@@ -52,7 +52,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent  # eval_phi_enrollments
 DATA_DIR = REPO_ROOT.parent / "data/phi/enrollments"
 GOLD_LLM = "openai/gpt-oss-120b"
 BASELINE_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-ONCOREASONING_MODEL = "ksg-dfci/OncoReasoning-3B-1225"
+ONCOREASONING_MODEL = "../../../models/oncoreasoning/checkpoint-90000"
 
 STAGES = [
     "prepare",        # Data preparation

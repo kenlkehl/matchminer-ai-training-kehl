@@ -92,7 +92,7 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=2000,
+        default=100,
         help="Number of prompts per batch",
     )
     parser.add_argument(
