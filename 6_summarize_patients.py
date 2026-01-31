@@ -2,14 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-Serial patient summarization with iterative updates using vLLM.
+Serial patient summarization with iterative updates using vLLM server.
 
 For each patient, notes are processed chronologically. Each new note updates
 the prior summary. Work is scheduled in rounds to maximize GPU utilization.
 
+This version uses a single vLLM server for all inference, eliminating the
+overhead of loading/unloading the model for each round.
+
 Examples
 --------
-# Basic usage with 4 GPUs (2 per kernel = 2 workers)
+# Basic usage (tensor parallelism inferred from gpu count)
 python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
@@ -17,77 +20,48 @@ python 6_summarize_patients.py \
   --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --gpu_ids 2,3 \
-  --gpus_per_kernel 1 \
   --max_model_len 10000 \
-  --prompt_batch_size 1000 \
   --generate_dates \
   --synthetic_start_date 2017-01-01 \
   --synthetic_min_days 7 \
   --synthetic_max_days 90 \
   --max_patients 10
 
-# With explicit GPU groups
+# With custom port and concurrency
 python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
   --model openai/gpt-oss-120b \
   --download_dir ../meta_ai \
-  --gpu_ids 0,1;2,3 \
-  --max_model_len 120000
+  --gpu_ids 0,1,2,3 \
+  --max_model_len 120000 \
+  --port 8000 \
+  --max_concurrent_requests 100
 """
 
 import argparse
+import asyncio
 import glob
-import math
 import os
 import random
 import re
+import signal
+import subprocess
 import sys
+import time
 import warnings
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
+
 import pandas as pd
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing as mp
+import requests
+from openai import AsyncOpenAI
+
 
 # -------------------------
 # Utilities
 # -------------------------
-
-def parse_gpu_groups(gpu_ids_arg: str, gpus_per_kernel: int) -> List[List[str]]:
-    """
-    Parse GPU groupings. Accepts either:
-    - "0,1,2,3" with gpus_per_kernel=2 => [["0","1"],["2","3"]]
-    - "0,1;2,3" => [["0","1"],["2","3"]] (explicit groups; gpus_per_kernel ignored)
-    """
-    if ";" in gpu_ids_arg:
-        groups = []
-        for grp in gpu_ids_arg.split(";"):
-            grp = grp.strip()
-            if not grp:
-                continue
-            groups.append([g.strip() for g in grp.split(",") if g.strip() != ""])
-        return groups
-
-    flat = [g.strip() for g in gpu_ids_arg.split(",") if g.strip() != ""]
-    if gpus_per_kernel <= 0:
-        raise ValueError("--gpus_per_kernel must be >= 1 when GPU groups are not explicit.")
-    if len(flat) % gpus_per_kernel != 0:
-        raise ValueError(
-            f"Number of GPUs ({len(flat)}) not divisible by --gpus_per_kernel ({gpus_per_kernel}). "
-            f"Either adjust or pass explicit groups like '0,1;2,3'."
-        )
-    groups = []
-    for i in range(0, len(flat), gpus_per_kernel):
-        groups.append(flat[i:i+gpus_per_kernel])
-    return groups
-
-
-def chunk_list(lst, chunk_size):
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i:i+chunk_size]
-
 
 def generate_synthetic_dates(
     df: pd.DataFrame,
@@ -99,11 +73,11 @@ def generate_synthetic_dates(
 ) -> pd.DataFrame:
     """
     Generate synthetic dates for notes when no date column exists.
-    
+
     For each patient, assigns dates starting from start_date, with random
     intervals between min_days and max_days for each subsequent note.
     Notes are assumed to be in their original order within each patient group.
-    
+
     Args:
         df: Input DataFrame
         patient_id_col: Column name for patient ID
@@ -111,25 +85,25 @@ def generate_synthetic_dates(
         start_date_str: Start date for first note (YYYY-MM-DD format)
         min_days: Minimum days between consecutive notes
         max_days: Maximum days between consecutive notes
-    
+
     Returns:
         DataFrame with new date column added
     """
     df = df.copy()
     start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
-    
+
     # Generate dates for each patient
     dates = []
     for idx in range(len(df)):
         dates.append(None)  # Placeholder
-    
+
     # Group by patient and assign dates
     current_patient = None
     current_date = start_date
-    
+
     for idx, row in df.iterrows():
         pid = row[patient_id_col]
-        
+
         if pid != current_patient:
             # New patient - reset to start date
             current_patient = pid
@@ -138,19 +112,19 @@ def generate_synthetic_dates(
             # Same patient - add random interval
             days_to_add = random.randint(min_days, max_days)
             current_date = current_date + timedelta(days=days_to_add)
-        
+
         dates[idx] = current_date
-    
+
     df[date_col] = dates
     return df
 
 
 def build_prompt_text(
-    tokenizer, 
-    prior_summary: Optional[str], 
-    note_date: str, 
-    note_text: str, 
-    max_model_len: int, 
+    tokenizer,
+    prior_summary: Optional[str],
+    note_date: str,
+    note_text: str,
+    max_model_len: int,
     margin_tokens: int = 5000
 ) -> str:
     """
@@ -158,7 +132,7 @@ def build_prompt_text(
     Truncates note_text if too long, keeping head & tail.
     """
     threshold = max(1024, max_model_len - margin_tokens)
-    
+
     # Truncate note_text if needed
     toks = tokenizer(note_text, add_special_tokens=False).input_ids
     if len(toks) > threshold:
@@ -166,9 +140,9 @@ def build_prompt_text(
         first_part = toks[:half]
         last_part = toks[-half:]
         note_text = tokenizer.decode(first_part) + " ... " + tokenizer.decode(last_part)
-    
+
     prior_summary_text = prior_summary if prior_summary else "None - this is the first note for this patient"
-    
+
     user_content = f"""You are an experienced clinical oncology history summarization bot.
 
 You are maintaining a running summary of a patient's cancer history based on their electronic health record.
@@ -198,7 +172,7 @@ Cancer type: Lung cancer
 Histology: Adenocarcinoma
 Current extent: Metastatic
 Biomarkers: PD-L1 75%, KRAS G12C mutant
-Treatment history: 
+Treatment history:
 # 1/5/2020-2/5/2021: carboplatin/pemetrexed/pembrolizumab
 # 1/2021: Palliative radiation to progressive spinal metastases
 # 3/2021-present: docetaxel
@@ -218,7 +192,7 @@ Now, write your updated summary. Do not add preceding text before the abstractio
         {'role': 'system', 'content': 'Reasoning: high'},
         {'role': 'user', 'content': user_content}
     ]
-    
+
     prompt = tokenizer.apply_chat_template(
         conversation=messages,
         add_generation_prompt=True,
@@ -233,7 +207,7 @@ def postprocess_output(raw_text: str) -> Tuple[str, str]:
     Returns (reasoning, summary).
     """
     reasoning_marker = "assistantfinal"
-    
+
     if reasoning_marker in raw_text:
         parts = raw_text.split(reasoning_marker, 1)
         reasoning = parts[0].strip()
@@ -242,7 +216,7 @@ def postprocess_output(raw_text: str) -> Tuple[str, str]:
         # If no marker, treat entire output as summary
         reasoning = ""
         summary = raw_text.strip()
-    
+
     return reasoning, summary
 
 
@@ -258,14 +232,14 @@ def prepare_rounds(
 ) -> Tuple[List[List[Tuple[str, int, str, str]]], Dict[str, List[int]]]:
     """
     Organize work into rounds for parallel processing.
-    
+
     Returns:
         rounds: List of rounds, each containing list of (patient_id, row_idx, date_str, note_text)
         patient_row_order: Dict mapping patient_id -> list of row indices in chronological order
     """
     # Sort by patient and date
     df = df.sort_values([patient_id_col, date_col]).reset_index(drop=True)
-    
+
     # Group by patient and get ordered row indices
     patient_row_order: Dict[str, List[int]] = {}
     for idx, row in df.iterrows():
@@ -273,10 +247,10 @@ def prepare_rounds(
         if pid not in patient_row_order:
             patient_row_order[pid] = []
         patient_row_order[pid].append(idx)
-    
+
     # Determine max notes per patient
     max_notes = max(len(rows) for rows in patient_row_order.values())
-    
+
     # Build rounds: round i contains the (i+1)th note for each patient that has one
     rounds: List[List[Tuple[str, int, str, str]]] = []
     for round_idx in range(max_notes):
@@ -290,24 +264,24 @@ def prepare_rounds(
                 round_items.append((pid, row_idx, date_str, note_text))
         if round_items:
             rounds.append(round_items)
-    
+
     return rounds, patient_row_order
 
 
 def load_existing_shards(shard_dir: str) -> Tuple[int, Dict[int, Tuple[str, str, str]]]:
     """
     Load existing shard files to enable resume.
-    
+
     Returns:
         completed_rounds: Number of completed rounds
         results: Dict mapping row_idx -> (reasoning, summary, prior_summary)
     """
     results: Dict[int, Tuple[str, str, str]] = {}
     completed_rounds = 0
-    
+
     if not os.path.exists(shard_dir):
         return completed_rounds, results
-    
+
     shard_files = sorted(glob.glob(os.path.join(shard_dir, "round_*.parquet")))
     for shard_file in shard_files:
         # Extract round number from filename
@@ -316,7 +290,7 @@ def load_existing_shards(shard_dir: str) -> Tuple[int, Dict[int, Tuple[str, str,
         if match:
             round_num = int(match.group(1))
             completed_rounds = max(completed_rounds, round_num + 1)
-            
+
             shard_df = pd.read_parquet(shard_file)
             for _, row in shard_df.iterrows():
                 row_idx = int(row["row_idx"])
@@ -325,7 +299,7 @@ def load_existing_shards(shard_dir: str) -> Tuple[int, Dict[int, Tuple[str, str,
                 # Handle older shards that may not have prior_summary
                 prior_summary = str(row["prior_summary"]) if "prior_summary" in row and pd.notna(row["prior_summary"]) else ""
                 results[row_idx] = (reasoning, summary, prior_summary)
-    
+
     return completed_rounds, results
 
 
@@ -337,84 +311,363 @@ def save_round_shard(
     """Save results from a round to a shard file (includes prior_summary)."""
     os.makedirs(shard_dir, exist_ok=True)
     shard_path = os.path.join(shard_dir, f"round_{round_idx:04d}.parquet")
-    
+
     shard_df = pd.DataFrame(round_results, columns=["row_idx", "reasoning", "summary", "prior_summary"])
     shard_df.to_parquet(shard_path, index=False)
     print(f"Saved shard: {shard_path} ({len(round_results)} records)")
 
 
 # -------------------------
-# Worker
+# vLLM Server Management
 # -------------------------
 
-def worker_process_round(
-    worker_id: int,
-    gpu_group: List[str],
-    work_items: List[Tuple[str, int, str, str, Optional[str]]],  # (pid, row_idx, date, note, prior_summary)
-    model_name: str,
+def start_vllm_server(
+    model: str,
     download_dir: str,
+    gpu_ids: str,
+    tensor_parallel_size: int,
     max_model_len: int,
-    prompt_batch_size: int,
-    temperature: float,
-    top_k: int,
-    max_tokens: int,
-    repetition_penalty: float,
     gpu_memory_utilization: float,
+    port: int = 8000,
+    log_file: Optional[str] = None,
+) -> subprocess.Popen:
+    """Start vLLM server as a subprocess."""
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = gpu_ids
+
+    cmd = [
+        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+        "--model", model,
+        "--download-dir", download_dir,
+        "--tensor-parallel-size", str(tensor_parallel_size),
+        "--max-model-len", str(max_model_len),
+        "--gpu-memory-utilization", str(gpu_memory_utilization),
+        "--port", str(port),
+    ]
+
+    print(f"Starting vLLM server: {' '.join(cmd)}")
+    print(f"Using GPUs: {gpu_ids}")
+
+    # Start process - write logs to file if specified, otherwise to console
+    if log_file:
+        print(f"vLLM server logs will be written to: {log_file}")
+        log_handle = open(log_file, "w")
+        process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        process._log_handle = log_handle  # Store for cleanup
+    else:
+        # Let vLLM output go directly to console for debugging
+        print("vLLM server logs will be shown in console")
+        process = subprocess.Popen(
+            cmd,
+            env=env,
+            # No stdout/stderr redirection - goes to console
+        )
+
+    return process
+
+
+def wait_for_server_ready(port: int, timeout: int = 600, poll_interval: float = 5.0) -> bool:
+    """
+    Poll health endpoint until server is ready.
+
+    Args:
+        port: Server port
+        timeout: Maximum seconds to wait
+        poll_interval: Seconds between health checks
+
+    Returns:
+        True if server is ready, False if timeout exceeded
+    """
+    health_url = f"http://localhost:{port}/health"
+    start_time = time.time()
+
+    print(f"Waiting for vLLM server to be ready at {health_url}...")
+
+    while time.time() - start_time < timeout:
+        try:
+            response = requests.get(health_url, timeout=5)
+            if response.status_code == 200:
+                print(f"vLLM server is ready (took {time.time() - start_time:.1f}s)")
+                return True
+        except requests.exceptions.RequestException:
+            pass
+
+        time.sleep(poll_interval)
+        elapsed = time.time() - start_time
+        print(f"  Still waiting... ({elapsed:.0f}s / {timeout}s)")
+
+    print(f"Timeout waiting for vLLM server after {timeout}s")
+    return False
+
+
+def check_server_health(port: int) -> bool:
+    """Check if vLLM server is still responding."""
+    try:
+        response = requests.get(f"http://localhost:{port}/health", timeout=5)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+
+
+def shutdown_server(process: subprocess.Popen, timeout: int = 30):
+    """Gracefully terminate the server subprocess."""
+    if process is None:
+        return
+
+    print("Shutting down vLLM server...")
+
+    # Close log file handle if present
+    if hasattr(process, '_log_handle') and process._log_handle:
+        try:
+            process._log_handle.close()
+        except Exception:
+            pass
+
+    # Try graceful termination first
+    process.terminate()
+
+    try:
+        process.wait(timeout=timeout)
+        print("vLLM server stopped gracefully.")
+    except subprocess.TimeoutExpired:
+        print("Server did not stop gracefully, forcing kill...")
+        process.kill()
+        process.wait()
+        print("vLLM server killed.")
+
+
+# -------------------------
+# Async Inference
+# -------------------------
+
+async def single_inference_request(
+    client: AsyncOpenAI,
+    row_idx: int,
+    prompt: str,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    top_k: int,
+    repetition_penalty: float,
+    max_retries: int = 3,
+    base_timeout: float = 600.0,
+) -> Tuple[int, str, str]:
+    """
+    Send a single inference request with retry logic.
+    Returns (row_idx, reasoning, summary).
+    """
+    for attempt in range(max_retries):
+        try:
+            response = await asyncio.wait_for(
+                client.completions.create(
+                    model=model,
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    extra_body={
+                        "top_k": top_k,
+                        "repetition_penalty": repetition_penalty,
+                    }
+                ),
+                timeout=base_timeout
+            )
+            raw_text = response.choices[0].text
+            reasoning, summary = postprocess_output(raw_text)
+            return (row_idx, reasoning, summary)
+
+        except asyncio.TimeoutError:
+            wait_time = (2 ** attempt) * 5  # 5s, 10s, 20s
+            if attempt < max_retries - 1:
+                print(f"  Row {row_idx}: timeout (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"  Row {row_idx}: all retries exhausted (timeout)")
+                return (row_idx, "", "ERROR: timeout after all retries")
+
+        except Exception as e:
+            wait_time = (2 ** attempt) * 2  # 2s, 4s, 8s
+            if attempt < max_retries - 1:
+                print(f"  Row {row_idx}: error '{e}' (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"  Row {row_idx}: all retries exhausted")
+                return (row_idx, "", f"ERROR: {e}")
+
+    return (row_idx, "", "ERROR: unexpected retry loop exit")
+
+
+async def run_inference_batch(
+    client: AsyncOpenAI,
+    prompts: List[Tuple[int, str]],  # (row_idx, prompt_text)
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    top_k: int,
+    repetition_penalty: float,
+    max_concurrent: int = 16,
+    batch_size: int = 64,
+    max_retries: int = 3,
+    base_timeout: float = 600.0,
+    port: int = 8000,
 ) -> List[Tuple[int, str, str]]:
     """
-    Worker processes a batch of notes for one round.
-    Returns list of (row_idx, reasoning, summary).
+    Send batch of requests concurrently, return (row_idx, reasoning, summary).
+
+    Processes prompts in smaller batches to avoid overwhelming the server.
+    Each batch runs max_concurrent requests in parallel.
     """
-    # Set environment before importing vLLM
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_group)
-    
-    from vllm import LLM, SamplingParams
-    
-    tp_size = max(1, len(gpu_group))
-    print(f"[worker{worker_id}] Starting on GPUs {gpu_group} (tp={tp_size}), {len(work_items)} items.")
-    
-    llama = LLM(
-        model=model_name,
-        tensor_parallel_size=tp_size,
-        download_dir=download_dir,
-        gpu_memory_utilization=gpu_memory_utilization,
-        max_model_len=max_model_len
-    )
-    tokenizer = llama.get_tokenizer()
-    sampling = SamplingParams(
-        temperature=temperature,
-        top_k=top_k,
-        max_tokens=max_tokens,
-        repetition_penalty=repetition_penalty,
-    )
-    
-    results: List[Tuple[int, str, str]] = []
-    
+    total = len(prompts)
+    all_results: List[Tuple[int, str, str]] = []
+    completed = 0
+    consecutive_health_failures = 0
+
     # Process in batches
-    for batch_idx, batch_slice in enumerate(chunk_list(list(range(len(work_items))), prompt_batch_size)):
-        batch_items = [work_items[i] for i in batch_slice]
-        
-        # Build prompts
-        prompts = []
-        row_indices = []
-        for pid, row_idx, date_str, note_text, prior_summary in batch_items:
-            prompt = build_prompt_text(tokenizer, prior_summary, date_str, note_text, max_model_len)
-            prompts.append(prompt)
-            row_indices.append(row_idx)
-        
+    for batch_start in range(0, total, batch_size):
+        batch_end = min(batch_start + batch_size, total)
+        batch_prompts = prompts[batch_start:batch_end]
+
+        # Check server health before each batch
+        if not check_server_health(port):
+            consecutive_health_failures += 1
+            print(f"  WARNING: vLLM server health check failed (attempt {consecutive_health_failures}/3)")
+            if consecutive_health_failures >= 3:
+                print(f"  ERROR: vLLM server appears to be dead. Marking remaining {total - completed} prompts as errors.")
+                # Mark remaining prompts as errors
+                for idx, prompt in prompts[batch_start:]:
+                    all_results.append((idx, "", "ERROR: vLLM server died"))
+                return all_results
+            # Wait and retry
+            await asyncio.sleep(10)
+            if not check_server_health(port):
+                print(f"  ERROR: vLLM server still not responding after wait.")
+                for idx, prompt in prompts[batch_start:]:
+                    all_results.append((idx, "", "ERROR: vLLM server died"))
+                return all_results
+        else:
+            consecutive_health_failures = 0
+
+        print(f"  Processing batch {batch_start + 1}-{batch_end} of {total}...")
+
+        # Use semaphore to limit concurrent requests within batch
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def bounded_request(row_idx: int, prompt: str) -> Tuple[int, str, str]:
+            async with semaphore:
+                return await single_inference_request(
+                    client=client,
+                    row_idx=row_idx,
+                    prompt=prompt,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_k=top_k,
+                    repetition_penalty=repetition_penalty,
+                    max_retries=max_retries,
+                    base_timeout=base_timeout,
+                )
+
+        # Create tasks for this batch only
+        tasks = [bounded_request(idx, prompt) for idx, prompt in batch_prompts]
+        batch_results = await asyncio.gather(*tasks)
+        all_results.extend(batch_results)
+
+        completed += len(batch_results)
+
+        # Count errors in this batch
+        batch_errors = sum(1 for _, _, summary in batch_results if summary.startswith("ERROR:"))
+        if batch_errors > 0:
+            print(f"  Progress: {completed}/{total} completed ({batch_errors} errors in this batch)")
+        else:
+            print(f"  Progress: {completed}/{total} completed")
+
+    return all_results
+
+
+async def process_all_rounds(
+    rounds: List[List[Tuple[str, int, str, str]]],
+    patient_row_order: Dict[str, List[int]],
+    patient_summaries: Dict[str, str],
+    all_results: Dict[int, Tuple[str, str, str]],
+    completed_rounds: int,
+    args: argparse.Namespace,
+    client: AsyncOpenAI,
+    tokenizer
+):
+    """
+    Process all remaining rounds using async inference.
+
+    Args:
+        rounds: List of rounds, each containing (patient_id, row_idx, date_str, note_text)
+        patient_row_order: Dict mapping patient_id -> list of row indices
+        patient_summaries: Dict tracking current summary per patient (mutated)
+        all_results: Dict tracking all results by row_idx (mutated)
+        completed_rounds: Number of rounds already completed
+        args: Command line arguments
+        client: AsyncOpenAI client
+        tokenizer: HuggingFace tokenizer for prompt building
+    """
+    # Build reverse mapping: row_idx -> patient_id
+    row_to_patient: Dict[int, str] = {}
+    for pid, row_indices in patient_row_order.items():
+        for row_idx in row_indices:
+            row_to_patient[row_idx] = pid
+
+    for round_idx in range(completed_rounds, len(rounds)):
+        round_items = rounds[round_idx]
+        print(f"\n=== Round {round_idx + 1}/{len(rounds)}: {len(round_items)} patients ===")
+
+        # Build prompts with prior summaries
+        prompts: List[Tuple[int, str]] = []
+        round_prior_summaries: Dict[int, str] = {}
+
+        for pid, row_idx, date_str, note_text in round_items:
+            prior_summary = patient_summaries.get(pid, None)
+            prior_text = prior_summary if prior_summary else "None - this is the first note for this patient"
+            round_prior_summaries[row_idx] = prior_text
+
+            prompt = build_prompt_text(
+                tokenizer, prior_summary, date_str, note_text, args.max_model_len
+            )
+            prompts.append((row_idx, prompt))
+
         # Run inference
-        responses = llama.generate(prompts, sampling)
-        
-        # Post-process
-        for row_idx, response in zip(row_indices, responses):
-            raw_text = response.outputs[0].text
-            reasoning, summary = postprocess_output(raw_text)
-            results.append((row_idx, reasoning, summary))
-        
-        print(f"[worker{worker_id}] Completed batch {batch_idx+1}/{math.ceil(len(work_items)/prompt_batch_size)}")
-    
-    print(f"[worker{worker_id}] Done with round.")
-    return results
+        print(f"Sending {len(prompts)} requests to vLLM server...")
+        results = await run_inference_batch(
+            client=client,
+            prompts=prompts,
+            model=args.model,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
+            max_concurrent=args.max_concurrent_requests,
+            batch_size=args.batch_size,
+            max_retries=args.max_retries,
+            base_timeout=args.request_timeout,
+            port=args.port,
+        )
+
+        # Update state
+        round_results_with_prior: List[Tuple[int, str, str, str]] = []
+        for row_idx, reasoning, summary in results:
+            prior_text = round_prior_summaries[row_idx]
+            all_results[row_idx] = (reasoning, summary, prior_text)
+            round_results_with_prior.append((row_idx, reasoning, summary, prior_text))
+
+            # Update patient summary for next round
+            pid = row_to_patient[row_idx]
+            patient_summaries[pid] = summary
+
+        # Save round shard
+        save_round_shard(args.shard_dir, round_idx, round_results_with_prior)
+        print(f"Round {round_idx + 1} complete.")
 
 
 # -------------------------
@@ -422,7 +675,7 @@ def worker_process_round(
 # -------------------------
 
 def main():
-    ap = argparse.ArgumentParser("Serial patient summarization with iterative updates using vLLM.")
+    ap = argparse.ArgumentParser("Serial patient summarization with iterative updates using vLLM server.")
     ap.add_argument("--input_parquet", required=True)
     ap.add_argument("--output_parquet", required=True)
     ap.add_argument("--patient_summaries_parquet", default="../data/no_phi/patient_summaries.parquet",
@@ -442,37 +695,39 @@ def main():
     ap.add_argument("--model", default="openai/gpt-oss-120b")
     ap.add_argument("--download_dir", required=True)
     ap.add_argument("--gpu_ids", required=True,
-                    help="Either comma list (e.g., 0,1,2,3) used with --gpus_per_kernel, "
-                         "or explicit groups (e.g., 0,1;2,3).")
-    ap.add_argument("--gpus_per_kernel", type=int, default=1,
-                    help="Grouping size when --gpu_ids is a flat list.")
+                    help="Comma-separated list of GPU IDs (e.g., 0,1,2,3). Tensor parallel size is inferred from the count.")
     ap.add_argument("--max_model_len", type=int, default=120000)
-    ap.add_argument("--prompt_batch_size", type=int, default=64)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_k", type=int, default=1)
     ap.add_argument("--max_tokens", type=int, default=7500)
     ap.add_argument("--repetition_penalty", type=float, default=1.2)
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.93)
+    ap.add_argument("--port", type=int, default=8000,
+                    help="Port for vLLM server (default: 8000)")
+    ap.add_argument("--max_concurrent_requests", type=int, default=16,
+                    help="Maximum concurrent requests to vLLM server (default: 16)")
+    ap.add_argument("--batch_size", type=int, default=64,
+                    help="Number of prompts to process per batch before waiting (default: 64)")
+    ap.add_argument("--request_timeout", type=float, default=600.0,
+                    help="Timeout in seconds for individual inference requests (default: 600)")
+    ap.add_argument("--max_retries", type=int, default=3,
+                    help="Maximum retries for failed requests (default: 3)")
+    ap.add_argument("--server_timeout", type=int, default=600,
+                    help="Timeout in seconds waiting for vLLM server to start (default: 600)")
     ap.add_argument("--max_patients", type=int, default=None,
                     help="Limit to first N patients (for testing)")
     args = ap.parse_args()
-    
-    # Set multiprocessing start method
-    try:
-        mp.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
-    
+
     # Load data
     print(f"Loading {args.input_parquet}...")
     df = pd.read_parquet(args.input_parquet)
-    
+
     # Validate columns
     if args.patient_id_col not in df.columns:
         raise ValueError(f"Column '{args.patient_id_col}' (--patient_id_col) not found in input. Available: {df.columns.tolist()}")
     if args.text_col not in df.columns:
         raise ValueError(f"Column '{args.text_col}' (--text_col) not found in input. Available: {df.columns.tolist()}")
-    
+
     # Handle date column - generate synthetic dates if missing and --generate_dates is set
     if args.date_col not in df.columns:
         if args.generate_dates:
@@ -491,37 +746,30 @@ def main():
                 f"Column '{args.date_col}' (--date_col) not found in input. "
                 f"Use --generate_dates to create synthetic dates. Available columns: {df.columns.tolist()}"
             )
-    
+
     # Filter to max_patients if specified
     if args.max_patients is not None:
         unique_patients = df[args.patient_id_col].unique()[:args.max_patients]
         df = df[df[args.patient_id_col].isin(unique_patients)].copy()
         print(f"Limited to {args.max_patients} patients ({len(df)} rows)")
-    
+
     # Keep original index for output mapping
     df = df.reset_index(drop=True)
     original_len = len(df)
-    
-    # Parse GPU groups
-    groups = parse_gpu_groups(args.gpu_ids, args.gpus_per_kernel)
-    num_workers = len(groups)
-    if num_workers == 0:
-        raise ValueError("No GPU groups parsed from --gpu_ids.")
-    print(f"Using {num_workers} GPU worker(s): {groups}")
-    
+
     # Prepare rounds
     print("Preparing work rounds...")
     rounds, patient_row_order = prepare_rounds(df, args.patient_id_col, args.date_col, args.text_col)
     print(f"Organized into {len(rounds)} rounds for {len(patient_row_order)} patients")
-    
+
     # Load existing shards for resume
     completed_rounds, all_results = load_existing_shards(args.shard_dir)
     if completed_rounds > 0:
         print(f"Resuming from round {completed_rounds} (loaded {len(all_results)} existing results)")
-    
+
     # Track current summaries per patient
     patient_summaries: Dict[str, str] = {}
-    
+
     # Reconstruct patient summaries from completed rounds
     if completed_rounds > 0:
         for round_idx in range(completed_rounds):
@@ -529,72 +777,72 @@ def main():
                 if row_idx in all_results:
                     _, summary, _ = all_results[row_idx]
                     patient_summaries[pid] = summary
-    
-    # Process remaining rounds
-    for round_idx in range(completed_rounds, len(rounds)):
-        round_items = rounds[round_idx]
-        print(f"\n=== Round {round_idx + 1}/{len(rounds)}: {len(round_items)} patients ===")
-        
-        # Prepare work items with prior summaries
-        work_items: List[Tuple[str, int, str, str, Optional[str]]] = []
-        # Track prior summaries for this round (before processing)
-        round_prior_summaries: Dict[int, str] = {}
-        for pid, row_idx, date_str, note_text in round_items:
-            prior_summary = patient_summaries.get(pid, None)
-            # Store the prior summary text (use the "first note" message if None)
-            prior_summary_text = prior_summary if prior_summary else "None - this is the first note for this patient"
-            round_prior_summaries[row_idx] = prior_summary_text
-            work_items.append((pid, row_idx, date_str, note_text, prior_summary))
-        
-        # Distribute work across workers
-        shards: List[List[Tuple[str, int, str, str, Optional[str]]]] = [[] for _ in range(num_workers)]
-        for i, item in enumerate(work_items):
-            shards[i % num_workers].append(item)
-        
-        # Launch workers
-        round_results: List[Tuple[int, str, str]] = []
-        
-        with ProcessPoolExecutor(max_workers=num_workers) as ex:
-            futures = []
-            for wid, (gpu_group, shard) in enumerate(zip(groups, shards)):
-                if not shard:
-                    continue
-                futures.append(
-                    ex.submit(
-                        worker_process_round,
-                        wid, gpu_group, shard,
-                        args.model, args.download_dir,
-                        args.max_model_len, args.prompt_batch_size,
-                        args.temperature, args.top_k, args.max_tokens,
-                        args.repetition_penalty, args.gpu_memory_utilization
-                    )
-                )
-            
-            for fut in as_completed(futures):
-                res = fut.result()
-                round_results.extend(res)
-        
-        # Update patient summaries and all_results (now including prior_summary)
-        round_results_with_prior: List[Tuple[int, str, str, str]] = []
-        for row_idx, reasoning, summary in round_results:
-            prior_summary_text = round_prior_summaries[row_idx]
-            all_results[row_idx] = (reasoning, summary, prior_summary_text)
-            round_results_with_prior.append((row_idx, reasoning, summary, prior_summary_text))
-            # Find patient for this row
-            for pid, row_indices in patient_row_order.items():
-                if row_idx in row_indices:
-                    patient_summaries[pid] = summary
-                    break
-        
-        # Save round shard (with prior_summary)
-        save_round_shard(args.shard_dir, round_idx, round_results_with_prior)
-    
+
+    # Check if there's work to do
+    if completed_rounds >= len(rounds):
+        print("All rounds already completed. Building final output...")
+    else:
+        # Start vLLM server
+        # Normalize gpu_ids to remove any semicolons and use comma format
+        gpu_ids_normalized = args.gpu_ids.replace(";", ",")
+        gpu_list = [g.strip() for g in gpu_ids_normalized.split(",") if g.strip()]
+        tensor_parallel_size = len(gpu_list)
+
+        server_process = start_vllm_server(
+            model=args.model,
+            download_dir=args.download_dir,
+            gpu_ids=gpu_ids_normalized,
+            tensor_parallel_size=tensor_parallel_size,
+            max_model_len=args.max_model_len,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            port=args.port
+        )
+
+        try:
+            # Wait for server to be ready
+            if not wait_for_server_ready(args.port, timeout=args.server_timeout):
+                print("Failed to start vLLM server. Exiting.")
+                shutdown_server(server_process)
+                sys.exit(1)
+
+            # Create async OpenAI client with timeout
+            client = AsyncOpenAI(
+                base_url=f"http://localhost:{args.port}/v1",
+                api_key="not-needed",  # vLLM doesn't require API key
+                timeout=args.request_timeout + 60,  # Give extra buffer beyond request timeout
+            )
+
+            # Load tokenizer for prompt building
+            print("Loading tokenizer...")
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.model,
+                cache_dir=args.download_dir,
+                trust_remote_code=True
+            )
+
+            # Process all rounds
+            asyncio.run(process_all_rounds(
+                rounds=rounds,
+                patient_row_order=patient_row_order,
+                patient_summaries=patient_summaries,
+                all_results=all_results,
+                completed_rounds=completed_rounds,
+                args=args,
+                client=client,
+                tokenizer=tokenizer
+            ))
+
+        finally:
+            # Always shutdown server
+            shutdown_server(server_process)
+
     # Build final output
     print(f"\nBuilding final output ({original_len} rows)...")
     reasoning_list = []
     summary_list = []
     prior_summary_list = []
-    
+
     for idx in range(original_len):
         if idx in all_results:
             reasoning, summary, prior_summary = all_results[idx]
@@ -603,18 +851,18 @@ def main():
         reasoning_list.append(reasoning)
         summary_list.append(summary)
         prior_summary_list.append(prior_summary)
-    
+
     df["prior_summary"] = prior_summary_list
     df["new_summary_reasoning"] = reasoning_list
     df["new_summary"] = summary_list
-    
+
     # Split new_summary into patient_summary and patient_boilerplate_text
     # The model is instructed to separate boilerplate with "Boilerplate:" label
     def split_boilerplate(text: str) -> Tuple[str, str]:
         """Split summary into main summary and boilerplate text."""
         if not text:
             return "", ""
-        
+
         # Try different variations of the boilerplate marker
         markers = ["Boilerplate:", "BOILERPLATE:", "boilerplate:"]
         for marker in markers:
@@ -623,29 +871,29 @@ def main():
                 patient_summary = parts[0].strip()
                 boilerplate = parts[1].strip() if len(parts) > 1 else ""
                 return patient_summary, boilerplate
-        
+
         # No boilerplate marker found - entire text is the summary
         return text.strip(), ""
-    
+
     patient_summary_list = []
     boilerplate_list = []
     for summary in summary_list:
         ps, bp = split_boilerplate(summary)
         patient_summary_list.append(ps)
         boilerplate_list.append(bp)
-    
+
     df["patient_summary"] = patient_summary_list
     df["patient_boilerplate_text"] = boilerplate_list
-    
+
     # Add summary_generation_date (the date the script was run)
     from datetime import date
     summary_generation_date = date.today().isoformat()
     df["summary_generation_date"] = summary_generation_date
-    
+
     # Save full output (all rows)
     df.to_parquet(args.output_parquet, index=False)
     print(f"Wrote {args.output_parquet} with {len(df)} rows.")
-    
+
     # Create patient summaries output (last row per patient)
     # Data is already sorted by patient_id and date from prepare_rounds
     patient_summaries_df = df.groupby(args.patient_id_col).last().reset_index()

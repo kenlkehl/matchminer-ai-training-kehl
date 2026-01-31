@@ -412,7 +412,6 @@ def main():
                 "--gpu_ids", summary_gpus,
                 "--patient_id_col", "pseudo_mrn",
                 "--text_col", "text",
-                "--gpus_per_kernel", "1",
             ]
 
             ret = run_command(cmd, "Patient summarization", args.dry_run)
