@@ -21,7 +21,7 @@ Usage:
     python run_pipeline.py --gpus 0,1,2,3
 
     # Run only specific stages
-    python run_pipeline.py --gpus 0,1 --stages retrieval,llm_checks
+    python run_pipeline.py --gpus 0,1 --stages retrieval,llm_checks,baseline,evaluation,oncoreasoning
 
     # Run only baseline evaluation
     python run_pipeline.py --gpus 0,1 --stages baseline
@@ -46,8 +46,8 @@ import pandas as pd
 
 # Repo root for default paths
 REPO_ROOT = Path(__file__).resolve().parents[2]  # matchminer-ai-training
-SCRIPTS_DIR = Path(__file__).resolve().parent  # eval_phi_soc
-ENROLLMENTS_SCRIPTS_DIR = REPO_ROOT / "real_eval_code/eval_phi_enrollments"
+SCRIPTS_DIR = Path(__file__).resolve().parent  
+SOC_SCRIPTS_DIR = REPO_ROOT / "real_eval_code/eval_phi_soc"
 DATA_DIR = REPO_ROOT.parent / "data/phi/soc"
 GOLD_LLM = 'openai/gpt-oss-120b'
 BASELINE_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
@@ -364,7 +364,7 @@ def main():
     print(f"  Repo root: {REPO_ROOT}")
     print(f"  Data directory: {DATA_DIR}")
     print(f"  Scripts directory: {SCRIPTS_DIR}")
-    print(f"  Enrollments scripts directory: {ENROLLMENTS_SCRIPTS_DIR}")
+    print(f"  Enrollments scripts directory: {SOC_SCRIPTS_DIR}")
     print(f"  Available GPUs: {gpu_list} ({num_gpus} total)")
     print(f"  Dry run: {args.dry_run}")
 
@@ -488,7 +488,7 @@ def main():
                 commands = [
                     {
                         'cmd': [
-                            "python", str(ENROLLMENTS_SCRIPTS_DIR / "patient_centric_retrieval.py"),
+                            "python", str(SOC_SCRIPTS_DIR / "patient_centric_retrieval.py"),
                             "--gpu", gpu_list[0],
                             "--output-file", str(DATA_DIR / "patient_centric_candidates.csv"),
                             "--shard-dir", str(DATA_DIR / "shards_patient_centric"),
@@ -498,7 +498,7 @@ def main():
                     },
                     {
                         'cmd': [
-                            "python", str(ENROLLMENTS_SCRIPTS_DIR / "trial_centric_retrieval.py"),
+                            "python", str(SOC_SCRIPTS_DIR / "trial_centric_retrieval.py"),
                             "--gpu", gpu_list[1],
                             "--output-file", str(DATA_DIR / "trial_centric_candidates.csv"),
                             "--shard-dir", str(DATA_DIR / "shards_trial_centric"),
@@ -519,7 +519,7 @@ def main():
                      "trial_centric_candidates.csv", "shards_trial_centric"),
                 ]:
                     cmd = [
-                        "python", str(ENROLLMENTS_SCRIPTS_DIR / script_name),
+                        "python", str(SOC_SCRIPTS_DIR / script_name),
                         "--gpu", gpu_list[0],
                         "--output-file", str(DATA_DIR / output_file),
                         "--shard-dir", str(DATA_DIR / shard_dir),
@@ -605,7 +605,7 @@ def main():
             for i, task in enumerate(tasks_to_run):
                 gpu_idx = i % num_gpus
                 cmd = [
-                    "python", str(ENROLLMENTS_SCRIPTS_DIR / task['script']),
+                    "python", str(SOC_SCRIPTS_DIR / task['script']),
                     "--gpu", gpu_list[gpu_idx],
                     "--download-dir", args.download_dir,
                     "--input", task['input'],
@@ -692,7 +692,7 @@ def main():
         else:
             for task in tasks_to_run:
                 cmd = [
-                    "python", str(ENROLLMENTS_SCRIPTS_DIR / task['script']),
+                    "python", str(SOC_SCRIPTS_DIR / task['script']),
                     "--model", args.oncoreasoning_model,
                     "--input-file", task['input'],
                     "--output-file", task['output'],
@@ -734,7 +734,7 @@ def main():
                 commands = [
                     {
                         'cmd': [
-                            "python", str(ENROLLMENTS_SCRIPTS_DIR / "patient_centric_retrieval.py"),
+                            "python", str(SOC_SCRIPTS_DIR / "patient_centric_retrieval.py"),
                             "--gpu", gpu_list[0],
                             "--output-file", str(DATA_DIR / "baseline_patient_centric_candidates.csv"),
                             "--shard-dir", str(DATA_DIR / "shards_baseline_patient_centric"),
@@ -744,7 +744,7 @@ def main():
                     },
                     {
                         'cmd': [
-                            "python", str(ENROLLMENTS_SCRIPTS_DIR / "trial_centric_retrieval.py"),
+                            "python", str(SOC_SCRIPTS_DIR / "trial_centric_retrieval.py"),
                             "--gpu", gpu_list[1],
                             "--output-file", str(DATA_DIR / "baseline_trial_centric_candidates.csv"),
                             "--shard-dir", str(DATA_DIR / "shards_baseline_trial_centric"),
@@ -765,7 +765,7 @@ def main():
                      "baseline_trial_centric_candidates.csv", "shards_baseline_trial_centric"),
                 ]:
                     cmd = [
-                        "python", str(ENROLLMENTS_SCRIPTS_DIR / script_name),
+                        "python", str(SOC_SCRIPTS_DIR / script_name),
                         "--gpu", gpu_list[0],
                         "--output-file", str(DATA_DIR / output_file),
                         "--shard-dir", str(DATA_DIR / shard_dir),
@@ -821,7 +821,7 @@ def main():
                 for i, task in enumerate(baseline_tasks_to_run):
                     gpu_idx = i % num_gpus
                     cmd = [
-                        "python", str(ENROLLMENTS_SCRIPTS_DIR / task['script']),
+                        "python", str(SOC_SCRIPTS_DIR / task['script']),
                         "--gpu", gpu_list[gpu_idx],
                         "--download-dir", args.download_dir,
                         "--input", task['input'],
