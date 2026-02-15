@@ -2,19 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-Serial patient summarization with chunk-based updates using vLLM server.
+Serial patient summarization with chunk-based updates using vLLM server(s).
 
 For each patient, all clinical notes are sorted by date and concatenated into
 a single text, then chunked into token-length segments. A running summary is
 maintained across chunks. Work is scheduled in rounds (Round N = Nth chunk from
 each patient) to maximize GPU utilization.
 
-This version uses a single vLLM server for all inference, eliminating the
-overhead of loading/unloading the model for each round.
+Multiple vLLM servers can be launched in parallel to increase throughput.
+The number of servers is determined by: n_servers = len(gpu_ids) // gpus_per_server.
+Within each round, prompts are distributed across servers round-robin.
 
 Examples
 --------
-# Basic usage (tensor parallelism inferred from gpu count)
+# Single server on 2 GPUs (tensor_parallel_size=2)
 python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
@@ -22,6 +23,7 @@ python 6_summarize_patients.py \
   --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --gpu_ids 2,3 \
+  --gpus_per_server 2 \
   --max_model_len 10000 \
   --generate_dates \
   --synthetic_start_date 2017-01-01 \
@@ -29,7 +31,7 @@ python 6_summarize_patients.py \
   --synthetic_max_days 90 \
   --max_patients 10
 
-# With custom chunk size and concurrency
+# Two servers, 2 GPUs each (4 GPUs total, tensor_parallel_size=2 per server)
 python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
@@ -37,10 +39,11 @@ python 6_summarize_patients.py \
   --model openai/gpt-oss-120b \
   --download_dir ../meta_ai \
   --gpu_ids 0,1,2,3 \
+  --gpus_per_server 2 \
+  --base_port 8000 \
   --max_model_len 120000 \
   --chunk_size 40000 \
   --chunk_overlap 500 \
-  --port 8000 \
   --max_concurrent_requests 100
 """
 
@@ -705,11 +708,11 @@ async def process_all_rounds(
     all_results: Dict[int, Tuple[str, str, str]],
     completed_rounds: int,
     args: argparse.Namespace,
-    client: AsyncOpenAI,
+    server_clients: List[Tuple[AsyncOpenAI, int]],
     tokenizer
 ):
     """
-    Process all remaining rounds using async inference.
+    Process all remaining rounds using async inference across multiple servers.
 
     Args:
         rounds: List of rounds, each containing (patient_id, chunk_idx, first_date, last_date, chunk_text)
@@ -718,9 +721,11 @@ async def process_all_rounds(
         all_results: Dict tracking all results by chunk_idx (mutated)
         completed_rounds: Number of rounds already completed
         args: Command line arguments
-        client: AsyncOpenAI client
+        server_clients: List of (AsyncOpenAI client, port) tuples, one per server
         tokenizer: HuggingFace tokenizer for prompt building
     """
+    n_servers = len(server_clients)
+
     # Build reverse mapping: chunk_idx -> patient_id
     chunk_to_patient: Dict[int, str] = {}
     for pid, chunk_indices in patient_chunk_order.items():
@@ -745,22 +750,41 @@ async def process_all_rounds(
             )
             prompts.append((chunk_idx, prompt))
 
-        # Run inference
-        print(f"Sending {len(prompts)} requests to vLLM server...")
-        results = await run_inference_batch(
-            client=client,
-            prompts=prompts,
-            model=args.model,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            top_k=args.top_k,
-            repetition_penalty=args.repetition_penalty,
-            max_concurrent=args.max_concurrent_requests,
-            batch_size=args.batch_size,
-            max_retries=args.max_retries,
-            base_timeout=args.request_timeout,
-            port=args.port,
-        )
+        # Distribute prompts across servers round-robin
+        server_prompt_groups: List[List[Tuple[int, str]]] = [[] for _ in range(n_servers)]
+        for i, prompt_item in enumerate(prompts):
+            server_prompt_groups[i % n_servers].append(prompt_item)
+
+        print(f"Distributing {len(prompts)} requests across {n_servers} server(s)...")
+        for si, (_, port) in enumerate(server_clients):
+            print(f"  Server {si} (port {port}): {len(server_prompt_groups[si])} prompts")
+
+        # Launch inference on all servers concurrently
+        tasks = []
+        for server_idx, (client, port) in enumerate(server_clients):
+            group = server_prompt_groups[server_idx]
+            if group:
+                tasks.append(
+                    run_inference_batch(
+                        client=client,
+                        prompts=group,
+                        model=args.model,
+                        temperature=args.temperature,
+                        max_tokens=args.max_tokens,
+                        top_k=args.top_k,
+                        repetition_penalty=args.repetition_penalty,
+                        max_concurrent=args.max_concurrent_requests,
+                        batch_size=args.batch_size,
+                        max_retries=args.max_retries,
+                        base_timeout=args.request_timeout,
+                        port=port,
+                    )
+                )
+
+        all_batch_results = await asyncio.gather(*tasks)
+        results = []
+        for batch_result in all_batch_results:
+            results.extend(batch_result)
 
         # Update state
         round_results_with_prior: List[Tuple[int, str, str, str]] = []
@@ -807,15 +831,18 @@ def main():
     ap.add_argument("--model", default="openai/gpt-oss-120b")
     ap.add_argument("--download_dir", required=True)
     ap.add_argument("--gpu_ids", required=True,
-                    help="Comma-separated list of GPU IDs (e.g., 0,1,2,3). Tensor parallel size is inferred from the count.")
+                    help="Comma-separated list of GPU IDs (e.g., 0,1,2,3). Used with --gpus_per_server to determine number of servers.")
+    ap.add_argument("--gpus_per_server", type=int, required=True,
+                    help="Number of GPUs per vLLM server. n_servers = len(gpu_ids) // gpus_per_server. "
+                         "tensor_parallel_size is set to this value.")
     ap.add_argument("--max_model_len", type=int, default=120000)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_k", type=int, default=1)
     ap.add_argument("--max_tokens", type=int, default=7500)
     ap.add_argument("--repetition_penalty", type=float, default=1.2)
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.93)
-    ap.add_argument("--port", type=int, default=8000,
-                    help="Port for vLLM server (default: 8000)")
+    ap.add_argument("--base_port", type=int, default=8000,
+                    help="Base port for vLLM servers. Server i uses base_port + i (default: 8000)")
     ap.add_argument("--max_concurrent_requests", type=int, default=16,
                     help="Maximum concurrent requests to vLLM server (default: 16)")
     ap.add_argument("--batch_size", type=int, default=64,
@@ -906,35 +933,70 @@ def main():
     if completed_rounds >= len(rounds):
         print("All rounds already completed. Building final output...")
     else:
-        # Start vLLM server
         # Normalize gpu_ids to remove any semicolons and use comma format
         gpu_ids_normalized = args.gpu_ids.replace(";", ",")
         gpu_list = [g.strip() for g in gpu_ids_normalized.split(",") if g.strip()]
-        tensor_parallel_size = len(gpu_list)
 
-        server_process = start_vllm_server(
-            model=args.model,
-            download_dir=args.download_dir,
-            gpu_ids=gpu_ids_normalized,
-            tensor_parallel_size=tensor_parallel_size,
-            max_model_len=args.max_model_len,
-            gpu_memory_utilization=args.gpu_memory_utilization,
-            port=args.port
-        )
+        # Validate GPU count vs gpus_per_server
+        if len(gpu_list) % args.gpus_per_server != 0:
+            remainder = len(gpu_list) % args.gpus_per_server
+            usable = len(gpu_list) - remainder
+            print(f"WARNING: {len(gpu_list)} GPUs not evenly divisible by gpus_per_server={args.gpus_per_server}. "
+                  f"Using first {usable} GPUs, ignoring GPUs: {gpu_list[usable:]}")
+            gpu_list = gpu_list[:usable]
+
+        n_servers = len(gpu_list) // args.gpus_per_server
+        if n_servers == 0:
+            raise ValueError(f"Not enough GPUs ({len(gpu_list)}) for gpus_per_server={args.gpus_per_server}")
+
+        print(f"Starting {n_servers} vLLM server(s), each with {args.gpus_per_server} GPU(s)")
+
+        # Ensure shard_dir exists for server log files
+        os.makedirs(args.shard_dir, exist_ok=True)
+
+        # Start N vLLM servers (subprocess spawns are non-blocking, so models load concurrently)
+        server_infos: List[Tuple[subprocess.Popen, int]] = []  # (process, port)
+        for server_idx in range(n_servers):
+            gpu_start = server_idx * args.gpus_per_server
+            gpu_end = gpu_start + args.gpus_per_server
+            server_gpu_ids = ",".join(gpu_list[gpu_start:gpu_end])
+            server_port = args.base_port + server_idx
+
+            log_file = os.path.join(args.shard_dir, f"vllm_server_{server_idx}.log")
+
+            process = start_vllm_server(
+                model=args.model,
+                download_dir=args.download_dir,
+                gpu_ids=server_gpu_ids,
+                tensor_parallel_size=args.gpus_per_server,
+                max_model_len=args.max_model_len,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+                port=server_port,
+                log_file=log_file,
+            )
+            server_infos.append((process, server_port))
 
         try:
-            # Wait for server to be ready
-            if not wait_for_server_ready(args.port, timeout=args.server_timeout):
-                print("Failed to start vLLM server. Exiting.")
-                shutdown_server(server_process)
-                sys.exit(1)
+            # Wait for all servers to be ready
+            for i, (process, port) in enumerate(server_infos):
+                print(f"Waiting for server {i} (port {port})...")
+                if not wait_for_server_ready(port, timeout=args.server_timeout):
+                    print(f"Failed to start vLLM server {i} on port {port}. Shutting down all servers.")
+                    for proc, _ in server_infos:
+                        shutdown_server(proc)
+                    sys.exit(1)
 
-            # Create async OpenAI client with timeout
-            client = AsyncOpenAI(
-                base_url=f"http://localhost:{args.port}/v1",
-                api_key="not-needed",  # vLLM doesn't require API key
-                timeout=args.request_timeout + 60,  # Give extra buffer beyond request timeout
-            )
+            # Create async OpenAI clients, one per server
+            server_clients: List[Tuple[AsyncOpenAI, int]] = []
+            for i, (process, port) in enumerate(server_infos):
+                client = AsyncOpenAI(
+                    base_url=f"http://localhost:{port}/v1",
+                    api_key="not-needed",
+                    timeout=args.request_timeout + 60,
+                )
+                server_clients.append((client, port))
+
+            print(f"All {n_servers} vLLM server(s) ready.")
 
             # Process all rounds
             asyncio.run(process_all_rounds(
@@ -944,13 +1006,17 @@ def main():
                 all_results=all_results,
                 completed_rounds=completed_rounds,
                 args=args,
-                client=client,
+                server_clients=server_clients,
                 tokenizer=tokenizer
             ))
 
         finally:
-            # Always shutdown server
-            shutdown_server(server_process)
+            # Always shutdown all servers
+            print(f"Shutting down {len(server_infos)} vLLM server(s)...")
+            for i, (process, port) in enumerate(server_infos):
+                print(f"  Shutting down server {i} (port {port})...")
+                shutdown_server(process)
+            print("All servers shut down.")
 
     # Build final output (one row per chunk per patient)
     def split_boilerplate(text: str) -> Tuple[str, str]:
