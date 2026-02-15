@@ -379,6 +379,85 @@ def prepare_rounds(
     return rounds, patient_chunk_order, patient_last_dates
 
 
+def save_prepared_chunks(
+    shard_dir: str,
+    rounds: List[List[Tuple[str, int, str, str, str]]],
+    patient_chunk_order: Dict[str, List[int]],
+    patient_last_dates: Dict[str, str],
+):
+    """Save prepared chunks to parquet for fast resume."""
+    os.makedirs(shard_dir, exist_ok=True)
+    rows = []
+    # Build local_idx lookup: for each patient, chunk_order position
+    patient_local_idx: Dict[str, int] = {}
+    for rnd in rounds:
+        for pid, chunk_idx, first_date, last_date, chunk_text in rnd:
+            local_idx = patient_local_idx.get(pid, 0)
+            patient_local_idx[pid] = local_idx + 1
+            rows.append({
+                "patient_id": pid,
+                "chunk_idx": chunk_idx,
+                "local_idx": local_idx,
+                "first_date": first_date,
+                "last_date": last_date,
+                "chunk_text": chunk_text,
+                "patient_last_date": patient_last_dates.get(pid, ""),
+            })
+    chunk_df = pd.DataFrame(rows)
+    path = os.path.join(shard_dir, "prepared_chunks.parquet")
+    chunk_df.to_parquet(path, index=False)
+    print(f"Saved prepared chunks: {path} ({len(chunk_df)} chunks)")
+
+
+def load_prepared_chunks(
+    shard_dir: str,
+) -> Optional[Tuple[List[List[Tuple[str, int, str, str, str]]], Dict[str, List[int]], Dict[str, str]]]:
+    """
+    Load prepared chunks from parquet if available.
+
+    Returns None if no cached file exists, otherwise returns
+    (rounds, patient_chunk_order, patient_last_dates).
+    """
+    path = os.path.join(shard_dir, "prepared_chunks.parquet")
+    if not os.path.exists(path):
+        return None
+
+    print(f"Loading cached prepared chunks from {path}...")
+    chunk_df = pd.read_parquet(path)
+
+    # Reconstruct patient_chunk_order and patient_last_dates
+    patient_chunk_order: Dict[str, List[int]] = {}
+    patient_last_dates: Dict[str, str] = {}
+
+    for _, row in chunk_df.iterrows():
+        pid = str(row["patient_id"])
+        chunk_idx = int(row["chunk_idx"])
+        if pid not in patient_chunk_order:
+            patient_chunk_order[pid] = []
+            patient_last_dates[pid] = str(row["patient_last_date"])
+        patient_chunk_order[pid].append(chunk_idx)
+
+    # Reconstruct rounds: group by local_idx (round number)
+    max_local = int(chunk_df["local_idx"].max()) + 1 if len(chunk_df) > 0 else 0
+    rounds: List[List[Tuple[str, int, str, str, str]]] = []
+    for round_idx in range(max_local):
+        round_rows = chunk_df[chunk_df["local_idx"] == round_idx]
+        round_items = []
+        for _, row in round_rows.iterrows():
+            round_items.append((
+                str(row["patient_id"]),
+                int(row["chunk_idx"]),
+                str(row["first_date"]),
+                str(row["last_date"]),
+                str(row["chunk_text"]),
+            ))
+        if round_items:
+            rounds.append(round_items)
+
+    print(f"Loaded {len(chunk_df)} cached chunks ({len(rounds)} rounds, {len(patient_chunk_order)} patients)")
+    return rounds, patient_chunk_order, patient_last_dates
+
+
 def load_existing_shards(shard_dir: str) -> Tuple[int, Dict[int, Tuple[str, str, str]]]:
     """
     Load existing shard files to enable resume.
@@ -904,12 +983,18 @@ def main():
         trust_remote_code=True
     )
 
-    # Prepare rounds (concatenate notes per patient, chunk, organize into rounds)
-    print("Preparing work rounds (concatenating and chunking notes per patient)...")
-    rounds, patient_chunk_order, patient_last_dates = prepare_rounds(
-        df, args.patient_id_col, args.date_col, args.text_col,
-        tokenizer, args.chunk_size, args.chunk_overlap
-    )
+    # Try loading cached prepared chunks, otherwise prepare from scratch
+    cached = load_prepared_chunks(args.shard_dir)
+    if cached is not None:
+        rounds, patient_chunk_order, patient_last_dates = cached
+    else:
+        print("Preparing work rounds (concatenating and chunking notes per patient)...")
+        rounds, patient_chunk_order, patient_last_dates = prepare_rounds(
+            df, args.patient_id_col, args.date_col, args.text_col,
+            tokenizer, args.chunk_size, args.chunk_overlap
+        )
+        save_prepared_chunks(args.shard_dir, rounds, patient_chunk_order, patient_last_dates)
+
     total_chunks = sum(len(clist) for clist in patient_chunk_order.values())
     print(f"Organized into {len(rounds)} rounds for {len(patient_chunk_order)} patients ({total_chunks} total chunks)")
 
