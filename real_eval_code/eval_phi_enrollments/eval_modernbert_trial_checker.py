@@ -220,17 +220,18 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute classification metrics
+    # Compute classification metrics (binarize graded labels for AUC)
     if 'prediction_score' in validation_set.columns and 'eligibility_result' in validation_set.columns:
         print("\n--- Classification Metrics ---")
-        auc = roc_auc_score(validation_set.eligibility_result, validation_set.prediction_score)
+        gold_binary = (validation_set.eligibility_result > 0).astype(float)
+        auc = roc_auc_score(gold_binary, validation_set.prediction_score)
         print(f"AUC: {auc:.4f}")
 
         # Generate classification PDF report
         pdf_path = output_dir / "trial_checker_patient_centric_classification.pdf"
         eval_model(
             validation_set.prediction_score.values,
-            validation_set.eligibility_result.values,
+            gold_binary.values,
             pdf_path=str(pdf_path),
             title_prefix="Trial Checker Patient-Centric"
         )
@@ -363,16 +364,17 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute classification metrics
+    # Compute classification metrics (binarize graded labels for AUC)
     if 'prediction_score' in validation_set.columns and 'eligibility_result' in validation_set.columns:
         print("\n--- Classification Metrics ---")
-        auc = roc_auc_score(validation_set.eligibility_result, validation_set.prediction_score)
+        gold_binary = (validation_set.eligibility_result > 0).astype(float)
+        auc = roc_auc_score(gold_binary, validation_set.prediction_score)
         print(f"AUC: {auc:.4f}")
 
         pdf_path = output_dir / "trial_checker_trial_centric_classification.pdf"
         eval_model(
             validation_set.prediction_score.values,
-            validation_set.eligibility_result.values,
+            gold_binary.values,
             pdf_path=str(pdf_path),
             title_prefix="Trial Checker Trial-Centric"
         )

@@ -31,7 +31,7 @@ def main(checkpoint_dir: str, output_dir: str):
     
     dataset.eligibility_result.value_counts()
     
-    dataset['eligibility_result'] = dataset.eligibility_result.astype(int)
+    dataset['eligibility_result'] = (dataset.eligibility_result > 0).astype(int)
     
     from transformers import AutoTokenizer
     

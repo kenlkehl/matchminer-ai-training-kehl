@@ -42,12 +42,12 @@ def average_precision_at_k(label_array: np.ndarray) -> float:
     Returns:
         Average precision score
     """
-    total_yes = np.sum(label_array)
+    total_yes = np.sum(label_array > 0)
     if total_yes > 0:
-        yes_indices = np.where(label_array == 1)[0] + 1
+        yes_indices = np.where(label_array > 0)[0] + 1
         precisions = []
         for index in yes_indices:
-            precision = np.sum(label_array[0:index]) / index
+            precision = np.sum(label_array[0:index] > 0) / index
             precisions.append(precision)
         return np.sum(np.array(precisions)) / total_yes
     else:

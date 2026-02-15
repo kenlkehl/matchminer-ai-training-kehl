@@ -146,7 +146,7 @@ def main():
     trial_checks["patient_summary_trunc"] = PROMPT_PREFIX + trial_checks["patient_summary"].map(truncate)
     trial_checks["this_space_trunc"] = PROMPT_PREFIX + trial_checks["this_space"].map(truncate)
 
-    eligible = trial_checks[trial_checks.eligibility_result == 1]
+    eligible = trial_checks[trial_checks.eligibility_result >= 0.5]
     print("\n[INFO] Eligible subset info:")
     eligible.info()
 
@@ -178,7 +178,7 @@ def main():
 
     # --- Losses ---
     mll_train_loss = losses.MultipleNegativesRankingLoss(model=model)
-    contrastive_train_loss = losses.OnlineContrastiveLoss(model=model)
+    contrastive_train_loss = losses.CoSENTLoss(model=model)
     losses_map = {
         "mnri_dataset": mll_train_loss,
         "contrastive_dataset": contrastive_train_loss,

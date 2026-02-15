@@ -255,9 +255,13 @@ def worker_process(
                     "most recent information available in their summary, at the time of that most recently available information. "
                     "Do not provide ethical judgments or comment on resource constraints with respect whether the trial is a reasonable clinical "
                     "consideration; just evaluate whether it is, given the available information.\n"
-                    'Reason step by step, then answer the question "Is this trial a reasonable consideration for this patient?" with a one-word '
-                    '"Yes!" or "No!" answer.\n'
-                    "Make sure to include the exclamation point in your final one-word answer."
+                    "Reason step by step, then classify this trial using exactly one of these verdict labels.\n"
+                    "Your response MUST end with one of these labels and nothing else after it:\n\n"
+                    "- Yes-Targeted!  The trial IS reasonable, AND it specifies the patient's cancer type, AND it targets a biomarker the patient is known to have.\n"
+                    "- Yes-CancerMatch!  The trial IS reasonable AND specifies the patient's cancer type, BUT does not specifically target a known biomarker of the patient (either no biomarker requirement, or the required biomarker status is unknown in the patient).\n"
+                    "- Yes-BiomarkerMatch!  The trial IS reasonable AND targets a biomarker the patient is known to have, BUT uses a broader indicated cancer type than the patient's specific cancer (e.g., \"solid tumors\" or \"advanced cancers\").\n"
+                    "- Yes-General!  The trial IS reasonable, BUT neither the cancer type nor biomarkers specifically match as described above.\n"
+                    "- No!  The trial is NOT a reasonable consideration for this patient."
                 )}
             ]
             
@@ -283,16 +287,33 @@ def worker_process(
                 response_text = completion_output.text
                 response_id = completion_output.index
                 
-                if ("Yes!" in response_text[-10:]) or ("YES!" in response_text[-10:]):
-                    eligibility_result = 1.0
+                VERDICT_MAP = {
+                    "YES-TARGETED!": 1.0, "YES-CANCERMATCH!": 0.75,
+                    "YES-BIOMARKERMATCH!": 0.75, "YES-GENERAL!": 0.5, "NO!": 0.0,
+                }
+                tail = response_text[-30:].upper()
+                matched_verdict = None
+                for verdict_key, score in VERDICT_MAP.items():
+                    if verdict_key in tail:
+                        matched_verdict = verdict_key
+                        break
+                if matched_verdict is not None:
+                    eligibility_result = VERDICT_MAP[matched_verdict]
+                    eligibility_verdict = matched_verdict
                 else:
-                    eligibility_result = 0.0
-                
+                    if "YES" in tail:
+                        eligibility_result = 0.5
+                        eligibility_verdict = "YES-GENERAL!"
+                    else:
+                        eligibility_result = 0.0
+                        eligibility_verdict = "NO!"
+
                 result = {
                     "prompt_id": original_idx,
                     "response_id": response_id,
                     "llama_response": response_text,
                     "eligibility_result": eligibility_result,
+                    "eligibility_verdict": eligibility_verdict,
                 }
                 result.update(row_data)
                 results.append(result)

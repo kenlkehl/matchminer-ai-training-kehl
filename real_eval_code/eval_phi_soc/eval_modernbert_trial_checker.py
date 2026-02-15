@@ -203,13 +203,14 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
 
     if 'prediction_score' in validation_set.columns and 'eligibility_result' in validation_set.columns:
         print("\n--- Classification Metrics ---")
-        auc = roc_auc_score(validation_set.eligibility_result, validation_set.prediction_score)
+        gold_binary = (validation_set.eligibility_result > 0).astype(float)
+        auc = roc_auc_score(gold_binary, validation_set.prediction_score)
         print(f"AUC: {auc:.4f}")
 
         pdf_path = output_dir / "trial_checker_patient_centric_classification_soc.pdf"
         eval_model(
             validation_set.prediction_score.values,
-            validation_set.eligibility_result.values,
+            gold_binary.values,
             pdf_path=str(pdf_path),
             title_prefix="SOC Trial Checker Patient-Centric"
         )
@@ -331,13 +332,14 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
 
     if 'prediction_score' in validation_set.columns and 'eligibility_result' in validation_set.columns:
         print("\n--- Classification Metrics ---")
-        auc = roc_auc_score(validation_set.eligibility_result, validation_set.prediction_score)
+        gold_binary = (validation_set.eligibility_result > 0).astype(float)
+        auc = roc_auc_score(gold_binary, validation_set.prediction_score)
         print(f"AUC: {auc:.4f}")
 
         pdf_path = output_dir / "trial_checker_trial_centric_classification_soc.pdf"
         eval_model(
             validation_set.prediction_score.values,
-            validation_set.eligibility_result.values,
+            gold_binary.values,
             pdf_path=str(pdf_path),
             title_prefix="SOC Trial Checker Trial-Centric"
         )

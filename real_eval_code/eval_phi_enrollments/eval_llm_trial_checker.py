@@ -133,16 +133,17 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute classification metrics
+    # Compute classification metrics (binarize graded labels for AUC)
     print("\n--- Classification Metrics ---")
-    auc = roc_auc_score(gold.eligibility_result, predictions.values)
+    gold_binary = (gold.eligibility_result > 0).astype(float)
+    auc = roc_auc_score(gold_binary, predictions.values)
     print(f"AUC: {auc:.4f}")
 
     # Generate classification PDF report
     pdf_path = output_dir / "llm_trial_checker_patient_centric_classification.pdf"
     eval_model(
         predictions.values,
-        gold.eligibility_result.values,
+        gold_binary.values,
         pdf_path=str(pdf_path),
         title_prefix="LLM Trial Checker Patient-Centric"
     )
@@ -239,15 +240,16 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute classification metrics
+    # Compute classification metrics (binarize graded labels for AUC)
     print("\n--- Classification Metrics ---")
-    auc = roc_auc_score(gold.eligibility_result, predictions.values)
+    gold_binary = (gold.eligibility_result > 0).astype(float)
+    auc = roc_auc_score(gold_binary, predictions.values)
     print(f"AUC: {auc:.4f}")
 
     pdf_path = output_dir / "llm_trial_checker_trial_centric_classification.pdf"
     eval_model(
         predictions.values,
-        gold.eligibility_result.values,
+        gold_binary.values,
         pdf_path=str(pdf_path),
         title_prefix="LLM Trial Checker Trial-Centric"
     )

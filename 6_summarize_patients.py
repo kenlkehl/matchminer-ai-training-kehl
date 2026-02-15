@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-Serial patient summarization with iterative updates using vLLM server.
+Serial patient summarization with chunk-based updates using vLLM server.
 
-For each patient, notes are processed chronologically. Each new note updates
-the prior summary. Work is scheduled in rounds to maximize GPU utilization.
+For each patient, all clinical notes are sorted by date and concatenated into
+a single text, then chunked into token-length segments. A running summary is
+maintained across chunks. Work is scheduled in rounds (Round N = Nth chunk from
+each patient) to maximize GPU utilization.
 
 This version uses a single vLLM server for all inference, eliminating the
 overhead of loading/unloading the model for each round.
@@ -27,7 +29,7 @@ python 6_summarize_patients.py \
   --synthetic_max_days 90 \
   --max_patients 10
 
-# With custom port and concurrency
+# With custom chunk size and concurrency
 python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
@@ -36,6 +38,8 @@ python 6_summarize_patients.py \
   --download_dir ../meta_ai \
   --gpu_ids 0,1,2,3 \
   --max_model_len 120000 \
+  --chunk_size 40000 \
+  --chunk_overlap 500 \
   --port 8000 \
   --max_concurrent_requests 100
 """
@@ -119,46 +123,122 @@ def generate_synthetic_dates(
     return df
 
 
+def concatenate_and_chunk_notes(
+    notes: List[Tuple[str, str]],
+    tokenizer,
+    chunk_size: int = 40000,
+    chunk_overlap: int = 500,
+) -> List[Tuple[str, str, str]]:
+    """
+    Concatenate all notes for a patient with date headers, then chunk into
+    token-length segments with overlap.
+
+    Args:
+        notes: List of (date_str, note_text) sorted chronologically
+        tokenizer: HuggingFace tokenizer for token counting
+        chunk_size: Maximum tokens per chunk
+        chunk_overlap: Token overlap between consecutive chunks
+
+    Returns:
+        List of (chunk_text, first_date_in_chunk, last_date_in_chunk) tuples
+    """
+    assert chunk_overlap < chunk_size, "chunk_overlap must be less than chunk_size"
+
+    if not notes:
+        return []
+
+    # Concatenate all notes with date headers
+    blocks = []
+    for date_str, note_text in notes:
+        blocks.append(f"=== Clinical Note dated {date_str} ===\n{note_text}\n")
+    full_text = "\n".join(blocks)
+
+    all_dates = [date_str for date_str, _ in notes]
+
+    # Tokenize the full concatenated text
+    all_tokens = tokenizer(full_text, add_special_tokens=False).input_ids
+
+    # If it fits in a single chunk, return as-is
+    if len(all_tokens) <= chunk_size:
+        return [(full_text, all_dates[0], all_dates[-1])]
+
+    # Chunk with overlap
+    stride = chunk_size - chunk_overlap
+    date_header_pattern = re.compile(r"=== Clinical Note dated (.+?) ===")
+    chunks = []
+
+    start = 0
+    while start < len(all_tokens):
+        end = min(start + chunk_size, len(all_tokens))
+        chunk_tokens = all_tokens[start:end]
+        chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
+
+        # Extract dates present in this chunk
+        found_dates = date_header_pattern.findall(chunk_text)
+        if found_dates:
+            first_date = found_dates[0]
+            last_date = found_dates[-1]
+        else:
+            # Chunk falls within a single note with no header visible
+            # Use the dates from the nearest preceding chunk or overall dates
+            if chunks:
+                first_date = chunks[-1][2]  # last_date of previous chunk
+                last_date = first_date
+            else:
+                first_date = all_dates[0]
+                last_date = all_dates[0]
+
+        chunks.append((chunk_text, first_date, last_date))
+
+        # Stop if we've reached the end
+        if end >= len(all_tokens):
+            break
+        start += stride
+
+    return chunks
+
+
 def build_prompt_text(
     tokenizer,
     prior_summary: Optional[str],
-    note_date: str,
-    note_text: str,
+    first_date: str,
+    last_date: str,
+    chunk_text: str,
     max_model_len: int,
     margin_tokens: int = 5000
 ) -> str:
     """
     Build a single prompt for iterative summarization.
-    Truncates note_text if too long, keeping head & tail.
+    Truncates chunk_text if too long, keeping head & tail.
     """
     threshold = max(1024, max_model_len - margin_tokens)
 
-    # Truncate note_text if needed
-    toks = tokenizer(note_text, add_special_tokens=False).input_ids
+    # Truncate chunk_text if needed (safety net; chunks should already be sized)
+    toks = tokenizer(chunk_text, add_special_tokens=False).input_ids
     if len(toks) > threshold:
         half = threshold // 2
         first_part = toks[:half]
         last_part = toks[-half:]
-        note_text = tokenizer.decode(first_part) + " ... " + tokenizer.decode(last_part)
+        chunk_text = tokenizer.decode(first_part) + " ... " + tokenizer.decode(last_part)
 
-    prior_summary_text = prior_summary if prior_summary else "None - this is the first note for this patient"
+    prior_summary_text = prior_summary if prior_summary else "None - this is the first segment for this patient"
 
     user_content = f"""You are an experienced clinical oncology history summarization bot.
 
 You are maintaining a running summary of a patient's cancer history based on their electronic health record.
 You will be given:
-1. A PRIOR SUMMARY of the patient's history (may be empty for first note)
-2. A NEW CLINICAL NOTE to incorporate
+1. A PRIOR SUMMARY of the patient's history (may be empty for the first segment)
+2. THE NEXT SEGMENT of the patient's clinical record (may contain multiple notes with dates)
 
 Your task:
-- Update the summary to incorporate any new relevant information from the new note
-- If the new note contains no information that would change the summary, output the prior summary exactly as-is
+- Update the summary to incorporate any new relevant information from this segment of the clinical record
+- If the segment contains no information that would change the summary, output the prior summary exactly as-is
 - The patient may not yet have a cancer diagnosis. If not, state "No cancer diagnosis documented as of [date]" and summarize relevant medical history that might be relevant to a future oncology workup.
 
 Document the patient's most recent age; sex; cancer type/primary site (eg breast cancer, lung cancer, etc); histology (eg adenocarcinoma, squamous carcinoma, etc); current extent (localized, advanced, metastatic, etc); biomarkers (genomic results, protein expression, etc); and treatment history (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates and best response if known).
 Do not consider localized basal cell or squamous carcinomas of the skin, or colon polyps, to be cancers for your purposes.
 Do not include the patient's name, but do include relevant dates whenever documented.
-If a patient has a history of more than one cancer, document the cancers one at a time.
+If a patient has a history of more than one cancer, document the cancers one at a time. List the currently or most recently active cancer first, followed by any prior cancers. Within each cancer, events should be in chronological order.
 CRITICAL: Format your response as free text ONLY. Do NOT output markdown, Unicode, or tables.
 
 Also document any history of conditions that might meet "boilerplate" exclusion criteria for clinical trials, including uncontrolled brain metastases, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, lack of measurable disease,and HIV or hepatitis infection.
@@ -183,8 +263,8 @@ No evidence of common boilerplate exclusion criteria
 PRIOR SUMMARY:
 {prior_summary_text}
 
-NEW NOTE (dated {note_date}):
-{note_text}
+NEXT CLINICAL RECORD SEGMENT (covering {first_date} to {last_date}):
+{chunk_text}
 ---
 Now, write your updated summary. Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
@@ -228,44 +308,72 @@ def prepare_rounds(
     df: pd.DataFrame,
     patient_id_col: str,
     date_col: str,
-    text_col: str
-) -> Tuple[List[List[Tuple[str, int, str, str]]], Dict[str, List[int]]]:
+    text_col: str,
+    tokenizer,
+    chunk_size: int = 40000,
+    chunk_overlap: int = 500,
+) -> Tuple[List[List[Tuple[str, int, str, str, str]]], Dict[str, List[int]], Dict[str, str]]:
     """
-    Organize work into rounds for parallel processing.
+    Organize work into rounds for parallel processing using chunk-based approach.
+
+    For each patient, all notes are concatenated chronologically and split into
+    token-length chunks. Rounds are built so that Round N contains the Nth chunk
+    from each patient.
 
     Returns:
-        rounds: List of rounds, each containing list of (patient_id, row_idx, date_str, note_text)
-        patient_row_order: Dict mapping patient_id -> list of row indices in chronological order
+        rounds: List of rounds, each containing list of (patient_id, chunk_idx, first_date, last_date, chunk_text)
+        patient_chunk_order: Dict mapping patient_id -> list of chunk indices
+        patient_last_dates: Dict mapping patient_id -> last note date string
     """
     # Sort by patient and date
     df = df.sort_values([patient_id_col, date_col]).reset_index(drop=True)
 
-    # Group by patient and get ordered row indices
-    patient_row_order: Dict[str, List[int]] = {}
-    for idx, row in df.iterrows():
-        pid = str(row[patient_id_col])
-        if pid not in patient_row_order:
-            patient_row_order[pid] = []
-        patient_row_order[pid].append(idx)
+    patient_chunks: Dict[str, List[Tuple[str, str, str]]] = {}  # pid -> [(chunk_text, first_date, last_date)]
+    patient_chunk_order: Dict[str, List[int]] = {}  # pid -> [chunk_idx, ...]
+    patient_last_dates: Dict[str, str] = {}  # pid -> last_note_date
 
-    # Determine max notes per patient
-    max_notes = max(len(rows) for rows in patient_row_order.values())
+    chunk_idx_counter = 0
 
-    # Build rounds: round i contains the (i+1)th note for each patient that has one
-    rounds: List[List[Tuple[str, int, str, str]]] = []
-    for round_idx in range(max_notes):
+    for pid, group in df.groupby(patient_id_col, sort=False):
+        pid = str(pid)
+
+        # Collect notes sorted by date for this patient
+        notes = []
+        last_date_str = "unknown date"
+        for _, row in group.iterrows():
+            date_val = row[date_col]
+            date_str = str(date_val) if pd.notna(date_val) else "unknown date"
+            note_text = str(row[text_col])
+            notes.append((date_str, note_text))
+            last_date_str = date_str
+
+        patient_last_dates[pid] = last_date_str
+
+        # Concatenate and chunk
+        chunks = concatenate_and_chunk_notes(notes, tokenizer, chunk_size, chunk_overlap)
+        patient_chunks[pid] = chunks
+
+        patient_chunk_order[pid] = []
+        for _ in chunks:
+            patient_chunk_order[pid].append(chunk_idx_counter)
+            chunk_idx_counter += 1
+
+    # Build rounds: round i contains the (i+1)th chunk for each patient that has one
+    max_chunks = max(len(clist) for clist in patient_chunk_order.values()) if patient_chunk_order else 0
+
+    rounds: List[List[Tuple[str, int, str, str, str]]] = []
+    for round_idx in range(max_chunks):
         round_items = []
-        for pid, row_indices in patient_row_order.items():
-            if round_idx < len(row_indices):
-                row_idx = row_indices[round_idx]
-                date_val = df.loc[row_idx, date_col]
-                date_str = str(date_val) if pd.notna(date_val) else "unknown date"
-                note_text = str(df.loc[row_idx, text_col])
-                round_items.append((pid, row_idx, date_str, note_text))
+        for pid in patient_chunk_order:
+            chunk_indices = patient_chunk_order[pid]
+            if round_idx < len(chunk_indices):
+                cidx = chunk_indices[round_idx]
+                chunk_text, first_date, last_date = patient_chunks[pid][round_idx]
+                round_items.append((pid, cidx, first_date, last_date, chunk_text))
         if round_items:
             rounds.append(round_items)
 
-    return rounds, patient_row_order
+    return rounds, patient_chunk_order, patient_last_dates
 
 
 def load_existing_shards(shard_dir: str) -> Tuple[int, Dict[int, Tuple[str, str, str]]]:
@@ -591,8 +699,8 @@ async def run_inference_batch(
 
 
 async def process_all_rounds(
-    rounds: List[List[Tuple[str, int, str, str]]],
-    patient_row_order: Dict[str, List[int]],
+    rounds: List[List[Tuple[str, int, str, str, str]]],
+    patient_chunk_order: Dict[str, List[int]],
     patient_summaries: Dict[str, str],
     all_results: Dict[int, Tuple[str, str, str]],
     completed_rounds: int,
@@ -604,20 +712,20 @@ async def process_all_rounds(
     Process all remaining rounds using async inference.
 
     Args:
-        rounds: List of rounds, each containing (patient_id, row_idx, date_str, note_text)
-        patient_row_order: Dict mapping patient_id -> list of row indices
+        rounds: List of rounds, each containing (patient_id, chunk_idx, first_date, last_date, chunk_text)
+        patient_chunk_order: Dict mapping patient_id -> list of chunk indices
         patient_summaries: Dict tracking current summary per patient (mutated)
-        all_results: Dict tracking all results by row_idx (mutated)
+        all_results: Dict tracking all results by chunk_idx (mutated)
         completed_rounds: Number of rounds already completed
         args: Command line arguments
         client: AsyncOpenAI client
         tokenizer: HuggingFace tokenizer for prompt building
     """
-    # Build reverse mapping: row_idx -> patient_id
-    row_to_patient: Dict[int, str] = {}
-    for pid, row_indices in patient_row_order.items():
-        for row_idx in row_indices:
-            row_to_patient[row_idx] = pid
+    # Build reverse mapping: chunk_idx -> patient_id
+    chunk_to_patient: Dict[int, str] = {}
+    for pid, chunk_indices in patient_chunk_order.items():
+        for cidx in chunk_indices:
+            chunk_to_patient[cidx] = pid
 
     for round_idx in range(completed_rounds, len(rounds)):
         round_items = rounds[round_idx]
@@ -627,15 +735,15 @@ async def process_all_rounds(
         prompts: List[Tuple[int, str]] = []
         round_prior_summaries: Dict[int, str] = {}
 
-        for pid, row_idx, date_str, note_text in round_items:
+        for pid, chunk_idx, first_date, last_date, chunk_text in round_items:
             prior_summary = patient_summaries.get(pid, None)
-            prior_text = prior_summary if prior_summary else "None - this is the first note for this patient"
-            round_prior_summaries[row_idx] = prior_text
+            prior_text = prior_summary if prior_summary else "None - this is the first segment for this patient"
+            round_prior_summaries[chunk_idx] = prior_text
 
             prompt = build_prompt_text(
-                tokenizer, prior_summary, date_str, note_text, args.max_model_len
+                tokenizer, prior_summary, first_date, last_date, chunk_text, args.max_model_len
             )
-            prompts.append((row_idx, prompt))
+            prompts.append((chunk_idx, prompt))
 
         # Run inference
         print(f"Sending {len(prompts)} requests to vLLM server...")
@@ -656,13 +764,13 @@ async def process_all_rounds(
 
         # Update state
         round_results_with_prior: List[Tuple[int, str, str, str]] = []
-        for row_idx, reasoning, summary in results:
-            prior_text = round_prior_summaries[row_idx]
-            all_results[row_idx] = (reasoning, summary, prior_text)
-            round_results_with_prior.append((row_idx, reasoning, summary, prior_text))
+        for chunk_idx, reasoning, summary in results:
+            prior_text = round_prior_summaries[chunk_idx]
+            all_results[chunk_idx] = (reasoning, summary, prior_text)
+            round_results_with_prior.append((chunk_idx, reasoning, summary, prior_text))
 
             # Update patient summary for next round
-            pid = row_to_patient[row_idx]
+            pid = chunk_to_patient[chunk_idx]
             patient_summaries[pid] = summary
 
         # Save round shard
@@ -675,7 +783,7 @@ async def process_all_rounds(
 # -------------------------
 
 def main():
-    ap = argparse.ArgumentParser("Serial patient summarization with iterative updates using vLLM server.")
+    ap = argparse.ArgumentParser("Chunk-based patient summarization with iterative updates using vLLM server.")
     ap.add_argument("--input_parquet", required=True)
     ap.add_argument("--output_parquet", required=True)
     ap.add_argument("--patient_summaries_parquet", default="../data/no_phi/patient_summaries.parquet",
@@ -692,6 +800,10 @@ def main():
                     help="Minimum days between consecutive notes")
     ap.add_argument("--synthetic_max_days", type=int, default=90,
                     help="Maximum days between consecutive notes")
+    ap.add_argument("--chunk_size", type=int, default=40000,
+                    help="Maximum tokens per chunk when concatenating patient notes (default: 40000)")
+    ap.add_argument("--chunk_overlap", type=int, default=500,
+                    help="Token overlap between consecutive chunks (default: 500)")
     ap.add_argument("--model", default="openai/gpt-oss-120b")
     ap.add_argument("--download_dir", required=True)
     ap.add_argument("--gpu_ids", required=True,
@@ -755,12 +867,24 @@ def main():
 
     # Keep original index for output mapping
     df = df.reset_index(drop=True)
-    original_len = len(df)
 
-    # Prepare rounds
-    print("Preparing work rounds...")
-    rounds, patient_row_order = prepare_rounds(df, args.patient_id_col, args.date_col, args.text_col)
-    print(f"Organized into {len(rounds)} rounds for {len(patient_row_order)} patients")
+    # Load tokenizer for chunking and prompt building (needed before prepare_rounds)
+    print("Loading tokenizer...")
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        cache_dir=args.download_dir,
+        trust_remote_code=True
+    )
+
+    # Prepare rounds (concatenate notes per patient, chunk, organize into rounds)
+    print("Preparing work rounds (concatenating and chunking notes per patient)...")
+    rounds, patient_chunk_order, patient_last_dates = prepare_rounds(
+        df, args.patient_id_col, args.date_col, args.text_col,
+        tokenizer, args.chunk_size, args.chunk_overlap
+    )
+    total_chunks = sum(len(clist) for clist in patient_chunk_order.values())
+    print(f"Organized into {len(rounds)} rounds for {len(patient_chunk_order)} patients ({total_chunks} total chunks)")
 
     # Load existing shards for resume
     completed_rounds, all_results = load_existing_shards(args.shard_dir)
@@ -768,15 +892,15 @@ def main():
         print(f"Resuming from round {completed_rounds} (loaded {len(all_results)} existing results)")
 
     # Track current summaries per patient
-    patient_summaries: Dict[str, str] = {}
+    patient_summaries_dict: Dict[str, str] = {}
 
     # Reconstruct patient summaries from completed rounds
     if completed_rounds > 0:
         for round_idx in range(completed_rounds):
-            for pid, row_idx, _, _ in rounds[round_idx]:
-                if row_idx in all_results:
-                    _, summary, _ = all_results[row_idx]
-                    patient_summaries[pid] = summary
+            for pid, chunk_idx, _, _, _ in rounds[round_idx]:
+                if chunk_idx in all_results:
+                    _, summary, _ = all_results[chunk_idx]
+                    patient_summaries_dict[pid] = summary
 
     # Check if there's work to do
     if completed_rounds >= len(rounds):
@@ -812,20 +936,11 @@ def main():
                 timeout=args.request_timeout + 60,  # Give extra buffer beyond request timeout
             )
 
-            # Load tokenizer for prompt building
-            print("Loading tokenizer...")
-            from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(
-                args.model,
-                cache_dir=args.download_dir,
-                trust_remote_code=True
-            )
-
             # Process all rounds
             asyncio.run(process_all_rounds(
                 rounds=rounds,
-                patient_row_order=patient_row_order,
-                patient_summaries=patient_summaries,
+                patient_chunk_order=patient_chunk_order,
+                patient_summaries=patient_summaries_dict,
                 all_results=all_results,
                 completed_rounds=completed_rounds,
                 args=args,
@@ -837,33 +952,11 @@ def main():
             # Always shutdown server
             shutdown_server(server_process)
 
-    # Build final output
-    print(f"\nBuilding final output ({original_len} rows)...")
-    reasoning_list = []
-    summary_list = []
-    prior_summary_list = []
-
-    for idx in range(original_len):
-        if idx in all_results:
-            reasoning, summary, prior_summary = all_results[idx]
-        else:
-            reasoning, summary, prior_summary = "", "", ""
-        reasoning_list.append(reasoning)
-        summary_list.append(summary)
-        prior_summary_list.append(prior_summary)
-
-    df["prior_summary"] = prior_summary_list
-    df["new_summary_reasoning"] = reasoning_list
-    df["new_summary"] = summary_list
-
-    # Split new_summary into patient_summary and patient_boilerplate_text
-    # The model is instructed to separate boilerplate with "Boilerplate:" label
+    # Build final output (one row per chunk per patient)
     def split_boilerplate(text: str) -> Tuple[str, str]:
         """Split summary into main summary and boilerplate text."""
         if not text:
             return "", ""
-
-        # Try different variations of the boilerplate marker
         markers = ["Boilerplate:", "BOILERPLATE:", "boilerplate:"]
         for marker in markers:
             if marker in text:
@@ -871,35 +964,68 @@ def main():
                 patient_summary = parts[0].strip()
                 boilerplate = parts[1].strip() if len(parts) > 1 else ""
                 return patient_summary, boilerplate
-
-        # No boilerplate marker found - entire text is the summary
         return text.strip(), ""
 
-    patient_summary_list = []
-    boilerplate_list = []
-    for summary in summary_list:
-        ps, bp = split_boilerplate(summary)
-        patient_summary_list.append(ps)
-        boilerplate_list.append(bp)
-
-    df["patient_summary"] = patient_summary_list
-    df["patient_boilerplate_text"] = boilerplate_list
-
-    # Add summary_generation_date (the date the script was run)
     from datetime import date
     summary_generation_date = date.today().isoformat()
-    df["summary_generation_date"] = summary_generation_date
 
-    # Save full output (all rows)
-    df.to_parquet(args.output_parquet, index=False)
-    print(f"Wrote {args.output_parquet} with {len(df)} rows.")
+    print(f"\nBuilding full output ({total_chunks} chunks)...")
 
-    # Create patient summaries output (last row per patient)
-    # Data is already sorted by patient_id and date from prepare_rounds
-    patient_summaries_df = df.groupby(args.patient_id_col).last().reset_index()
-    # Rename date column to last_note_date for clarity
-    if args.date_col in patient_summaries_df.columns:
-        patient_summaries_df = patient_summaries_df.rename(columns={args.date_col: "last_note_date"})
+    # Build chunk_idx -> (first_date, last_date) lookup for efficient output building
+    chunk_dates: Dict[int, Tuple[str, str]] = {}
+    for rnd in rounds:
+        for item in rnd:
+            chunk_dates[item[1]] = (item[2], item[3])
+
+    output_rows = []
+    for pid, chunk_indices in patient_chunk_order.items():
+        for i, cidx in enumerate(chunk_indices):
+            if cidx in all_results:
+                reasoning, summary, prior_summary = all_results[cidx]
+            else:
+                reasoning, summary, prior_summary = "", "", ""
+
+            ps, bp = split_boilerplate(summary)
+            first_date, last_date = chunk_dates.get(cidx, ("", ""))
+
+            output_rows.append({
+                args.patient_id_col: pid,
+                "chunk_index": i,
+                "first_date": first_date,
+                "last_date": last_date,
+                "prior_summary": prior_summary,
+                "new_summary_reasoning": reasoning,
+                "new_summary": summary,
+                "patient_summary": ps,
+                "patient_boilerplate_text": bp,
+                "summary_generation_date": summary_generation_date,
+            })
+
+    output_df = pd.DataFrame(output_rows)
+    output_df.to_parquet(args.output_parquet, index=False)
+    print(f"Wrote {args.output_parquet} with {len(output_df)} rows.")
+
+    # Create patient summaries output (one row per patient, using last chunk's summary)
+    print("Building patient summaries...")
+    patient_rows = []
+    for pid, chunk_indices in patient_chunk_order.items():
+        last_cidx = chunk_indices[-1]
+        if last_cidx in all_results:
+            _, summary, _ = all_results[last_cidx]
+        else:
+            summary = ""
+
+        ps, bp = split_boilerplate(summary)
+
+        patient_rows.append({
+            args.patient_id_col: pid,
+            "patient_summary": ps,
+            "patient_boilerplate_text": bp,
+            "last_note_date": patient_last_dates.get(pid, ""),
+            "summary_generation_date": summary_generation_date,
+        })
+
+    patient_summaries_df = pd.DataFrame(patient_rows)
     patient_summaries_df.to_parquet(args.patient_summaries_parquet, index=False)
     print(f"Wrote {args.patient_summaries_parquet} with {len(patient_summaries_df)} patients.")
 
