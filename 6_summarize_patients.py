@@ -961,58 +961,57 @@ def main():
                     help="Limit to first N patients (for testing)")
     args = ap.parse_args()
 
-    # Load data
-    print(f"Loading {args.input_parquet}...")
-    df = pd.read_parquet(args.input_parquet)
-
-    # Validate columns
-    if args.patient_id_col not in df.columns:
-        raise ValueError(f"Column '{args.patient_id_col}' (--patient_id_col) not found in input. Available: {df.columns.tolist()}")
-    if args.text_col not in df.columns:
-        raise ValueError(f"Column '{args.text_col}' (--text_col) not found in input. Available: {df.columns.tolist()}")
-
-    # Handle date column - generate synthetic dates if missing and --generate_dates is set
-    if args.date_col not in df.columns:
-        if args.generate_dates:
-            print(f"Date column '{args.date_col}' not found. Generating synthetic dates...")
-            df = generate_synthetic_dates(
-                df,
-                patient_id_col=args.patient_id_col,
-                date_col=args.date_col,
-                start_date_str=args.synthetic_start_date,
-                min_days=args.synthetic_min_days,
-                max_days=args.synthetic_max_days
-            )
-            print(f"Generated synthetic dates in column '{args.date_col}'")
-        else:
-            raise ValueError(
-                f"Column '{args.date_col}' (--date_col) not found in input. "
-                f"Use --generate_dates to create synthetic dates. Available columns: {df.columns.tolist()}"
-            )
-
-    # Filter to max_patients if specified
-    if args.max_patients is not None:
-        unique_patients = df[args.patient_id_col].unique()[:args.max_patients]
-        df = df[df[args.patient_id_col].isin(unique_patients)].copy()
-        print(f"Limited to {args.max_patients} patients ({len(df)} rows)")
-
-    # Keep original index for output mapping
-    df = df.reset_index(drop=True)
-
-    # Load tokenizer for chunking and prompt building (needed before prepare_rounds)
-    print("Loading tokenizer...")
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
-        cache_dir=args.download_dir,
-        trust_remote_code=True
-    )
-
-    # Try loading cached prepared chunks, otherwise prepare from scratch
+    # Try loading cached prepared chunks first to skip expensive data prep
     cached = load_prepared_chunks(args.shard_dir)
     if cached is not None:
         rounds, patient_chunk_order, patient_last_dates = cached
     else:
+        # No cache — load data, generate dates, chunk notes, and save
+        print(f"Loading {args.input_parquet}...")
+        df = pd.read_parquet(args.input_parquet)
+
+        # Validate columns
+        if args.patient_id_col not in df.columns:
+            raise ValueError(f"Column '{args.patient_id_col}' (--patient_id_col) not found in input. Available: {df.columns.tolist()}")
+        if args.text_col not in df.columns:
+            raise ValueError(f"Column '{args.text_col}' (--text_col) not found in input. Available: {df.columns.tolist()}")
+
+        # Handle date column - generate synthetic dates if missing and --generate_dates is set
+        if args.date_col not in df.columns:
+            if args.generate_dates:
+                print(f"Date column '{args.date_col}' not found. Generating synthetic dates...")
+                df = generate_synthetic_dates(
+                    df,
+                    patient_id_col=args.patient_id_col,
+                    date_col=args.date_col,
+                    start_date_str=args.synthetic_start_date,
+                    min_days=args.synthetic_min_days,
+                    max_days=args.synthetic_max_days
+                )
+                print(f"Generated synthetic dates in column '{args.date_col}'")
+            else:
+                raise ValueError(
+                    f"Column '{args.date_col}' (--date_col) not found in input. "
+                    f"Use --generate_dates to create synthetic dates. Available columns: {df.columns.tolist()}"
+                )
+
+        # Filter to max_patients if specified
+        if args.max_patients is not None:
+            unique_patients = df[args.patient_id_col].unique()[:args.max_patients]
+            df = df[df[args.patient_id_col].isin(unique_patients)].copy()
+            print(f"Limited to {args.max_patients} patients ({len(df)} rows)")
+
+        df = df.reset_index(drop=True)
+
+        # Load tokenizer for chunking (needed by prepare_rounds)
+        print("Loading tokenizer...")
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model,
+            cache_dir=args.download_dir,
+            trust_remote_code=True
+        )
+
         print("Preparing work rounds (concatenating and chunking notes per patient)...")
         rounds, patient_chunk_order, patient_last_dates = prepare_rounds(
             df, args.patient_id_col, args.date_col, args.text_col,
