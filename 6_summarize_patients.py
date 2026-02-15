@@ -59,6 +59,7 @@ import sys
 import time
 import warnings
 from datetime import datetime, timedelta
+from multiprocessing import Pool
 from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
@@ -282,6 +283,29 @@ Now, write your updated summary. Do not add preceding text before the abstractio
         tokenize=False
     )
     return prompt
+
+
+# Worker functions for parallel prompt building via multiprocessing.Pool.
+# Each worker process loads its own tokenizer to avoid pickling issues.
+_worker_tokenizer = None
+
+
+def _init_prompt_worker(model_name, download_dir):
+    """Initialize tokenizer in each worker process."""
+    global _worker_tokenizer
+    from transformers import AutoTokenizer
+    _worker_tokenizer = AutoTokenizer.from_pretrained(
+        model_name, cache_dir=download_dir, trust_remote_code=True
+    )
+
+
+def _build_prompt_worker(item):
+    """Build a single prompt in a worker process."""
+    chunk_idx, prior_summary, first_date, last_date, chunk_text, max_model_len = item
+    prompt = build_prompt_text(
+        _worker_tokenizer, prior_summary, first_date, last_date, chunk_text, max_model_len
+    )
+    return (chunk_idx, prompt)
 
 
 def postprocess_output(raw_text: str) -> Tuple[str, str]:
@@ -788,7 +812,7 @@ async def process_all_rounds(
     completed_rounds: int,
     args: argparse.Namespace,
     server_clients: List[Tuple[AsyncOpenAI, int]],
-    tokenizer
+    prompt_pool: Pool,
 ):
     """
     Process all remaining rounds using async inference across multiple servers.
@@ -801,7 +825,7 @@ async def process_all_rounds(
         completed_rounds: Number of rounds already completed
         args: Command line arguments
         server_clients: List of (AsyncOpenAI client, port) tuples, one per server
-        tokenizer: HuggingFace tokenizer for prompt building
+        prompt_pool: Multiprocessing pool for parallel prompt building
     """
     n_servers = len(server_clients)
 
@@ -815,19 +839,20 @@ async def process_all_rounds(
         round_items = rounds[round_idx]
         print(f"\n=== Round {round_idx + 1}/{len(rounds)}: {len(round_items)} patients ===")
 
-        # Build prompts with prior summaries
-        prompts: List[Tuple[int, str]] = []
+        # Build prior summaries (fast, sequential dict lookups)
         round_prior_summaries: Dict[int, str] = {}
-
+        work_items = []
         for pid, chunk_idx, first_date, last_date, chunk_text in round_items:
             prior_summary = patient_summaries.get(pid, None)
             prior_text = prior_summary if prior_summary else "None - this is the first segment for this patient"
             round_prior_summaries[chunk_idx] = prior_text
+            work_items.append((chunk_idx, prior_summary, first_date, last_date, chunk_text, args.max_model_len))
 
-            prompt = build_prompt_text(
-                tokenizer, prior_summary, first_date, last_date, chunk_text, args.max_model_len
-            )
-            prompts.append((chunk_idx, prompt))
+        # Build prompts in parallel across CPU cores
+        print(f"Building {len(work_items)} prompts in parallel...")
+        chunksize = max(1, len(work_items) // (prompt_pool._processes * 4))
+        prompts: List[Tuple[int, str]] = list(prompt_pool.map(_build_prompt_worker, work_items, chunksize=chunksize))
+        print(f"Prompts built.")
 
         # Distribute prompts across servers round-robin
         server_prompt_groups: List[List[Tuple[int, str]]] = [[] for _ in range(n_servers)]
@@ -1039,6 +1064,15 @@ def main():
         # Ensure shard_dir exists for server log files
         os.makedirs(args.shard_dir, exist_ok=True)
 
+        # Create multiprocessing pool for parallel prompt building
+        n_workers = min(os.cpu_count() or 4, 32)
+        print(f"Creating prompt-building pool with {n_workers} workers...")
+        prompt_pool = Pool(
+            processes=n_workers,
+            initializer=_init_prompt_worker,
+            initargs=(args.model, args.download_dir),
+        )
+
         # Start N vLLM servers (subprocess spawns are non-blocking, so models load concurrently)
         server_infos: List[Tuple[subprocess.Popen, int]] = []  # (process, port)
         for server_idx in range(n_servers):
@@ -1092,11 +1126,13 @@ def main():
                 completed_rounds=completed_rounds,
                 args=args,
                 server_clients=server_clients,
-                tokenizer=tokenizer
+                prompt_pool=prompt_pool,
             ))
 
         finally:
-            # Always shutdown all servers
+            # Always shutdown prompt pool and all servers
+            prompt_pool.close()
+            prompt_pool.join()
             print(f"Shutting down {len(server_infos)} vLLM server(s)...")
             for i, (process, port) in enumerate(server_infos):
                 print(f"  Shutting down server {i} (port {port})...")
