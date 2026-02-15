@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument("--download-dir", type=str,
                         default="/data1/ken/meta/2024/meta_ai",
                         help="Download directory for model weights (used if model not found locally)")
-    parser.add_argument("--gpu-mem-util", type=float, default=0.94,
+    parser.add_argument("--gpu-mem-util", type=float, default=0.90,
                         help="GPU memory utilization")
     parser.add_argument("--max-model-len", type=int, default=10000,
                         help="Maximum model context length")
