@@ -184,9 +184,12 @@ python 6_summarize_patients.py \
   --model openai/gpt-oss-120b \
   --download_dir ../models \
   --gpu_ids 0,1,2,3,4,5,6,7 \
-  --gpus_per_kernel 1 \
-  --max_model_len 20000 \
-  --prompt_batch_size 1000 \
+  --gpus_per_server 1 \
+  --max_model_len 60000 \
+  --base_port 8000 \
+  --chunk_size 40000 \
+  --chunk_overlap 500 \
+  --max_concurrent_requests 100 \
   --generate_dates \
   --synthetic_start_date 2017-01-01 \
   --synthetic_min_days 0 \
@@ -195,12 +198,18 @@ python 6_summarize_patients.py \
 echo 6 done
 
 
+
+
 aggregator=$(cat << EOF
 import pandas as pd
 
 spaces = pd.read_csv('../data/no_phi/sample_trial_space_lineitems.csv')
 summaries = pd.read_parquet('../data/no_phi/patient_summaries.parquet')
 
+notes = pd.read_parquet('../data/no_phi/all_synthetic_notes.parquet')[['pseudo_mrn','space_index']].groupby('pseudo_mrn').first().reset_index()
+summaries['pseudo_mrn'] = pd.to_numeric(summaries.pseudo_mrn)
+
+summaries = pd.merge(summaries, notes, on='pseudo_mrn')
 summaries = pd.merge(summaries, spaces, on='space_index')
 
 summaries.to_parquet('../data/no_phi/patient_summaries_with_spaces.parquet')
