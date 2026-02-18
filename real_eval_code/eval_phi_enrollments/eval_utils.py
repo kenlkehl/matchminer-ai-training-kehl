@@ -282,6 +282,127 @@ Classification Report at 0.5 Threshold:
         return None
 
 
+def eval_model_categorical(predicted_probs: np.ndarray, actual_labels: np.ndarray,
+                           class_names: list, pdf_path: Optional[str] = None,
+                           title_prefix: str = "") -> Optional[Dict[str, Any]]:
+    """
+    Evaluate multi-class model predictions and optionally save results to PDF.
+
+    Args:
+        predicted_probs: Array of shape (N, num_classes) with predicted probabilities
+        actual_labels: Array of integer class labels (N,)
+        class_names: List of class name strings
+        pdf_path: Path to save PDF report
+        title_prefix: Prefix for plot titles
+
+    Returns:
+        Dictionary with metrics or None if calculation fails
+    """
+    from sklearn.metrics import accuracy_score
+
+    try:
+        predicted_labels = np.argmax(predicted_probs, axis=1)
+        accuracy = accuracy_score(actual_labels, predicted_labels)
+        macro_f1 = f1_score(actual_labels, predicted_labels, average='macro')
+        weighted_f1 = f1_score(actual_labels, predicted_labels, average='weighted')
+        kappa = cohen_kappa_score(actual_labels, predicted_labels)
+
+        metrics = {
+            'accuracy': accuracy,
+            'macro_f1': macro_f1,
+            'weighted_f1': weighted_f1,
+            'kappa': kappa,
+        }
+
+        print(f"Accuracy: {accuracy:.4f}")
+        print(f"Macro F1: {macro_f1:.4f}")
+        print(f"Weighted F1: {weighted_f1:.4f}")
+        print(f"Cohen's Kappa: {kappa:.4f}")
+
+        if pdf_path is None:
+            return metrics
+
+        with PdfPages(pdf_path) as pdf:
+            # Page 1: Summary metrics
+            fig, ax = plt.subplots(figsize=(8, 6))
+            ax.axis('off')
+            class_counts = np.bincount(actual_labels.astype(int), minlength=len(class_names))
+            counts_str = "\n".join(f"  {name}: {count}" for name, count in zip(class_names, class_counts))
+            summary_text = f"""{title_prefix} Categorical Evaluation Report
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+SUMMARY METRICS
+===============
+Total samples: {len(actual_labels)}
+Number of classes: {len(class_names)}
+
+Accuracy: {accuracy:.4f}
+Macro F1: {macro_f1:.4f}
+Weighted F1: {weighted_f1:.4f}
+Cohen's Kappa: {kappa:.4f}
+
+CLASS DISTRIBUTION (actual):
+{counts_str}
+"""
+            ax.text(0.05, 0.95, summary_text, transform=ax.transAxes,
+                    fontsize=10, verticalalignment='top', fontfamily='monospace')
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+            # Page 2: Confusion matrix (raw)
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            cm = confusion_matrix(actual_labels, predicted_labels,
+                                  labels=list(range(len(class_names))))
+            plot_confusion_matrix(cm, classes=class_names,
+                                  title='Confusion Matrix (counts)', ax=axes[0])
+            plot_confusion_matrix(cm, classes=class_names, normalize=True,
+                                  title='Confusion Matrix (normalized)', ax=axes[1])
+            fig.suptitle(f'{title_prefix} Confusion Matrices')
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+            # Page 3: Classification report
+            fig, ax = plt.subplots(figsize=(10, 8))
+            ax.axis('off')
+            report = classification_report(actual_labels, predicted_labels,
+                                           target_names=class_names,
+                                           labels=list(range(len(class_names))))
+            report_text = f"Classification Report:\n\n{report}"
+            ax.text(0.05, 0.95, report_text, transform=ax.transAxes,
+                    fontsize=10, verticalalignment='top', fontfamily='monospace')
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+            # Page 4: Per-class probability distributions
+            n_classes = len(class_names)
+            cols = min(n_classes, 3)
+            rows = (n_classes + cols - 1) // cols
+            fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows))
+            axes_flat = np.array(axes).flatten() if n_classes > 1 else [axes]
+            for i, (name, ax) in enumerate(zip(class_names, axes_flat)):
+                ax.hist(predicted_probs[:, i], bins=30, edgecolor='black', alpha=0.7)
+                ax.set_title(f'P({name})')
+                ax.set_xlabel('Predicted probability')
+                ax.set_ylabel('Frequency')
+                ax.grid(True, alpha=0.3)
+            for j in range(n_classes, len(axes_flat)):
+                axes_flat[j].set_visible(False)
+            fig.suptitle(f'{title_prefix} Per-Class Probability Distributions')
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        print(f"PDF report saved to: {pdf_path}")
+        return metrics
+
+    except Exception as e:
+        print(f"Error calculating categorical metrics: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def calculate_map_at_k(df: pd.DataFrame,
                        group_col: str,
                        label_col: str,

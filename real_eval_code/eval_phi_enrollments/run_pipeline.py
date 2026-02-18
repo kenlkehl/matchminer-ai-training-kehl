@@ -102,6 +102,9 @@ Examples:
                         help="Max tokens per chunk for patient summarization (default: 40000)")
     parser.add_argument("--chunk-overlap", type=int, default=500,
                         help="Token overlap between chunks for patient summarization (default: 500)")
+    parser.add_argument("--summarize-gpus-per-server", type=int, default=2,
+                        help="GPUs per vLLM server for summarization (default: 2). "
+                             "n_servers = len(gpus) // gpus_per_server.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without executing")
     parser.add_argument("--verbose", action="store_true",
@@ -130,6 +133,9 @@ Examples:
                         help="OncoReasoning model for vLLM inference (HuggingFace ID or path)")
     parser.add_argument("--oncoreasoning-n-samples", type=int, default=50,
                         help="Number of samples per prompt for OncoReasoning inference")
+    parser.add_argument("--categorical-trial-checker-model", type=str, default=None,
+                        help="Path to categorical (5-class) trial checker model. "
+                             "If provided, runs categorical evaluation in addition to binary.")
     parser.add_argument("--eval-output-dir", type=str,
                         default=None,
                         help="Output directory for evaluation PDFs (default: DATA_DIR/evaluation)")
@@ -404,16 +410,16 @@ def main():
         if not args.force and check_outputs_exist(summarize_outputs, "Patient summarization"):
             pass  # Skip
         else:
-            summary_gpus = ",".join(gpu_list[:min(2, num_gpus)])
-
             cmd = [
                 "python", args.summarize_script,
                 "--input_parquet", args.input_notes,
                 "--output_parquet", str(DATA_DIR / "patient_summaries_full.parquet"),
                 "--patient_summaries_parquet", str(DATA_DIR / "patient_summaries.parquet"),
                 "--shard_dir", str(DATA_DIR / "summary_shards"),
+                "--model", GOLD_LLM,
                 "--download_dir", args.download_dir,
-                "--gpu_ids", summary_gpus,
+                "--gpu_ids", ",".join(gpu_list),
+                "--gpus_per_server", str(args.summarize_gpus_per_server),
                 "--patient_id_col", "pseudo_mrn",
                 "--text_col", "text",
                 "--chunk_size", str(args.chunk_size),
@@ -848,6 +854,7 @@ def main():
             """Run ModernBERT eval with multi-GPU sharding."""
             num_gpus = len(gpus)
             shard_dir = Path(task['output_dir']) / f"shards_{task['mode']}"
+            extra_args = task.get('extra_args', [])
 
             # Step 1: Launch parallel inference processes (one per GPU)
             print(f"\n--- Running {task['description']} with {num_gpus} GPU shards ---")
@@ -864,7 +871,7 @@ def main():
                     "--num-shards", str(num_gpus),
                     "--shard-dir", str(shard_dir),
                     "--run-inference",
-                ]
+                ] + extra_args
                 commands.append({
                     'cmd': cmd,
                     'description': f"{task['description']} (shard {shard_id + 1}/{num_gpus})",
@@ -887,7 +894,7 @@ def main():
                 "--shard-dir", str(shard_dir),
                 "--num-shards", str(num_gpus),
                 # No --run-inference, just merge and evaluate
-            ]
+            ] + extra_args
             return run_command(merge_cmd, f"{task['description']} (merge & evaluate)", dry_run)
 
         # ModernBERT tasks with multi-GPU sharding
@@ -921,6 +928,27 @@ def main():
                 'description': "ModernBERT boilerplate checker trial-centric",
             },
         ]
+
+        # Add categorical trial checker tasks if model path provided
+        if args.categorical_trial_checker_model:
+            modernbert_tasks.extend([
+                {
+                    'script': "eval_modernbert_trial_checker.py",
+                    'mode': "patient_centric",
+                    'output_dir': eval_output_dir / "modernbert-trial-checker-categorical",
+                    'model_path': args.categorical_trial_checker_model,
+                    'description': "ModernBERT categorical trial checker patient-centric",
+                    'extra_args': ["--categorical"],
+                },
+                {
+                    'script': "eval_modernbert_trial_checker.py",
+                    'mode': "trial_centric",
+                    'output_dir': eval_output_dir / "modernbert-trial-checker-categorical",
+                    'model_path': args.categorical_trial_checker_model,
+                    'description': "ModernBERT categorical trial checker trial-centric",
+                    'extra_args': ["--categorical"],
+                },
+            ])
 
         # Run ModernBERT tasks with multi-GPU sharding
         for task in modernbert_tasks:
