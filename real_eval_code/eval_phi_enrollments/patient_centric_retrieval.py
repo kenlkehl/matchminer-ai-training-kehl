@@ -128,7 +128,7 @@ def main():
 
     # Prepare patient summaries dataframe
     patient_summaries = patients.groupby(['patient_summary', 'trial_start_dt']).first().reset_index()[
-        ['dfci_mrn', 'patient_summary', 'patient_boilerplate_text', 'trial_start_dt', 'split']
+        ['dfci_mrn', 'patient_summary', 'patient_boilerplate_text', 'trial_start_dt']
     ]
     patient_summaries['trial_start_dt'] = pd.to_datetime(patient_summaries.trial_start_dt)
 
@@ -210,7 +210,6 @@ def main():
 
             output = pd.DataFrame({
                 'dfci_mrn': patient_summaries.iloc[i].dfci_mrn,
-                'split': patient_summaries.iloc[i].split,
                 'patient_summary': patient_summaries.iloc[i].patient_summary,
                 'patient_boilerplate_text': patient_summaries.iloc[i].patient_boilerplate_text,
                 'this_space': relevant_spaces,

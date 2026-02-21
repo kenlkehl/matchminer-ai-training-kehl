@@ -96,7 +96,7 @@ Examples:
                         default=str(DATA_DIR / "note_level_dataset.parquet"),
                         help="Input parquet with patient notes (for summarization)")
     parser.add_argument("--download-dir", type=str,
-                        default="/data1/ken/meta/2024/meta_ai",
+                        default="/data1/ken/models",
                         help="Download directory for model weights")
     parser.add_argument("--chunk-size", type=int, default=40000,
                         help="Max tokens per chunk for patient summarization (default: 40000)")
@@ -429,6 +429,24 @@ def main():
             ret = run_command(cmd, "Patient summarization", args.dry_run)
             if ret != 0:
                 failures.append("summarize")
+
+        # Enrich patient_summaries.parquet with metadata from processed_trial_enrollments.csv
+        # The summarizer is generic and only outputs summary columns; downstream retrieval
+        # scripts need dfci_mrn and trial_start_dt which come from the enrollment data.
+        summaries_path = DATA_DIR / "patient_summaries.parquet"
+        enrollments_path = DATA_DIR / "processed_trial_enrollments.csv"
+        if summaries_path.exists() and enrollments_path.exists():
+            print("Enriching patient summaries with enrollment metadata...")
+            ps_df = pd.read_parquet(summaries_path)
+            enroll_df = pd.read_csv(enrollments_path)
+            # Each pseudo_mrn maps to a unique (dfci_mrn, trial_start_dt)
+            meta_cols = ['pseudo_mrn', 'dfci_mrn', 'trial_start_dt']
+            meta = enroll_df[meta_cols].drop_duplicates(subset=['pseudo_mrn'])
+            ps_df['pseudo_mrn'] = ps_df['pseudo_mrn'].astype(int)
+            meta['pseudo_mrn'] = meta['pseudo_mrn'].astype(int)
+            ps_df = ps_df.merge(meta, on='pseudo_mrn', how='left')
+            ps_df.to_parquet(summaries_path, index=False)
+            print(f"  Added dfci_mrn and trial_start_dt to {summaries_path}")
 
     # Stage 2: Create trial spaces
     if "spacify" in stages_to_run:

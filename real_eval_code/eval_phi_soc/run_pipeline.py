@@ -125,8 +125,8 @@ Examples:
                         help="End date for treatment filtering")
     parser.add_argument("--days-buffer", type=int, default=5,
                         help="Number of days after treatment start to include reports")
-    parser.add_argument("--split-filter", type=str, default=None,
-                        help="Filter to specific split (train, validation, test)")
+    parser.add_argument("--split-filter", type=str, default="test",
+                        help="Filter to specific split (train, validation, test). Default: test.")
     # Trial selection parameters
     parser.add_argument("--n-trials", type=int, default=500,
                         help="Number of unique trials to sample for SOC evaluation (default: 500)")
@@ -446,6 +446,24 @@ def main():
             ret = run_command(cmd, "Patient summarization", args.dry_run)
             if ret != 0:
                 failures.append("summarize")
+
+        # Enrich patient_summaries.parquet with metadata from processed_soc_treatments.csv
+        # The summarizer is generic and only outputs summary columns; downstream retrieval
+        # scripts need dfci_mrn and split which come from the treatment data.
+        summaries_path = DATA_DIR / "patient_summaries.parquet"
+        treatments_path = DATA_DIR / "processed_soc_treatments.csv"
+        if summaries_path.exists() and treatments_path.exists():
+            print("Enriching patient summaries with treatment metadata...")
+            ps_df = pd.read_parquet(summaries_path)
+            treat_df = pd.read_csv(treatments_path)
+            # Each pseudo_mrn maps to a unique (dfci_mrn, trial_start_dt)
+            meta_cols = ['pseudo_mrn', 'dfci_mrn', 'trial_start_dt', 'split']
+            meta = treat_df[meta_cols].drop_duplicates(subset=['pseudo_mrn'])
+            ps_df['pseudo_mrn'] = ps_df['pseudo_mrn'].astype(int)
+            meta['pseudo_mrn'] = meta['pseudo_mrn'].astype(int)
+            ps_df = ps_df.merge(meta, on='pseudo_mrn', how='left')
+            ps_df.to_parquet(summaries_path, index=False)
+            print(f"  Added dfci_mrn, trial_start_dt, and split to {summaries_path}")
 
     # Stage 2: Select trial spaces (sample from v20_public_data excluding training trials)
     if "spacify" in stages_to_run:

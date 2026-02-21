@@ -408,7 +408,7 @@ python 14_check_boilerplate.py \
 
 echo 14 done
 
-accelerate launch --num_processes 8 15_train_modernbert_trial_checker.py
+accelerate launch --num_processes 8 15_train_modernbert_trial_checker.py --categorical
 
 echo 15 done
 

@@ -261,8 +261,8 @@ def main():
     parser.add_argument(
         "--split-filter",
         type=str,
-        default=None,
-        help="Filter to specific split (train, validation, test). If None, use all."
+        default="test",
+        help="Filter to specific split (train, validation, test). Default: test."
     )
     args = parser.parse_args()
 

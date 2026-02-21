@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: data/phi)")
     parser.add_argument("--download-dir", type=str,
-                        default="/data1/ken/meta/2024/meta_ai",
+                        default="/data1/ken/models",
                         help="Download directory for model weights")
     parser.add_argument("--gpu-mem-util", type=float, default=0.90,
                         help="GPU memory utilization")

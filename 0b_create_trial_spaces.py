@@ -273,6 +273,9 @@ def main():
     # We only generate from trial_text, but keep the rest for merging later
     # Keep the original column set so we can write the same outputs
     base_cols = trials.columns.tolist()
+    print(trials.info())
+    print(trials.columns)
+    print(base_cols)
 
     # Determine GPU groups / instances
     gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip() != ""]
@@ -288,7 +291,7 @@ def main():
         )
 
     n_instances = len(gpu_groups)
-    shards = np.array_split(trials, n_instances)
+    shards = [trials.iloc[idx] for idx in np.array_split(range(len(trials)), n_instances)]
 
     # Persist shard inputs and schedule workers
     shard_in_paths = []
