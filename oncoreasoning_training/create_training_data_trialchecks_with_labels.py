@@ -4,6 +4,9 @@ Generate trial checks with labels training data.
 
 Reads multiple parquet files from ../../data and produces
 trialchecks_with_labels.parquet with formatted prompts for training.
+
+Uses categorical verdicts: Yes-Targeted!, Yes-CancerMatch!,
+Yes-BiomarkerMatch!, Yes-General!, No!
 """
 
 import pandas as pd
@@ -45,9 +48,13 @@ def trialcheck(frame, tokenizer):
                 "most recent information available in their summary, at the time of that most recently available information. "
                 "Do not provide ethical judgments or comment on resource constraints with respect whether the trial is a reasonable clinical "
                 "consideration; just evaluate whether it is, given the available information.\n"
-                'Reason step by step, then answer the question "Is this trial a reasonable consideration for this patient?" with a one-word '
-                '"Yes!" or "No!" answer.\n'
-                "Make sure to include the exclamation point in your final one-word answer."
+                "Reason step by step, then classify this trial using exactly one of these verdict labels.\n"
+                "Your response MUST end with one of these labels and nothing else after it:\n\n"
+                "- Yes-Targeted!  The trial IS reasonable, AND it specifies the patient's cancer type, AND it targets a biomarker the patient is known to have.\n"
+                "- Yes-CancerMatch!  The trial IS reasonable AND specifies the patient's cancer type, BUT does not specifically target a known biomarker of the patient (either no biomarker requirement, or the required biomarker status is unknown in the patient).\n"
+                "- Yes-BiomarkerMatch!  The trial IS reasonable AND targets a biomarker the patient is known to have, BUT uses a broader indicated cancer type than the patient's specific cancer (e.g., \"solid tumors\" or \"advanced cancers\").\n"
+                "- Yes-General!  The trial IS reasonable, BUT neither the cancer type nor biomarkers specifically match as described above.\n"
+                "- No!  The trial is NOT a reasonable consideration for this patient."
             )},
             {'role': 'assistant', 'content': answer}
         ]
@@ -62,44 +69,51 @@ def main():
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained('meta-llama/llama-3.2-3B-Instruct')
 
+    KEEP_COLS = ['patient_summary', 'this_space', 'trialcheck_llm_response',
+                 'eligibility_result', 'eligibility_verdict']
+
+    def load_and_select(path, rename_cols=None):
+        """Load a parquet, optionally rename columns, and select KEEP_COLS."""
+        df = pd.read_parquet(path)
+        if rename_cols:
+            df = df.rename(columns=rename_cols)
+        # Only keep columns that exist (older files may lack eligibility_verdict)
+        available = [c for c in KEEP_COLS if c in df.columns]
+        return df[available]
+
     # Load primary trial spaces data
     print("Loading space_specific_eligibility_checks.parquet...")
-    trial_spaces = pd.read_parquet('../../data/no_phi/space_specific_eligibility_checks.parquet')
-    trial_spaces = trial_spaces[['patient_summary', 'this_space', 'trialcheck_llm_response', 'eligibility_result']]
+    trial_spaces = load_and_select('../../data/no_phi/space_specific_eligibility_checks.parquet')
     print(f"  Loaded {len(trial_spaces)} records")
 
     # Load patient cohort rounds (patientcentric checks)
+    rename = {'trialcheck_llama_response': 'trialcheck_llm_response'}
+
     print("Loading patient cohort rounds...")
-    patient_round1 = pd.read_parquet('../../data/no_phi/round1_patientcentric_checks/top_cohorts_checked_round1.parquet').rename(
-        columns={'trialcheck_llama_response': 'trialcheck_llm_response'}
-    )[['patient_summary', 'this_space', 'trialcheck_llm_response', 'eligibility_result']]
+    patient_round1 = load_and_select(
+        '../../data/no_phi/round1_patientcentric_checks/top_cohorts_checked_round1.parquet', rename)
     print(f"  Round 1: {len(patient_round1)} records")
 
-    patient_round2 = pd.read_parquet('../../data/no_phi/round2_patientcentric_checks/top_cohorts_checked_round2.parquet').rename(
-        columns={'trialcheck_llama_response': 'trialcheck_llm_response'}
-    )[['patient_summary', 'this_space', 'trialcheck_llm_response', 'eligibility_result']]
+    patient_round2 = load_and_select(
+        '../../data/no_phi/round2_patientcentric_checks/top_cohorts_checked_round2.parquet', rename)
     print(f"  Round 2: {len(patient_round2)} records")
 
-    patient_round3 = pd.read_parquet('../../data/no_phi/round3_patientcentric_checks/top_cohorts_checked_round3.parquet').rename(
-        columns={'trialcheck_llama_response': 'trialcheck_llm_response'}
-    )[['patient_summary', 'this_space', 'trialcheck_llm_response', 'eligibility_result']]
+    patient_round3 = load_and_select(
+        '../../data/no_phi/round3_patientcentric_checks/top_cohorts_checked_round3.parquet', rename)
     print(f"  Round 3: {len(patient_round3)} records")
 
     # Load trial patient rounds (trialcentric checks)
     print("Loading trial patient rounds...")
-    trial_round1 = pd.read_parquet('../../data/no_phi/round1_trialcentric_checks/top_patients_checked_round1.parquet').rename(
-        columns={'trialcheck_llama_response': 'trialcheck_llm_response'}
-    )[['patient_summary', 'this_space', 'trialcheck_llm_response', 'eligibility_result']]
+    trial_round1 = load_and_select(
+        '../../data/no_phi/round1_trialcentric_checks/top_patients_checked_round1.parquet', rename)
     print(f"  Round 1: {len(trial_round1)} records")
 
-    trial_round2 = pd.read_parquet('../../data/no_phi/round2_trialcentric_checks/top_patients_checked_round2.parquet').rename(
-        columns={'trialcheck_llama_response': 'trialcheck_llm_response'}
-    )[['patient_summary', 'this_space', 'trialcheck_llm_response', 'eligibility_result']]
+    trial_round2 = load_and_select(
+        '../../data/no_phi/round2_trialcentric_checks/top_patients_checked_round2.parquet', rename)
     print(f"  Round 2: {len(trial_round2)} records")
 
-    trial_round3 = pd.read_parquet('../../data/no_phi/round3_trialcentric_checks/top_patients_checked_round3.parquet').rename(
-        columns={'trialcheck_llama_response': 'trialcheck_llm_response'}
-    )[['patient_summary', 'this_space', 'trialcheck_llm_response', 'eligibility_result']]
+    trial_round3 = load_and_select(
+        '../../data/no_phi/round3_trialcentric_checks/top_patients_checked_round3.parquet', rename)
     print(f"  Round 3: {len(trial_round3)} records")
 
     # Concatenate all data
@@ -119,10 +133,10 @@ def main():
     output = trialcheck(firstchecks, tokenizer)
 
     print("Saving to ../../data/no_phi/oncoreasoning_training_data/trialchecks_with_labels.parquet...")
-    pd.DataFrame({
-        'text': output,
-        'label': firstchecks.eligibility_result
-    }).to_parquet('../../data/no_phi/oncoreasoning_training_data/trialchecks_with_labels.parquet')
+    output_df = pd.DataFrame({'text': output, 'label': firstchecks.eligibility_result})
+    if 'eligibility_verdict' in firstchecks.columns:
+        output_df['verdict'] = firstchecks.eligibility_verdict.values
+    output_df.to_parquet('../../data/no_phi/oncoreasoning_training_data/trialchecks_with_labels.parquet')
     print(f"Done! Saved {len(output)} records")
 
 
