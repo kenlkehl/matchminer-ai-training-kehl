@@ -350,6 +350,29 @@ def run_parallel_commands(commands: List[Dict], max_workers: int, dry_run: bool 
     return results
 
 
+def enrich_patient_summaries(data_dir: Path):
+    """Enrich patient_summaries.parquet with dfci_mrn, trial_start_dt, and split from treatment data.
+
+    This is idempotent — it skips if the columns already exist.
+    """
+    summaries_path = data_dir / "patient_summaries.parquet"
+    treatments_path = data_dir / "processed_soc_treatments.csv"
+    if not summaries_path.exists() or not treatments_path.exists():
+        return
+    ps_df = pd.read_parquet(summaries_path)
+    if 'dfci_mrn' in ps_df.columns and 'split' in ps_df.columns:
+        return  # already enriched
+    print("Enriching patient summaries with treatment metadata...")
+    treat_df = pd.read_csv(treatments_path)
+    meta_cols = ['pseudo_mrn', 'dfci_mrn', 'trial_start_dt', 'split']
+    meta = treat_df[meta_cols].drop_duplicates(subset=['pseudo_mrn'])
+    ps_df['pseudo_mrn'] = ps_df['pseudo_mrn'].astype(int)
+    meta['pseudo_mrn'] = meta['pseudo_mrn'].astype(int)
+    ps_df = ps_df.merge(meta, on='pseudo_mrn', how='left')
+    ps_df.to_parquet(summaries_path, index=False)
+    print(f"  Added dfci_mrn, trial_start_dt, and split to {summaries_path}")
+
+
 def get_stages_to_run(args) -> List[str]:
     """Determine which stages to run based on arguments."""
     if args.stages:
@@ -450,20 +473,7 @@ def main():
         # Enrich patient_summaries.parquet with metadata from processed_soc_treatments.csv
         # The summarizer is generic and only outputs summary columns; downstream retrieval
         # scripts need dfci_mrn and split which come from the treatment data.
-        summaries_path = DATA_DIR / "patient_summaries.parquet"
-        treatments_path = DATA_DIR / "processed_soc_treatments.csv"
-        if summaries_path.exists() and treatments_path.exists():
-            print("Enriching patient summaries with treatment metadata...")
-            ps_df = pd.read_parquet(summaries_path)
-            treat_df = pd.read_csv(treatments_path)
-            # Each pseudo_mrn maps to a unique (dfci_mrn, trial_start_dt)
-            meta_cols = ['pseudo_mrn', 'dfci_mrn', 'trial_start_dt', 'split']
-            meta = treat_df[meta_cols].drop_duplicates(subset=['pseudo_mrn'])
-            ps_df['pseudo_mrn'] = ps_df['pseudo_mrn'].astype(int)
-            meta['pseudo_mrn'] = meta['pseudo_mrn'].astype(int)
-            ps_df = ps_df.merge(meta, on='pseudo_mrn', how='left')
-            ps_df.to_parquet(summaries_path, index=False)
-            print(f"  Added dfci_mrn, trial_start_dt, and split to {summaries_path}")
+        enrich_patient_summaries(DATA_DIR)
 
     # Stage 2: Select trial spaces (sample from v20_public_data excluding training trials)
     if "spacify" in stages_to_run:
@@ -498,6 +508,9 @@ def main():
         print("\n" + "="*70)
         print("STAGE 3: PATIENT-TRIAL RETRIEVAL")
         print("="*70)
+
+        # Ensure patient summaries have metadata columns needed by retrieval scripts
+        enrich_patient_summaries(DATA_DIR)
 
         retrieval_outputs = [
             DATA_DIR / "patient_centric_candidates.csv",

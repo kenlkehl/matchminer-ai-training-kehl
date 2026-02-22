@@ -573,6 +573,40 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
+    combined_path = os.path.join(args.output_dir, 'all_training_data.parquet')
+    tokenized_path = os.path.join(args.output_dir, 'tokenized_training_data.dataset')
+
+    # If the final parquet exists but the tokenized dataset doesn't, skip to tokenization
+    if os.path.exists(combined_path) and not os.path.exists(tokenized_path):
+        print(f"\nFound existing {combined_path} but no tokenized dataset.")
+        print("Skipping data loading/building — jumping straight to tokenization.")
+        combined_df = pd.read_parquet(combined_path)
+        print(f"Loaded {len(combined_df)} rows from existing parquet")
+
+        print(f"\nTokenizing with max_length={args.max_seq_length}, num_proc={args.num_proc}...")
+        hf_ds = Dataset.from_pandas(combined_df)
+
+        def tokenize_function(examples):
+            return tokenizer(
+                examples["text"],
+                max_length=args.max_seq_length,
+                truncation=True,
+                padding="max_length",
+            )
+
+        tokenized_dataset = hf_ds.map(
+            tokenize_function,
+            batched=True,
+            num_proc=args.num_proc,
+            writer_batch_size=args.writer_batch_size,
+        )
+
+        print(f"Saving tokenized dataset to {tokenized_path}...")
+        tokenized_dataset.save_to_disk(tokenized_path)
+        print(f"Total examples: {len(tokenized_dataset)}")
+        print("Done!")
+        return
+
     # ---- Step 1 & 2: Load data and build prompts with truncation ----
     task_prompts = {}
     for task_name in args.tasks:
@@ -659,7 +693,6 @@ def main():
     print(f"Shuffling with seed={args.seed}...")
     combined_df = combined_df.sample(frac=1.0, random_state=args.seed).reset_index(drop=True)
 
-    combined_path = os.path.join(args.output_dir, 'all_training_data.parquet')
     print(f"Saving combined parquet to {combined_path}...")
     combined_df.to_parquet(combined_path)
     print(f"Saved {len(combined_df)} rows")
@@ -683,7 +716,6 @@ def main():
         writer_batch_size=args.writer_batch_size,
     )
 
-    tokenized_path = os.path.join(args.output_dir, 'tokenized_training_data.dataset')
     print(f"Saving tokenized dataset to {tokenized_path}...")
     tokenized_dataset.save_to_disk(tokenized_path)
 
