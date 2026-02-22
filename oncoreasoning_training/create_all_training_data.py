@@ -14,11 +14,12 @@ Usage:
 """
 
 import argparse
+import json
 import math
 import os
 
 import pandas as pd
-from datasets import Dataset
+from datasets.arrow_writer import ArrowWriter
 from transformers import AutoTokenizer
 
 
@@ -385,6 +386,59 @@ def build_prompt_with_truncation(
 
 
 # ---------------------------------------------------------------------------
+# Streaming tokenization — writes directly to Arrow on disk
+# ---------------------------------------------------------------------------
+
+def streaming_tokenize(texts, tokenizer, max_seq_length, output_path, batch_size=256):
+    """
+    Tokenize a list of texts in small batches, streaming results directly to
+    an Arrow file on disk.  Only one batch of tokens is in memory at a time.
+    """
+    os.makedirs(output_path, exist_ok=True)
+    arrow_path = os.path.join(output_path, "data-00000-of-00001.arrow")
+
+    writer = ArrowWriter(path=arrow_path)
+    total = len(texts)
+
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+
+        tokenized = tokenizer(
+            texts[start:end],
+            max_length=max_seq_length,
+            truncation=True,
+        )
+
+        writer.write_batch({
+            "input_ids": tokenized["input_ids"],
+            "attention_mask": tokenized["attention_mask"],
+        })
+
+        if start % (batch_size * 10) == 0:
+            print(f"  Tokenized {end}/{total} examples...")
+
+    num_examples, num_bytes = writer.finalize()
+    print(f"  Wrote {num_examples} examples ({num_bytes / 1e6:.1f} MB)")
+
+    # Write minimal metadata so Dataset.load_from_disk() works
+    with open(os.path.join(output_path, "state.json"), "w") as f:
+        json.dump({
+            "_data_files": [{"filename": "data-00000-of-00001.arrow"}],
+            "_fingerprint": "streaming_tokenized",
+            "_format_columns": None,
+            "_format_kwargs": {},
+            "_format_type": None,
+            "_output_all_columns": False,
+            "_split": None,
+        }, f, indent=2)
+
+    with open(os.path.join(output_path, "dataset_info.json"), "w") as f:
+        json.dump({}, f)
+
+    return num_examples
+
+
+# ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
 
@@ -538,12 +592,6 @@ def parse_args():
         help='Target example count per task for balancing. "max" = match largest task, or an integer (default: max)',
     )
     parser.add_argument(
-        "--num-proc",
-        type=int,
-        default=4,
-        help="Tokenization parallelism (default: 4)",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -583,28 +631,16 @@ def main():
         combined_df = pd.read_parquet(combined_path)
         print(f"Loaded {len(combined_df)} rows from existing parquet")
 
-        print(f"\nTokenizing with max_length={args.max_seq_length}, num_proc={args.num_proc}...")
-        hf_ds = Dataset.from_pandas(combined_df)
+        print(f"\nTokenizing with max_length={args.max_seq_length} (streaming to disk)...")
+        texts = combined_df["text"].tolist()
+        del combined_df
 
-        def tokenize_function(examples):
-            return tokenizer(
-                examples["text"],
-                max_length=args.max_seq_length,
-                truncation=True,
-            )
-
-        tokenized_dataset = hf_ds.map(
-            tokenize_function,
-            batched=True,
-            batch_size=256,
-            num_proc=args.num_proc,
-            writer_batch_size=args.writer_batch_size,
-            remove_columns=["text"],
+        num_examples = streaming_tokenize(
+            texts, tokenizer, args.max_seq_length, tokenized_path,
+            batch_size=args.writer_batch_size,
         )
-
-        print(f"Saving tokenized dataset to {tokenized_path}...")
-        tokenized_dataset.save_to_disk(tokenized_path)
-        print(f"Total examples: {len(tokenized_dataset)}")
+        del texts
+        print(f"Total examples: {num_examples}")
         print("Done!")
         return
 
@@ -698,39 +734,23 @@ def main():
     combined_df.to_parquet(combined_path)
     print(f"Saved {len(combined_df)} rows")
 
-    # Tokenize
-    print(f"\nTokenizing with max_length={args.max_seq_length}, num_proc={args.num_proc}...")
-    hf_ds = Dataset.from_pandas(combined_df)
+    # Tokenize — stream directly to disk
+    print(f"\nTokenizing with max_length={args.max_seq_length} (streaming to disk)...")
+    texts = combined_df["text"].tolist()
+    del combined_df, all_prompts, balanced_prompts, task_prompts
 
-    def tokenize_function(examples):
-        return tokenizer(
-            examples["text"],
-            max_length=args.max_seq_length,
-            truncation=True,
-        )
-
-    tokenized_dataset = hf_ds.map(
-        tokenize_function,
-        batched=True,
-        batch_size=256,
-        num_proc=args.num_proc,
-        writer_batch_size=args.writer_batch_size,
-        remove_columns=["text"],
+    num_examples = streaming_tokenize(
+        texts, tokenizer, args.max_seq_length, tokenized_path,
+        batch_size=args.writer_batch_size,
     )
-
-    print(f"Saving tokenized dataset to {tokenized_path}...")
-    tokenized_dataset.save_to_disk(tokenized_path)
+    del texts
 
     # Summary
     print(f"\n{'='*60}")
     print("Summary")
     print(f"{'='*60}")
     print(f"Max sequence length: {args.max_seq_length}")
-    print(f"Total examples: {len(tokenized_dataset)}")
-    for name in args.tasks:
-        raw = len(task_prompts.get(name, []))
-        final = len(balanced_prompts.get(name, []))
-        print(f"  {name}: {raw} raw -> {final} balanced")
+    print(f"Total examples: {num_examples}")
     print(f"Output parquet: {combined_path}")
     print(f"Tokenized dataset: {tokenized_path}")
     print("Done!")
