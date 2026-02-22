@@ -9,7 +9,7 @@ import os
 import torch
 from datasets import Dataset, load_dataset
 #from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, DataCollatorForSeq2Seq
 from trl import SFTConfig, SFTTrainer
 from peft import LoraConfig, TaskType
 
@@ -89,12 +89,15 @@ sft_config = SFTConfig(
     report_to='none'
 )
 
+data_collator = DataCollatorForSeq2Seq(tokenizer, padding=True, pad_to_multiple_of=8)
+
 trainer = SFTTrainer(
     model=model,
     processing_class=tokenizer,
     args=sft_config,
     #peft_config = lora_config,
     train_dataset=dataset,
+    data_collator=data_collator,
 )
 
 len(dataset)

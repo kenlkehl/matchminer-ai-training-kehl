@@ -540,8 +540,8 @@ def parse_args():
     parser.add_argument(
         "--num-proc",
         type=int,
-        default=32,
-        help="Tokenization parallelism (default: 32)",
+        default=4,
+        help="Tokenization parallelism (default: 4)",
     )
     parser.add_argument(
         "--seed",
@@ -591,14 +591,15 @@ def main():
                 examples["text"],
                 max_length=args.max_seq_length,
                 truncation=True,
-                padding="max_length",
             )
 
         tokenized_dataset = hf_ds.map(
             tokenize_function,
             batched=True,
+            batch_size=256,
             num_proc=args.num_proc,
             writer_batch_size=args.writer_batch_size,
+            remove_columns=["text"],
         )
 
         print(f"Saving tokenized dataset to {tokenized_path}...")
@@ -706,14 +707,15 @@ def main():
             examples["text"],
             max_length=args.max_seq_length,
             truncation=True,
-            padding="max_length",
         )
 
     tokenized_dataset = hf_ds.map(
         tokenize_function,
         batched=True,
+        batch_size=256,
         num_proc=args.num_proc,
         writer_batch_size=args.writer_batch_size,
+        remove_columns=["text"],
     )
 
     print(f"Saving tokenized dataset to {tokenized_path}...")
