@@ -37,8 +37,11 @@ lora_config = LoraConfig(
 repo_id = "meta-llama/Llama-3.2-3B-Instruct"
 
 
+torch.backends.cuda.enable_flash_sdp(True)
+print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")
+
 model = AutoModelForCausalLM.from_pretrained(
-   repo_id, attn_implementation="flash_attention_2", torch_dtype=torch.bfloat16
+   repo_id, attn_implementation="sdpa", torch_dtype=torch.bfloat16
 )
 tokenizer = AutoTokenizer.from_pretrained(repo_id)
 
@@ -78,7 +81,7 @@ sft_config = SFTConfig(
     # 8-bit Adam optimizer - doesn't help much if you're using LoRA!
     optim='adamw_torch_fused',       
     dataset_kwargs = {'skip_prepare_dataset':True},
-    model_init_kwargs={"torch_dtype": torch.bfloat16, "attn_implementation": "flash_attention_2"},
+    model_init_kwargs={"torch_dtype": torch.bfloat16, "attn_implementation": "sdpa"},
     lr_scheduler_kwargs={'num_cycles':3},
     ## GROUP 4: Logging parameters
     logging_steps=20,
