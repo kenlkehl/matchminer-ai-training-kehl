@@ -49,14 +49,14 @@ sft_config = SFTConfig(
     ## GROUP 1: Memory usage
     # These arguments will squeeze the most out of your GPU's RAM
     # Checkpointing
-    gradient_checkpointing=False,    # this saves a LOT of memory when set true but is slower
+    gradient_checkpointing=True,    # this saves a LOT of memory when set true but is slower
     # Set this to avoid exceptions in newer versions of PyTorch
     gradient_checkpointing_kwargs={'use_reentrant': False}, 
     # Gradient Accumulation / Batch size
     # Actual batch (for updating) is same (1x) as micro-batch size
     gradient_accumulation_steps=1,  
     # The initial (micro) batch size to start off with
-    per_device_train_batch_size=1, 
+    per_device_train_batch_size=2, 
     bf16=True,
     # If batch size would cause OOM, halves its size until it works
     auto_find_batch_size=False,
