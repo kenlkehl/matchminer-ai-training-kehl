@@ -36,7 +36,6 @@ lora_config = LoraConfig(
 
 repo_id = "meta-llama/Llama-3.2-3B-Instruct"
 
-
 torch.backends.cuda.enable_flash_sdp(True)
 print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")
 
@@ -44,12 +43,13 @@ model = AutoModelForCausalLM.from_pretrained(
    repo_id, attn_implementation="sdpa", torch_dtype=torch.bfloat16
 )
 tokenizer = AutoTokenizer.from_pretrained(repo_id)
+tokenizer.pad_token = tokenizer.eos_token
 
 sft_config = SFTConfig(
     ## GROUP 1: Memory usage
     # These arguments will squeeze the most out of your GPU's RAM
     # Checkpointing
-    gradient_checkpointing=True,    # this saves a LOT of memory
+    gradient_checkpointing=False,    # this saves a LOT of memory when set true but is slower
     # Set this to avoid exceptions in newer versions of PyTorch
     gradient_checkpointing_kwargs={'use_reentrant': False}, 
     # Gradient Accumulation / Batch size
@@ -85,7 +85,7 @@ sft_config = SFTConfig(
     lr_scheduler_kwargs={'num_cycles':3},
     ## GROUP 4: Logging parameters
     logging_steps=20,
-    #activation_offloading=True,
+    activation_offloading=True,
     use_liger_kernel=True,
     logging_dir='./logs',
     output_dir='../../models/onco_reasoning_3b',
@@ -98,7 +98,7 @@ trainer = SFTTrainer(
     model=model,
     processing_class=tokenizer,
     args=sft_config,
-    #peft_config = lora_config,
+    peft_config = lora_config,
     train_dataset=dataset,
     data_collator=data_collator,
 )
