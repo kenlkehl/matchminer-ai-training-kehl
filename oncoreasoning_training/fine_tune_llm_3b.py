@@ -53,7 +53,7 @@ sft_config = SFTConfig(
     # Actual batch (for updating) is same (1x) as micro-batch size
     gradient_accumulation_steps=1,  
     # The initial (micro) batch size to start off with
-    per_device_train_batch_size=4, 
+    per_device_train_batch_size=1, 
     bf16=True,
     # If batch size would cause OOM, halves its size until it works
     auto_find_batch_size=False,
@@ -106,7 +106,12 @@ len(dataset)
 
 
 
-trainer.train()
+if any(
+    d.startswith("checkpoint-") for d in os.listdir(sft_config.output_dir)
+) if os.path.isdir(sft_config.output_dir) else False:
+    trainer.train(resume_from_checkpoint=True)
+else:
+    trainer.train()
 
 
 
