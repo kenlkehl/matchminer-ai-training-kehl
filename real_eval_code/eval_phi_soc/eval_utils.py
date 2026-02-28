@@ -314,10 +314,54 @@ def eval_model_categorical(predicted_probs: np.ndarray, actual_labels: np.ndarra
             'kappa': kappa,
         }
 
+        # Multiclass AUROC metrics (One-vs-Rest)
+        try:
+            macro_auroc = roc_auc_score(actual_labels, predicted_probs,
+                                        multi_class='ovr', average='macro')
+            weighted_auroc = roc_auc_score(actual_labels, predicted_probs,
+                                           multi_class='ovr', average='weighted')
+            metrics['macro_auroc'] = macro_auroc
+            metrics['weighted_auroc'] = weighted_auroc
+        except ValueError as e:
+            macro_auroc = None
+            weighted_auroc = None
+            print(f"Warning: Could not compute multiclass AUROC: {e}")
+
+        # Per-class AUROC (one-vs-rest)
+        per_class_auroc = {}
+        for i, name in enumerate(class_names):
+            try:
+                binary_labels = (actual_labels == i).astype(int)
+                if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
+                    class_auroc = roc_auc_score(binary_labels, predicted_probs[:, i])
+                    per_class_auroc[name] = class_auroc
+                    metrics[f'auroc_{name}'] = class_auroc
+            except ValueError:
+                pass
+
+        # Binary AUROC: first class vs rest (e.g., NO! vs any YES)
+        binary_auroc = None
+        try:
+            binary_gold = (actual_labels > 0).astype(int)
+            binary_score = 1 - predicted_probs[:, 0]
+            if binary_gold.sum() > 0 and binary_gold.sum() < len(binary_gold):
+                binary_auroc = roc_auc_score(binary_gold, binary_score)
+                metrics['binary_auroc'] = binary_auroc
+        except ValueError as e:
+            print(f"Warning: Could not compute binary AUROC: {e}")
+
         print(f"Accuracy: {accuracy:.4f}")
         print(f"Macro F1: {macro_f1:.4f}")
         print(f"Weighted F1: {weighted_f1:.4f}")
         print(f"Cohen's Kappa: {kappa:.4f}")
+        if macro_auroc is not None:
+            print(f"Macro AUROC (OvR): {macro_auroc:.4f}")
+        if weighted_auroc is not None:
+            print(f"Weighted AUROC (OvR): {weighted_auroc:.4f}")
+        if binary_auroc is not None:
+            print(f"Binary AUROC ({class_names[0]} vs rest): {binary_auroc:.4f}")
+        for name, auc_val in per_class_auroc.items():
+            print(f"  AUROC {name}: {auc_val:.4f}")
 
         if pdf_path is None:
             return metrics
@@ -328,6 +372,18 @@ def eval_model_categorical(predicted_probs: np.ndarray, actual_labels: np.ndarra
             ax.axis('off')
             class_counts = np.bincount(actual_labels.astype(int), minlength=len(class_names))
             counts_str = "\n".join(f"  {name}: {count}" for name, count in zip(class_names, class_counts))
+            auroc_str = ""
+            if macro_auroc is not None:
+                auroc_str += f"\nMacro AUROC (OvR): {macro_auroc:.4f}"
+            if weighted_auroc is not None:
+                auroc_str += f"\nWeighted AUROC (OvR): {weighted_auroc:.4f}"
+            if binary_auroc is not None:
+                auroc_str += f"\nBinary AUROC ({class_names[0]} vs rest): {binary_auroc:.4f}"
+            if per_class_auroc:
+                auroc_str += "\n\nPer-class AUROC (OvR):"
+                for name, auc_val in per_class_auroc.items():
+                    auroc_str += f"\n  {name}: {auc_val:.4f}"
+
             summary_text = f"""{title_prefix} Categorical Evaluation Report
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
@@ -340,6 +396,7 @@ Accuracy: {accuracy:.4f}
 Macro F1: {macro_f1:.4f}
 Weighted F1: {weighted_f1:.4f}
 Cohen's Kappa: {kappa:.4f}
+{auroc_str}
 
 CLASS DISTRIBUTION (actual):
 {counts_str}
@@ -392,6 +449,34 @@ CLASS DISTRIBUTION (actual):
             plt.tight_layout()
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
+
+            # Page 5: Per-class ROC curves (OvR)
+            if per_class_auroc:
+                fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows))
+                axes_flat = np.array(axes).flatten() if n_classes > 1 else [axes]
+                for i, (name, ax) in enumerate(zip(class_names, axes_flat)):
+                    binary_labels = (actual_labels == i).astype(int)
+                    if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
+                        fpr, tpr, _ = roc_curve(binary_labels, predicted_probs[:, i])
+                        auc_val = per_class_auroc.get(name)
+                        label = f'AUC = {auc_val:.4f}' if auc_val else 'AUC = N/A'
+                        ax.plot(fpr, tpr, 'b', label=label)
+                        ax.plot([0, 1], [0, 1], 'r--', alpha=0.5)
+                        ax.legend(loc='lower right', fontsize=8)
+                    else:
+                        ax.text(0.5, 0.5, 'N/A\n(single class)', ha='center', va='center')
+                    ax.set_title(f'{name}')
+                    ax.set_xlabel('FPR')
+                    ax.set_ylabel('TPR')
+                    ax.set_xlim([0, 1])
+                    ax.set_ylim([0, 1])
+                    ax.grid(True, alpha=0.3)
+                for j in range(n_classes, len(axes_flat)):
+                    axes_flat[j].set_visible(False)
+                fig.suptitle(f'{title_prefix} Per-Class ROC Curves (OvR)')
+                plt.tight_layout()
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
 
         print(f"PDF report saved to: {pdf_path}")
         return metrics

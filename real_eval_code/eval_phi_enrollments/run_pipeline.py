@@ -139,6 +139,10 @@ Examples:
     parser.add_argument("--eval-output-dir", type=str,
                         default=None,
                         help="Output directory for evaluation PDFs (default: DATA_DIR/evaluation)")
+    parser.add_argument("--metrics-only", action="store_true",
+                        help="Skip inference, recompute metrics and PDFs from existing prediction CSVs. "
+                             "Always computes both binary and categorical metrics. "
+                             "Implies --stages evaluation.")
     parser.add_argument("--force", action="store_true",
                         help="Force re-run of stages even if outputs already exist")
     return parser.parse_args()
@@ -366,7 +370,10 @@ def main():
     print(f"  Available GPUs: {gpu_list} ({num_gpus} total)")
     print(f"  Dry run: {args.dry_run}")
 
-    stages_to_run = get_stages_to_run(args)
+    if args.metrics_only:
+        stages_to_run = ["evaluation"]
+    else:
+        stages_to_run = get_stages_to_run(args)
     print(f"  Stages to run: {stages_to_run}")
 
     # Track failures
@@ -968,10 +975,42 @@ def main():
                 },
             ])
 
-        # Run ModernBERT tasks with multi-GPU sharding
+        # In metrics-only mode, always add categorical tasks (predictions already exist on disk)
+        if args.metrics_only and not args.categorical_trial_checker_model:
+            modernbert_tasks.extend([
+                {
+                    'script': "eval_modernbert_trial_checker.py",
+                    'mode': "patient_centric",
+                    'output_dir': eval_output_dir / "modernbert-trial-checker-categorical",
+                    'model_path': "unused",
+                    'description': "ModernBERT categorical trial checker patient-centric",
+                    'extra_args': ["--categorical"],
+                },
+                {
+                    'script': "eval_modernbert_trial_checker.py",
+                    'mode': "trial_centric",
+                    'output_dir': eval_output_dir / "modernbert-trial-checker-categorical",
+                    'model_path': "unused",
+                    'description': "ModernBERT categorical trial checker trial-centric",
+                    'extra_args': ["--categorical"],
+                },
+            ])
+
+        # Run ModernBERT tasks
         for task in modernbert_tasks:
             task['output_dir'].mkdir(parents=True, exist_ok=True)
-            ret = run_sharded_modernbert_eval(task, gpu_list, args.dry_run)
+            if args.metrics_only:
+                # Metrics-only: run eval script without inference (loads prediction CSVs)
+                extra_args = task.get('extra_args', [])
+                cmd = [
+                    "python", task['script'],
+                    "--mode", task['mode'],
+                    "--data-dir", str(DATA_DIR),
+                    "--output-dir", str(task['output_dir']),
+                ] + extra_args
+                ret = run_command(cmd, f"{task['description']} (metrics only)", args.dry_run)
+            else:
+                ret = run_sharded_modernbert_eval(task, gpu_list, args.dry_run)
             if ret != 0:
                 print(f"Warning: {task['description']} failed, continuing...")
 

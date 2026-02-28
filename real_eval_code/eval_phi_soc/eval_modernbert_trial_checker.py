@@ -392,22 +392,36 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
         if 'prediction_score' in validation_set.columns and 'eligibility_result' in validation_set.columns:
             print("\n--- Classification Metrics ---")
             gold_binary = (validation_set.eligibility_result > 0).astype(float)
-            auc = roc_auc_score(gold_binary, validation_set.prediction_score)
+
+            # Detect and correct inverted prediction scores
+            raw_auc = roc_auc_score(gold_binary, validation_set.prediction_score)
+            if raw_auc < 0.5:
+                print(f"Warning: Raw AUROC = {raw_auc:.4f} < 0.5 — prediction scores "
+                      f"appear inverted relative to labels. Flipping scores.")
+                pred_scores = 1 - validation_set.prediction_score.values
+                auc = 1 - raw_auc
+            else:
+                pred_scores = validation_set.prediction_score.values
+                auc = raw_auc
             print(f"AUC: {auc:.4f}")
 
             pdf_path = output_dir / "trial_checker_patient_centric_classification_soc.pdf"
             eval_model(
-                validation_set.prediction_score.values,
+                pred_scores,
                 gold_binary.values,
                 pdf_path=str(pdf_path),
                 title_prefix="SOC Trial Checker Patient-Centric"
             )
 
             if 'prediction_label' in validation_set.columns:
+                pred_labels = validation_set.prediction_label.values
+                if raw_auc < 0.5:
+                    label_flip = {'POSITIVE': 'NEGATIVE', 'NEGATIVE': 'POSITIVE'}
+                    pred_labels = np.array([label_flip.get(l, l) for l in pred_labels])
                 actual_labels = np.where(
                     validation_set.eligibility_result == 0.0, 'NEGATIVE', 'POSITIVE'
                 )
-                kappa = cohen_kappa_score(actual_labels, validation_set.prediction_label)
+                kappa = cohen_kappa_score(actual_labels, pred_labels)
                 print(f"Cohen's Kappa: {kappa:.4f}")
 
         if 'prediction_label' in validation_set.columns:
@@ -535,12 +549,22 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
         if 'prediction_score' in validation_set.columns and 'eligibility_result' in validation_set.columns:
             print("\n--- Classification Metrics ---")
             gold_binary = (validation_set.eligibility_result > 0).astype(float)
-            auc = roc_auc_score(gold_binary, validation_set.prediction_score)
+
+            # Detect and correct inverted prediction scores
+            raw_auc = roc_auc_score(gold_binary, validation_set.prediction_score)
+            if raw_auc < 0.5:
+                print(f"Warning: Raw AUROC = {raw_auc:.4f} < 0.5 — prediction scores "
+                      f"appear inverted relative to labels. Flipping scores.")
+                pred_scores = 1 - validation_set.prediction_score.values
+                auc = 1 - raw_auc
+            else:
+                pred_scores = validation_set.prediction_score.values
+                auc = raw_auc
             print(f"AUC: {auc:.4f}")
 
             pdf_path = output_dir / "trial_checker_trial_centric_classification_soc.pdf"
             eval_model(
-                validation_set.prediction_score.values,
+                pred_scores,
                 gold_binary.values,
                 pdf_path=str(pdf_path),
                 title_prefix="SOC Trial Checker Trial-Centric"
