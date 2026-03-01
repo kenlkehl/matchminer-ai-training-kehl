@@ -11,18 +11,11 @@ sudo apt install build-essential python3-dev nvidia-cuda-toolkit
 Installing uv (https://docs.astral.sh/uv/getting-started/installation/)
 
 
-Making and activating a venv:
-```
-uv venv mmai --python=3.12
-source mmai/bin/activate
-```
-
-
 Pulling this code and installing dependencies:
 ```
 git clone https://github.com/kenlkehl/matchminer-ai-training
 cd matchminer-ai-training
-uv pip install -r requirements.txt
+uv sync --group training
 ```
 
 
