@@ -31,7 +31,7 @@ from uuid import uuid4
 
 
 PROMPT_HEADER = (
-    "You are an expert clinical oncologist with an encyclopedic knowledge of cancer and its treatments.\n"
+    "You are an expert clinical oncologist with a broad and deep knowledge of cancer and its treatments.\n"
     "Your job is to review a clinical trial document and extract a list of structured clinical spaces that are eligible for that trial.\n"
     "A clinical space is defined as a unique combination of patient age range, sex (if any sex criteria), cancer primary site, histology, which treatments a patient must have received, "
     "which treatments a patient must not have received, cancer burden (eg presence of metastatic disease; this also includes cancer type-specific prognostic scores, risk indices, or categories), tumor biomarkers (such as "
@@ -77,7 +77,7 @@ PROMPT_SUFFIX = (
     "looks at the text for one space will not have access to text for other spaces, and so output like \"Same criteria as #1...\" renders a space useless!"
 )
 
-REASONING_MARKER = "assistantfinal"   # adjust if your model uses a different marker
+REASONING_MARKER = "</think>"   # default; override with --reasoning-marker
 BOILERPLATE_MARKER = "Boilerplate"
 
 
@@ -98,12 +98,12 @@ def build_messages(trial_text: str):
     ]
 
 
-def postprocess_outputs(raw_texts):
+def postprocess_outputs(raw_texts, reasoning_marker=REASONING_MARKER):
     """
     Split out (1) full raw text (reasoning+final), (2) final only,
     (3) space_text (before boilerplate line), and (4) boilerplate text.
-    
-    The boilerplate split is performed on the ENTIRE line containing 
+
+    The boilerplate split is performed on the ENTIRE line containing
     the marker, removing that line from both resultant parts.
     """
     no_reasoning = []
@@ -112,7 +112,7 @@ def postprocess_outputs(raw_texts):
 
     for t in raw_texts:
         # 1. Handle Reasoning Split (Same as original)
-        final_t = t.split(REASONING_MARKER, 1)[-1] if REASONING_MARKER in t else t
+        final_t = t.split(reasoning_marker, 1)[-1] if reasoning_marker in t else t
 
         # 2. Handle Boilerplate Split (Line-based)
         if BOILERPLATE_MARKER in final_t:
@@ -156,10 +156,14 @@ def worker_process(
     max_model_len: int,
     gpu_mem_util: float,
     temperature: float,
+    top_p: float,
     top_k: int,
-    max_tokens: int,
+    min_p: float,
+    presence_penalty: float,
     repetition_penalty: float,
+    max_tokens: int,
     batch_size: int,
+    reasoning_marker: str = REASONING_MARKER,
 ):
     """
     Worker: loads its own vLLM on the specified GPU group (via CUDA_VISIBLE_DEVICES),
@@ -183,6 +187,7 @@ def worker_process(
         download_dir=download_dir,
         gpu_memory_utilization=gpu_mem_util,
         max_model_len=max_model_len,
+        language_model_only=True
     )
     tokenizer = llm.get_tokenizer()
 
@@ -201,11 +206,12 @@ def worker_process(
     raw_texts = []
     sampling = SamplingParams(
         temperature=temperature,
+        top_p=top_p,
         top_k=top_k,
-        max_tokens=max_tokens,
+        min_p=min_p,
+        presence_penalty=presence_penalty,
         repetition_penalty=repetition_penalty,
-        # If needed, you can add stop_token_ids here:
-        # stop_token_ids=[tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|eot_id|>")],
+        max_tokens=max_tokens,
     )
 
     for i in range(0, len(prompts), batch_size):
@@ -215,7 +221,7 @@ def worker_process(
             raw_texts.append(r.outputs[0].text)
 
     # Post-process
-    no_reasoning, space_only, boiler_only = postprocess_outputs(raw_texts)
+    no_reasoning, space_only, boiler_only = postprocess_outputs(raw_texts, reasoning_marker)
 
     # Attach outputs
     out_df = shard_df.copy()
@@ -246,15 +252,19 @@ def main():
     parser.add_argument("--work-dir", default="../data/no_phi/trial_space_shards", help="Directory for shard inputs/outputs")
     parser.add_argument("--gpus", required=True, help="Comma-separated GPU IDs, e.g. 0,1,2,3")
     parser.add_argument("--gpus-per-instance", type=int, default=1, help="Tensor-parallel GPUs per instance (set >1 for very large models)")
-    parser.add_argument("--model", default="openai/gpt-oss-120b")
-    parser.add_argument("--download-dir", default="../models")
-    parser.add_argument("--max-model-len", type=int, default=10000)
+    parser.add_argument("--model", default="Qwen/Qwen3.5-35B-A3B")
+    parser.add_argument("--download-dir", default="/data1/ken/models")
+    parser.add_argument("--max-model-len", type=int, default=220000)
     parser.add_argument("--gpu-mem-util", type=float, default=0.94)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top-k", type=int, default=1)
-    parser.add_argument("--max-tokens", type=int, default=7500)
-    parser.add_argument("--repetition-penalty", type=float, default=1.3)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--min-p", type=float, default=0.0)
+    parser.add_argument("--presence-penalty", type=float, default=1.5)
+    parser.add_argument("--repetition-penalty", type=float, default=1.0)
+    parser.add_argument("--max-tokens", type=int, default=200000)
     parser.add_argument("--batch-size", type=int, default=1000, help="Prompts per generate() call per instance")
+    parser.add_argument("--reasoning-marker", default="</think>", help="Marker that separates reasoning from final output (default: </think>)")
     parser.add_argument("--seed", type=int, default=42, help="Seed for split assignment")
     args = parser.parse_args()
 
@@ -320,10 +330,14 @@ def main():
                 max_model_len=args.max_model_len,
                 gpu_mem_util=args.gpu_mem_util,
                 temperature=args.temperature,
+                top_p=args.top_p,
                 top_k=args.top_k,
-                max_tokens=args.max_tokens,
+                min_p=args.min_p,
+                presence_penalty=args.presence_penalty,
                 repetition_penalty=args.repetition_penalty,
+                max_tokens=args.max_tokens,
                 batch_size=args.batch_size,
+                reasoning_marker=args.reasoning_marker,
             ),
             name=f"vllm_worker_{i}",
             daemon=False,

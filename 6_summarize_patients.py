@@ -20,11 +20,11 @@ python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
-  --model openai/gpt-oss-120b \
+  --model Qwen/Qwen3.5-35B-A3B \
   --download_dir /data1/ken/models \
-  --gpu_ids 2,3 \
-  --gpus_per_server 2 \
-  --max_model_len 10000 \
+  --gpu_ids 0,1,2,3 \
+  --gpus_per_server 1 \
+  --max_model_len 200000 \
   --generate_dates \
   --synthetic_start_date 2017-01-01 \
   --synthetic_min_days 7 \
@@ -36,7 +36,7 @@ python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
-  --model openai/gpt-oss-120b \
+  --model Qwen/Qwen-3.5-30B-A3B \
   --download_dir ../meta_ai \
   --gpu_ids 0,1,2,3 \
   --gpus_per_server 2 \
@@ -300,21 +300,20 @@ def _init_prompt_worker(model_name, download_dir):
 
 
 def _build_prompt_worker(item):
-    """Build a single prompt in a worker process."""
+    """Build a single prompt in a worker process. Returns (chunk_idx, prompt, prompt_token_count)."""
     chunk_idx, prior_summary, first_date, last_date, chunk_text, max_model_len = item
     prompt = build_prompt_text(
         _worker_tokenizer, prior_summary, first_date, last_date, chunk_text, max_model_len
     )
-    return (chunk_idx, prompt)
+    prompt_token_count = len(_worker_tokenizer(prompt, add_special_tokens=False).input_ids)
+    return (chunk_idx, prompt, prompt_token_count)
 
 
-def postprocess_output(raw_text: str) -> Tuple[str, str]:
+def postprocess_output(raw_text: str, reasoning_marker: str = "</think>") -> Tuple[str, str]:
     """
-    Split output into reasoning (before 'assistantfinal') and summary (after).
+    Split output into reasoning (before reasoning_marker) and summary (after).
     Returns (reasoning, summary).
     """
-    reasoning_marker = "assistantfinal"
-
     if reasoning_marker in raw_text:
         parts = raw_text.split(reasoning_marker, 1)
         reasoning = parts[0].strip()
@@ -669,7 +668,10 @@ async def single_inference_request(
     temperature: float,
     max_tokens: int,
     top_k: int,
+    top_p: float,
+    presence_penalty: float,
     repetition_penalty: float,
+    reasoning_marker: str = "</think>",
     max_retries: int = 3,
     base_timeout: float = 600.0,
 ) -> Tuple[int, str, str]:
@@ -685,6 +687,8 @@ async def single_inference_request(
                     prompt=prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    top_p=top_p,
+                    presence_penalty=presence_penalty,
                     extra_body={
                         "top_k": top_k,
                         "repetition_penalty": repetition_penalty,
@@ -693,7 +697,7 @@ async def single_inference_request(
                 timeout=base_timeout
             )
             raw_text = response.choices[0].text
-            reasoning, summary = postprocess_output(raw_text)
+            reasoning, summary = postprocess_output(raw_text, reasoning_marker)
             return (row_idx, reasoning, summary)
 
         except asyncio.TimeoutError:
@@ -719,12 +723,14 @@ async def single_inference_request(
 
 async def run_inference_batch(
     client: AsyncOpenAI,
-    prompts: List[Tuple[int, str]],  # (row_idx, prompt_text)
+    prompts: List[Tuple[int, str, int]],  # (row_idx, prompt_text, max_tokens)
     model: str,
     temperature: float,
-    max_tokens: int,
     top_k: int,
+    top_p: float,
+    presence_penalty: float,
     repetition_penalty: float,
+    reasoning_marker: str = "</think>",
     max_concurrent: int = 16,
     batch_size: int = 64,
     max_retries: int = 3,
@@ -754,14 +760,14 @@ async def run_inference_batch(
             if consecutive_health_failures >= 3:
                 print(f"  ERROR: vLLM server appears to be dead. Marking remaining {total - completed} prompts as errors.")
                 # Mark remaining prompts as errors
-                for idx, prompt in prompts[batch_start:]:
+                for idx, prompt, _mt in prompts[batch_start:]:
                     all_results.append((idx, "", "ERROR: vLLM server died"))
                 return all_results
             # Wait and retry
             await asyncio.sleep(10)
             if not check_server_health(port):
                 print(f"  ERROR: vLLM server still not responding after wait.")
-                for idx, prompt in prompts[batch_start:]:
+                for idx, prompt, _mt in prompts[batch_start:]:
                     all_results.append((idx, "", "ERROR: vLLM server died"))
                 return all_results
         else:
@@ -772,7 +778,7 @@ async def run_inference_batch(
         # Use semaphore to limit concurrent requests within batch
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def bounded_request(row_idx: int, prompt: str) -> Tuple[int, str, str]:
+        async def bounded_request(row_idx: int, prompt: str, prompt_max_tokens: int) -> Tuple[int, str, str]:
             async with semaphore:
                 return await single_inference_request(
                     client=client,
@@ -780,15 +786,18 @@ async def run_inference_batch(
                     prompt=prompt,
                     model=model,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=prompt_max_tokens,
                     top_k=top_k,
+                    top_p=top_p,
+                    presence_penalty=presence_penalty,
                     repetition_penalty=repetition_penalty,
+                    reasoning_marker=reasoning_marker,
                     max_retries=max_retries,
                     base_timeout=base_timeout,
                 )
 
         # Create tasks for this batch only
-        tasks = [bounded_request(idx, prompt) for idx, prompt in batch_prompts]
+        tasks = [bounded_request(idx, prompt, mt) for idx, prompt, mt in batch_prompts]
         batch_results = await asyncio.gather(*tasks)
         all_results.extend(batch_results)
 
@@ -851,11 +860,20 @@ async def process_all_rounds(
         # Build prompts in parallel across CPU cores
         print(f"Building {len(work_items)} prompts in parallel...")
         chunksize = max(1, len(work_items) // (prompt_pool._processes * 4))
-        prompts: List[Tuple[int, str]] = list(prompt_pool.map(_build_prompt_worker, work_items, chunksize=chunksize))
+        prompt_results: List[Tuple[int, str, int]] = list(prompt_pool.map(_build_prompt_worker, work_items, chunksize=chunksize))
+
+        # Compute per-prompt max_tokens: max_model_len - prompt_token_count
+        prompts: List[Tuple[int, str, int]] = []
+        for chunk_idx, prompt, prompt_token_count in prompt_results:
+            gen_tokens = args.max_model_len - prompt_token_count
+            if args.max_tokens is not None:
+                gen_tokens = min(gen_tokens, args.max_tokens)
+            gen_tokens = max(gen_tokens, 1)  # safety floor
+            prompts.append((chunk_idx, prompt, gen_tokens))
         print(f"Prompts built.")
 
         # Distribute prompts across servers round-robin
-        server_prompt_groups: List[List[Tuple[int, str]]] = [[] for _ in range(n_servers)]
+        server_prompt_groups: List[List[Tuple[int, str, int]]] = [[] for _ in range(n_servers)]
         for i, prompt_item in enumerate(prompts):
             server_prompt_groups[i % n_servers].append(prompt_item)
 
@@ -874,9 +892,11 @@ async def process_all_rounds(
                         prompts=group,
                         model=args.model,
                         temperature=args.temperature,
-                        max_tokens=args.max_tokens,
                         top_k=args.top_k,
+                        top_p=args.top_p,
+                        presence_penalty=args.presence_penalty,
                         repetition_penalty=args.repetition_penalty,
+                        reasoning_marker=args.reasoning_marker,
                         max_concurrent=args.max_concurrent_requests,
                         batch_size=args.batch_size,
                         max_retries=args.max_retries,
@@ -932,18 +952,23 @@ def main():
                     help="Maximum tokens per chunk when concatenating patient notes (default: 40000)")
     ap.add_argument("--chunk_overlap", type=int, default=500,
                     help="Token overlap between consecutive chunks (default: 500)")
-    ap.add_argument("--model", default="openai/gpt-oss-120b")
+    ap.add_argument("--model", default="Qwen/Qwen-3.5-30B-A3B")
     ap.add_argument("--download_dir", required=True)
     ap.add_argument("--gpu_ids", required=True,
                     help="Comma-separated list of GPU IDs (e.g., 0,1,2,3). Used with --gpus_per_server to determine number of servers.")
     ap.add_argument("--gpus_per_server", type=int, required=True,
                     help="Number of GPUs per vLLM server. n_servers = len(gpu_ids) // gpus_per_server. "
                          "tensor_parallel_size is set to this value.")
-    ap.add_argument("--max_model_len", type=int, default=120000)
-    ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--top_k", type=int, default=1)
-    ap.add_argument("--max_tokens", type=int, default=7500)
-    ap.add_argument("--repetition_penalty", type=float, default=1.2)
+    ap.add_argument("--max_model_len", type=int, default=220000)
+    ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--top_k", type=int, default=20)
+    ap.add_argument("--top_p", type=float, default=0.95)
+    ap.add_argument("--presence_penalty", type=float, default=1.5)
+    ap.add_argument("--max_tokens", type=int, default=160000,
+                    help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
+    ap.add_argument("--repetition_penalty", type=float, default=1.0)
+    ap.add_argument("--reasoning_marker", type=str, default="</think>",
+                    help="Marker string that separates reasoning from final summary in model output (default: </think>)")
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.93)
     ap.add_argument("--base_port", type=int, default=8000,
                     help="Base port for vLLM servers. Server i uses base_port + i (default: 8000)")

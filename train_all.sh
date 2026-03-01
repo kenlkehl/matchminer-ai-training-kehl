@@ -10,91 +10,20 @@ wget -P ../data https://huggingface.co/datasets/ksg-dfci/mmai-synthetic/resolve/
 
 
 # try to pre-compile relevant vllm configurations
+
 aggregator=$(cat << EOF
 from vllm import LLM
 llm = LLM(
-        model='openai/gpt-oss-120b',
+        model='Qwen/Qwen3.5-35B-A3B',
         tensor_parallel_size=1,
-        download_dir="../models",
-        gpu_memory_utilization=0.94,
-        max_model_len=10000
-    )
-
-EOF
-)
-python -c "$aggregator"
-
-aggregator=$(cat << EOF
-from vllm import LLM
-llm = LLM(
-        model='openai/gpt-oss-120b',
-        tensor_parallel_size=1,
-        download_dir="../models",
+        download_dir="/data1/ken/models",
         gpu_memory_utilization=0.95,
-        max_model_len=15000
+        max_model_len=220000
     )
 
 EOF
 )
-python -c "$aggregator"
 
-
-aggregator=$(cat << EOF
-from vllm import LLM
-llm = LLM(
-        model='openai/gpt-oss-120b',
-        tensor_parallel_size=2,
-        download_dir="../models",
-        gpu_memory_utilization=0.95,
-        max_model_len=30000
-    )
-
-EOF
-)
-python -c "$aggregator"
-
-
-aggregator=$(cat << EOF
-from vllm import LLM
-llm = LLM(
-        model='openai/gpt-oss-120b',
-        tensor_parallel_size=2,
-        download_dir="../models",
-        gpu_memory_utilization=0.93,
-        max_model_len=120000
-    )
-
-EOF
-)
-python -c "$aggregator"
-
-aggregator=$(cat << EOF
-from vllm import LLM
-llm = LLM(
-        model='openai/gpt-oss-120b',
-        tensor_parallel_size=1,
-        download_dir="../models",
-        gpu_memory_utilization=0.95,
-        max_model_len=20000
-    )
-
-EOF
-)
-python -c "$aggregator"
-
-aggregator=$(cat << EOF
-from vllm import LLM
-llm = LLM(
-        model='openai/gpt-oss-120b',
-        tensor_parallel_size=1,
-        download_dir="../models",
-        gpu_memory_utilization=0.95,
-        max_model_len=10000
-    )
-
-EOF
-)
-python -c "$aggregator"
 
 
 
@@ -103,7 +32,9 @@ python 0a_parse_ctgov_json.py
 python 0b_create_trial_spaces.py \
    --input ../data/no_phi/ctgov_trials.csv \
    --gpus 0,1,2,3,4,5,6,7 \
-   --gpus-per-instance 1
+   --gpus-per-instance 1 \
+   --model Qwen/Qwen3.5-35B-A3B \
+   --download-dir /data1/ken/models
 
 echo 0 done
 
@@ -121,9 +52,9 @@ echo 1b done
 python 2_make_synthetic_notes_sharded.py \
   --input_csv ../data/no_phi/trial_spaces_with_positive_prompts.csv \
   --out_dir ../data/no_phi/synthetic_notes \
-  --model openai/gpt-oss-120b \
+  --model Qwen/Qwen3.5-35B-A3B \
   --gpu_ids 0,1,2,3,4,5,6,7 \
-  --download_dir ../models \
+  --download_dir /data1/ken/models \
   --max_model_len 10000 --max_new_tokens 5000 \
   --batch_size 1000 --tp 1 --temperature 0.75 --top_p 0.5 \
   --perturb_prob 0.3
@@ -135,9 +66,9 @@ echo 2a done
 python 2_make_synthetic_notes_sharded.py \
   --input_csv ../data/no_phi/trial_spaces_with_negative_prompts.csv \
   --out_dir ../data/no_phi/synthetic_negative_notes \
-  --model openai/gpt-oss-120b \
+  --model Qwen/Qwen3.5-35B-A3B \
   --gpu_ids 0,1,2,3,4,5,6,7 \
-  --download_dir ../models \
+  --download_dir /data1/ken/models \
   --max_model_len 10000 --max_new_tokens 5000 \
   --batch_size 1000 --tp 1 --temperature 0.75 --top_p 0.5 \
   --perturb_prob 0.3
@@ -181,11 +112,11 @@ python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
-  --model openai/gpt-oss-120b \
-  --download_dir ../models \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --download_dir /data1/ken/models \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --gpus_per_server 1 \
-  --max_model_len 60000 \
+  --max_model_len 220000 \
   --base_port 8000 \
   --chunk_size 40000 \
   --chunk_overlap 500 \
@@ -230,8 +161,8 @@ python llm_check_trials.py \
  --gpus 0,1,2,3,4,5,6,7 \
  --gpus_per_kernel 1 \
  --prompt_batch_size 2000 \
- --model openai/gpt-oss-120b \
- --download_dir ../models \
+ --model Qwen/Qwen3.5-35B-A3B \
+ --download_dir /data1/ken/models \
  --max_model_len 20000 \
  --gpu_memory_utilization 0.95
 
@@ -240,13 +171,13 @@ echo 7 done
 mv ../data/no_phi/initial_trialcheck_outputs/space_specific_eligibility_checks.parquet ../data/no_phi/space_specific_eligibility_checks.parquet
 
 accelerate launch finetune_embedder.py -i ../data/no_phi/space_specific_eligibility_checks.parquet \
--c ../models/initial_embedder_training -m Qwen/Qwen3-Embedding-0.6B -o ../models/pt_trial_summary_perspace_finetuned.model
+-c /data1/ken/models/initial_embedder_training -m Qwen/Qwen3-Embedding-0.6B -o /data1/ken/models/pt_trial_summary_perspace_finetuned.model
 
 echo 8 done
 
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ../models/pt_trial_summary_perspace_finetuned.model \
+  --model /data1/ken/models/pt_trial_summary_perspace_finetuned.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
@@ -267,8 +198,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model openai/gpt-oss-120b \
-  --download_dir ../models \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
 
@@ -281,8 +212,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model openai/gpt-oss-120b \
-  --download_dir ../models \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
 
@@ -291,15 +222,15 @@ echo 9c done
 accelerate launch finetune_embedder.py \
    -i ../data/no_phi/round1_trialcentric_checks/top_patients_checked_round1.parquet \
    -i ../data/no_phi/round1_patientcentric_checks/top_cohorts_checked_round1.parquet \
-   -c ../models/reranker1_training \
-   -m ../models/pt_trial_summary_perspace_finetuned.model \
-   -o ../models/reranker_round1.model
+   -c /data1/ken/models/reranker1_training \
+   -m /data1/ken/models/pt_trial_summary_perspace_finetuned.model \
+   -o /data1/ken/models/reranker_round1.model
 
 echo 10 done
 
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ../models/reranker_round1.model \
+  --model /data1/ken/models/reranker_round1.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
@@ -320,8 +251,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model openai/gpt-oss-120b \
-  --download_dir ../models \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
 
@@ -334,8 +265,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model openai/gpt-oss-120b \
-  --download_dir ../models \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --download_dir /data1/ken/models \
   --max_model_len 20000 \
   --gpu_memory_utilization 0.95
 
@@ -344,16 +275,16 @@ echo 11c done
 accelerate launch finetune_embedder.py \
    -i ../data/no_phi/round2_trialcentric_checks/top_patients_checked_round2.parquet \
    -i ../data/no_phi/round2_patientcentric_checks/top_cohorts_checked_round2.parquet \
-   -c ../models/reranker2_training \
-   -m ../models/reranker_round1.model \
-   -o ../models/reranker_round2.model
+   -c /data1/ken/models/reranker2_training \
+   -m /data1/ken/models/reranker_round1.model \
+   -o /data1/ken/models/reranker_round2.model
 
 echo 12 done
 
 
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ../models/reranker_round2.model \
+  --model /data1/ken/models/reranker_round2.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
@@ -374,8 +305,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model openai/gpt-oss-120b \
-  --download_dir ../models \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
 
@@ -388,16 +319,16 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model openai/gpt-oss-120b \
-  --download_dir ../models \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
 
 echo 13c done
 
 python 14_check_boilerplate.py \
-  --model openai/gpt-oss-120b \
-  --download_dir ../models \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --download_dir /data1/ken/models \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 1000 \
