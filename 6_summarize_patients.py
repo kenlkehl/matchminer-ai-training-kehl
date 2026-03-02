@@ -699,9 +699,10 @@ async def single_inference_request(
     temperature: float,
     max_tokens: int,
     top_k: int,
-    #top_p: float,
-    #presence_penalty: float,
-    repetition_penalty: float,
+    top_p: float = 1.0,
+    presence_penalty: float = 0.0,
+    min_p: float = 0.0,
+    repetition_penalty: float = 1.0,
     reasoning_marker: str = "assistantfinal",
     max_retries: int = 3,
     base_timeout: float = 600.0,
@@ -712,18 +713,21 @@ async def single_inference_request(
     """
     for attempt in range(max_retries):
         try:
+            extra = {
+                "top_k": top_k,
+                "repetition_penalty": repetition_penalty,
+            }
+            if min_p > 0.0:
+                extra["min_p"] = min_p
             response = await asyncio.wait_for(
                 client.completions.create(
                     model=model,
                     prompt=prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    #top_p=top_p,
-                    #presence_penalty=presence_penalty,
-                    extra_body={
-                        "top_k": top_k,
-                        "repetition_penalty": repetition_penalty,
-                    }
+                    top_p=top_p,
+                    presence_penalty=presence_penalty,
+                    extra_body=extra,
                 ),
                 timeout=base_timeout
             )
@@ -758,9 +762,10 @@ async def run_inference_batch(
     model: str,
     temperature: float,
     top_k: int,
-    #top_p: float,
-    #presence_penalty: float,
-    repetition_penalty: float,
+    top_p: float = 1.0,
+    presence_penalty: float = 0.0,
+    min_p: float = 0.0,
+    repetition_penalty: float = 1.0,
     reasoning_marker: str = "assistantfinal",
     max_concurrent: int = 16,
     batch_size: int = 64,
@@ -819,8 +824,9 @@ async def run_inference_batch(
                     temperature=temperature,
                     max_tokens=prompt_max_tokens,
                     top_k=top_k,
-                    #top_p=top_p,
-                    #presence_penalty=presence_penalty,
+                    top_p=top_p,
+                    presence_penalty=presence_penalty,
+                    min_p=min_p,
                     repetition_penalty=repetition_penalty,
                     reasoning_marker=reasoning_marker,
                     max_retries=max_retries,
@@ -924,8 +930,9 @@ async def process_all_rounds(
                         model=args.model,
                         temperature=args.temperature,
                         top_k=args.top_k,
-                        #top_p=args.top_p,
-                        #presence_penalty=args.presence_penalty,
+                        top_p=args.top_p,
+                        presence_penalty=args.presence_penalty,
+                        min_p=args.min_p,
                         repetition_penalty=args.repetition_penalty,
                         reasoning_marker=args.reasoning_marker,
                         max_concurrent=args.max_concurrent_requests,
@@ -993,8 +1000,9 @@ def main():
     ap.add_argument("--max_model_len", type=int, default=30000)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_k", type=int, default=1)
-    #ap.add_argument("--top_p", type=float, default=0.95)
-    #ap.add_argument("--presence_penalty", type=float, default=1.0)
+    ap.add_argument("--top_p", type=float, default=1.0)
+    ap.add_argument("--presence_penalty", type=float, default=0.0)
+    ap.add_argument("--min_p", type=float, default=0.0)
     ap.add_argument("--max_tokens", type=int, default=10000,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
     ap.add_argument("--repetition_penalty", type=float, default=1.3)
@@ -1003,6 +1011,10 @@ def main():
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     ap.add_argument("--base_port", type=int, default=8000,
                     help="Base port for vLLM servers. Server i uses base_port + i (default: 8000)")
+    ap.add_argument("--server_urls", type=str, default=None,
+                    help="Comma-separated URLs of existing vLLM servers "
+                         "(e.g. 'http://localhost:8000/v1,http://localhost:8001/v1'). "
+                         "When set, no servers are started or stopped.")
     ap.add_argument("--max_concurrent_requests", type=int, default=16,
                     help="Maximum concurrent requests to vLLM server (default: 16)")
     ap.add_argument("--batch_size", type=int, default=1000,
@@ -1098,24 +1110,6 @@ def main():
     if completed_rounds >= len(rounds):
         print("All rounds already completed. Building final output...")
     else:
-        # Normalize gpu_ids to remove any semicolons and use comma format
-        gpu_ids_normalized = args.gpu_ids.replace(";", ",")
-        gpu_list = [g.strip() for g in gpu_ids_normalized.split(",") if g.strip()]
-
-        # Validate GPU count vs gpus_per_server
-        if len(gpu_list) % args.gpus_per_server != 0:
-            remainder = len(gpu_list) % args.gpus_per_server
-            usable = len(gpu_list) - remainder
-            print(f"WARNING: {len(gpu_list)} GPUs not evenly divisible by gpus_per_server={args.gpus_per_server}. "
-                  f"Using first {usable} GPUs, ignoring GPUs: {gpu_list[usable:]}")
-            gpu_list = gpu_list[:usable]
-
-        n_servers = len(gpu_list) // args.gpus_per_server
-        if n_servers == 0:
-            raise ValueError(f"Not enough GPUs ({len(gpu_list)}) for gpus_per_server={args.gpus_per_server}")
-
-        print(f"Starting {n_servers} vLLM server(s), each with {args.gpus_per_server} GPU(s)")
-
         # Ensure shard_dir exists for server log files
         os.makedirs(args.shard_dir, exist_ok=True)
 
@@ -1128,29 +1122,67 @@ def main():
             initargs=(args.model, args.download_dir),
         )
 
-        # Start N vLLM servers (subprocess spawns are non-blocking, so models load concurrently)
+        # --- Server setup: external URLs or launch our own ---
         server_infos: List[Tuple[subprocess.Popen, int]] = []  # (process, port)
-        for server_idx in range(n_servers):
-            gpu_start = server_idx * args.gpus_per_server
-            gpu_end = gpu_start + args.gpus_per_server
-            server_gpu_ids = ",".join(gpu_list[gpu_start:gpu_end])
-            server_port = args.base_port + server_idx
 
-            log_file = os.path.join(args.shard_dir, f"vllm_server_{server_idx}.log")
+        if args.server_urls:
+            # Connect to externally-managed servers — no startup/shutdown
+            urls = [u.strip() for u in args.server_urls.split(",") if u.strip()]
+            print(f"Using {len(urls)} external server(s): {urls}")
+            server_clients: List[Tuple[AsyncOpenAI, int]] = []
+            for url in urls:
+                # Extract port from URL for logging (e.g. http://localhost:8000/v1 → 8000)
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                port = parsed.port or 0
+                client = AsyncOpenAI(
+                    base_url=url,
+                    api_key="not-needed",
+                    timeout=args.request_timeout + 60,
+                )
+                server_clients.append((client, port))
+            n_servers = len(urls)
+            print(f"All {n_servers} external server(s) connected.")
+        else:
+            # Normalize gpu_ids to remove any semicolons and use comma format
+            gpu_ids_normalized = args.gpu_ids.replace(";", ",")
+            gpu_list = [g.strip() for g in gpu_ids_normalized.split(",") if g.strip()]
 
-            process = start_vllm_server(
-                model=args.model,
-                download_dir=args.download_dir,
-                gpu_ids=server_gpu_ids,
-                tensor_parallel_size=args.gpus_per_server,
-                max_model_len=args.max_model_len,
-                gpu_memory_utilization=args.gpu_memory_utilization,
-                port=server_port,
-                log_file=log_file,
-            )
-            server_infos.append((process, server_port))
+            # Validate GPU count vs gpus_per_server
+            if len(gpu_list) % args.gpus_per_server != 0:
+                remainder = len(gpu_list) % args.gpus_per_server
+                usable = len(gpu_list) - remainder
+                print(f"WARNING: {len(gpu_list)} GPUs not evenly divisible by gpus_per_server={args.gpus_per_server}. "
+                      f"Using first {usable} GPUs, ignoring GPUs: {gpu_list[usable:]}")
+                gpu_list = gpu_list[:usable]
 
-        try:
+            n_servers = len(gpu_list) // args.gpus_per_server
+            if n_servers == 0:
+                raise ValueError(f"Not enough GPUs ({len(gpu_list)}) for gpus_per_server={args.gpus_per_server}")
+
+            print(f"Starting {n_servers} vLLM server(s), each with {args.gpus_per_server} GPU(s)")
+
+            # Start N vLLM servers (subprocess spawns are non-blocking, so models load concurrently)
+            for server_idx in range(n_servers):
+                gpu_start = server_idx * args.gpus_per_server
+                gpu_end = gpu_start + args.gpus_per_server
+                server_gpu_ids = ",".join(gpu_list[gpu_start:gpu_end])
+                server_port = args.base_port + server_idx
+
+                log_file = os.path.join(args.shard_dir, f"vllm_server_{server_idx}.log")
+
+                process = start_vllm_server(
+                    model=args.model,
+                    download_dir=args.download_dir,
+                    gpu_ids=server_gpu_ids,
+                    tensor_parallel_size=args.gpus_per_server,
+                    max_model_len=args.max_model_len,
+                    gpu_memory_utilization=args.gpu_memory_utilization,
+                    port=server_port,
+                    log_file=log_file,
+                )
+                server_infos.append((process, server_port))
+
             # Wait for all servers to be ready
             for i, (process, port) in enumerate(server_infos):
                 print(f"Waiting for server {i} (port {port})...")
@@ -1172,6 +1204,7 @@ def main():
 
             print(f"All {n_servers} vLLM server(s) ready.")
 
+        try:
             # Process all rounds
             asyncio.run(process_all_rounds(
                 rounds=rounds,
@@ -1185,14 +1218,18 @@ def main():
             ))
 
         finally:
-            # Always shutdown prompt pool and all servers
+            # Always shutdown prompt pool
             prompt_pool.close()
             prompt_pool.join()
-            print(f"Shutting down {len(server_infos)} vLLM server(s)...")
-            for i, (process, port) in enumerate(server_infos):
-                print(f"  Shutting down server {i} (port {port})...")
-                shutdown_server(process)
-            print("All servers shut down.")
+            # Only shutdown servers we started ourselves
+            if server_infos:
+                print(f"Shutting down {len(server_infos)} vLLM server(s)...")
+                for i, (process, port) in enumerate(server_infos):
+                    print(f"  Shutting down server {i} (port {port})...")
+                    shutdown_server(process)
+                print("All servers shut down.")
+            else:
+                print("External servers left running (not managed by this script).")
 
     # Build final output (one row per chunk per patient)
     def split_boilerplate(text: str) -> Tuple[str, str]:
