@@ -20,11 +20,12 @@ python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --gpu_ids 0,1,2,3 \
   --gpus_per_server 1 \
-  --max_model_len 200000 \
+  --max_model_len 30000 \
+  --chunk_size 10000 \
   --generate_dates \
   --synthetic_start_date 2017-01-01 \
   --synthetic_min_days 7 \
@@ -36,13 +37,13 @@ python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
-  --model Qwen/Qwen-3.5-30B-A3B \
-  --download_dir ../meta_ai \
+  --model openai/gpt-oss-120b \
+  --download_dir /data1/ken/models \
   --gpu_ids 0,1,2,3 \
   --gpus_per_server 2 \
   --base_port 8000 \
-  --max_model_len 120000 \
-  --chunk_size 40000 \
+  --max_model_len 30000 \
+  --chunk_size 10000 \
   --chunk_overlap 500 \
   --max_concurrent_requests 100
 """
@@ -130,7 +131,7 @@ def generate_synthetic_dates(
 def concatenate_and_chunk_notes(
     notes: List[Tuple[str, str]],
     tokenizer,
-    chunk_size: int = 40000,
+    chunk_size: int = 10000,
     chunk_overlap: int = 500,
 ) -> List[Tuple[str, str, str]]:
     """
@@ -309,7 +310,7 @@ def _build_prompt_worker(item):
     return (chunk_idx, prompt, prompt_token_count)
 
 
-def postprocess_output(raw_text: str, reasoning_marker: str = "</think>") -> Tuple[str, str]:
+def postprocess_output(raw_text: str, reasoning_marker: str = "assistantfinal") -> Tuple[str, str]:
     """
     Split output into reasoning (before reasoning_marker) and summary (after).
     Returns (reasoning, summary).
@@ -330,13 +331,40 @@ def postprocess_output(raw_text: str, reasoning_marker: str = "</think>") -> Tup
 # Work Planning
 # -------------------------
 
+_sentence_split_re = re.compile(r'(?<=[.!?])\s+')
+
+
+def deduplicate_patient_notes(
+    notes: List[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    """
+    Remove duplicate sentences across a patient's notes (keeping first occurrence).
+    Notes must already be sorted chronologically.
+    """
+    seen: set = set()
+    deduped_notes = []
+    for date_str, note_text in notes:
+        sentences = _sentence_split_re.split(note_text)
+        kept = []
+        for s in sentences:
+            normalized = s.strip()
+            if not normalized:
+                continue
+            if normalized not in seen:
+                seen.add(normalized)
+                kept.append(s)
+        if kept:
+            deduped_notes.append((date_str, " ".join(kept)))
+    return deduped_notes
+
+
 def prepare_rounds(
     df: pd.DataFrame,
     patient_id_col: str,
     date_col: str,
     text_col: str,
     tokenizer,
-    chunk_size: int = 40000,
+    chunk_size: int = 10000,
     chunk_overlap: int = 500,
 ) -> Tuple[List[List[Tuple[str, int, str, str, str]]], Dict[str, List[int]], Dict[str, str]]:
     """
@@ -374,6 +402,9 @@ def prepare_rounds(
             last_date_str = date_str
 
         patient_last_dates[pid] = last_date_str
+
+        # Deduplicate sentences across this patient's notes
+        notes = deduplicate_patient_notes(notes)
 
         # Concatenate and chunk
         chunks = concatenate_and_chunk_notes(notes, tokenizer, chunk_size, chunk_overlap)
@@ -668,10 +699,10 @@ async def single_inference_request(
     temperature: float,
     max_tokens: int,
     top_k: int,
-    top_p: float,
-    presence_penalty: float,
+    #top_p: float,
+    #presence_penalty: float,
     repetition_penalty: float,
-    reasoning_marker: str = "</think>",
+    reasoning_marker: str = "assistantfinal",
     max_retries: int = 3,
     base_timeout: float = 600.0,
 ) -> Tuple[int, str, str]:
@@ -687,8 +718,8 @@ async def single_inference_request(
                     prompt=prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    top_p=top_p,
-                    presence_penalty=presence_penalty,
+                    #top_p=top_p,
+                    #presence_penalty=presence_penalty,
                     extra_body={
                         "top_k": top_k,
                         "repetition_penalty": repetition_penalty,
@@ -727,10 +758,10 @@ async def run_inference_batch(
     model: str,
     temperature: float,
     top_k: int,
-    top_p: float,
-    presence_penalty: float,
+    #top_p: float,
+    #presence_penalty: float,
     repetition_penalty: float,
-    reasoning_marker: str = "</think>",
+    reasoning_marker: str = "assistantfinal",
     max_concurrent: int = 16,
     batch_size: int = 64,
     max_retries: int = 3,
@@ -788,8 +819,8 @@ async def run_inference_batch(
                     temperature=temperature,
                     max_tokens=prompt_max_tokens,
                     top_k=top_k,
-                    top_p=top_p,
-                    presence_penalty=presence_penalty,
+                    #top_p=top_p,
+                    #presence_penalty=presence_penalty,
                     repetition_penalty=repetition_penalty,
                     reasoning_marker=reasoning_marker,
                     max_retries=max_retries,
@@ -893,8 +924,8 @@ async def process_all_rounds(
                         model=args.model,
                         temperature=args.temperature,
                         top_k=args.top_k,
-                        top_p=args.top_p,
-                        presence_penalty=args.presence_penalty,
+                        #top_p=args.top_p,
+                        #presence_penalty=args.presence_penalty,
                         repetition_penalty=args.repetition_penalty,
                         reasoning_marker=args.reasoning_marker,
                         max_concurrent=args.max_concurrent_requests,
@@ -948,34 +979,34 @@ def main():
                     help="Minimum days between consecutive notes")
     ap.add_argument("--synthetic_max_days", type=int, default=90,
                     help="Maximum days between consecutive notes")
-    ap.add_argument("--chunk_size", type=int, default=40000,
-                    help="Maximum tokens per chunk when concatenating patient notes (default: 40000)")
+    ap.add_argument("--chunk_size", type=int, default=10000,
+                    help="Maximum tokens per chunk when concatenating patient notes (default: 10000)")
     ap.add_argument("--chunk_overlap", type=int, default=500,
                     help="Token overlap between consecutive chunks (default: 500)")
-    ap.add_argument("--model", default="Qwen/Qwen-3.5-30B-A3B")
+    ap.add_argument("--model", default="gpt-oss-120b")
     ap.add_argument("--download_dir", required=True)
     ap.add_argument("--gpu_ids", required=True,
                     help="Comma-separated list of GPU IDs (e.g., 0,1,2,3). Used with --gpus_per_server to determine number of servers.")
     ap.add_argument("--gpus_per_server", type=int, required=True,
                     help="Number of GPUs per vLLM server. n_servers = len(gpu_ids) // gpus_per_server. "
                          "tensor_parallel_size is set to this value.")
-    ap.add_argument("--max_model_len", type=int, default=220000)
-    ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument("--top_k", type=int, default=20)
-    ap.add_argument("--top_p", type=float, default=0.95)
-    ap.add_argument("--presence_penalty", type=float, default=1.5)
-    ap.add_argument("--max_tokens", type=int, default=160000,
+    ap.add_argument("--max_model_len", type=int, default=30000)
+    ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--top_k", type=int, default=1)
+    #ap.add_argument("--top_p", type=float, default=0.95)
+    #ap.add_argument("--presence_penalty", type=float, default=1.0)
+    ap.add_argument("--max_tokens", type=int, default=10000,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
-    ap.add_argument("--repetition_penalty", type=float, default=1.0)
-    ap.add_argument("--reasoning_marker", type=str, default="</think>",
-                    help="Marker string that separates reasoning from final summary in model output (default: </think>)")
-    ap.add_argument("--gpu_memory_utilization", type=float, default=0.93)
+    ap.add_argument("--repetition_penalty", type=float, default=1.3)
+    ap.add_argument("--reasoning_marker", type=str, default="assistantfinal",
+                    help="Marker string that separates reasoning from final summary in model output (default: assistantfinal)")
+    ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     ap.add_argument("--base_port", type=int, default=8000,
                     help="Base port for vLLM servers. Server i uses base_port + i (default: 8000)")
     ap.add_argument("--max_concurrent_requests", type=int, default=16,
                     help="Maximum concurrent requests to vLLM server (default: 16)")
-    ap.add_argument("--batch_size", type=int, default=64,
-                    help="Number of prompts to process per batch before waiting (default: 64)")
+    ap.add_argument("--batch_size", type=int, default=1000,
+                    help="Number of prompts to process per batch before waiting (default: 1000)")
     ap.add_argument("--request_timeout", type=float, default=600.0,
                     help="Timeout in seconds for individual inference requests (default: 600)")
     ap.add_argument("--max_retries", type=int, default=3,

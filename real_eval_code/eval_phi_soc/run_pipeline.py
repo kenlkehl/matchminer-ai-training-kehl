@@ -98,8 +98,8 @@ Examples:
     parser.add_argument("--download-dir", type=str,
                         default="/data1/ken/meta/2024/meta_ai",
                         help="Download directory for model weights")
-    parser.add_argument("--chunk-size", type=int, default=40000,
-                        help="Max tokens per chunk for patient summarization (default: 40000)")
+    parser.add_argument("--chunk-size", type=int, default=10000,
+                        help="Max tokens per chunk for patient summarization (default: 10000)")
     parser.add_argument("--chunk-overlap", type=int, default=500,
                         help="Token overlap between chunks for patient summarization (default: 500)")
     parser.add_argument("--summarize-gpus-per-server", type=int, default=2,

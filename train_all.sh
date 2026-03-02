@@ -14,7 +14,7 @@ wget -P ../data https://huggingface.co/datasets/ksg-dfci/mmai-synthetic/resolve/
 aggregator=$(cat << EOF
 from vllm import LLM
 llm = LLM(
-        model='Qwen/Qwen3.5-35B-A3B',
+        model='openai/gpt-oss-120b',
         tensor_parallel_size=1,
         download_dir="/data1/ken/models",
         gpu_memory_utilization=0.95,
@@ -33,7 +33,7 @@ python 0b_create_trial_spaces.py \
    --input ../data/no_phi/ctgov_trials.csv \
    --gpus 0,1,2,3,4,5,6,7 \
    --gpus-per-instance 1 \
-   --model Qwen/Qwen3.5-35B-A3B \
+   --model openai/gpt-oss-120b \
    --download-dir /data1/ken/models
 
 echo 0 done
@@ -52,7 +52,7 @@ echo 1b done
 python 2_make_synthetic_notes_sharded.py \
   --input_csv ../data/no_phi/trial_spaces_with_positive_prompts.csv \
   --out_dir ../data/no_phi/synthetic_notes \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --download_dir /data1/ken/models \
   --max_model_len 10000 --max_new_tokens 5000 \
@@ -66,7 +66,7 @@ echo 2a done
 python 2_make_synthetic_notes_sharded.py \
   --input_csv ../data/no_phi/trial_spaces_with_negative_prompts.csv \
   --out_dir ../data/no_phi/synthetic_negative_notes \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --download_dir /data1/ken/models \
   --max_model_len 10000 --max_new_tokens 5000 \
@@ -112,13 +112,13 @@ python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --gpus_per_server 1 \
-  --max_model_len 220000 \
+  --max_model_len 30000 \
   --base_port 8000 \
-  --chunk_size 40000 \
+  --chunk_size 10000 \
   --chunk_overlap 500 \
   --max_concurrent_requests 100 \
   --generate_dates \
@@ -161,7 +161,7 @@ python llm_check_trials.py \
  --gpus 0,1,2,3,4,5,6,7 \
  --gpus_per_kernel 1 \
  --prompt_batch_size 2000 \
- --model Qwen/Qwen3.5-35B-A3B \
+ --model openai/gpt-oss-120b \
  --download_dir /data1/ken/models \
  --max_model_len 20000 \
  --gpu_memory_utilization 0.95
@@ -198,7 +198,7 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
@@ -212,7 +212,7 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
@@ -251,7 +251,7 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
@@ -265,7 +265,7 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --max_model_len 20000 \
   --gpu_memory_utilization 0.95
@@ -305,7 +305,7 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
@@ -319,7 +319,7 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --max_model_len 10000 \
   --gpu_memory_utilization 0.95
@@ -327,7 +327,7 @@ python llm_check_trials.py \
 echo 13c done
 
 python 14_check_boilerplate.py \
-  --model Qwen/Qwen3.5-35B-A3B \
+  --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
