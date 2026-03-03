@@ -1031,7 +1031,22 @@ def main():
                     help="Timeout in seconds waiting for vLLM server to start (default: 600)")
     ap.add_argument("--max_patients", type=int, default=None,
                     help="Limit to first N patients (for testing)")
+    ap.add_argument("--run_deterministic", action="store_true",
+                    help="Override LLM parameters for deterministic output: "
+                         "temperature=0.0, top_k=1, repetition_penalty=1.3, "
+                         "max_model_len=120000, chunk_size=50000, max_tokens=10000")
     args = ap.parse_args()
+
+    # Apply deterministic overrides
+    if args.run_deterministic:
+        args.temperature = 0.0
+        args.top_k = 1
+        args.repetition_penalty = 1.3
+        args.max_model_len = 120000
+        args.chunk_size = 50000
+        args.max_tokens = 10000
+        print("Deterministic mode: temperature=0.0, top_k=1, repetition_penalty=1.3, "
+              "max_model_len=120000, chunk_size=50000, max_tokens=10000")
 
     # Try loading cached prepared chunks first to skip expensive data prep
     cached = load_prepared_chunks(args.shard_dir)

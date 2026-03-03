@@ -123,11 +123,20 @@ def main():
 
     # remove leading digit and period and space from trial space if present
     trial_checks["this_space"] = trial_checks['this_space'].str.replace(r'^\s*\d+\.', '', regex=True)
-    
+
+    # Drop rows where the LLM could not parse a score
+    trial_checks = trial_checks[trial_checks.eligibility_result >= 0].copy()
+
+    # Normalize eligibility_result (raw score 0–5) to [-1, 1] for cosine-similarity-scale labels
+    MAX_SCORE = 5
+    trial_checks["eligibility_label"] = (trial_checks["eligibility_result"] / MAX_SCORE) * 2 - 1
+
     print("\n[INFO] Dataframe info after filtering:")
     trial_checks.info()
-    print("\n[INFO] eligibility_result counts:")
+    print("\n[INFO] eligibility_result (raw score) counts:")
     print(trial_checks.eligibility_result.value_counts(dropna=False))
+    print("\n[INFO] eligibility_label (normalized) distribution:")
+    print(trial_checks.eligibility_label.describe())
 
     # --- Tokenizer & truncation (from the base model) ---
     try:
@@ -146,7 +155,7 @@ def main():
     trial_checks["patient_summary_trunc"] = PROMPT_PREFIX + trial_checks["patient_summary"].map(truncate)
     trial_checks["this_space_trunc"] = PROMPT_PREFIX + trial_checks["this_space"].map(truncate)
 
-    eligible = trial_checks[trial_checks.eligibility_result >= 0.5]
+    eligible = trial_checks[trial_checks.eligibility_result >= 1]
     print("\n[INFO] Eligible subset info:")
     eligible.info()
 
@@ -167,8 +176,8 @@ def main():
         preserve_index=False
     )
     contrastive_dataset = Dataset.from_pandas(
-        trial_checks[["patient_summary_trunc", "this_space_trunc", "eligibility_result"]]
-        .rename(columns={"eligibility_result": "label"}),
+        trial_checks[["patient_summary_trunc", "this_space_trunc", "eligibility_label"]]
+        .rename(columns={"eligibility_label": "label"}),
         preserve_index=False
     )
     train_dataset = {

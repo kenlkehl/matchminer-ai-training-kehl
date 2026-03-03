@@ -310,21 +310,36 @@ async def run_single_experiment(
 
     # Build patient-level output (last chunk's summary per patient)
     summary_generation_date = date.today().isoformat()
+
+    # Build full EHR text per patient (all notes concatenated in date order)
+    patient_full_text = (
+        df.sort_values(["pseudo_mrn", "date"])
+        .groupby("pseudo_mrn")["text"]
+        .apply(lambda texts: "\n\n".join(texts))
+        .to_dict()
+    )
+
+    # Map pseudo_mrn -> dfci_mrn
+    pseudo_to_dfci = df.drop_duplicates("pseudo_mrn").set_index("pseudo_mrn")["dfci_mrn"].to_dict()
+
     patient_rows = []
     for pid, chunk_indices in patient_chunk_order.items():
         last_cidx = chunk_indices[-1]
         if last_cidx in all_results:
-            _, summary, _ = all_results[last_cidx]
+            reasoning, summary, _ = all_results[last_cidx]
         else:
-            summary = ""
+            reasoning, summary = "", ""
         ps, bp = split_boilerplate(summary)
         patient_rows.append({
             "pseudo_mrn": pid,
+            "dfci_mrn": pseudo_to_dfci.get(pid, ""),
             "patient_summary": ps,
             "patient_boilerplate_text": bp,
+            "full_llm_output": (reasoning or "") + summary,
             "last_note_date": patient_last_dates.get(pid, ""),
             "summary_generation_date": summary_generation_date,
             "num_chunks": len(chunk_indices),
+            "full_ehr_text": patient_full_text.get(pid, ""),
         })
 
     patient_df = pd.DataFrame(patient_rows)
