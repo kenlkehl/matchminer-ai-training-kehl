@@ -3,8 +3,8 @@
 Grid experiment runner for patient summarization — parallelized.
 
 Runs the iterative summarization pipeline across a grid of models and chunk
-sizes on a sample of real patients from the PHI enrollments dataset. Each
-experiment produces its own output directory with patient summaries and
+sizes on a sample of real patients from the PHI SOC (standard of care) dataset.
+Each experiment produces its own output directory with patient summaries and
 checkpoint shards. A comparison CSV is generated at the end.
 
 GPUs are divided among models ("model batches"). Within each batch, all
@@ -70,7 +70,7 @@ _build_prompt_worker = _summarize._build_prompt_worker
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DATA_DIR = REPO_ROOT.parent / "data/phi/enrollments"
+DATA_DIR = REPO_ROOT.parent / "data/phi/soc"
 
 # Per-model configs: reasoning marker + sampling parameters.
 # Qwen instruct (non-thinking) mode for reasoning tasks.
@@ -161,6 +161,39 @@ def split_boilerplate(text: str) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# SOC-specific: enrich summaries with treatment metadata
+# ---------------------------------------------------------------------------
+
+def enrich_experiment_summaries(patient_df: pd.DataFrame, data_dir: Path) -> pd.DataFrame:
+    """Enrich patient summaries with dfci_mrn, trial_start_dt, and split from SOC treatment data.
+
+    Returns the enriched DataFrame (also useful for the comparison CSV).
+    """
+    treatments_path = data_dir / "processed_soc_treatments.csv"
+    if not treatments_path.exists():
+        return patient_df
+
+    treat_df = pd.read_csv(treatments_path)
+    meta_cols = ['pseudo_mrn', 'dfci_mrn', 'trial_start_dt', 'split']
+    available_cols = [c for c in meta_cols if c in treat_df.columns]
+    if len(available_cols) < 2:
+        return patient_df
+
+    meta = treat_df[available_cols].drop_duplicates(subset=['pseudo_mrn'])
+    patient_df = patient_df.copy()
+    patient_df['pseudo_mrn'] = patient_df['pseudo_mrn'].astype(int)
+    meta['pseudo_mrn'] = meta['pseudo_mrn'].astype(int)
+
+    # Drop columns that already exist to avoid duplicates on merge
+    existing = [c for c in meta.columns if c in patient_df.columns and c != 'pseudo_mrn']
+    if existing:
+        patient_df = patient_df.drop(columns=existing)
+
+    patient_df = patient_df.merge(meta, on='pseudo_mrn', how='left')
+    return patient_df
+
+
+# ---------------------------------------------------------------------------
 # Core experiment runner
 # ---------------------------------------------------------------------------
 
@@ -185,6 +218,7 @@ async def run_single_experiment(
     min_p: float,
     repetition_penalty: float,
     chunk_overlap: int,
+    data_dir: Path,
 ):
     """Run a single summarization experiment for one (model, chunk_size) pair."""
 
@@ -327,6 +361,10 @@ async def run_single_experiment(
         })
 
     patient_df = pd.DataFrame(patient_rows)
+
+    # Enrich with SOC treatment metadata (dfci_mrn, trial_start_dt, split)
+    patient_df = enrich_experiment_summaries(patient_df, data_dir)
+
     out_path = experiment_dir / "patient_summaries.parquet"
     patient_df.to_parquet(out_path, index=False)
     print(f"    {label} Saved {out_path} ({len(patient_df)} patients)")
@@ -348,7 +386,7 @@ async def run_batch_experiments(
 
 def parse_args():
     ap = argparse.ArgumentParser(
-        description="Grid experiment runner for patient summarization (parallelized)",
+        description="Grid experiment runner for patient summarization on SOC data (parallelized)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--gpu_ids", required=True,
@@ -388,6 +426,9 @@ def parse_args():
                     help="GPU memory utilization for vLLM (default: 0.90)")
     ap.add_argument("--chunk_overlap", type=int, default=500,
                     help="Token overlap between chunks (default: 500)")
+    ap.add_argument("--split_filter", type=str, default="test",
+                    help="Filter patients by split (e.g. 'test', 'train', 'validation'). "
+                         "Set to empty string to disable. Default: 'test'.")
     ap.add_argument("--dry_run", action="store_true",
                     help="Print experiment grid and exit")
     return ap.parse_args()
@@ -424,12 +465,13 @@ def main():
     # Print experiment grid
     total_experiments = len(models) * len(chunk_sizes)
     print("=" * 70)
-    print("SUMMARIZATION EXPERIMENT GRID (PARALLELIZED)")
+    print("SUMMARIZATION EXPERIMENT GRID — SOC DATA (PARALLELIZED)")
     print("=" * 70)
     print(f"  Models: {models}")
     print(f"  Chunk sizes: {chunk_sizes}")
     print(f"  Total experiments: {total_experiments}")
     print(f"  Patients: {args.n_patients}")
+    print(f"  Split filter: {args.split_filter or '(none)'}")
     print(f"  GPUs: {gpu_list} ({args.gpus_per_server} GPU(s) per server)")
     print(f"  Concurrent model slots: {n_concurrent_models}")
     print(f"  Model batches: {len(model_batches)}")
@@ -479,6 +521,14 @@ def main():
     # Load data
     print(f"Loading {input_parquet}...")
     df = pd.read_parquet(input_parquet)
+
+    # Apply split filter (SOC data has a patient_split column from prepare_data.py)
+    if args.split_filter and "patient_split" in df.columns:
+        before = df["pseudo_mrn"].nunique()
+        df = df[df["patient_split"].str.contains(args.split_filter, na=False)].copy()
+        after = df["pseudo_mrn"].nunique()
+        print(f"  Split filter '{args.split_filter}': {before} → {after} patients")
+
     unique_patients = sorted(df["pseudo_mrn"].unique())[:args.n_patients]
     df = df[df["pseudo_mrn"].isin(unique_patients)].copy()
     df = df.sort_values(["pseudo_mrn", "date"]).reset_index(drop=True)
@@ -631,6 +681,7 @@ def main():
                         "min_p": model_cfg["min_p"],
                         "repetition_penalty": model_cfg["repetition_penalty"],
                         "chunk_overlap": args.chunk_overlap,
+                        "data_dir": DATA_DIR,
                     })
 
             if batch_experiments:

@@ -210,7 +210,8 @@ def build_prompt_text(
     last_date: str,
     chunk_text: str,
     max_model_len: int,
-    margin_tokens: int = 5000
+    margin_tokens: int = 5000,
+    model_name: str = ""
 ) -> str:
     """
     Build a single prompt for iterative summarization.
@@ -240,7 +241,7 @@ Your task:
 - If the segment contains no information that would change the summary, output the prior summary exactly as-is
 - The patient may not yet have a cancer diagnosis. If not, state "No cancer diagnosis documented as of [date]" and summarize relevant medical history that might be relevant to a future oncology workup.
 
-Document the patient's most recent age; sex; cancer type/primary site (eg breast cancer, lung cancer, etc); histology (eg adenocarcinoma, squamous carcinoma, etc); current extent (localized, advanced, metastatic, etc); biomarkers (genomic results, protein expression, etc); and treatment history (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates and best response if known).
+Document the patient's most recent age; sex; cancer type/primary site (eg breast cancer, lung cancer, etc); histology (eg adenocarcinoma, squamous carcinoma, etc); current extent (localized, advanced, metastatic, etc; tumor markers for following disease status over time, such as CEA or PSA, go here); biomarkers (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings); and treatment history (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates and best response if known). Include any prior disease response and/or progression/relapse/recurrence events.
 Do not consider localized basal cell or squamous carcinomas of the skin, or colon polyps, to be cancers for your purposes.
 Do not include the patient's name, but do include relevant dates whenever documented.
 If a patient has a history of more than one cancer, document the cancers one at a time. List the currently or most recently active cancer first, followed by any prior cancers. Within each cancer, events should be in chronological order.
@@ -271,10 +272,11 @@ PRIOR SUMMARY:
 NEXT CLINICAL RECORD SEGMENT (covering {first_date} to {last_date}):
 {chunk_text}
 ---
-Now, write your updated summary. Do not add preceding text before the abstraction, and do not add commentary afterwards."""
+Now, write your updated summary, or if there is no new relevant information, output the prior summary exactly as it was. Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
+    system_content = 'Reasoning: high' if 'gpt-oss' in model_name.lower() else ''
     messages = [
-        {'role': 'system', 'content': 'Reasoning: high'},
+        {'role': 'system', 'content': system_content},
         {'role': 'user', 'content': user_content}
     ]
 
@@ -289,22 +291,25 @@ Now, write your updated summary. Do not add preceding text before the abstractio
 # Worker functions for parallel prompt building via multiprocessing.Pool.
 # Each worker process loads its own tokenizer to avoid pickling issues.
 _worker_tokenizer = None
+_worker_model_name = None
 
 
 def _init_prompt_worker(model_name, download_dir):
     """Initialize tokenizer in each worker process."""
-    global _worker_tokenizer
+    global _worker_tokenizer, _worker_model_name
     from transformers import AutoTokenizer
     _worker_tokenizer = AutoTokenizer.from_pretrained(
         model_name, cache_dir=download_dir, trust_remote_code=True
     )
+    _worker_model_name = model_name
 
 
 def _build_prompt_worker(item):
     """Build a single prompt in a worker process. Returns (chunk_idx, prompt, prompt_token_count)."""
     chunk_idx, prior_summary, first_date, last_date, chunk_text, max_model_len = item
     prompt = build_prompt_text(
-        _worker_tokenizer, prior_summary, first_date, last_date, chunk_text, max_model_len
+        _worker_tokenizer, prior_summary, first_date, last_date, chunk_text, max_model_len,
+        model_name=_worker_model_name
     )
     prompt_token_count = len(_worker_tokenizer(prompt, add_special_tokens=False).input_ids)
     return (chunk_idx, prompt, prompt_token_count)
