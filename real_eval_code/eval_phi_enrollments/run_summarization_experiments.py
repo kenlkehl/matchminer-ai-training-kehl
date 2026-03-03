@@ -189,6 +189,7 @@ async def run_single_experiment(
     """Run a single summarization experiment for one (model, chunk_size) pair."""
 
     label = f"[{model} / chunk={chunk_size}]"
+    exp_t0 = time.time()
     shard_dir = str(experiment_dir / "round_shards")
     os.makedirs(shard_dir, exist_ok=True)
 
@@ -327,9 +328,14 @@ async def run_single_experiment(
         })
 
     patient_df = pd.DataFrame(patient_rows)
+
+    # Record wall time for this experiment
+    wall_time_seconds = time.time() - exp_t0
+    patient_df["wall_time_seconds"] = round(wall_time_seconds, 1)
+
     out_path = experiment_dir / "patient_summaries.parquet"
     patient_df.to_parquet(out_path, index=False)
-    print(f"    {label} Saved {out_path} ({len(patient_df)} patients)")
+    print(f"    {label} Saved {out_path} ({len(patient_df)} patients, {wall_time_seconds:.1f}s wall time)")
 
     return patient_df
 
@@ -380,8 +386,8 @@ def parse_args():
                     help="Prompts per batch (default: 1000)")
     ap.add_argument("--request_timeout", type=float, default=600.0,
                     help="Timeout per inference request in seconds (default: 600)")
-    ap.add_argument("--max_retries", type=int, default=3,
-                    help="Max retries for failed requests (default: 3)")
+    ap.add_argument("--max_retries", type=int, default=6,
+                    help="Max retries for failed requests (default: 6)")
     ap.add_argument("--server_timeout", type=int, default=600,
                     help="Timeout waiting for vLLM server to start (default: 600)")
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90,
@@ -685,6 +691,7 @@ def main():
             n_patients=("pseudo_mrn", "nunique"),
             avg_chunks=("num_chunks", "mean"),
             avg_summary_len=("patient_summary", lambda x: x.str.len().mean()),
+            wall_time_s=("wall_time_seconds", "first"),
         ).reset_index()
         print(stats.to_string(index=False))
     else:

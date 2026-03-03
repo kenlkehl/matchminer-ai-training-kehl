@@ -709,7 +709,7 @@ async def single_inference_request(
     min_p: float = 0.0,
     repetition_penalty: float = 1.0,
     reasoning_marker: str = "assistantfinal",
-    max_retries: int = 3,
+    max_retries: int = 6,
     base_timeout: float = 600.0,
 ) -> Tuple[int, str, str]:
     """
@@ -741,7 +741,7 @@ async def single_inference_request(
             return (row_idx, reasoning, summary)
 
         except asyncio.TimeoutError:
-            wait_time = (2 ** attempt) * 5  # 5s, 10s, 20s
+            wait_time = min((2 ** attempt) * 10, 300)  # 10s, 20s, 40s, 80s, 160s, 300s
             if attempt < max_retries - 1:
                 print(f"  Row {row_idx}: timeout (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
@@ -750,7 +750,7 @@ async def single_inference_request(
                 return (row_idx, "", "ERROR: timeout after all retries")
 
         except Exception as e:
-            wait_time = (2 ** attempt) * 2  # 2s, 4s, 8s
+            wait_time = min((2 ** attempt) * 5, 120)  # 5s, 10s, 20s, 40s, 80s, 120s
             if attempt < max_retries - 1:
                 print(f"  Row {row_idx}: error '{e}' (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
@@ -774,7 +774,7 @@ async def run_inference_batch(
     reasoning_marker: str = "assistantfinal",
     max_concurrent: int = 16,
     batch_size: int = 64,
-    max_retries: int = 3,
+    max_retries: int = 6,
     base_timeout: float = 600.0,
     port: int = 8000,
 ) -> List[Tuple[int, str, str]]:
@@ -787,6 +787,7 @@ async def run_inference_batch(
     total = len(prompts)
     all_results: List[Tuple[int, str, str]] = []
     completed = 0
+    max_health_failures = 5
     consecutive_health_failures = 0
 
     # Process in batches
@@ -794,23 +795,21 @@ async def run_inference_batch(
         batch_end = min(batch_start + batch_size, total)
         batch_prompts = prompts[batch_start:batch_end]
 
-        # Check server health before each batch
+        # Check server health before each batch (with progressive backoff)
         if not check_server_health(port):
             consecutive_health_failures += 1
-            print(f"  WARNING: vLLM server health check failed (attempt {consecutive_health_failures}/3)")
-            if consecutive_health_failures >= 3:
+            print(f"  WARNING: vLLM server health check failed (attempt {consecutive_health_failures}/{max_health_failures})")
+            if consecutive_health_failures >= max_health_failures:
                 print(f"  ERROR: vLLM server appears to be dead. Marking remaining {total - completed} prompts as errors.")
-                # Mark remaining prompts as errors
                 for idx, prompt, _mt in prompts[batch_start:]:
                     all_results.append((idx, "", "ERROR: vLLM server died"))
                 return all_results
-            # Wait and retry
-            await asyncio.sleep(10)
+            # Progressive backoff: 10s, 20s, 40s, 60s
+            health_wait = min(10 * (2 ** (consecutive_health_failures - 1)), 60)
+            print(f"  Waiting {health_wait}s before health re-check...")
+            await asyncio.sleep(health_wait)
             if not check_server_health(port):
-                print(f"  ERROR: vLLM server still not responding after wait.")
-                for idx, prompt, _mt in prompts[batch_start:]:
-                    all_results.append((idx, "", "ERROR: vLLM server died"))
-                return all_results
+                print(f"  WARNING: vLLM server still not responding, will retry on next batch.")
         else:
             consecutive_health_failures = 0
 
@@ -1026,8 +1025,8 @@ def main():
                     help="Number of prompts to process per batch before waiting (default: 1000)")
     ap.add_argument("--request_timeout", type=float, default=600.0,
                     help="Timeout in seconds for individual inference requests (default: 600)")
-    ap.add_argument("--max_retries", type=int, default=3,
-                    help="Maximum retries for failed requests (default: 3)")
+    ap.add_argument("--max_retries", type=int, default=6,
+                    help="Maximum retries for failed requests (default: 6)")
     ap.add_argument("--server_timeout", type=int, default=600,
                     help="Timeout in seconds waiting for vLLM server to start (default: 600)")
     ap.add_argument("--max_patients", type=int, default=None,
