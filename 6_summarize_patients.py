@@ -250,7 +250,7 @@ Histology: (patient's histology (eg adenocarcinoma, squamous carcinoma, etc))
 Current extent: (patient's current extent (localized, advanced, metastatic, etc))
 Tumor markers: (tumor markers for following disease status over time, such as CEA or PSA, go here)
 Biomarkers: (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings)
-Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates; include any disease response and/or progression/relapse/recurrence events in the course of each treatment WITHIN this section, not as a separate section)
+Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically.)
 Boilerplate: (any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, etc)
 Clearly separate the "boilerplate" section by labeling it "Boilerplate: " before describing any such conditions.
 --(end of sections)
@@ -259,8 +259,6 @@ Do not consider localized basal cell or squamous carcinomas of the skin, or colo
 Do not include the patient's name, but do include relevant dates whenever documented.
 If a patient has a history of more than one cancer, document the cancers one at a time. List the currently or most recently active cancer first, followed by any prior cancers. Within each cancer, events should be in chronological order.
 CRITICAL: Format your response as free text ONLY. Do NOT output markdown, Unicode, or tables.
-
-
 
 Here is an example of the desired output format:
 
