@@ -1001,13 +1001,13 @@ def main():
     ap.add_argument("--gpus_per_server", type=int, required=True,
                     help="Number of GPUs per vLLM server. n_servers = len(gpu_ids) // gpus_per_server. "
                          "tensor_parallel_size is set to this value.")
-    ap.add_argument("--max_model_len", type=int, default=30000)
+    ap.add_argument("--max_model_len", type=int, default=120000)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_k", type=int, default=1)
     ap.add_argument("--top_p", type=float, default=1.0)
     ap.add_argument("--presence_penalty", type=float, default=0.0)
     ap.add_argument("--min_p", type=float, default=0.0)
-    ap.add_argument("--max_tokens", type=int, default=10000,
+    ap.add_argument("--max_tokens", type=int, default=15000,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
     ap.add_argument("--repetition_penalty", type=float, default=1.3)
     ap.add_argument("--reasoning_marker", type=str, default="assistantfinal",
