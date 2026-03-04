@@ -592,7 +592,6 @@ def start_vllm_server(
         "--max-model-len", str(max_model_len),
         "--gpu-memory-utilization", str(gpu_memory_utilization),
         "--port", str(port),
-        "--disable-responses-api",
     ]
 
     print(f"Starting vLLM server: {' '.join(cmd)}")
