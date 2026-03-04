@@ -241,7 +241,7 @@ Your task:
 - If the segment contains no information that would change the summary, output the prior summary exactly as-is
 - The patient may not yet have a cancer diagnosis. If not, state "No cancer diagnosis documented as of [date]" and summarize relevant medical history that might be relevant to a future oncology workup.
 
-Document the patient's most recent age; sex; cancer type/primary site (eg breast cancer, lung cancer, etc); histology (eg adenocarcinoma, squamous carcinoma, etc); current extent (localized, advanced, metastatic, etc; tumor markers for following disease status over time, such as CEA or PSA, go here); biomarkers (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings); and treatment history (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates and best response if known). Include any prior disease response and/or progression/relapse/recurrence events.
+Document the patient's most recent age; sex; cancer type/primary site (eg breast cancer, lung cancer, etc); histology (eg adenocarcinoma, squamous carcinoma, etc); current extent (localized, advanced, metastatic, etc; tumor markers for following disease status over time, such as CEA or PSA, go here); biomarkers (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings); and treatment history (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates; include any disease response and/or progression/relapse/recurrence events in the course of each prior treatment).
 Do not consider localized basal cell or squamous carcinomas of the skin, or colon polyps, to be cancers for your purposes.
 Do not include the patient's name, but do include relevant dates whenever documented.
 If a patient has a history of more than one cancer, document the cancers one at a time. List the currently or most recently active cancer first, followed by any prior cancers. Within each cancer, events should be in chronological order.
@@ -259,9 +259,9 @@ Histology: Adenocarcinoma
 Current extent: Metastatic
 Biomarkers: PD-L1 75%, KRAS G12C mutant
 Treatment history:
-# 1/5/2020-2/5/2021: carboplatin/pemetrexed/pembrolizumab
-# 1/2021: Palliative radiation to progressive spinal metastases
-# 3/2021-present: docetaxel
+# 1/5/2020-2/5/2021: carboplatin/pemetrexed/pembrolizumab; best response stable disease
+# 1/2021: Palliative radiation for progressive spinal metastases
+# 3/2021-present: docetaxel; achieved partial response, ongoing as of last note
 Boilerplate:
 No evidence of common boilerplate exclusion criteria
 
