@@ -241,14 +241,26 @@ Your task:
 - If the segment contains no information that would change the summary, output the prior summary exactly as-is
 - The patient may not yet have a cancer diagnosis. If not, state "No cancer diagnosis documented as of [date]" and summarize relevant medical history that might be relevant to a future oncology workup.
 
-Document the patient's most recent age; sex; cancer type/primary site (eg breast cancer, lung cancer, etc); histology (eg adenocarcinoma, squamous carcinoma, etc); current extent (localized, advanced, metastatic, etc; tumor markers for following disease status over time, such as CEA or PSA, go here); biomarkers (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings); and treatment history (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates; include any disease response and/or progression/relapse/recurrence events in the course of each prior treatment).
+Document the following sections, and ONLY the following sections:
+--(start of sections)
+Age: (patient's most recent age)
+Sex: (patient's sex)
+Cancer type: (patient's cancer type/primary site (eg breast cancer, lung cancer, etc))
+Histology: (patient's histology (eg adenocarcinoma, squamous carcinoma, etc))
+Current extent: (patient's current extent (localized, advanced, metastatic, etc))
+Tumor markers: (tumor markers for following disease status over time, such as CEA or PSA, go here)
+Biomarkers: (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings)
+Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates; include any disease response and/or progression/relapse/recurrence events in the course of each  treatment)
+Boilerplate: (any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, etc)
+Clearly separate the "boilerplate" section by labeling it "Boilerplate: " before describing any such conditions.
+--(end of sections)
+
 Do not consider localized basal cell or squamous carcinomas of the skin, or colon polyps, to be cancers for your purposes.
 Do not include the patient's name, but do include relevant dates whenever documented.
 If a patient has a history of more than one cancer, document the cancers one at a time. List the currently or most recently active cancer first, followed by any prior cancers. Within each cancer, events should be in chronological order.
 CRITICAL: Format your response as free text ONLY. Do NOT output markdown, Unicode, or tables.
 
-Also document any history of conditions that might meet "boilerplate" exclusion criteria for clinical trials, including uncontrolled brain metastases, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, lack of measurable disease,and HIV or hepatitis infection.
-Clearly separate the "boilerplate" section by labeling it "Boilerplate: " before describing any such conditions.
+
 
 Here is an example of the desired output format:
 
@@ -265,6 +277,7 @@ Treatment history:
 Boilerplate:
 No evidence of common boilerplate exclusion criteria
 
+The following are the patient's data.
 ---
 PRIOR SUMMARY:
 {prior_summary_text}
