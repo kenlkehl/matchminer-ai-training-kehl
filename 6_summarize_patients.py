@@ -283,7 +283,9 @@ PRIOR SUMMARY:
 NEXT CLINICAL RECORD SEGMENT (covering {first_date} to {last_date}):
 {chunk_text}
 ---
-Now, write your updated summary, or if there is no new relevant information, output the prior summary exactly as it was. Do not add preceding text before the abstraction, and do not add commentary afterwards."""
+Now, write your updated summary, or if there is no new relevant information, output the prior summary exactly as it was. 
+If any information is still relevant but is unchanged, just restate it in the updated summary, but do NOT state "no change" or similar - just produce the updated summary text as if you were writing it fresh, incorporating any new information but keeping relevant old information, without calling out what changed vs what stayed the same from the prior summary.
+Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
     system_content = 'Reasoning: high' if 'gpt-oss' in model_name.lower() else ''
     messages = [
