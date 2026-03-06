@@ -196,7 +196,7 @@ def main():
     # --- Trainer ---
     args_st = SentenceTransformerTrainingArguments(
         output_dir=args.ckpt_dir,
-        per_device_train_batch_size=18,
+        per_device_train_batch_size=10,
         learning_rate=2e-5,
         lr_scheduler_type="linear",
         warmup_ratio=0.01,
