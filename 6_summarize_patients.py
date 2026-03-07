@@ -24,8 +24,9 @@ python 6_summarize_patients.py \
   --download_dir /data1/ken/models \
   --gpu_ids 0,1,2,3 \
   --gpus_per_server 1 \
-  --max_model_len 30000 \
-  --chunk_size 10000 \
+  --max_model_len 120000 \
+  --chunk_size 50000 \
+  --chunk_overlap 500 \
   --generate_dates \
   --synthetic_start_date 2017-01-01 \
   --synthetic_min_days 7 \
@@ -42,7 +43,7 @@ python 6_summarize_patients.py \
   --gpu_ids 0,1,2,3 \
   --gpus_per_server 2 \
   --base_port 8000 \
-  --max_model_len 30000 \
+  --max_model_len 120000 \
   --chunk_size 10000 \
   --chunk_overlap 500 \
   --max_concurrent_requests 100

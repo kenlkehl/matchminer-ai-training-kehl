@@ -96,7 +96,7 @@ Examples:
                         default=str(DATA_DIR / "note_level_dataset.parquet"),
                         help="Input parquet with patient notes (for summarization)")
     parser.add_argument("--download-dir", type=str,
-                        default="/data1/ken/meta/2024/meta_ai",
+                        default="/data1/ken/models",
                         help="Download directory for model weights")
     parser.add_argument("--chunk-size", type=int, default=50000,
                         help="Max tokens per chunk for patient summarization (default: 10000)")

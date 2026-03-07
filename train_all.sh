@@ -200,7 +200,7 @@ python llm_check_trials.py \
   --prompt_batch_size 2000 \
   --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
-  --max_model_len 10000 \
+  --max_model_len 20000 \
   --gpu_memory_utilization 0.95
 
 echo 9b done
@@ -214,7 +214,7 @@ python llm_check_trials.py \
   --prompt_batch_size 2000 \
   --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
-  --max_model_len 10000 \
+  --max_model_len 20000 \
   --gpu_memory_utilization 0.95
 
 echo 9c done
@@ -253,7 +253,7 @@ python llm_check_trials.py \
   --prompt_batch_size 2000 \
   --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
-  --max_model_len 10000 \
+  --max_model_len 20000 \
   --gpu_memory_utilization 0.95
 
 echo 11b done
@@ -307,7 +307,7 @@ python llm_check_trials.py \
   --prompt_batch_size 2000 \
   --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
-  --max_model_len 10000 \
+  --max_model_len 20000 \
   --gpu_memory_utilization 0.95
 
 echo 13b done
@@ -321,7 +321,7 @@ python llm_check_trials.py \
   --prompt_batch_size 2000 \
   --model openai/gpt-oss-120b \
   --download_dir /data1/ken/models \
-  --max_model_len 10000 \
+  --max_model_len 20000 \
   --gpu_memory_utilization 0.95
 
 echo 13c done
@@ -332,7 +332,7 @@ python 14_check_boilerplate.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 1000 \
-  --max_model_len 10000 \
+  --max_model_len 20000 \
   --max_new_tokens 5000 \
   --gpu_memory_utilization 0.95 \
   --out_dir ../data/no_phi/boilerplate_checks
