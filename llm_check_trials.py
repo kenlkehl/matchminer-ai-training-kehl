@@ -133,7 +133,7 @@ def ask_about_trials_loosely(patient_summaries: List[str],
     eligibility_results = []
     eligibility_verdicts = []
     for txt in response_texts:
-        tail = txt[-60:]
+        tail = txt[-60:].replace("*", "").replace("\u202f", " ")
         m = SCORE_PATTERN.search(tail)
         if m:
             score = int(m.group(1))
