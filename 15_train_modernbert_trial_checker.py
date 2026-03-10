@@ -3,13 +3,12 @@ import numpy as np
 import os
 import argparse
 import torch
+import torch.nn.functional as F
 torch.compile.disable = True
 torch.set_float32_matmul_precision('high')
 
-VERDICT_LABELS = ["NO!", "YES-GENERAL!", "YES-CANCERMATCH!", "YES-BIOMARKERMATCH!", "YES-TARGETED!"]
 
-
-def main(checkpoint_dir: str, output_dir: str, categorical: bool = False):
+def main(checkpoint_dir: str, output_dir: str):
 
     enrollments = pd.read_parquet('../data/no_phi/space_specific_eligibility_checks.parquet')
     enrollments.info()
@@ -29,27 +28,13 @@ def main(checkpoint_dir: str, output_dir: str, categorical: bool = False):
 
     dataset = pd.concat([enrollments, patient, space], axis=0, ignore_index=True).groupby(['patient_summary','this_space']).first().reset_index()
 
-    if categorical:
-        dataset = dataset[['split','patient_summary','this_space','eligibility_verdict']]
-        dataset = dataset[dataset.eligibility_verdict.isin(VERDICT_LABELS)]
-        dataset.info()
-        print(dataset.eligibility_verdict.value_counts())
+    dataset = dataset[['split', 'patient_summary', 'this_space', 'eligibility_result']]
+    dataset = dataset[dataset.eligibility_result >= 0]  # drop parse failures (-1)
+    dataset.info()
+    print(dataset.eligibility_result.value_counts())
 
-        cat_label2id = {v: i for i, v in enumerate(VERDICT_LABELS)}
-        cat_id2label = {i: v for i, v in enumerate(VERDICT_LABELS)}
-        num_labels = len(VERDICT_LABELS)
-
-        dataset['label'] = dataset['eligibility_verdict'].map(cat_label2id)
-    else:
-        dataset = dataset[['split','patient_summary','this_space','eligibility_result']]
-        dataset.info()
-        dataset.eligibility_result.value_counts()
-        dataset['eligibility_result'] = (dataset.eligibility_result > 0).astype(int)
-        dataset['label'] = dataset['eligibility_result']
-
-        cat_id2label = {0: "NEGATIVE", 1: "POSITIVE"}
-        cat_label2id = {"NEGATIVE": 0, "POSITIVE": 1}
-        num_labels = 2
+    # Normalize labels to [0, 1] for sigmoid + BCE training
+    dataset['label'] = (dataset['eligibility_result'].clip(0, 5).astype('float32')) / 5.0
 
     from transformers import AutoTokenizer
 
@@ -90,10 +75,18 @@ def main(checkpoint_dir: str, output_dir: str, categorical: bool = False):
 
     from transformers import AutoModelForSequenceClassification, TrainingArguments, Trainer
 
+    class BCETrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+            logits = outputs.logits.squeeze(-1)
+            loss = F.binary_cross_entropy_with_logits(logits, labels)
+            return (loss, outputs) if return_outputs else loss
+
     model = AutoModelForSequenceClassification.from_pretrained(
-        "answerdotai/ModernBERT-large", num_labels=num_labels, id2label=cat_id2label, label2id=cat_label2id, reference_compile=False
+        "answerdotai/ModernBERT-large", num_labels=1, reference_compile=False
     )
-    #model.config.pad_token_id = model.config.eos_token_id
+    model.config.problem_type = "regression"
 
 
     training_args = TrainingArguments(
@@ -110,7 +103,7 @@ def main(checkpoint_dir: str, output_dir: str, categorical: bool = False):
     )
 
 
-    trainer = Trainer(
+    trainer = BCETrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_data["train"],
@@ -134,16 +127,9 @@ if __name__ == "__main__":
                         help="Directory to save training checkpoints")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Directory to save final model")
-    parser.add_argument("--categorical", action="store_true",
-                        help="Train a 5-class categorical model using eligibility_verdict labels "
-                             "instead of binary classification")
     args = parser.parse_args()
 
-    if args.categorical:
-        checkpoint_dir = args.checkpoint_dir or "../models/trialchecker_categorical_checkpoints"
-        output_dir = args.output_dir or "../models/modernbert-trial-checker-categorical"
-    else:
-        checkpoint_dir = args.checkpoint_dir or "../models/trialchecker_checkpoints"
-        output_dir = args.output_dir or "../models/modernbert-trial-checker"
+    checkpoint_dir = args.checkpoint_dir or "../models/trialchecker_regression_checkpoints"
+    output_dir = args.output_dir or "../models/modernbert-trial-checker-regression"
 
-    main(checkpoint_dir=checkpoint_dir, output_dir=output_dir, categorical=args.categorical)
+    main(checkpoint_dir=checkpoint_dir, output_dir=output_dir)
