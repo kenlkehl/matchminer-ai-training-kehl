@@ -90,6 +90,19 @@ def main():
     cur.close()
     conn.close()
 
+    # De-duplicate trial spaces: keep only the first row per (nct_id, this_cohort)
+    seen = set()
+    deduped_rows = []
+    for r in spaces_rows:
+        key = (r[1], r[2])  # (nct_id, this_cohort)
+        if key not in seen:
+            seen.add(key)
+            deduped_rows.append(r)
+
+    print(f"Fetched {len(spaces_rows)} trial spaces, "
+          f"{len(deduped_rows)} unique after de-duplicating by (nct_id, this_cohort).")
+    spaces_rows = deduped_rows
+
     space_ids = [r[0] for r in spaces_rows]
     nct_ids = [r[1] for r in spaces_rows]
     space_texts = [r[2] for r in spaces_rows]
@@ -117,7 +130,7 @@ def main():
     with torch.no_grad():
         space_embs = model.encode(
             space_texts,
-            batch_size=128,
+            batch_size=12,
             convert_to_tensor=True,
             normalize_embeddings=True,
             prompt="query",
