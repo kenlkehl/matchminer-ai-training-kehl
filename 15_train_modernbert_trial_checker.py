@@ -108,7 +108,7 @@ def main(checkpoint_dir: str, output_dir: str):
         args=training_args,
         train_dataset=tokenized_data["train"],
         #eval_dataset=tokenized_data["valid"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator
         #compute_metrics=compute_metrics,
     )
