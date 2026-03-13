@@ -21,6 +21,9 @@ Examples:
 
     # Use an alternate secrets file
     python eval_random_patient.py /path/to/model --secrets /alt/path/to/database_secrets.txt
+
+    # Re-score top-10 results with a trial checker model
+    python eval_random_patient.py /path/to/model --trial-checker /path/to/trial_checker_model
 """
 
 import argparse
@@ -48,6 +51,9 @@ def parse_args():
     parser.add_argument("--gpu", type=str, default="0", help="GPU id (default: 0)")
     parser.add_argument("--secrets", type=str, default=str(SECRETS_FILE),
                         help="Path to database_secrets.txt")
+    parser.add_argument("--trial-checker", type=str, default=None,
+                        help="Path to a trained trial checker model (ModernBERT). "
+                             "If provided, re-scores top-10 trial spaces.")
     return parser.parse_args()
 
 
@@ -116,6 +122,16 @@ def main():
     model.max_seq_length = args.max_seq_length
     model.prompts["query"] = QUERY_PROMPT
 
+    # --- Trial checker model (optional) ------------------------------------
+    tc_model = None
+    tc_tokenizer = None
+    if args.trial_checker:
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        print(f"Loading trial checker model from {args.trial_checker} on {device} ...")
+        tc_tokenizer = AutoTokenizer.from_pretrained(args.trial_checker)
+        tc_model = AutoModelForSequenceClassification.from_pretrained(args.trial_checker).to(device)
+        tc_model.eval()
+
     # --- Encode ------------------------------------------------------------
     print("Encoding patient summary ...")
     with torch.no_grad():
@@ -141,6 +157,28 @@ def main():
     similarities = (patient_emb @ space_embs.T).squeeze(0).cpu().numpy()
     top_indices = np.argsort(similarities)[::-1][:10]
 
+    # --- Trial checker re-scoring (optional) ------------------------------
+    tc_scores = None
+    if tc_model is not None:
+        print("Running trial checker on top 10 trial spaces ...")
+        tc_texts = [
+            space_texts[idx] + "\nNow here is the patient summary:" + patient_summary
+            for idx in top_indices
+        ]
+        inputs = tc_tokenizer(
+            tc_texts, truncation=True, padding=True,
+            max_length=4096, return_tensors="pt"
+        ).to(device)
+        with torch.no_grad():
+            outputs = tc_model(**inputs)
+            logits = outputs.logits.squeeze(-1)
+            tc_scores = torch.sigmoid(logits).cpu().numpy()
+
+        # Re-rank top indices by trial checker score (highest first)
+        rerank_order = np.argsort(tc_scores)[::-1]
+        top_indices = top_indices[rerank_order]
+        tc_scores = tc_scores[rerank_order]
+
     # --- Print results -----------------------------------------------------
     print("\n" + "=" * 80)
     print("PATIENT SUMMARY")
@@ -148,11 +186,18 @@ def main():
     print(patient_summary)
 
     print("\n" + "=" * 80)
-    print("TOP 10 MOST SIMILAR TRIAL SPACES")
+    if tc_scores is not None:
+        print("TOP 10 TRIAL SPACES (re-ranked by trial checker)")
+    else:
+        print("TOP 10 MOST SIMILAR TRIAL SPACES")
     print("=" * 80)
     for rank, idx in enumerate(top_indices, 1):
-        print(f"\n--- Rank {rank} | similarity={similarities[idx]:.4f} | "
-              f"nct_id={nct_ids[idx]} | space_id={space_ids[idx]} ---")
+        line = (f"\n--- Rank {rank} | similarity={similarities[idx]:.4f} | "
+                f"nct_id={nct_ids[idx]} | space_id={space_ids[idx]}")
+        if tc_scores is not None:
+            line += f" | tc_score={tc_scores[rank - 1]:.4f}"
+        line += " ---"
+        print(line)
         print(space_texts[idx])
 
 
