@@ -10,7 +10,7 @@ Replaces the 4 individual data-creation scripts and the combiner/tokenizer:
   - prepare_training_data.py
 
 Usage:
-  python create_all_training_data.py --max-seq-length 13000
+  python create_all_training_data.py --max-seq-length 32000
 """
 
 import argparse
@@ -805,8 +805,8 @@ def parse_args():
     parser.add_argument(
         "--model-name",
         type=str,
-        default="meta-llama/Llama-3.2-3B-Instruct",
-        help="Tokenizer model (default: meta-llama/Llama-3.2-3B-Instruct)",
+        default="LiquidAI/LFM-2.5-1.2B-Thinking",
+        help="Tokenizer model (default: LiquidAI/LFM-2.5-1.2B-Thinking)",
     )
     parser.add_argument(
         "--balance-target",
