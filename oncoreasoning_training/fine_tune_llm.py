@@ -34,7 +34,7 @@ lora_config = LoraConfig(
 
 
 
-repo_id = "meta-llama/Llama-3.2-3B-Instruct"
+repo_id = "LiquidAI/LFM2.5-1.2B-Thinking"
 
 torch.backends.cuda.enable_flash_sdp(True)
 print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")

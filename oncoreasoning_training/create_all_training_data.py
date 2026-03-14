@@ -162,14 +162,23 @@ Your task:
 - If the segment contains no information that would change the summary, output the prior summary exactly as-is
 - The patient may not yet have a cancer diagnosis. If not, state "No cancer diagnosis documented as of [date]" and summarize relevant medical history that might be relevant to a future oncology workup.
 
-Document the patient's most recent age; sex; cancer type/primary site (eg breast cancer, lung cancer, etc); histology (eg adenocarcinoma, squamous carcinoma, etc); current extent (localized, advanced, metastatic, etc); biomarkers (genomic results, protein expression, etc); and treatment history (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates and best response if known).
+Document the following sections, and ONLY the following sections:
+--(start of sections)
+Age: (patient's most recent age)
+Sex: (patient's sex)
+Cancer type: (patient's cancer type/primary site (eg breast cancer, lung cancer, etc))
+Histology: (patient's histology (eg adenocarcinoma, squamous carcinoma, etc))
+Current extent: (patient's current extent (localized, advanced, metastatic, etc); this is also where tumor markers for following disease status over time, such as CEA or PSA, should be documented if relevant)
+Biomarkers: (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings)
+Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically.)
+Boilerplate: (any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, etc)
+Clearly separate the "boilerplate" section by labeling it "Boilerplate: " before describing any such conditions.
+--(end of sections)
+
 Do not consider localized basal cell or squamous carcinomas of the skin, or colon polyps, to be cancers for your purposes.
 Do not include the patient's name, but do include relevant dates whenever documented.
 If a patient has a history of more than one cancer, document the cancers one at a time. List the currently or most recently active cancer first, followed by any prior cancers. Within each cancer, events should be in chronological order.
 CRITICAL: Format your response as free text ONLY. Do NOT output markdown, Unicode, or tables.
-
-Also document any history of conditions that might meet "boilerplate" exclusion criteria for clinical trials, including uncontrolled brain metastases, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, lack of measurable disease,and HIV or hepatitis infection.
-Clearly separate the "boilerplate" section by labeling it "Boilerplate: " before describing any such conditions.
 
 Here is an example of the desired output format:
 
@@ -180,12 +189,13 @@ Histology: Adenocarcinoma
 Current extent: Metastatic
 Biomarkers: PD-L1 75%, KRAS G12C mutant
 Treatment history:
-# 1/5/2020-2/5/2021: carboplatin/pemetrexed/pembrolizumab
-# 1/2021: Palliative radiation to progressive spinal metastases
-# 3/2021-present: docetaxel
+# 1/5/2020-2/5/2021: carboplatin/pemetrexed/pembrolizumab; best response stable disease
+# 1/2021: Palliative radiation for progressive spinal metastases
+# 3/2021-present: docetaxel; achieved partial response, ongoing as of last note
 Boilerplate:
 No evidence of common boilerplate exclusion criteria
 
+The following are the patient's data.
 ---
 PRIOR SUMMARY:
 {prior_summary_text}
@@ -193,7 +203,9 @@ PRIOR SUMMARY:
 NEXT CLINICAL RECORD SEGMENT (covering {first_date} to {last_date}):
 {chunk_text}
 ---
-Now, write your updated summary. Do not add preceding text before the abstraction, and do not add commentary afterwards."""
+Now, write your updated summary, or if there is no new relevant information, output the prior summary exactly as it was.
+If any information is still relevant but is unchanged, just restate it in the updated summary, but do NOT state "no change" or similar - just produce the updated summary text as if you were writing it fresh, incorporating any new information but keeping relevant old information, without calling out what changed vs what stayed the same from the prior summary.
+Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
     messages = [
         {'role': 'system', 'content': 'Reasoning: high'},
@@ -212,17 +224,15 @@ def build_trialcheck_messages(row):
     user_content = (
         "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
         "Your job is to evaluate whether a given clinical trial is a reasonable consideration for a patient, "
-        "given a clinical trial summary and a patient summary.\n\n"
+        "given a clinical trial summary and a patient summary, and then score how targeted the trial is for "
+        "this specific patient.\n\n"
         f"Here is a summary of the clinical trial:\n{trial_summary}\n"
         f"Here is a summary of the patient:\n{patient_summary}\n"
         "Base your judgment on whether the patient generally fits the age requirements if any, sex requirements if any, cancer type(s), cancer burden, prior treatment(s), "
         "and biomarker criteria specified for the trial.\n"
         "You do not have to determine if the patient is actually eligible; instead please just evaluate whether it is reasonable "
         "for the trial to be considered further by the patient's oncologist.\n"
-        "Biomarker criteria have to be considered carefully. Some trials have biomarker requirements that are not assessed until "
-        "formal trial screening. A trial may therefore sometimes be a reasonable consideration for a patient even if a required "
-        "biomarker is not known to be present in the patient.\n"
-        "However, if a required biomarker is known to be absent, or can be assumed to be absent based on other information, the trial "
+        "Biomarker criteria have to be considered carefully. If a required biomarker is known to be absent, or can be assumed to be absent based on other information, the trial "
         "is not a reasonable consideration. For example, if a trial for lung cancer requires an EGFR mutation, documentation that there "
         "is no EGFR mutation indicates the trial is not a reasonable consideration. Similarly, documentation of a KRAS mutation in the "
         "patient indicates the trial is not a reasonable consideration, since, as you know, KRAS and EGFR driver mutations in lung cancer "
@@ -233,14 +243,30 @@ def build_trialcheck_messages(row):
         "Also CRITICAL: Ignore your knowledge of today's current date. Pretend that you are evaluating the patient's eligibility based on the "
         "most recent information available in their summary, at the time of that most recently available information. "
         "Do not provide ethical judgments or comment on resource constraints with respect whether the trial is a reasonable clinical "
-        "consideration; just evaluate whether it is, given the available information.\n"
-        "Reason step by step, then classify this trial using exactly one of these verdict labels.\n"
-        "Your response MUST end with one of these labels and nothing else after it:\n\n"
-        "- Yes-Targeted!  The trial IS reasonable, AND it specifies the patient's cancer type, AND it targets a biomarker the patient is known to have.\n"
-        "- Yes-CancerMatch!  The trial IS reasonable AND specifies the patient's cancer type, BUT does not specifically target a known biomarker of the patient (either no biomarker requirement, or the required biomarker status is unknown in the patient).\n"
-        "- Yes-BiomarkerMatch!  The trial IS reasonable AND targets a biomarker the patient is known to have, BUT uses a broader indicated cancer type than the patient's specific cancer (e.g., \"solid tumors\" or \"advanced cancers\").\n"
-        "- Yes-General!  The trial IS reasonable, BUT neither the cancer type nor biomarkers specifically match as described above.\n"
-        "- No!  The trial is NOT a reasonable consideration for this patient."
+        "consideration; just evaluate whether it is, given the available information.\n\n"
+        "SCORING INSTRUCTIONS:\n"
+        "After reasoning step by step, compute a score from 0 to 5 using the following rubric:\n\n"
+        "Start with 0 points.\n"
+        "1) REASONABLENESS (0 or 1 point): If the trial is at least a reasonable consideration for this patient "
+        "(i.e., the patient does not clearly meet an exclusion criterion such as wrong cancer type, wrong age group, "
+        "wrong sex, having an excluded biomarker, etc.), award 1 point. If the trial is NOT reasonable, the final score is 0 — "
+        "skip the remaining categories.\n"
+        "2) CANCER TYPE SPECIFICITY (+1 point): If the trial specifies the patient's cancer type (e.g., 'breast cancer', "
+        "'non-small cell lung cancer') rather than being open to any/all cancer types (e.g., 'solid tumors', 'advanced cancers'), "
+        "award +1 point.\n"
+        "3) CANCER BURDEN/STAGE SPECIFICITY (+1 point): If the trial specifies a particular disease stage or burden "
+        "(e.g., 'metastatic', 'locally advanced', 'stage III-IV') that matches the patient's disease status, award +1 point. "
+        "If the trial has no stage/burden requirements or is open to any stage, do not award a point.\n"
+        "4) PRIOR TREATMENT SPECIFICITY (+1 point): If the trial has specific prior treatment requirements "
+        "(e.g., 'must have progressed on platinum-based chemotherapy', 'prior immunotherapy required') "
+        "and the patient's treatment history matches those requirements, award +1 point. "
+        "If the trial has no specific prior treatment requirements, do not award a point.\n"
+        "5) BIOMARKER SPECIFICITY (+1 point): If the trial requires a specific biomarker (e.g., 'EGFR mutation', "
+        "'PD-L1 ≥ 50%', 'HER2-positive') AND the patient is known to have that biomarker, award +1 point. "
+        "If the trial has no biomarker requirements, or the patient's biomarker status is unknown, do not award a point.\n\n"
+        "Your response MUST end with the following line and nothing else after it:\n"
+        "Final score: X\n"
+        "where X is the total score (an integer from 0 to 5)."
     )
 
     messages = [
