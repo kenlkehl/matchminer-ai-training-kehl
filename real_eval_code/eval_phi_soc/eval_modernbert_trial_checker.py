@@ -140,12 +140,15 @@ def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_di
     auc = roc_auc_score(gold_binary, validation_set.prediction_score)
     print(f"AUC: {auc:.4f}")
 
+    gold_scores = validation_set.eligibility_result.values
+
     pdf_path = output_dir / f"trial_checker_{mode_label}_classification_soc.pdf"
     eval_model(
         validation_set.prediction_score.values,
         gold_binary.values,
         pdf_path=str(pdf_path),
-        title_prefix=f"SOC Trial Checker {mode_label.replace('_', ' ').title()}"
+        title_prefix=f"SOC Trial Checker {mode_label.replace('_', ' ').title()}",
+        gold_continuous=gold_scores
     )
 
     if 'prediction_label' in validation_set.columns:
@@ -163,7 +166,6 @@ def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_di
 
     # --- Regression Metrics ---
     print("\n--- Regression Metrics ---")
-    gold_scores = validation_set.eligibility_result.values
     pred_scores = validation_set.prediction_score.values
     r, p_r = pearsonr(gold_scores, pred_scores)
     rho, p_rho = spearmanr(gold_scores, pred_scores)

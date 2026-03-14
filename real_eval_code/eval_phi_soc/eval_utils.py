@@ -21,6 +21,7 @@ from sklearn.metrics import (
     average_precision_score, cohen_kappa_score
 )
 from sklearn.calibration import calibration_curve
+from scipy.stats import spearmanr, pearsonr
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any
@@ -99,7 +100,8 @@ def plot_confusion_matrix(cm: np.ndarray, classes: list,
 
 def eval_model(predicted: np.ndarray, actual: np.ndarray,
                pdf_path: Optional[str] = None,
-               title_prefix: str = "") -> Optional[float]:
+               title_prefix: str = "",
+               gold_continuous: Optional[np.ndarray] = None) -> Optional[float]:
     """
     Evaluate model predictions and optionally save results to PDF.
 
@@ -108,6 +110,7 @@ def eval_model(predicted: np.ndarray, actual: np.ndarray,
         actual: Actual binary labels
         pdf_path: Path to save PDF report (if None, just returns metrics)
         title_prefix: Prefix for plot titles
+        gold_continuous: Optional continuous gold-standard scores for regression metrics
 
     Returns:
         Best F1 threshold or None if calculation fails
@@ -273,6 +276,46 @@ Classification Report at 0.5 Threshold:
             ax.grid(True, alpha=0.3)
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
+
+            # --- Regression metrics pages (only when continuous gold scores provided) ---
+            if gold_continuous is not None:
+                r, p_r = pearsonr(gold_continuous, predicted)
+                rho, p_rho = spearmanr(gold_continuous, predicted)
+                mae = np.mean(np.abs(gold_continuous - predicted))
+
+                # Page: Regression summary metrics
+                fig, ax = plt.subplots(figsize=(8, 6))
+                ax.axis('off')
+                reg_text = f"""
+{title_prefix} Regression Metrics
+{'=' * 40}
+
+Pearson r:    {r:.4f}  (p = {p_r:.4e})
+Spearman rho: {rho:.4f}  (p = {p_rho:.4e})
+MAE:          {mae:.4f}
+
+Gold score range:      [{gold_continuous.min():.2f}, {gold_continuous.max():.2f}]
+Predicted score range: [{predicted.min():.2f}, {predicted.max():.2f}]
+N samples:             {len(gold_continuous)}
+"""
+                ax.text(0.1, 0.9, reg_text, transform=ax.transAxes,
+                        fontsize=12, verticalalignment='top', fontfamily='monospace')
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
+
+                # Page: Scatter plot of gold vs predicted
+                fig, ax = plt.subplots(figsize=(8, 6))
+                ax.scatter(gold_continuous, predicted, alpha=0.15, s=10, edgecolors='none')
+                score_min = min(gold_continuous.min(), predicted.min())
+                score_max = max(gold_continuous.max(), predicted.max())
+                ax.plot([score_min, score_max], [score_min, score_max], 'r--', label='y = x')
+                ax.set_xlabel('Gold Score')
+                ax.set_ylabel('Predicted Score')
+                ax.set_title(f'{title_prefix} Gold vs Predicted (r={r:.3f}, ρ={rho:.3f})')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
 
         print(f"PDF report saved to: {pdf_path}")
         return best_f1_thresh
