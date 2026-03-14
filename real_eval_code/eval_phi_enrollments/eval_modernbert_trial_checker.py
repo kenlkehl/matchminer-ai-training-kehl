@@ -179,6 +179,65 @@ def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_di
     print(f"Spearman rho: {rho:.4f} (p={p_rho:.4e})")
     print(f"MAE: {mae:.4f}")
 
+    # Generate regression metrics PDF
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from datetime import datetime
+
+    reg_pdf_path = output_dir / f"trial_checker_{mode_label}_regression.pdf"
+    with PdfPages(str(reg_pdf_path)) as pdf:
+        # Page 1: Summary metrics
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.axis('off')
+        reg_text = f"""
+Trial Checker {mode_label.replace('_', ' ').title()} Regression Metrics
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{'=' * 50}
+
+Pearson r:    {r:.4f}  (p = {p_r:.4e})
+Spearman rho: {rho:.4f}  (p = {p_rho:.4e})
+MAE:          {mae:.4f}
+
+Gold score range:      [{gold_scores.min():.2f}, {gold_scores.max():.2f}]
+Predicted score range: [{pred_scores.min():.2f}, {pred_scores.max():.2f}]
+N samples:             {len(gold_scores)}
+"""
+        ax.text(0.1, 0.9, reg_text, transform=ax.transAxes,
+                fontsize=12, verticalalignment='top', fontfamily='monospace')
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 2: Scatter plot of gold vs predicted
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.scatter(gold_scores, pred_scores, alpha=0.15, s=10, edgecolors='none')
+        score_min = min(gold_scores.min(), pred_scores.min())
+        score_max = max(gold_scores.max(), pred_scores.max())
+        ax.plot([score_min, score_max], [score_min, score_max], 'r--', label='y = x')
+        ax.set_xlabel('Gold Score')
+        ax.set_ylabel('Predicted Score')
+        ax.set_title(f'Trial Checker {mode_label.replace("_", " ").title()} Gold vs Predicted (r={r:.3f}, \u03c1={rho:.3f})')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 3: Residual distribution
+        fig, ax = plt.subplots(figsize=(8, 6))
+        residuals = pred_scores - gold_scores
+        ax.hist(residuals, bins=50, edgecolor='black', alpha=0.7)
+        ax.axvline(0, color='r', linestyle='--', label='Zero error')
+        ax.set_xlabel('Prediction Error (predicted - gold)')
+        ax.set_ylabel('Frequency')
+        ax.set_title(f'Trial Checker {mode_label.replace("_", " ").title()} Residual Distribution (MAE={mae:.3f})')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+    print(f"Regression PDF report saved to: {reg_pdf_path}")
+
     # --- Ranking Metrics (score-based top-K) ---
     print(f"\n--- Ranking Metrics (top-{k} by regression score) ---")
     scored_set = validation_set.sort_values(
