@@ -45,7 +45,7 @@ def parse_args():
                         help="Download directory for model weights (used if model not found locally)")
     parser.add_argument("--gpu-mem-util", type=float, default=0.90,
                         help="GPU memory utilization")
-    parser.add_argument("--max-model-len", type=int, default=10000,
+    parser.add_argument("--max-model-len", type=int, default=15000,
                         help="Maximum model context length")
     return parser.parse_args()
 
