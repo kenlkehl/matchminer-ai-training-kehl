@@ -805,7 +805,7 @@ def parse_args():
     parser.add_argument(
         "--model-name",
         type=str,
-        default="LiquidAI/LFM-2.5-1.2B-Thinking",
+        default="LiquidAI/LFM2.5-1.2B-Thinking",
         help="Tokenizer model (default: LiquidAI/LFM-2.5-1.2B-Thinking)",
     )
     parser.add_argument(
