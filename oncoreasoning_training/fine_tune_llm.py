@@ -88,7 +88,7 @@ sft_config = SFTConfig(
     activation_offloading=True,
     use_liger_kernel=True,
     logging_dir='./logs',
-    output_dir='../../models/onco_reasoning_3b',
+    output_dir='../../models/onco_reasoning_lfm',
     report_to='none'
 )
 
@@ -98,7 +98,7 @@ trainer = SFTTrainer(
     model=model,
     processing_class=tokenizer,
     args=sft_config,
-    peft_config = lora_config,
+    #peft_config = lora_config,
     train_dataset=dataset,
     data_collator=data_collator,
 )
