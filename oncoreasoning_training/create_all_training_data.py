@@ -16,12 +16,12 @@ Usage:
 import argparse
 import json
 import math
+import multiprocessing as mp
 import os
+import re
 import struct
-from concurrent.futures import ProcessPoolExecutor
 
 import pandas as pd
-import pyarrow as pa
 import pyarrow.parquet as pq
 from datasets.arrow_writer import ArrowWriter
 from transformers import AutoTokenizer
@@ -95,6 +95,17 @@ def truncate_field(text: str, max_tokens: int, tokenizer) -> str:
 def token_len(text: str, tokenizer) -> int:
     """Return the number of tokens in text (no special tokens)."""
     return len(tokenizer(text, add_special_tokens=False).input_ids)
+
+
+def apply_think_tags(text: str) -> str:
+    """Replace gpt-oss-120b reasoning markers with <think>/<​/think> tags.
+
+    Replaces 'assistantfinal' -> '</think>' first, then
+    'assistant' (not inside chat template headers) -> '<think>'.
+    """
+    text = text.replace('assistantfinal', '</think>')
+    text = re.sub(r'(?<!\|start_header_id\|>)assistant(?!final)', '<think>', text)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -435,26 +446,31 @@ def _find_last_subsequence(seq, subseq):
     return pos // 4
 
 
-def _tokenize_shard_worker(args):
-    """Multiprocessing entry point: stream from shard parquet, tokenize to Arrow.
+# Module-level list shared with fork()-ed workers via copy-on-write.
+_WORKER_TEXTS = None
 
-    Reads the shard parquet in small batches via iter_batches so that only one
-    batch of text + tokens is in memory at a time (instead of the full shard).
+
+def _tokenize_range_worker(args):
+    """Multiprocessing worker: tokenize a slice of the shared text list.
+
+    Reads from the module-level _WORKER_TEXTS (shared via fork CoW)
+    using start/end indices, so no text data is pickled or copied.
     """
-    shard_parquet, model_name, max_seq_length, arrow_path, header_ids, batch_size, shard_idx, num_shards = args
+    start, end, model_name, max_seq_length, arrow_path, header_ids, batch_size, worker_idx, num_workers = args
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    pf = pq.ParquetFile(shard_parquet)
-    total_rows = pf.metadata.num_rows
+    texts = _WORKER_TEXTS[start:end]
     header_len = len(header_ids)
     writer = ArrowWriter(path=arrow_path)
     masked_count = 0
     unmasked_count = 0
+    total = len(texts)
     rows_done = 0
-    log_prefix = f"[Shard {shard_idx + 1}/{num_shards}] "
+    log_prefix = f"[Worker {worker_idx + 1}/{num_workers}] "
 
-    for record_batch in pf.iter_batches(batch_size=batch_size, columns=["text"]):
-        texts = record_batch.column("text").to_pylist()
-        tokenized = tokenizer(texts, max_length=max_seq_length, truncation=True)
+    for batch_start in range(0, total, batch_size):
+        batch_texts = texts[batch_start:batch_start + batch_size]
+        tokenized = tokenizer(batch_texts, max_length=max_seq_length, truncation=True)
 
         batch_labels = []
         for input_ids in tokenized["input_ids"]:
@@ -474,81 +490,27 @@ def _tokenize_shard_worker(args):
             "labels": batch_labels,
         })
 
-        rows_done += len(texts)
+        rows_done += len(batch_texts)
         if rows_done % (batch_size * 10) < batch_size:
-            print(f"  {log_prefix}Tokenized {rows_done}/{total_rows} examples...")
+            print(f"  {log_prefix}Tokenized {rows_done}/{total} examples...")
 
     num_examples, num_bytes = writer.finalize()
     print(f"  {log_prefix}Wrote {num_examples} examples ({num_bytes / 1e6:.1f} MB)")
     return num_examples, num_bytes, masked_count, unmasked_count
 
 
-def _write_shard_parquets(source_parquet, output_path, num_shards):
-    """Stream a source parquet into per-shard parquet files.
-
-    Reads the source in chunks via iter_batches and distributes rows across
-    shard files so that the full dataset is never materialised in memory.
-    Returns a list of (shard_path, row_count) tuples.
-    """
-    pf = pq.ParquetFile(source_parquet)
-    total_rows = pf.metadata.num_rows
-    shard_size = math.ceil(total_rows / num_shards)
-
-    shard_info = []          # [(path, row_count), ...]
-    current_shard = 0
-    current_batches = []     # accumulated pyarrow RecordBatch slices
-    current_rows = 0
-
-    for record_batch in pf.iter_batches(batch_size=50_000, columns=["text"]):
-        offset = 0
-        while offset < len(record_batch):
-            remaining = shard_size - current_rows
-            take = min(remaining, len(record_batch) - offset)
-
-            current_batches.append(record_batch.slice(offset, take))
-            current_rows += take
-            offset += take
-
-            # Flush shard when full (but let the last shard accumulate all
-            # remaining rows so nothing is lost to rounding).
-            if current_rows >= shard_size and current_shard < num_shards - 1:
-                shard_path = os.path.join(output_path, f"_shard_{current_shard:05d}.parquet")
-                table = pa.Table.from_batches(current_batches)
-                pq.write_table(table, shard_path)
-                shard_info.append((shard_path, current_rows))
-                print(f"  Wrote shard {current_shard}: {current_rows} rows")
-                del table
-                current_batches = []
-                current_rows = 0
-                current_shard += 1
-
-    # Write the final shard
-    if current_batches:
-        shard_path = os.path.join(output_path, f"_shard_{current_shard:05d}.parquet")
-        table = pa.Table.from_batches(current_batches)
-        pq.write_table(table, shard_path)
-        shard_info.append((shard_path, current_rows))
-        print(f"  Wrote shard {current_shard}: {current_rows} rows")
-        del table
-
-    return shard_info
-
-
 def streaming_tokenize(source_parquet, tokenizer, max_seq_length, output_path,
                        batch_size=256, num_workers=1):
     """
-    Tokenize texts from *source_parquet*, streaming results directly to
-    Arrow file(s) on disk.  The source parquet is read in chunks via
-    ``iter_batches`` so the full dataset is **never** loaded into memory
-    as Python objects.
+    Tokenize texts from *source_parquet* to Arrow file(s) on disk.
 
     Creates a ``labels`` column with prompt tokens masked to -100 so the loss
     is computed only on the assistant response (proper SFT behaviour).
 
-    When *num_workers* > 1, the source parquet is split into per-worker shard
-    files (also streamed, not materialised in full), and each worker
-    tokenizes its shard independently.  The resulting multi-file dataset is
-    compatible with ``Dataset.load_from_disk()``.
+    When *num_workers* > 1, texts are loaded into a module-level list and
+    fork()-ed workers access their slice via copy-on-write — no intermediate
+    shard files or pickling of text data.  The resulting multi-file dataset
+    is compatible with ``Dataset.load_from_disk()``.
     """
     os.makedirs(output_path, exist_ok=True)
 
@@ -600,35 +562,39 @@ def streaming_tokenize(source_parquet, tokenizer, max_seq_length, output_path,
         data_files = [{"filename": "data-00000-of-00001.arrow"}]
     else:
         # ---- Multi-process path ----
-        # Stream the source parquet into per-shard parquet files so the full
-        # dataset is never in memory.  Workers then stream from their shards.
+        # Load texts into a module-level list so fork()-ed workers can
+        # access them via copy-on-write without pickling or shard files.
+        global _WORKER_TEXTS
         model_name = tokenizer.name_or_path
 
-        print(f"  Splitting source parquet into {num_workers} shards (streaming)...")
-        shard_info = _write_shard_parquets(source_parquet, output_path, num_workers)
-        actual_shards = len(shard_info)
+        print(f"  Loading texts for {num_workers} workers...")
+        _WORKER_TEXTS = []
+        for record_batch in pf.iter_batches(batch_size=50_000, columns=["text"]):
+            _WORKER_TEXTS.extend(record_batch.column("text").to_pylist())
+        print(f"  Loaded {len(_WORKER_TEXTS)} texts")
 
-        shard_args = []
-        shard_files = []
-        for i, (shard_path, _row_count) in enumerate(shard_info):
-            shard_files.append(shard_path)
+        chunk_size = math.ceil(len(_WORKER_TEXTS) / num_workers)
+        worker_args = []
+        for i in range(num_workers):
+            start = i * chunk_size
+            end = min(start + chunk_size, len(_WORKER_TEXTS))
+            if start >= len(_WORKER_TEXTS):
+                break
             arrow_path = os.path.join(
-                output_path, f"data-{i:05d}-of-{actual_shards:05d}.arrow",
+                output_path, f"data-{i:05d}-of-{num_workers:05d}.arrow",
             )
-            shard_args.append((
-                shard_path, model_name, max_seq_length, arrow_path,
-                header_ids, batch_size, i, actual_shards,
+            worker_args.append((
+                start, end, model_name, max_seq_length, arrow_path,
+                header_ids, batch_size, i, num_workers,
             ))
 
-        print(f"  Launching {actual_shards} tokenization workers...")
-        with ProcessPoolExecutor(max_workers=actual_shards) as pool:
-            results = list(pool.map(_tokenize_shard_worker, shard_args))
+        actual_workers = len(worker_args)
+        print(f"  Launching {actual_workers} tokenization workers...")
+        ctx = mp.get_context('fork')
+        with ctx.Pool(actual_workers) as pool:
+            results = pool.map(_tokenize_range_worker, worker_args)
 
-        for path in shard_files:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        _WORKER_TEXTS = None  # free shared memory
 
         num_examples = sum(r[0] for r in results)
         num_bytes = sum(r[1] for r in results)
@@ -636,8 +602,8 @@ def streaming_tokenize(source_parquet, tokenizer, max_seq_length, output_path,
         unmasked_count = sum(r[3] for r in results)
 
         data_files = [
-            {"filename": f"data-{i:05d}-of-{actual_shards:05d}.arrow"}
-            for i in range(actual_shards)
+            {"filename": f"data-{i:05d}-of-{num_workers:05d}.arrow"}
+            for i in range(actual_workers)
         ]
 
     print(f"  Wrote {num_examples} examples ({num_bytes / 1e6:.1f} MB)")
@@ -836,8 +802,14 @@ def parse_args():
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=1,
-        help="Number of parallel workers for tokenization (default: 1, single-process)",
+        default=os.cpu_count() or 1,
+        help="Number of parallel workers for tokenization (default: all CPUs)",
+    )
+    parser.add_argument(
+        "--change-to-think",
+        action="store_true",
+        default=False,
+        help="Replace reasoning markers (assistant/assistantfinal) with <think>/</think> tags",
     )
     return parser.parse_args()
 
@@ -904,6 +876,8 @@ def main():
             else:
                 if was_truncated:
                     truncated_count += 1
+                if args.change_to_think:
+                    prompt = apply_think_tags(prompt)
                 prompts.append(prompt)
 
         print(f"  Built {len(prompts)} prompts")
