@@ -131,6 +131,31 @@ def merge_shards(shard_dir: Path, output_path: Path, num_shards: int) -> pd.Data
     return combined
 
 
+def _compute_scenario_metrics(df: pd.DataFrame, group_col: str,
+                               label_col: str, k: int) -> dict:
+    """Compute ranking metrics for a pre-sorted, pre-filtered DataFrame."""
+    top_k = df.groupby(group_col).head(k)
+    if len(top_k) == 0:
+        return {
+            'map_at_k': 0.0, 'positive_rate': 0.0, 'num_groups': 0,
+            'total_samples': 0, 'median_group_size': 0.0,
+            'mean_group_size': 0.0, 'ap_scores': pd.Series(dtype=float),
+        }
+    ap_scores = top_k.groupby(group_col)[label_col].apply(
+        lambda x: average_precision_at_k(x.values)
+    )
+    group_sizes = top_k.groupby(group_col).size()
+    return {
+        'map_at_k': ap_scores.mean(),
+        'positive_rate': top_k[label_col].mean(),
+        'num_groups': len(ap_scores),
+        'total_samples': len(top_k),
+        'median_group_size': group_sizes.median(),
+        'mean_group_size': group_sizes.mean(),
+        'ap_scores': ap_scores,
+    }
+
+
 def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_dir: Path,
                                          group_col: str, mode_label: str, k: int):
     """Run classification metrics, regression metrics, and ranking evaluation."""
@@ -238,33 +263,104 @@ N samples:             {len(gold_scores)}
 
     print(f"Regression PDF report saved to: {reg_pdf_path}")
 
-    # --- Ranking Metrics (score-based top-K) ---
-    print(f"\n--- Ranking Metrics (top-{k} by regression score) ---")
-    scored_set = validation_set.sort_values(
+    # --- Ranking Metrics: Three-Scenario Comparison ---
+    print(f"\n--- Ranking Metrics (top-{k}, three scenarios) ---")
+
+    base_df = validation_set.copy()
+    base_df['_binary_label'] = (base_df.eligibility_result > 0).astype(float)
+    base_df['_original_rank'] = base_df.groupby(group_col).cumcount()
+
+    # Scenario A: Without TrialChecker (cosine similarity order only)
+    scenario_a_df = base_df.sort_values(by=[group_col, '_original_rank'])
+    scenario_a_stats = _compute_scenario_metrics(scenario_a_df, group_col, '_binary_label', k)
+
+    # Scenario B: TrialChecker as hard filter (>= 1.0), keep cosine similarity order
+    scenario_b_df = base_df[base_df.prediction_score >= 1.0].copy()
+    scenario_b_df = scenario_b_df.sort_values(by=[group_col, '_original_rank'])
+    scenario_b_stats = _compute_scenario_metrics(scenario_b_df, group_col, '_binary_label', k)
+
+    # Scenario C: TrialChecker as re-ranker (>= 1.0 filter, rank by prediction_score)
+    scenario_c_df = base_df[base_df.prediction_score >= 1.0].copy()
+    scenario_c_df = scenario_c_df.sort_values(
         by=[group_col, 'prediction_score'], ascending=[True, False]
-    ).copy()
-    scored_set['_binary_label'] = (scored_set.eligibility_result > 0).astype(float)
-    top_k = scored_set.groupby(group_col).head(k)
+    )
+    scenario_c_stats = _compute_scenario_metrics(scenario_c_df, group_col, '_binary_label', k)
 
-    print(f"Samples in top-{k}: {len(top_k)}")
-    if len(top_k) > 0:
-        print(f"Positive rate in top-{k}: {top_k._binary_label.mean():.4f}")
+    scenarios = [
+        ('A: No TrialChecker (cosine sim)', scenario_a_stats),
+        ('B: TrialChecker Filter (>= 1)', scenario_b_stats),
+        ('C: TrialChecker Re-Ranker (>= 1)', scenario_c_stats),
+    ]
 
-        temp = top_k.groupby(group_col)._binary_label.apply(
-            lambda x: average_precision_at_k(x.values)
-        )
-        map_k = temp.mean()
-        print(f"MAP@{k}: {map_k:.4f}")
+    kstr = f'MAP@{k}'
+    print(f"\n{'Scenario':<38} {kstr:<10} {'PosRate':<10} {'Groups':<8} {'Samples':<10} {'MedSz':<8} {'MeanSz':<8}")
+    print("-" * 92)
+    for name, stats in scenarios:
+        print(f"{name:<38} {stats['map_at_k']:<10.4f} {stats['positive_rate']:<10.4f} "
+              f"{stats['num_groups']:<8} {stats['total_samples']:<10} "
+              f"{stats['median_group_size']:<8.1f} {stats['mean_group_size']:<8.1f}")
 
-        pdf_path = output_dir / f"trial_checker_{mode_label}_ranking.pdf"
-        generate_ranking_report(
-            top_k,
-            group_col=group_col,
-            label_col='_binary_label',
-            pdf_path=str(pdf_path),
-            title_prefix=f"Trial Checker {mode_label.replace('_', ' ').title()} (Score-Ranked)",
-            k=k
-        )
+    # Generate comparison ranking PDF
+    title_base = f"Trial Checker {mode_label.replace('_', ' ').title()}"
+    pdf_path = output_dir / f"trial_checker_{mode_label}_ranking.pdf"
+
+    with PdfPages(str(pdf_path)) as pdf:
+        # Page 1: Summary comparison table
+        fig, ax = plt.subplots(figsize=(11, 8))
+        ax.axis('off')
+        summary = f"""{title_base} Ranking Scenario Comparison
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+K = {k}
+{'=' * 80}
+
+{'Scenario':<42} {kstr:<9} {'PosRate':<9} {'Groups':<8} {'Samples':<9} {'MedSz':<8} {'MeanSz':<8}
+{'-' * 93}
+"""
+        for name, stats in scenarios:
+            summary += (f"{name:<42} {stats['map_at_k']:<9.4f} {stats['positive_rate']:<9.4f} "
+                        f"{stats['num_groups']:<8} {stats['total_samples']:<9} "
+                        f"{stats['median_group_size']:<8.1f} {stats['mean_group_size']:<8.1f}\n")
+        ax.text(0.05, 0.95, summary, transform=ax.transAxes,
+                fontsize=10, verticalalignment='top', fontfamily='monospace')
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 2: Overlaid AP distribution histograms
+        fig, ax = plt.subplots(figsize=(10, 6))
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+        for (name, stats), color in zip(scenarios, colors):
+            ap = stats['ap_scores']
+            if len(ap) > 0:
+                ax.hist(ap, bins=20, alpha=0.4, color=color, edgecolor=color,
+                        label=f"{name} (MAP@{k}={stats['map_at_k']:.4f})")
+        ax.set_xlabel('Average Precision')
+        ax.set_ylabel('Frequency')
+        ax.set_title(f'{title_base} AP@{k} Distribution by Scenario')
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 3: Side-by-side individual AP histograms
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharey=True)
+        for ax_i, ((name, stats), color) in enumerate(zip(scenarios, colors)):
+            ap = stats['ap_scores']
+            if len(ap) > 0:
+                axes[ax_i].hist(ap, bins=20, alpha=0.7, color=color, edgecolor='black')
+                axes[ax_i].axvline(stats['map_at_k'], color='r', linestyle='--',
+                                   label=f"MAP@{k}={stats['map_at_k']:.4f}")
+            axes[ax_i].set_xlabel('Average Precision')
+            if ax_i == 0:
+                axes[ax_i].set_ylabel('Frequency')
+            axes[ax_i].set_title(name, fontsize=9)
+            axes[ax_i].legend(fontsize=8)
+            axes[ax_i].grid(True, alpha=0.3)
+        fig.suptitle(f'{title_base} AP@{k} Distributions', fontsize=12)
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+    print(f"Ranking comparison report saved to: {pdf_path}")
 
 
 def evaluate_patient_centric(data_dir: Path, output_dir: Path,
