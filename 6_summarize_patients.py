@@ -33,6 +33,25 @@ python 6_summarize_patients.py \
   --synthetic_max_days 90 \
   --max_patients 10
 
+
+# shorter chunks
+python 6_summarize_patients.py \
+  --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
+  --output_parquet ../data/no_phi/patient_serial_summaries_20K_chunks.parquet \
+  --shard_dir ../data/no_phi/summary_shards_20K_chunks \
+  --model openai/gpt-oss-120b \
+  --download_dir ~/models \
+  --gpu_ids 0,1,2,3,4,5,6,7 \
+  --gpus_per_server 1 \
+  --max_model_len 50000 \
+  --chunk_size 20000 \
+  --chunk_overlap 500 \
+  --generate_dates \
+  --synthetic_start_date 2017-01-01 \
+  --synthetic_min_days 7 \
+  --synthetic_max_days 90 \
+
+
 # Two servers, 2 GPUs each (4 GPUs total, tensor_parallel_size=2 per server)
 python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \

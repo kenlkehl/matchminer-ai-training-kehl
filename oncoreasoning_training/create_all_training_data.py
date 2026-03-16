@@ -640,8 +640,8 @@ def load_boilerplate(data_dir):
 
 
 def load_summarization(data_dir):
-    sum_path = os.path.join(data_dir, 'patient_serial_summaries.parquet')
-    chunk_path = os.path.join(data_dir, 'summary_shards', 'prepared_chunks.parquet')
+    sum_path = os.path.join(data_dir, 'patient_serial_summaries_20K_chunks.parquet')
+    chunk_path = os.path.join(data_dir, 'summary_shards_20K_chunks', 'prepared_chunks.parquet')
     print(f"  Loading {sum_path}...")
     serial_summaries = pd.read_parquet(sum_path)
     print(f"  Loaded {len(serial_summaries)} summary records")
