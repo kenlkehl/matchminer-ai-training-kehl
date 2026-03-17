@@ -7,12 +7,15 @@ Usage:
 """
 import argparse
 import os
-import re
+import tempfile
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from transformers import AutoTokenizer
 
 from create_all_training_data import apply_think_tags, streaming_tokenize
+
+CONVERT_BATCH_SIZE = 10_000
 
 
 def main():
@@ -34,18 +37,45 @@ def main():
 
     output_parquet = args.output or args.input
 
-    # Step 1: Replace reasoning markers
-    print(f"Reading {args.input}...")
-    df = pd.read_parquet(args.input)
-    print(f"  {len(df)} rows")
+    # Step 1: Replace reasoning markers (streaming — constant memory)
+    pf = pq.ParquetFile(args.input)
+    total_rows = pf.metadata.num_rows
+    print(f"Reading {args.input} ({total_rows} rows)")
 
-    print("Applying think tag replacements...")
-    df['text'] = df['text'].apply(apply_think_tags)
+    # Write to a temp file when overwriting the input, then atomically swap
+    overwriting = os.path.abspath(output_parquet) == os.path.abspath(args.input)
+    if overwriting:
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            suffix='.parquet', dir=os.path.dirname(os.path.abspath(output_parquet)))
+        os.close(tmp_fd)
+        write_path = tmp_path
+    else:
+        tmp_path = None
+        write_path = output_parquet
 
-    print(f"Writing to {output_parquet}...")
-    df.to_parquet(output_parquet)
-    print(f"  Wrote {len(df)} rows")
-    del df
+    print("Applying think tag replacements (streaming)...")
+    schema = pf.schema_arrow
+    writer = pq.ParquetWriter(write_path, schema)
+    rows_done = 0
+    try:
+        for batch in pf.iter_batches(batch_size=CONVERT_BATCH_SIZE):
+            texts = batch.column("text").to_pylist()
+            converted = [apply_think_tags(t) for t in texts]
+            out_batch = pa.RecordBatch.from_pydict(
+                {"text": converted}, schema=schema)
+            writer.write_batch(out_batch)
+            rows_done += len(texts)
+            if rows_done % (CONVERT_BATCH_SIZE * 10) < CONVERT_BATCH_SIZE:
+                print(f"  Processed {rows_done}/{total_rows} rows...")
+        writer.close()
+        if overwriting:
+            os.replace(tmp_path, output_parquet)
+            tmp_path = None  # successfully moved, don't clean up
+    finally:
+        if tmp_path is not None and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    print(f"  Wrote {rows_done} rows to {output_parquet}")
 
     # Step 2: Re-tokenize
     tokenized_path = os.path.join(os.path.dirname(output_parquet),

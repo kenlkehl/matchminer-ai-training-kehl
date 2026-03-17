@@ -126,6 +126,16 @@ def merge_shards(shard_dir: Path, output_path: Path, num_shards: int) -> pd.Data
     return combined
 
 
+def _ndcg_at_k(relevance_scores: np.ndarray) -> float:
+    """Compute NDCG for a single ranked list of graded relevance scores."""
+    dcg = np.sum(relevance_scores / np.log2(np.arange(2, len(relevance_scores) + 2)))
+    ideal = np.sort(relevance_scores)[::-1]
+    idcg = np.sum(ideal / np.log2(np.arange(2, len(ideal) + 2)))
+    if idcg == 0:
+        return 0.0
+    return dcg / idcg
+
+
 def _compute_scenario_metrics(df: pd.DataFrame, group_col: str,
                                label_col: str, k: int) -> dict:
     """Compute ranking metrics for a pre-sorted, pre-filtered DataFrame."""
@@ -135,11 +145,16 @@ def _compute_scenario_metrics(df: pd.DataFrame, group_col: str,
             'map_at_k': 0.0, 'positive_rate': 0.0, 'num_groups': 0,
             'total_samples': 0, 'median_group_size': 0.0,
             'mean_group_size': 0.0, 'ap_scores': pd.Series(dtype=float),
+            'mean_gold_score': 0.0, 'ndcg_at_k': 0.0,
         }
     ap_scores = top_k.groupby(group_col)[label_col].apply(
         lambda x: average_precision_at_k(x.values)
     )
     group_sizes = top_k.groupby(group_col).size()
+    mean_gold = top_k['eligibility_result'].mean()
+    ndcg_scores = top_k.groupby(group_col)['eligibility_result'].apply(
+        lambda x: _ndcg_at_k(x.values)
+    )
     return {
         'map_at_k': ap_scores.mean(),
         'positive_rate': top_k[label_col].mean(),
@@ -148,6 +163,8 @@ def _compute_scenario_metrics(df: pd.DataFrame, group_col: str,
         'median_group_size': group_sizes.median(),
         'mean_group_size': group_sizes.mean(),
         'ap_scores': ap_scores,
+        'mean_gold_score': mean_gold,
+        'ndcg_at_k': ndcg_scores.mean(),
     }
 
 
@@ -288,10 +305,12 @@ N samples:             {len(gold_scores)}
     ]
 
     kstr = f'MAP@{k}'
-    print(f"\n{'Scenario':<38} {kstr:<10} {'PosRate':<10} {'Groups':<8} {'Samples':<10} {'MedSz':<8} {'MeanSz':<8}")
-    print("-" * 92)
+    nstr = f'NDCG@{k}'
+    print(f"\n{'Scenario':<38} {kstr:<10} {nstr:<10} {'PosRate':<10} {'MeanGold':<10} {'Groups':<8} {'Samples':<10} {'MedSz':<8} {'MeanSz':<8}")
+    print("-" * 112)
     for name, stats in scenarios:
-        print(f"{name:<38} {stats['map_at_k']:<10.4f} {stats['positive_rate']:<10.4f} "
+        print(f"{name:<38} {stats['map_at_k']:<10.4f} {stats['ndcg_at_k']:<10.4f} {stats['positive_rate']:<10.4f} "
+              f"{stats['mean_gold_score']:<10.4f} "
               f"{stats['num_groups']:<8} {stats['total_samples']:<10} "
               f"{stats['median_group_size']:<8.1f} {stats['mean_group_size']:<8.1f}")
 
@@ -301,13 +320,14 @@ N samples:             {len(gold_scores)}
 
     with PdfPages(str(pdf_path)) as pdf:
         # Page 1: Summary comparison table
-        fig, ax = plt.subplots(figsize=(11, 8))
+        fig, ax = plt.subplots(figsize=(12, 8))
         ax.axis('off')
         summary = f"""{title_base} Ranking Scenario Comparison
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 K = {k}
-{'=' * 80}
+{'=' * 100}
 
+Binary Metrics (eligibility > 0 = positive):
 {'Scenario':<42} {kstr:<9} {'PosRate':<9} {'Groups':<8} {'Samples':<9} {'MedSz':<8} {'MeanSz':<8}
 {'-' * 93}
 """
@@ -315,6 +335,15 @@ K = {k}
             summary += (f"{name:<42} {stats['map_at_k']:<9.4f} {stats['positive_rate']:<9.4f} "
                         f"{stats['num_groups']:<8} {stats['total_samples']:<9} "
                         f"{stats['median_group_size']:<8.1f} {stats['mean_group_size']:<8.1f}\n")
+
+        summary += f"""
+Graded Relevance Metrics (using continuous eligibility scores 0-5):
+{'Scenario':<42} {nstr:<10} {'MeanGold':<10}
+{'-' * 62}
+"""
+        for name, stats in scenarios:
+            summary += f"{name:<42} {stats['ndcg_at_k']:<10.4f} {stats['mean_gold_score']:<10.4f}\n"
+
         ax.text(0.05, 0.95, summary, transform=ax.transAxes,
                 fontsize=10, verticalalignment='top', fontfamily='monospace')
         pdf.savefig(fig, bbox_inches='tight')
@@ -383,53 +412,58 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
         if validation_set is None:
             return
     else:
-        consolidated_path = data_dir / "consolidated_eligibility_patient_centric.csv"
-        if not consolidated_path.exists():
-            print(f"Consolidated eligibility file not found: {consolidated_path}")
-            return
-
-        print(f"Loading consolidated file: {consolidated_path}")
-        combined_df = pd.read_csv(consolidated_path)
-        print(f"Loaded {len(combined_df)} rows")
-
-        if split_filter and 'split' in combined_df.columns:
-            combined_df = combined_df[combined_df.split.str.contains(split_filter)]
-            print(f"Filtered to {split_filter} split: {len(combined_df)} rows")
-
-        combined_df = combined_df[~combined_df.patient_summary.isnull()]
-        validation_set = combined_df.copy()
-
-        # Apply sharding if specified
-        if shard_id is not None and num_shards is not None:
-            validation_set = validation_set.iloc[shard_id::num_shards].reset_index(drop=True)
-            print(f"Processing shard {shard_id + 1}/{num_shards}: {len(validation_set)} samples")
-
-        print(f"Unique trial spaces: {validation_set.this_space.nunique()}")
-        print(f"Unique patients: {validation_set.patient_summary.nunique()}")
-
-        if run_inference and model_path:
-            validation_set = run_trial_checker_inference(
-                validation_set, model_path, device='cuda', batch_size=batch_size
-            )
-            if shard_dir_path and shard_id is not None:
-                shard_dir_path.mkdir(parents=True, exist_ok=True)
-                shard_path = shard_dir_path / f"shard_{shard_id}.csv"
-                validation_set.to_csv(shard_path, index=False)
-                print(f"Saved shard to: {shard_path}")
+        # When not running inference, try pre-computed predictions first
+        precomputed_path = output_dir / "patient_centric_with_predictions_soc.csv"
+        if not run_inference and precomputed_path.exists():
+            print(f"Loading pre-computed predictions from: {precomputed_path}")
+            validation_set = pd.read_csv(precomputed_path)
+        else:
+            consolidated_path = data_dir / "consolidated_eligibility_patient_centric.csv"
+            if not consolidated_path.exists():
+                print(f"Consolidated eligibility file not found: {consolidated_path}")
                 return
-            else:
-                output_dir.mkdir(parents=True, exist_ok=True)
-                intermediate_path = output_dir / "patient_centric_with_predictions_soc.csv"
-                validation_set.to_csv(intermediate_path, index=False)
-                print(f"Saved predictions to: {intermediate_path}")
-        elif 'prediction_score' not in validation_set.columns:
-            precomputed_path = output_dir / "patient_centric_with_predictions_soc.csv"
-            if precomputed_path.exists():
-                print(f"Loading pre-computed predictions from: {precomputed_path}")
-                validation_set = pd.read_csv(precomputed_path)
-            else:
-                print("No predictions available. Use --run-inference to generate them.")
-                return
+
+            print(f"Loading consolidated file: {consolidated_path}")
+            combined_df = pd.read_csv(consolidated_path)
+            print(f"Loaded {len(combined_df)} rows")
+
+            if split_filter and 'split' in combined_df.columns:
+                combined_df = combined_df[combined_df.split.str.contains(split_filter)]
+                print(f"Filtered to {split_filter} split: {len(combined_df)} rows")
+
+            combined_df = combined_df[~combined_df.patient_summary.isnull()]
+            validation_set = combined_df.copy()
+
+            # Apply sharding if specified
+            if shard_id is not None and num_shards is not None:
+                validation_set = validation_set.iloc[shard_id::num_shards].reset_index(drop=True)
+                print(f"Processing shard {shard_id + 1}/{num_shards}: {len(validation_set)} samples")
+
+            print(f"Unique trial spaces: {validation_set.this_space.nunique()}")
+            print(f"Unique patients: {validation_set.patient_summary.nunique()}")
+
+            if run_inference and model_path:
+                validation_set = run_trial_checker_inference(
+                    validation_set, model_path, device='cuda', batch_size=batch_size
+                )
+                if shard_dir_path and shard_id is not None:
+                    shard_dir_path.mkdir(parents=True, exist_ok=True)
+                    shard_path = shard_dir_path / f"shard_{shard_id}.csv"
+                    validation_set.to_csv(shard_path, index=False)
+                    print(f"Saved shard to: {shard_path}")
+                    return
+                else:
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    intermediate_path = output_dir / "patient_centric_with_predictions_soc.csv"
+                    validation_set.to_csv(intermediate_path, index=False)
+                    print(f"Saved predictions to: {intermediate_path}")
+            elif 'prediction_score' not in validation_set.columns:
+                if precomputed_path.exists():
+                    print(f"Loading pre-computed predictions from: {precomputed_path}")
+                    validation_set = pd.read_csv(precomputed_path)
+                else:
+                    print("No predictions available. Use --run-inference to generate them.")
+                    return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -464,53 +498,58 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
         if validation_set is None:
             return
     else:
-        consolidated_path = data_dir / "consolidated_eligibility_trial_centric.csv"
-        if not consolidated_path.exists():
-            print(f"Consolidated eligibility file not found: {consolidated_path}")
-            return
-
-        print(f"Loading consolidated file: {consolidated_path}")
-        combined_df = pd.read_csv(consolidated_path)
-        print(f"Loaded {len(combined_df)} rows")
-
-        if split_filter and 'split' in combined_df.columns:
-            combined_df = combined_df[combined_df.split.str.contains(split_filter)]
-            print(f"Filtered to {split_filter} split: {len(combined_df)} rows")
-
-        combined_df = combined_df[~combined_df.patient_summary.isnull()]
-        validation_set = combined_df.copy()
-
-        # Apply sharding if specified
-        if shard_id is not None and num_shards is not None:
-            validation_set = validation_set.iloc[shard_id::num_shards].reset_index(drop=True)
-            print(f"Processing shard {shard_id + 1}/{num_shards}: {len(validation_set)} samples")
-
-        print(f"Unique trial spaces: {validation_set.this_space.nunique()}")
-        print(f"Unique patients: {validation_set.patient_summary.nunique()}")
-
-        if run_inference and model_path:
-            validation_set = run_trial_checker_inference(
-                validation_set, model_path, device='cuda', batch_size=batch_size
-            )
-            if shard_dir_path and shard_id is not None:
-                shard_dir_path.mkdir(parents=True, exist_ok=True)
-                shard_path = shard_dir_path / f"shard_{shard_id}.csv"
-                validation_set.to_csv(shard_path, index=False)
-                print(f"Saved shard to: {shard_path}")
+        # When not running inference, try pre-computed predictions first
+        precomputed_path = output_dir / "trial_centric_with_predictions_soc.csv"
+        if not run_inference and precomputed_path.exists():
+            print(f"Loading pre-computed predictions from: {precomputed_path}")
+            validation_set = pd.read_csv(precomputed_path)
+        else:
+            consolidated_path = data_dir / "consolidated_eligibility_trial_centric.csv"
+            if not consolidated_path.exists():
+                print(f"Consolidated eligibility file not found: {consolidated_path}")
                 return
-            else:
-                output_dir.mkdir(parents=True, exist_ok=True)
-                intermediate_path = output_dir / "trial_centric_with_predictions_soc.csv"
-                validation_set.to_csv(intermediate_path, index=False)
-                print(f"Saved predictions to: {intermediate_path}")
-        elif 'prediction_score' not in validation_set.columns:
-            precomputed_path = output_dir / "trial_centric_with_predictions_soc.csv"
-            if precomputed_path.exists():
-                print(f"Loading pre-computed predictions from: {precomputed_path}")
-                validation_set = pd.read_csv(precomputed_path)
-            else:
-                print("No predictions available. Use --run-inference to generate them.")
-                return
+
+            print(f"Loading consolidated file: {consolidated_path}")
+            combined_df = pd.read_csv(consolidated_path)
+            print(f"Loaded {len(combined_df)} rows")
+
+            if split_filter and 'split' in combined_df.columns:
+                combined_df = combined_df[combined_df.split.str.contains(split_filter)]
+                print(f"Filtered to {split_filter} split: {len(combined_df)} rows")
+
+            combined_df = combined_df[~combined_df.patient_summary.isnull()]
+            validation_set = combined_df.copy()
+
+            # Apply sharding if specified
+            if shard_id is not None and num_shards is not None:
+                validation_set = validation_set.iloc[shard_id::num_shards].reset_index(drop=True)
+                print(f"Processing shard {shard_id + 1}/{num_shards}: {len(validation_set)} samples")
+
+            print(f"Unique trial spaces: {validation_set.this_space.nunique()}")
+            print(f"Unique patients: {validation_set.patient_summary.nunique()}")
+
+            if run_inference and model_path:
+                validation_set = run_trial_checker_inference(
+                    validation_set, model_path, device='cuda', batch_size=batch_size
+                )
+                if shard_dir_path and shard_id is not None:
+                    shard_dir_path.mkdir(parents=True, exist_ok=True)
+                    shard_path = shard_dir_path / f"shard_{shard_id}.csv"
+                    validation_set.to_csv(shard_path, index=False)
+                    print(f"Saved shard to: {shard_path}")
+                    return
+                else:
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    intermediate_path = output_dir / "trial_centric_with_predictions_soc.csv"
+                    validation_set.to_csv(intermediate_path, index=False)
+                    print(f"Saved predictions to: {intermediate_path}")
+            elif 'prediction_score' not in validation_set.columns:
+                if precomputed_path.exists():
+                    print(f"Loading pre-computed predictions from: {precomputed_path}")
+                    validation_set = pd.read_csv(precomputed_path)
+                else:
+                    print("No predictions available. Use --run-inference to generate them.")
+                    return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

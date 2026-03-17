@@ -446,53 +446,53 @@ def _find_last_subsequence(seq, subseq):
     return pos // 4
 
 
-# Module-level list shared with fork()-ed workers via copy-on-write.
-_WORKER_TEXTS = None
-
-
 def _tokenize_range_worker(args):
-    """Multiprocessing worker: tokenize a slice of the shared text list.
+    """Multiprocessing worker: tokenize row groups from a parquet file.
 
-    Reads from the module-level _WORKER_TEXTS (shared via fork CoW)
-    using start/end indices, so no text data is pickled or copied.
+    Each worker opens the source parquet independently and reads only its
+    assigned row groups, so no text data is loaded into the parent process.
     """
-    start, end, model_name, max_seq_length, arrow_path, header_ids, batch_size, worker_idx, num_workers = args
+    (source_parquet, row_group_indices, model_name, max_seq_length,
+     arrow_path, header_ids, batch_size, worker_idx, num_workers) = args
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    texts = _WORKER_TEXTS[start:end]
+    pf = pq.ParquetFile(source_parquet)
     header_len = len(header_ids)
     writer = ArrowWriter(path=arrow_path)
     masked_count = 0
     unmasked_count = 0
-    total = len(texts)
+    total = sum(pf.metadata.row_group(i).num_rows for i in row_group_indices)
     rows_done = 0
     log_prefix = f"[Worker {worker_idx + 1}/{num_workers}] "
 
-    for batch_start in range(0, total, batch_size):
-        batch_texts = texts[batch_start:batch_start + batch_size]
-        tokenized = tokenizer(batch_texts, max_length=max_seq_length, truncation=True)
+    for rg_idx in row_group_indices:
+        texts = pf.read_row_group(rg_idx, columns=["text"]).column("text").to_pylist()
 
-        batch_labels = []
-        for input_ids in tokenized["input_ids"]:
-            labels = list(input_ids)
-            idx = _find_last_subsequence(input_ids, header_ids)
-            if idx >= 0:
-                mask_end = idx + header_len
-                labels[:mask_end] = [-100] * mask_end
-                masked_count += 1
-            else:
-                unmasked_count += 1
-            batch_labels.append(labels)
+        for batch_start in range(0, len(texts), batch_size):
+            batch_texts = texts[batch_start:batch_start + batch_size]
+            tokenized = tokenizer(batch_texts, max_length=max_seq_length, truncation=True)
 
-        writer.write_batch({
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": batch_labels,
-        })
+            batch_labels = []
+            for input_ids in tokenized["input_ids"]:
+                labels = list(input_ids)
+                idx = _find_last_subsequence(input_ids, header_ids)
+                if idx >= 0:
+                    mask_end = idx + header_len
+                    labels[:mask_end] = [-100] * mask_end
+                    masked_count += 1
+                else:
+                    unmasked_count += 1
+                batch_labels.append(labels)
 
-        rows_done += len(batch_texts)
-        if rows_done % (batch_size * 10) < batch_size:
-            print(f"  {log_prefix}Tokenized {rows_done}/{total} examples...")
+            writer.write_batch({
+                "input_ids": tokenized["input_ids"],
+                "attention_mask": tokenized["attention_mask"],
+                "labels": batch_labels,
+            })
+
+            rows_done += len(batch_texts)
+            if rows_done % (batch_size * 10) < batch_size:
+                print(f"  {log_prefix}Tokenized {rows_done}/{total} examples...")
 
     num_examples, num_bytes = writer.finalize()
     print(f"  {log_prefix}Wrote {num_examples} examples ({num_bytes / 1e6:.1f} MB)")
@@ -507,10 +507,11 @@ def streaming_tokenize(source_parquet, tokenizer, max_seq_length, output_path,
     Creates a ``labels`` column with prompt tokens masked to -100 so the loss
     is computed only on the assistant response (proper SFT behaviour).
 
-    When *num_workers* > 1, texts are loaded into a module-level list and
-    fork()-ed workers access their slice via copy-on-write — no intermediate
-    shard files or pickling of text data.  The resulting multi-file dataset
-    is compatible with ``Dataset.load_from_disk()``.
+    When *num_workers* > 1, the parquet file's row groups are distributed
+    across workers.  Each worker opens the file independently and reads only
+    its assigned row groups — no text data is loaded into the parent process.
+    The resulting multi-file dataset is compatible with
+    ``Dataset.load_from_disk()``.
     """
     os.makedirs(output_path, exist_ok=True)
 
@@ -562,39 +563,40 @@ def streaming_tokenize(source_parquet, tokenizer, max_seq_length, output_path,
         data_files = [{"filename": "data-00000-of-00001.arrow"}]
     else:
         # ---- Multi-process path ----
-        # Load texts into a module-level list so fork()-ed workers can
-        # access them via copy-on-write without pickling or shard files.
-        global _WORKER_TEXTS
+        # Distribute parquet row groups across workers.  Each worker opens
+        # the file independently and reads only its assigned row groups,
+        # so no text data is loaded into the parent process.
         model_name = tokenizer.name_or_path
+        num_row_groups = pf.metadata.num_row_groups
 
-        print(f"  Loading texts for {num_workers} workers...")
-        _WORKER_TEXTS = []
-        for record_batch in pf.iter_batches(batch_size=50_000, columns=["text"]):
-            _WORKER_TEXTS.extend(record_batch.column("text").to_pylist())
-        print(f"  Loaded {len(_WORKER_TEXTS)} texts")
+        if num_row_groups < num_workers:
+            print(f"  Warning: only {num_row_groups} row groups in parquet, "
+                  f"capping workers from {num_workers} to {num_row_groups}")
+            num_workers = num_row_groups
 
-        chunk_size = math.ceil(len(_WORKER_TEXTS) / num_workers)
+        # Round-robin assignment of row groups to workers
+        rg_assignments = [[] for _ in range(num_workers)]
+        for rg_idx in range(num_row_groups):
+            rg_assignments[rg_idx % num_workers].append(rg_idx)
+
         worker_args = []
         for i in range(num_workers):
-            start = i * chunk_size
-            end = min(start + chunk_size, len(_WORKER_TEXTS))
-            if start >= len(_WORKER_TEXTS):
+            if not rg_assignments[i]:
                 break
             arrow_path = os.path.join(
                 output_path, f"data-{i:05d}-of-{num_workers:05d}.arrow",
             )
             worker_args.append((
-                start, end, model_name, max_seq_length, arrow_path,
-                header_ids, batch_size, i, num_workers,
+                source_parquet, rg_assignments[i], model_name,
+                max_seq_length, arrow_path, header_ids, batch_size,
+                i, num_workers,
             ))
 
         actual_workers = len(worker_args)
-        print(f"  Launching {actual_workers} tokenization workers...")
-        ctx = mp.get_context('fork')
-        with ctx.Pool(actual_workers) as pool:
+        print(f"  Launching {actual_workers} tokenization workers "
+              f"({num_row_groups} row groups)...")
+        with mp.Pool(actual_workers) as pool:
             results = pool.map(_tokenize_range_worker, worker_args)
-
-        _WORKER_TEXTS = None  # free shared memory
 
         num_examples = sum(r[0] for r in results)
         num_bytes = sum(r[1] for r in results)
@@ -934,7 +936,7 @@ def main():
     combined_df = combined_df.sample(frac=1.0, random_state=args.seed).reset_index(drop=True)
 
     print(f"Saving combined parquet to {combined_path}...")
-    combined_df.to_parquet(combined_path)
+    combined_df.to_parquet(combined_path, row_group_size=10_000)
     print(f"Saved {len(combined_df)} rows")
 
     # Tokenize — stream directly from the parquet we just saved
