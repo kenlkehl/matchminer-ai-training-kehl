@@ -233,17 +233,15 @@ def worker_process(
                 {"role": "user", "content": (
                     "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
                     "Your job is to evaluate whether a given clinical trial is a reasonable consideration for a patient, "
-                    "given a clinical trial summary and a patient summary.\n\n"
+                    "given a clinical trial summary and a patient summary, and then score how targeted the trial is for "
+                    "this specific patient.\n\n"
                     f"Here is a summary of the clinical trial:\n{trial_summary}\n"
                     f"Here is a summary of the patient:\n{patient_summary}\n"
                     "Base your judgment on whether the patient generally fits the age requirements if any, sex requirements if any, cancer type(s), cancer burden, prior treatment(s), "
                     "and biomarker criteria specified for the trial.\n"
                     "You do not have to determine if the patient is actually eligible; instead please just evaluate whether it is reasonable "
                     "for the trial to be considered further by the patient's oncologist.\n"
-                    "Biomarker criteria have to be considered carefully. Some trials have biomarker requirements that are not assessed until "
-                    "formal trial screening. A trial may therefore sometimes be a reasonable consideration for a patient even if a required "
-                    "biomarker is not known to be present in the patient.\n"
-                    "However, if a required biomarker is known to be absent, or can be assumed to be absent based on other information, the trial "
+                    "Biomarker criteria have to be considered carefully. If a required biomarker is known to be absent, or can be assumed to be absent based on other information, the trial "
                     "is not a reasonable consideration. For example, if a trial for lung cancer requires an EGFR mutation, documentation that there "
                     "is no EGFR mutation indicates the trial is not a reasonable consideration. Similarly, documentation of a KRAS mutation in the "
                     "patient indicates the trial is not a reasonable consideration, since, as you know, KRAS and EGFR driver mutations in lung cancer "
@@ -254,14 +252,30 @@ def worker_process(
                     "Also CRITICAL: Ignore your knowledge of today's current date. Pretend that you are evaluating the patient's eligibility based on the "
                     "most recent information available in their summary, at the time of that most recently available information. "
                     "Do not provide ethical judgments or comment on resource constraints with respect whether the trial is a reasonable clinical "
-                    "consideration; just evaluate whether it is, given the available information.\n"
-                    "Reason step by step, then classify this trial using exactly one of these verdict labels.\n"
-                    "Your response MUST end with one of these labels and nothing else after it:\n\n"
-                    "- Yes-Targeted!  The trial IS reasonable, AND it specifies the patient's cancer type, AND it targets a biomarker the patient is known to have.\n"
-                    "- Yes-CancerMatch!  The trial IS reasonable AND specifies the patient's cancer type, BUT does not specifically target a known biomarker of the patient (either no biomarker requirement, or the required biomarker status is unknown in the patient).\n"
-                    "- Yes-BiomarkerMatch!  The trial IS reasonable AND targets a biomarker the patient is known to have, BUT uses a broader indicated cancer type than the patient's specific cancer (e.g., \"solid tumors\" or \"advanced cancers\").\n"
-                    "- Yes-General!  The trial IS reasonable, BUT neither the cancer type nor biomarkers specifically match as described above.\n"
-                    "- No!  The trial is NOT a reasonable consideration for this patient."
+                    "consideration; just evaluate whether it is, given the available information.\n\n"
+                    "SCORING INSTRUCTIONS:\n"
+                    "After reasoning step by step, compute a score from 0 to 5 using the following rubric:\n\n"
+                    "Start with 0 points.\n"
+                    "1) REASONABLENESS (0 or 1 point): If the trial is at least a reasonable consideration for this patient "
+                    "(i.e., the patient does not clearly meet an exclusion criterion such as wrong cancer type, wrong age group, "
+                    "wrong sex, having an excluded biomarker, etc.), award 1 point. If the trial is NOT reasonable, the final score is 0 — "
+                    "skip the remaining categories.\n"
+                    "2) CANCER TYPE SPECIFICITY (+1 point): If the trial specifies the patient's cancer type (e.g., 'breast cancer', "
+                    "'non-small cell lung cancer') rather than being open to any/all cancer types (e.g., 'solid tumors', 'advanced cancers'), "
+                    "award +1 point.\n"
+                    "3) CANCER BURDEN/STAGE SPECIFICITY (+1 point): If the trial specifies a particular disease stage or burden "
+                    "(e.g., 'metastatic', 'locally advanced', 'stage III-IV') that matches the patient's disease status, award +1 point. "
+                    "If the trial has no stage/burden requirements or is open to any stage, do not award a point.\n"
+                    "4) PRIOR TREATMENT SPECIFICITY (+1 point): If the trial has specific prior treatment requirements "
+                    "(e.g., 'must have progressed on platinum-based chemotherapy', 'prior immunotherapy required') "
+                    "and the patient's treatment history matches those requirements, award +1 point. "
+                    "If the trial has no specific prior treatment requirements, do not award a point.\n"
+                    "5) BIOMARKER SPECIFICITY (+1 point): If the trial requires a specific biomarker (e.g., 'EGFR mutation', "
+                    "'PD-L1 ≥ 50%', 'HER2-positive') AND the patient is known to have that biomarker, award +1 point. "
+                    "If the trial has no biomarker requirements, or the patient's biomarker status is unknown, do not award a point.\n\n"
+                    "Your response MUST end with the following line and nothing else after it:\n"
+                    "Final score: X\n"
+                    "where X is the total score (an integer from 0 to 5)."
                 )}
             ]
             
@@ -287,26 +301,26 @@ def worker_process(
                 response_text = completion_output.text
                 response_id = completion_output.index
                 
-                VERDICT_MAP = {
-                    "YES-TARGETED!": 1.0, "YES-CANCERMATCH!": 0.75,
-                    "YES-BIOMARKERMATCH!": 0.75, "YES-GENERAL!": 0.5, "NO!": 0.0,
-                }
-                tail = response_text[-30:].upper()
-                matched_verdict = None
-                for verdict_key, score in VERDICT_MAP.items():
-                    if verdict_key in tail:
-                        matched_verdict = verdict_key
-                        break
-                if matched_verdict is not None:
-                    eligibility_result = VERDICT_MAP[matched_verdict]
-                    eligibility_verdict = matched_verdict
+                SCORE_PATTERN = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")
+                tail = response_text[-60:].replace("*", "").replace("\u202f", " ")
+                m = SCORE_PATTERN.search(tail)
+                if m:
+                    score = min(int(m.group(1)), 5)
+                    eligibility_result = score
+                    eligibility_verdict = f"Score:{score}"
                 else:
-                    if "YES" in tail:
-                        eligibility_result = 0.5
-                        eligibility_verdict = "YES-GENERAL!"
+                    tail_upper = tail.upper()
+                    fallback_m = re.search(r"SCORE\s*[:\-=]\s*(\d)", tail_upper)
+                    if fallback_m:
+                        score = min(int(fallback_m.group(1)), 5)
+                        eligibility_result = score
+                        eligibility_verdict = f"Score:{score}"
+                    elif "NOT REASONABLE" in tail_upper or "NOT A REASONABLE" in tail_upper:
+                        eligibility_result = 0
+                        eligibility_verdict = "Score:0"
                     else:
-                        eligibility_result = 0.0
-                        eligibility_verdict = "NO!"
+                        eligibility_result = -1
+                        eligibility_verdict = "PARSE_FAILED"
 
                 result = {
                     "prompt_id": original_idx,
