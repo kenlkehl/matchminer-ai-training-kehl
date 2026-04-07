@@ -108,7 +108,7 @@ def parse_args():
     parser.add_argument(
         "--max-model-len",
         type=int,
-        default=10000,
+        default=20000,
         help="Maximum model context length",
     )
     parser.add_argument(
