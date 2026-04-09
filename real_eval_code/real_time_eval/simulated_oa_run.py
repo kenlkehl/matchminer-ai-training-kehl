@@ -142,8 +142,12 @@ def parse_args():
         help="Base port for summarization vLLM servers (default: 8000)",
     )
     parser.add_argument(
-        "--summarization-max-concurrent-requests", type=int, default=16,
-        help="Max concurrent summarization requests (default: 16)",
+        "--summarization-max-concurrent-requests", type=int, default=8,
+        help="Max concurrent summarization requests (default: 8)",
+    )
+    parser.add_argument(
+        "--summarization-max-retries", type=int, default=10,
+        help="Max retries per failed summarization request (default: 10)",
     )
     parser.add_argument(
         "--summarization-request-timeout", type=float, default=600.0,
@@ -177,6 +181,11 @@ def parse_args():
              "If patient_summaries.parquet already exists there, it is reused. "
              "Otherwise the summarizer is rerun against that directory's "
              "input/shards.",
+    )
+    parser.add_argument(
+        "--execution-timestamp", type=str, default=None,
+        help="If provided, only consider outbound email drafts from "
+             "activate_emails with this exact execution_timestamp value.",
     )
     return parser.parse_args()
 
@@ -325,9 +334,18 @@ def parallel_checker(all_texts, gpu_ids, model_path, batch_size, max_length,
     return np.concatenate([arr for arr in outputs if arr.size > 0])
 
 
-def fetch_email_triggered_patients(conn):
-    """Return latest activate_info IDs for MRNs that generated email drafts."""
+def fetch_email_triggered_patients(conn, execution_timestamp=None):
+    """Return latest activate_info IDs for MRNs that generated email drafts.
+
+    If *execution_timestamp* is given, only emails with that exact
+    execution_timestamp value are considered.
+    """
     cur = conn.cursor()
+    ts_clause = ""
+    params = []
+    if execution_timestamp is not None:
+        ts_clause = "      AND ae.execution_timestamp = %s "
+        params.append(execution_timestamp)
     cur.execute(
         "SELECT DISTINCT ON (ai.mrn) ai.id, ai.mrn "
         "FROM activate_info ai "
@@ -335,13 +353,33 @@ def fetch_email_triggered_patients(conn):
         "    SELECT 1 FROM activate_emails ae "
         "    WHERE ae.mrn = ai.mrn "
         "      AND ae.body IS NOT NULL "
-        "      AND btrim(ae.body) <> ''"
+        "      AND btrim(ae.body) <> '' "
+        + ts_clause +
         ") "
-        "ORDER BY ai.mrn, ai.id DESC"
+        "ORDER BY ai.mrn, ai.id DESC",
+        params or None,
     )
     rows = cur.fetchall()
     cur.close()
     return rows
+
+
+def fetch_oncologist_names(conn, patient_mrns):
+    """Return a dict mapping mrn -> oncologist full_name via email_assignments + recipients."""
+    if not patient_mrns:
+        return {}
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT ON (ea.mrn) ea.mrn, r.full_name "
+        "FROM email_assignments ea "
+        "JOIN recipients r ON r.npi = ea.recipient_npi "
+        "WHERE ea.mrn = ANY(%s) "
+        "ORDER BY ea.mrn, ea.enabled DESC, ea.date_assigned DESC NULLS LAST",
+        (patient_mrns,),
+    )
+    result = {row[0]: row[1] for row in cur.fetchall()}
+    cur.close()
+    return result
 
 
 def fetch_note_level_input(conn, patient_mrns):
@@ -454,6 +492,7 @@ def run_or_resume_summarization(notes_df, args):
         "--request_timeout", str(args.summarization_request_timeout),
         "--gpu_memory_utilization", str(args.summarization_gpu_memory_utilization),
         "--server_timeout", str(args.summarization_server_timeout),
+        "--max_retries", str(args.summarization_max_retries),
     ]
     if args.summarization_server_urls:
         cmd.extend(["--server_urls", args.summarization_server_urls])
@@ -479,7 +518,7 @@ def main():
     # --- Database: identify patients that need fresh summaries ------------
     print("Connecting to database ...")
     conn = get_db_connection(args.secrets)
-    patient_rows = fetch_email_triggered_patients(conn)
+    patient_rows = fetch_email_triggered_patients(conn, args.execution_timestamp)
     if not patient_rows:
         conn.close()
         print("No patients generated outbound email drafts. Nothing to do.")
@@ -488,6 +527,8 @@ def main():
     patient_ids = [r[0] for r in patient_rows]
     patient_mrns = [r[1] for r in patient_rows]
     print(f"Identified {len(patient_rows)} patients with outbound email drafts.")
+
+    oncologist_by_mrn = fetch_oncologist_names(conn, patient_mrns)
 
     notes_df = None
     resume_paths = None
@@ -704,6 +745,7 @@ def main():
             rows.append({
                 "patient_id": patient_ids[i],
                 "mrn": patient_mrns[i],
+                "oncologist_name": oncologist_by_mrn.get(patient_mrns[i]),
                 "patient_summary": patient_summaries[i],
                 "space_id": space_ids[idx],
                 "nct_id": nct_ids[idx],

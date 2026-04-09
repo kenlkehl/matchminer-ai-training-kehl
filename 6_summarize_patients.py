@@ -773,7 +773,7 @@ async def single_inference_request(
             return (row_idx, reasoning, summary)
 
         except asyncio.TimeoutError:
-            wait_time = min((2 ** attempt) * 10, 300)  # 10s, 20s, 40s, 80s, 160s, 300s
+            wait_time = min((2 ** attempt) * 15, 600)  # 15s, 30s, 60s, 120s, 240s, 480s, 600s, ...
             if attempt < max_retries - 1:
                 print(f"  Row {row_idx}: timeout (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
@@ -782,7 +782,7 @@ async def single_inference_request(
                 return (row_idx, "", "ERROR: timeout after all retries")
 
         except Exception as e:
-            wait_time = min((2 ** attempt) * 5, 120)  # 5s, 10s, 20s, 40s, 80s, 120s
+            wait_time = min((2 ** attempt) * 10, 300)  # 10s, 20s, 40s, 80s, 160s, 300s, ...
             if attempt < max_retries - 1:
                 print(f"  Row {row_idx}: error '{e}' (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
