@@ -15,7 +15,7 @@ print(trial_space_lineitems.good_space.value_counts())
 trial_space_lineitems = trial_space_lineitems[trial_space_lineitems.good_space]
 print(trial_space_lineitems.info())
 
-dfci_enrollments = pd.read_csv('dfci_enrolled_nctids.csv')
+dfci_enrollments = pd.read_csv('../data/no_phi/dfci_enrolled_nctids.csv')
 
 trial_space_lineitems = trial_space_lineitems[~trial_space_lineitems.nct_id.isin(dfci_enrollments.nct_id)]
 
