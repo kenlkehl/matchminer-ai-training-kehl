@@ -26,4 +26,4 @@ output['space_index'] = output.index
 
 print(output.info())
 
-output.to_csv('sample_trial_space_lineitems.csv')
+output.to_csv('../data/no_phi/sample_trial_space_lineitems.csv', index=False)

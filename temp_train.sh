@@ -1,5 +1,4 @@
 
-
 python 1a_make_synthetic_enrollee_prompts.py
 
 echo 1a done
