@@ -154,6 +154,7 @@ def worker_process(
     model: str,
     download_dir: str,
     max_model_len: int,
+    max_num_seqs: int,
     gpu_mem_util: float,
     temperature: float,
     top_p: float,
@@ -186,6 +187,7 @@ def worker_process(
         tensor_parallel_size=tp_size,
         download_dir=download_dir,
         gpu_memory_utilization=gpu_mem_util,
+        max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
         language_model_only=True
     )
@@ -255,6 +257,7 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen3.5-35B-A3B")
     parser.add_argument("--download-dir", default="/data1/ken/models")
     parser.add_argument("--max-model-len", type=int, default=220000)
+    parser.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     parser.add_argument("--gpu-mem-util", type=float, default=0.94)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
@@ -328,6 +331,7 @@ def main():
                 model=args.model,
                 download_dir=args.download_dir,
                 max_model_len=args.max_model_len,
+                max_num_seqs=args.max_num_seqs,
                 gpu_mem_util=args.gpu_mem_util,
                 temperature=args.temperature,
                 top_p=args.top_p,

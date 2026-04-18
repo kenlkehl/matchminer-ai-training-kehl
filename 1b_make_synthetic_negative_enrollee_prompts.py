@@ -126,6 +126,7 @@ def parse_args():
     p.add_argument("--download-dir", default="../models")
     p.add_argument("--gpu-mem-util", type=float, default=0.95)
     p.add_argument("--max-model-len", type=int, default=50000)
+    p.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--top-p", type=float, default=0.95)
     p.add_argument("--max-tokens", type=int, default=12000)
@@ -170,6 +171,7 @@ def worker_process_shards(
     download_dir: str,
     gpu_memory_utilization: float,
     max_model_len: int,
+    max_num_seqs: int,
     temperature: float,
     top_p: float,
     max_tokens: int,
@@ -190,6 +192,7 @@ def worker_process_shards(
         tensor_parallel_size=tp,
         download_dir=download_dir,
         gpu_memory_utilization=gpu_memory_utilization,
+        max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
     )
     tokenizer = llm.get_tokenizer()
@@ -395,6 +398,7 @@ def main():
                     args.download_dir,
                     args.gpu_mem_util,
                     args.max_model_len,
+                    args.max_num_seqs,
                     args.temperature,
                     args.top_p,
                     args.max_tokens,

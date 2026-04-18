@@ -166,6 +166,7 @@ def worker_process(worker_id: int,
                    download_dir: str,
                    tp_size: int,
                    max_model_len: int,
+                   max_num_seqs: int,
                    gpu_memory_utilization: float,
                    prompt_batch_size: int):
     """
@@ -226,6 +227,7 @@ def worker_process(worker_id: int,
             tensor_parallel_size=tp_size,
             download_dir=download_dir,
             gpu_memory_utilization=gpu_memory_utilization,
+            max_num_seqs=max_num_seqs,
             max_model_len=max_model_len
         )
 
@@ -326,6 +328,7 @@ def main():
     parser.add_argument("--model", default="openai/gpt-oss-120b", help="HF model id for vLLM.")
     parser.add_argument("--download_dir", default="", help="vLLM/HF download cache dir.")
     parser.add_argument("--max_model_len", type=int, default=30000, help="vLLM max_model_len.")
+    parser.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.92, help="vLLM gpu_memory_utilization.")
     args = parser.parse_args()
 
@@ -371,6 +374,7 @@ def main():
                 args.download_dir,
                 args.gpus_per_kernel,
                 args.max_model_len,
+                args.max_num_seqs,
                 args.gpu_memory_utilization,
                 args.prompt_batch_size
             ),

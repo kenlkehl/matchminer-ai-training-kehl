@@ -66,6 +66,8 @@ def parse_args():
                         help="GPU memory utilization for vLLM")
     parser.add_argument("--llm-max-model-len", type=int, default=10000,
                         help="Maximum context length for the LLM")
+    parser.add_argument("--llm-max-num-seqs", type=int, default=900,
+                        help="vLLM max_num_seqs (concurrent request cap).")
     return parser.parse_args()
 
 
@@ -351,6 +353,7 @@ def main():
             tensor_parallel_size=1,
             download_dir=args.llm_download_dir,
             gpu_memory_utilization=args.llm_gpu_mem_util,
+            max_num_seqs=args.llm_max_num_seqs,
             max_model_len=args.llm_max_model_len,
         )
 

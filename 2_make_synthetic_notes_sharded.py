@@ -318,6 +318,7 @@ def run_worker(
     download_dir: str,
     tp: int,
     max_model_len: int,
+    max_num_seqs: int,
     max_new_tokens: int,
     batch_size: int,
     temperature: float,
@@ -407,6 +408,7 @@ def run_worker(
                 tensor_parallel_size=tp,
                 download_dir=download_dir,
                 gpu_memory_utilization=gpu_mem_util,
+                max_num_seqs=max_num_seqs,
                 max_model_len=max_model_len,
             )
             tokenizer = llm.get_tokenizer()
@@ -508,6 +510,7 @@ def main():
     ap.add_argument("--tp", type=int, default=1, help="tensor_parallel_size per worker")
     ap.add_argument("--batch_size", type=int, default=8, help="prompts per vLLM.generate() call")
     ap.add_argument("--max_model_len", type=int, default=20000)
+    ap.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     ap.add_argument("--max_new_tokens", type=int, default=15000)
     ap.add_argument("--temperature", type=float, default=0.5)
     ap.add_argument("--top_p", type=float, default=0.2)
@@ -573,7 +576,7 @@ def main():
                 wid, gpu_spec,
                 promptframe_parquet, lo, hi,
                 args.out_dir, args.model, args.download_dir,
-                args.tp, args.max_model_len, args.max_new_tokens, args.batch_size,
+                args.tp, args.max_model_len, args.max_num_seqs, args.max_new_tokens, args.batch_size,
                 args.temperature, args.top_p, args.repetition_penalty, args.gpu_mem_util,
                 args.overwrite_existing,
                 # NEW: pass perturbation controls

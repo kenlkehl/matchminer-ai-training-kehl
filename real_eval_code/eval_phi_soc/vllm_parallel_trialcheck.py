@@ -108,6 +108,12 @@ def parse_args():
         help="Maximum model context length",
     )
     parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=900,
+        help="vLLM max_num_seqs (concurrent request cap).",
+    )
+    parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
         default=0.08,
@@ -192,6 +198,7 @@ def worker_process(
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_num_seqs=args.max_num_seqs,
         max_model_len=args.max_model_len,
     )
     

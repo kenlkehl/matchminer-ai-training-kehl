@@ -613,6 +613,7 @@ def start_vllm_server(
     tensor_parallel_size: int,
     max_model_len: int,
     gpu_memory_utilization: float,
+    max_num_seqs: int = 900,
     port: int = 8000,
     log_file: Optional[str] = None,
 ) -> subprocess.Popen:
@@ -626,6 +627,7 @@ def start_vllm_server(
         "--download-dir", download_dir,
         "--tensor-parallel-size", str(tensor_parallel_size),
         "--max-model-len", str(max_model_len),
+        "--max-num-seqs", str(max_num_seqs),
         "--gpu-memory-utilization", str(gpu_memory_utilization),
         "--port", str(port),
     ]
@@ -1038,6 +1040,7 @@ def main():
                     help="Number of GPUs per vLLM server. n_servers = len(gpu_ids) // gpus_per_server. "
                          "tensor_parallel_size is set to this value.")
     ap.add_argument("--max_model_len", type=int, default=120000)
+    ap.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_k", type=int, default=1)
     ap.add_argument("--top_p", type=float, default=1.0)
@@ -1233,6 +1236,7 @@ def main():
                     tensor_parallel_size=args.gpus_per_server,
                     max_model_len=args.max_model_len,
                     gpu_memory_utilization=args.gpu_memory_utilization,
+                    max_num_seqs=args.max_num_seqs,
                     port=server_port,
                     log_file=log_file,
                 )

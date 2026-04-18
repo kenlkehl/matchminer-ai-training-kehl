@@ -193,6 +193,7 @@ def worker_process(worker_id: int,
             tensor_parallel_size=args.gpus_per_kernel,
             download_dir=args.download_dir,
             gpu_memory_utilization=args.gpu_memory_utilization,
+            max_num_seqs=args.max_num_seqs,
             max_model_len=args.max_model_len
         )
 
@@ -245,6 +246,7 @@ def parse_args():
     p.add_argument("--model", type=str, default="openai/gpt-oss-120b")
     p.add_argument("--download_dir", type=str, default="./meta_ai")
     p.add_argument("--max_model_len", type=int, default=30000)
+    p.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     p.add_argument("--max_new_tokens", type=int, default=25000)
     p.add_argument("--gpu_memory_utilization", type=float, default=0.97)
 

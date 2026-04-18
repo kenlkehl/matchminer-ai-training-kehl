@@ -407,6 +407,8 @@ def parse_args():
                     help="Timeout waiting for vLLM server to start (default: 600)")
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90,
                     help="GPU memory utilization for vLLM (default: 0.90)")
+    ap.add_argument("--max_num_seqs", type=int, default=900,
+                    help="vLLM max_num_seqs (concurrent request cap; default: 900)")
     ap.add_argument("--chunk_overlap", type=int, default=500,
                     help="Token overlap between chunks (default: 500)")
     ap.add_argument("--dry_run", action="store_true",
@@ -568,6 +570,7 @@ def main():
                 tensor_parallel_size=args.gpus_per_server,
                 max_model_len=model_max_len,
                 gpu_memory_utilization=args.gpu_memory_utilization,
+                max_num_seqs=args.max_num_seqs,
                 port=server_port,
                 log_file=log_file,
             )
