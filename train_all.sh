@@ -6,7 +6,7 @@
 # and then selecting "Download" and a JSON download option.
 
 # to work with the same file we started with, do:
-wget -P ../data https://huggingface.co/datasets/ksg-dfci/mmai-synthetic/resolve/main/ctgov_interventional_phased_cancer_trials_11-3-25.json
+wget -P ../data/no_phi https://huggingface.co/datasets/ksg-dfci/mmai-synthetic/resolve/main/ctgov_interventional_phased_cancer_trials_11-3-25.json
 
 
 # try to pre-compile relevant vllm configurations
