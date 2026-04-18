@@ -61,7 +61,7 @@ def parse_clinical_trials_json(json_file_path):
 
 if __name__ == "__main__":
     # Example usage
-    input_file = "ctgov_interventional_phased_cancer_trials_11-3-25.json"  # Replace with your JSON file path
+    input_file = "../data/no_phi/ctgov_interventional_phased_cancer_trials_11-3-25.json"  # Replace with your JSON file path
     
     # Parse the JSON file
     df = parse_clinical_trials_json(input_file)
