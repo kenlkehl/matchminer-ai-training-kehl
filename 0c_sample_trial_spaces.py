@@ -1,6 +1,6 @@
 import pandas as pd
 
-trial_space_lineitems = pd.read_csv('trial_space_lineitems.csv')
+trial_space_lineitems = pd.read_csv('../data/no_phi/trial_space_lineitems.csv')
 
 print(trial_space_lineitems.info())
 

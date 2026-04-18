@@ -25,8 +25,9 @@ Examples:
         --embeddings trial_space_embeddings.parquet \
         --trial-checker ../../../models/trialchecker \
         --boilerplate-checker ../../../models/boilerplatechecker \
+        --summarization-model Qwen/Qwen3.6-35B-A3B \
         --batch-size 64 --checker-batch-size 64 \
-        --gpu 2,3
+        --gpu 0,1
 """
 
 import argparse
@@ -96,7 +97,7 @@ def parse_args():
     )
     parser.add_argument("--gpu", type=str, default="0",
                         help="Comma-separated GPU ids, e.g. '0,1,2' (default: 0)")
-    parser.add_argument("--max-seq-length", type=int, default=2500)
+    parser.add_argument("--max-seq-length", type=int, default=100000)
     parser.add_argument("--batch-size", type=int, default=12,
                         help="Embedding batch size (default: 12)")
     parser.add_argument("--checker-batch-size", type=int, default=32,
