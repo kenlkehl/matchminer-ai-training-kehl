@@ -34,7 +34,7 @@ PROMPT_HEADER = (
     "You are an expert clinical oncologist with a broad and deep knowledge of cancer and its treatments.\n"
     "Your job is to review a clinical trial document and extract a list of structured clinical spaces that are eligible for that trial.\n"
     "A clinical space is defined as a unique combination of patient age range, sex (if any sex criteria), cancer primary site, histology, which treatments a patient must have received, "
-    "which treatments a patient must not have received, cancer burden (eg presence of metastatic disease; this also includes cancer type-specific prognostic scores, risk indices, or categories), tumor biomarkers (such as "
+    "which treatments a patient must not have received, cancer burden (eg presence of metastatic disease; this also includes cancer type-specific prognostic scores, risk indices, or categories; it does NOT include ECOG performance status, measurable disease, or concepts like 'life expectancy at least 6 months'), tumor biomarkers (such as "
     "germline or somatic gene mutations or alterations, or protein expression on tumor), that a patient must have or must not have to "
     "be eligible for the trial. \n"
     "With respect to sex criteria: For cancers originating in organs only present in one sex, you must assume the sex criteria even if not stated explicitly.\n"
