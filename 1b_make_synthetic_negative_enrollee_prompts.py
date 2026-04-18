@@ -85,7 +85,7 @@ SECOND_PRIMARY_INSTRUCTION = (
     "the cancer relevant to the trial. Incorporate events for the prior cancer as well as the current cancer into your output."
 )
 
-REASONING_MARKER = "assistantfinal"  # adjust if your model uses a different delimiter
+REASONING_MARKER = "</think>"  # adjust if your model uses a different delimiter
 
 
 
@@ -122,10 +122,10 @@ def parse_args():
     p.add_argument("--output-dir", default=None, help="Directory for shard outputs and logs. Default: <output_csv_basename>_shards/")
     p.add_argument("--gpu-groups", default="0|1|2|3|4|5|6|7",
                    help='GPU groups string. Examples: "0,1,2,3|4,5,6,7" (two workers, TP=4 each) or "0,1,2,3,4,5,6,7" (one worker, TP=8).')
-    p.add_argument("--model-name", default="openai/gpt-oss-120b")
+    p.add_argument("--model-name", default="Qwen/Qwen3.6-35B-A3B", help="vLLM-compatible model name or path.")
     p.add_argument("--download-dir", default="../models")
     p.add_argument("--gpu-mem-util", type=float, default=0.95)
-    p.add_argument("--max-model-len", type=int, default=15000)
+    p.add_argument("--max-model-len", type=int, default=50000)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--top-p", type=float, default=0.95)
     p.add_argument("--max-tokens", type=int, default=12000)

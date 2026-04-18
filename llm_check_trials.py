@@ -117,7 +117,7 @@ def ask_about_trials_loosely(patient_summaries: List[str],
         SamplingParams(
             temperature=0.0,
             top_k=1,
-            max_tokens=5000,
+            max_tokens=15000,
             repetition_penalty=1.2,
             # You can add stop_token_ids if you want to trim reasoning
         )
