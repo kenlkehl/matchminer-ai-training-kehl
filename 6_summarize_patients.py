@@ -291,8 +291,11 @@ Treatment history:
 # 1/5/2020-2/5/2021: carboplatin/pemetrexed/pembrolizumab; best response stable disease
 # 1/2021: Palliative radiation for progressive spinal metastases
 # 3/2021-present: docetaxel; achieved partial response, ongoing as of last note
+
+--(then if there is a second active cancer, repeat the above format for that cancer, then proceed to Boilerplate section)--
+
 Boilerplate:
-No evidence of common boilerplate exclusion criteria
+ECOG 1. Remote history of prostate cancer (inactive).
 
 The following are the patient's data.
 ---
