@@ -5,8 +5,15 @@ Mirrors the preprocessing in llm_check_trials.py:
   * Drop rows where patient_summary is null.
   * Strip a leading "N." numbering from this_space.
 Then randomly samples n rows with the given seed and writes:
-  * <work_dir>/staging.parquet  — full sampled dataframe + __row_id__
-  * <work_dir>/staging.jsonl    — one JSON object per sampled row
+  * <work_dir>/staging.parquet     — full sampled dataframe + __row_id__
+  * <work_dir>/staging.jsonl       — one JSON object per sampled row
+  * <work_dir>/rows/row_NN.txt     — slim per-row text file with just the
+                                     patient_summary and this_space blocks
+                                     the model needs to score the row.
+                                     Keeping these inside work_dir (rather
+                                     than /tmp) lets existing Read rules
+                                     that cover work_dir auto-grant the
+                                     per-row reads with no extra approvals.
 """
 import argparse
 import json
@@ -75,6 +82,7 @@ def main() -> None:
 
     staging_parquet = work_dir / "staging.parquet"
     staging_jsonl = work_dir / "staging.jsonl"
+    rows_dir = work_dir / "rows"
 
     sampled.to_parquet(staging_parquet, index=False)
 
@@ -86,9 +94,29 @@ def main() -> None:
             }
             f.write(json.dumps(clean, default=str) + "\n")
 
+    # Fresh per-row slim text files for the model to read one at a time.
+    if rows_dir.exists():
+        for old in rows_dir.glob("row_*.txt"):
+            old.unlink()
+    rows_dir.mkdir(parents=True, exist_ok=True)
+
+    width = max(2, len(str(max(len(sampled) - 1, 0))))
+    for rec in sampled.to_dict(orient="records"):
+        rid = int(rec["__row_id__"])
+        patient = rec.get("patient_summary") or ""
+        trial = rec.get("this_space") or ""
+        slim_path = rows_dir / f"row_{rid:0{width}d}.txt"
+        slim_path.write_text(
+            "=== PATIENT SUMMARY ===\n"
+            f"{patient}\n\n"
+            "=== TRIAL SPACE ===\n"
+            f"{trial}\n"
+        )
+
     print(f"wrote {len(sampled)} rows")
     print(f"  {staging_parquet}")
     print(f"  {staging_jsonl}")
+    print(f"  {rows_dir}/row_*.txt  ({len(sampled)} files)")
 
 
 if __name__ == "__main__":

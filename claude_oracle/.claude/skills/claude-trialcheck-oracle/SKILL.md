@@ -3,7 +3,7 @@ name: claude-trialcheck-oracle
 description: Score sampled patient-trial candidate matches for clinical-trial reasonableness (0-5) using the same prompt and rubric as llm_check_trials.py, with Claude acting as the oracle model. Use when the user asks to run trialcheck / oracle scoring on a parquet or CSV of candidate matches, or mentions llm_check_trials / space_specific_eligibility_checks.
 disable-model-invocation: true
 argument-hint: [input_parquet_or_csv]
-allowed-tools: Read Write Bash(python *) Bash(ls *) Bash(mkdir *)
+allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *) Bash(wc *) Bash(: *)
 ---
 
 # claude-trialcheck-oracle
@@ -39,7 +39,11 @@ bundled scripts also enforce this, but catch it earlier in conversation.
 
 Run the preparation script. It filters null `patient_summary`, strips leading
 numbering from `this_space`, samples with the given seed, and writes
-`staging.parquet` + `staging.jsonl` to `work_dir`:
+`staging.parquet`, `staging.jsonl`, and slim per-row text files under
+`<work_dir>/rows/row_NN.txt` (one per sampled row, containing only the
+`patient_summary` and `this_space` blocks). Reading those per-row files is
+how you load each row for scoring — do NOT copy rows to `/tmp` or any other
+path, because doing so triggers a fresh Read/Bash approval round.
 
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/prepare_sample.py" \
@@ -51,22 +55,49 @@ python "${CLAUDE_SKILL_DIR}/scripts/prepare_sample.py" \
 
 ### 4. Score each row
 
-Read `<work_dir>/staging.jsonl`. Initialize `<work_dir>/responses.jsonl` as
-empty (overwrite any prior file).
+Initialize `<work_dir>/responses.jsonl` as empty (overwrite any prior file)
+with a single command, e.g.
 
-For **each** JSONL record, treat its `patient_summary` as `{patient_summary}`
-and its `this_space` as `{trial_summary}` and internally assemble the exact
-two-message prompt below. Then produce a response with your own reasoning that
-ends on a line `Final score: X` (X in 0-5). Append one line to
-`<work_dir>/responses.jsonl`:
-
-```json
-{"__row_id__": <int>, "trialcheck_llm_response": "<your full response text>"}
+```bash
+: > <work_dir>/responses.jsonl
 ```
 
-The stored `trialcheck_llm_response` must be the full response text including
-the trailing `Final score: X` line, since downstream parsing inspects the
-tail of the string.
+For each row, Read `<work_dir>/rows/row_NN.txt` (where `NN` is the zero-padded
+`__row_id__`; the pad width matches the sample size). That file contains the
+`patient_summary` and `this_space` blocks. Treat `patient_summary` as
+`{patient_summary}` and `this_space` as `{trial_summary}` and internally
+assemble the exact two-message prompt below. Then produce a response with
+your own reasoning that ends on a line `Final score: X` (X in 0-5).
+
+Do not re-split the staging file to a temp directory; the per-row files in
+`<work_dir>/rows/` exist precisely so the model doesn't have to create any
+new paths that would require fresh Read approvals.
+
+Append the row response by invoking the bundled helper with a **stable command
+prefix** so the user only needs to approve the pattern once (one "always allow"
+covers every row):
+
+```bash
+python "${CLAUDE_SKILL_DIR}/scripts/append_response.py" \
+  --work_dir <work_dir> --row_id <int> <<'TRIALCHECK_RESPONSE_EOF'
+<your full response text, ending with "Final score: X" on its own final line>
+TRIALCHECK_RESPONSE_EOF
+```
+
+Notes on this step:
+
+- Always keep the exact same command prefix
+  `python "${CLAUDE_SKILL_DIR}/scripts/append_response.py" --work_dir ... --row_id ...`
+  so permission grants are reused across rows. Do not inline ad-hoc `python` /
+  `python3` heredocs that write to `responses.jsonl` directly — those will
+  prompt per invocation.
+- The helper writes exactly one line per call:
+  `{"__row_id__": <int>, "trialcheck_llm_response": <your full response text>}`.
+- The stored `trialcheck_llm_response` must be the full response text
+  including the trailing `Final score: X` line, since downstream parsing
+  inspects the tail of the string.
+- Use a unique heredoc sentinel (e.g. `TRIALCHECK_RESPONSE_EOF`) so the
+  response body can contain arbitrary characters without terminating early.
 
 #### System message (verbatim)
 

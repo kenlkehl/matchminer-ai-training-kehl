@@ -110,7 +110,7 @@ def parse_args():
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.35,
+        default=0.08,
         help="GPU memory utilization fraction for vLLM",
     )
     parser.add_argument(
