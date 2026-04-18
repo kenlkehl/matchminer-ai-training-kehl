@@ -251,7 +251,7 @@ def build_prompt_text(
 
     user_content = f"""You are an experienced clinical oncology history summarization bot.
 
-You are maintaining a running summary of a patient's cancer history based on their electronic health record.
+You are maintaining a running summary of the history of a patient's active cancer(s) in their electronic health record.
 You will be given:
 1. A PRIOR SUMMARY of the patient's history (may be empty for the first segment)
 2. THE NEXT SEGMENT of the patient's clinical record (may contain multiple notes with dates)
@@ -268,15 +268,15 @@ Sex: (patient's sex)
 Cancer type: (patient's cancer type/primary site (eg breast cancer, lung cancer, etc))
 Histology: (patient's histology (eg adenocarcinoma, squamous carcinoma, etc))
 Current extent: (patient's current extent (localized, advanced, metastatic, etc); this is also where tumor markers for following disease status over time, such as CEA or PSA, should be documented if relevant)
-Biomarkers: (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings)
-Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically.)
-Boilerplate: (any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, etc)
+Biomarkers: (genomic results, protein expression, etc, relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings. However, critically, standard lab values (eg CBC, CMP, LFTs, etc) MUST NOT be included in this section - only tumor biomarkers relevant to cancer treatment selection should be included. Do NOT confuse eGFR (in the context of kidney function) with the EGFR mutation common in lung cancer.)
+Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically. For cancer drug names, use generic names whenever you know them. Expand abbreviations where possible ,(eg "carbo" -> "carboplatin", "pembro" -> "pembrolizumab", "AC/T" -> "doxorubicin + cyclophosphamide followed by paclitaxel", etc)
+Boilerplate: (any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, poor performance status, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, prior unrelated cancer diagnoses, etc)
 Clearly separate the "boilerplate" section by labeling it "Boilerplate: " before describing any such conditions.
 --(end of sections)
 
 Do not consider localized basal cell or squamous carcinomas of the skin, or colon polyps, to be cancers for your purposes.
 Do not include the patient's name, but do include relevant dates whenever documented.
-If a patient has a history of more than one cancer, document the cancers one at a time. List the currently or most recently active cancer first, followed by any prior cancers. Within each cancer, events should be in chronological order.
+If a patient has more than one active cancer, document the active cancers one at a time. List the most active cancer first, followed by any other active cancers. Within each active cancer, events should be in chronological order. Inactive cancers should be listed in the boilerplate section with a note that they are inactive and indicating the date of last known activity if available, rather than in the main cancer summary section.
 CRITICAL: Format your response as free text ONLY. Do NOT output markdown, Unicode, or tables.
 
 Here is an example of the desired output format:
@@ -303,7 +303,8 @@ NEXT CLINICAL RECORD SEGMENT (covering {first_date} to {last_date}):
 {chunk_text}
 ---
 Now, write your updated summary, or if there is no new relevant information, output the prior summary exactly as it was. 
-If any information is still relevant but is unchanged, just restate it in the updated summary, but do NOT state "no change" or similar - just produce the updated summary text as if you were writing it fresh, incorporating any new information but keeping relevant old information, without calling out what changed vs what stayed the same from the prior summary.
+If any information is still relevant but is unchanged, just restate it in the updated summary, but do NOT state "no change" or similar - just produce the updated summary text as if you were writing it fresh, incorporating any new information but keeping relevant old information, without calling out what changed vs what stayed the same from the prior summary. 
+You may update the old summary content in your output if the new information demonstrates that there was an error in the old output.
 Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
     system_content = 'Reasoning: high' if 'gpt-oss' in model_name.lower() else ''
