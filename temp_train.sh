@@ -14,7 +14,7 @@ python 2_make_synthetic_notes_sharded.py \
   --model Qwen/Qwen3.6-35B-A3B \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --download_dir ~/models \
-  --max_model_len 100000 --max_new_tokens 20000 \
+  --max_model_len 100000 --max_new_tokens 50000 \
   --batch_size 1000 --tp 1 --temperature 0.75 --top_p 0.5 \
   --perturb_prob 0.3
 
@@ -28,7 +28,7 @@ python 2_make_synthetic_notes_sharded.py \
   --model Qwen/Qwen3.6-35B-A3B \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --download_dir ~/models \
-  --max_model_len 100000 --max_new_tokens 20000 \
+  --max_model_len 100000 --max_new_tokens 50000 \
   --batch_size 1000 --tp 1 --temperature 0.75 --top_p 0.5 \
   --perturb_prob 0.3
 
@@ -76,7 +76,7 @@ python 6_summarize_patients.py \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --gpus_per_server 1 \
   --max_model_len 100000 \
-  --max_tokens 20000 \
+  --max_tokens 50000 \
   --base_port 8000 \
   --chunk_size 50000 \
   --chunk_overlap 500 \
