@@ -270,8 +270,11 @@ Histology: (patient's histology (eg adenocarcinoma, squamous carcinoma, etc))
 Current extent: (patient's current extent (localized, advanced, metastatic, etc); this is also where tumor markers for following disease status over time, such as CEA or PSA, should be documented if relevant)
 Biomarkers: (genomic results, protein expression, etc, relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings. However, critically, standard lab values (eg CBC, CMP, LFTs, etc) MUST NOT be included in this section - only tumor biomarkers relevant to cancer treatment selection should be included. Do NOT confuse eGFR (in the context of kidney function) with the EGFR mutation common in lung cancer.)
 Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically. For cancer drug names, use generic names whenever you know them. Expand abbreviations where possible ,(eg "carbo" -> "carboplatin", "pembro" -> "pembrolizumab", "AC/T" -> "doxorubicin + cyclophosphamide followed by paclitaxel", etc)
-Boilerplate: (any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, poor performance status, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, prior unrelated cancer diagnoses, etc)
-Clearly separate the "boilerplate" section by labeling it "Boilerplate: " before describing any such conditions.
+
+Boilerplate conditions:
+(any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, poor performance status, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, prior unrelated cancer diagnoses, etc)
+
+Clearly separate the "boilerplate" section by adding a newline after the patient history; then the "Boilerplate conditions:' text VERBATIM; then another newline; and then the boilerplate condition output text.
 --(end of sections)
 
 Do not consider localized basal cell or squamous carcinomas of the skin, or colon polyps, to be cancers for your purposes.
