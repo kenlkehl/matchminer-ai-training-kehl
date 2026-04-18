@@ -1043,7 +1043,7 @@ def main():
     ap.add_argument("--top_p", type=float, default=1.0)
     ap.add_argument("--presence_penalty", type=float, default=0.0)
     ap.add_argument("--min_p", type=float, default=0.0)
-    ap.add_argument("--max_tokens", type=int, default=15000,
+    ap.add_argument("--max_tokens", type=int, default=20000,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
     ap.add_argument("--repetition_penalty", type=float, default=1.3)
     ap.add_argument("--reasoning_marker", type=str, default="assistantfinal",
