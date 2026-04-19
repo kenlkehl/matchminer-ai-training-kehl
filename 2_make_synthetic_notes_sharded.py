@@ -409,7 +409,7 @@ def run_worker(
                 download_dir=download_dir,
                 gpu_memory_utilization=gpu_mem_util,
                 max_num_seqs=max_num_seqs,
-                max_model_len=max_model_len,
+                max_model_len=max_model_len
             )
             tokenizer = llm.get_tokenizer()
             sampling = SamplingParams(

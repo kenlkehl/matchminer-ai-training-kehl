@@ -55,8 +55,9 @@ python 2_make_synthetic_notes_sharded.py \
   --model Qwen/Qwen3.6-35B-A3B \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --download_dir ~/models \
-  --max_model_len 100000 --max_new_tokens 20000 \
+  --max_model_len 25000 --max_new_tokens 20000 \
   --batch_size 1000 --tp 1 --temperature 0.75 --top_p 0.5 \
+  --max_num_seqs 722 \
   --perturb_prob 0.3
 
 echo 2a done
@@ -69,8 +70,9 @@ python 2_make_synthetic_notes_sharded.py \
   --model Qwen/Qwen3.6-35B-A3B \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --download_dir ~/models \
-  --max_model_len 100000 --max_new_tokens 20000 \
+  --max_model_len 25000 --max_new_tokens 20000 \
   --batch_size 1000 --tp 1 --temperature 0.75 --top_p 0.5 \
+  --max_num_seqs 722 \
   --perturb_prob 0.3
 
 echo 2b done
