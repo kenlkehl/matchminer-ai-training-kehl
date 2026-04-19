@@ -19,7 +19,7 @@ from multiprocessing import set_start_method
 # -----------------------------
 SYSTEM_PROMPT = (
     "I'm a medical oncologist and data scientist. Your job is to help me create synthetic clinical data "
-    "for cancer research. Reasoning: high."
+    "for cancer research."
 )
 
 USER_PROMPT_TEMPLATE_PREFIX = (
@@ -122,12 +122,12 @@ def parse_args():
                    help='GPU groups string. Examples: "0,1,2,3|4,5,6,7" (two workers, TP=4 each) or "0,1,2,3,4,5,6,7" (one worker, TP=8).')
     p.add_argument("--model-name", default="google/gemma-4-31b-it", help="vLLM-compatible model name or path.")
     p.add_argument("--download-dir", default="../models")
-    p.add_argument("--gpu-mem-util", type=float, default=0.95)
-    p.add_argument("--max-model-len", type=int, default=150000)
+    p.add_argument("--gpu-mem-util", type=float, default=0.90)
+    p.add_argument("--max-model-len", type=int, default=50000)
     p.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--top-p", type=float, default=0.95)
-    p.add_argument("--max-tokens", type=int, default=50000)
+    p.add_argument("--max-tokens", type=int, default=40000)
     p.add_argument("--repetition-penalty", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--shard-size", type=int, default=1000, help="Number of rows per shard (contiguous).")

@@ -19,7 +19,7 @@ from multiprocessing import set_start_method
 # -----------------------------
 SYSTEM_PROMPT = (
     "I'm a medical oncologist and data scientist. Your job is to help me create synthetic clinical data "
-    "for cancer research. Reasoning: high."
+    "for cancer research."
 )
 
 USER_PROMPT_TEMPLATE_PREFIX = (
