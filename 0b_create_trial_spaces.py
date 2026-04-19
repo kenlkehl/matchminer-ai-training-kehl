@@ -58,6 +58,7 @@ PROMPT_HEADER = (
     "CRITICAL: Anytime you provide a list for a particular concept, you must be completely clear on whether \"or\" versus \"and\" logic applies "
     "to the list. For example, do not output \"EGFR L858R mutant, TP53 mutant\"; if both are required, output \"EGFR L858R mutant and TP53 mutant\". "
     "As another example, do not output \"ER+, PR+\"; if the patient can have either an ER or a PR positive tumor, output \"ER+ or PR+\".\n"
+    "If you find that a trial space might otherwise include lists of different prior treatments allowed, or biomarker paradigms, etc, that should be separated into multiple spaces. For example, if a trial allows patients with either (1) EGFR-mutant non-small cell lung cancer or (2) ALK-rearranged non-small cell lung cancer, that should be output as two separate spaces, one for the EGFR-mutant NSCLC and one for the ALK-rearranged NSCLC, even if all other criteria are the same for both spaces.\n"
     "NEVER put a newline within a single trial space.\n"
     "After you output the trial spaces, output a newline, then the text \"Boilerplate exclusions:\" VERBATIM, then another newline.\n"
     "Then, list exclusion criteria described in the trial text that are unrelated to the trial space definitions. Such exclusions tend to be common "
@@ -260,7 +261,7 @@ def main():
     parser.add_argument("--gpus-per-instance", type=int, default=1, help="Tensor-parallel GPUs per instance (set >1 for very large models)")
     parser.add_argument("--model", default="google/gemma-4-31b-it")
     parser.add_argument("--download-dir", default="/data1/ken/models")
-    parser.add_argument("--max-model-len", type=int, default=220000)
+    parser.add_argument("--max-model-len", type=int, default=50000)
     parser.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     parser.add_argument("--gpu-mem-util", type=float, default=0.94)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -269,7 +270,7 @@ def main():
     parser.add_argument("--min-p", type=float, default=0.0)
     parser.add_argument("--presence-penalty", type=float, default=1.5)
     parser.add_argument("--repetition-penalty", type=float, default=1.0)
-    parser.add_argument("--max-tokens", type=int, default=200000)
+    parser.add_argument("--max-tokens", type=int, default=45000)
     parser.add_argument("--batch-size", type=int, default=1000, help="Prompts per generate() call per instance")
     parser.add_argument("--reasoning-marker", default="<channel|>", help="Marker that separates reasoning from final output (default: <channel|>)")
     parser.add_argument("--seed", type=int, default=42, help="Seed for split assignment")
