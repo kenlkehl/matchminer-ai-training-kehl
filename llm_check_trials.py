@@ -46,7 +46,7 @@ def ask_about_trials_loosely(patient_summaries: List[str],
                              llm_model):
     """
     Given aligned lists of patient_summaries and trial_summaries, return
-    (responses, response_texts, eligibility_results)
+    (responses, response_reasonings, response_texts, eligibility_results, eligibility_verdicts)
     """
     tokenizer = llm_model.get_tokenizer()
     prompts = []
@@ -106,7 +106,8 @@ def ask_about_trials_loosely(patient_summaries: List[str],
         prompt = tokenizer.apply_chat_template(
             conversation=messages,
             add_generation_prompt=True,
-            tokenize=False
+            tokenize=False,
+            enable_thinking=True,
         )
         prompts.append(prompt)
 
@@ -119,11 +120,15 @@ def ask_about_trials_loosely(patient_summaries: List[str],
             top_k=1,
             max_tokens=15000,
             repetition_penalty=1.2,
+            skip_special_tokens=False,
             # You can add stop_token_ids if you want to trim reasoning
         )
     )
 
-    response_texts = [x.outputs[0].text for x in responses]
+    from vllm.reasoning.gemma4_utils import parse_thinking_output
+    parsed = [parse_thinking_output(x.outputs[0].text) for x in responses]
+    response_reasonings = [(p["thinking"] or "") for p in parsed]
+    response_texts = [(p["answer"] or "") for p in parsed]
 
     SCORE_PATTERN = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")
 
@@ -153,7 +158,7 @@ def ask_about_trials_loosely(patient_summaries: List[str],
                 eligibility_results.append(-1)
                 eligibility_verdicts.append("PARSE_FAILED")
 
-    return responses, response_texts, eligibility_results, eligibility_verdicts
+    return responses, response_reasonings, response_texts, eligibility_results, eligibility_verdicts
 
 
 # ---------- Worker ----------
@@ -228,7 +233,7 @@ def worker_process(worker_id: int,
             download_dir=download_dir,
             gpu_memory_utilization=gpu_memory_utilization,
             max_num_seqs=max_num_seqs,
-            max_model_len=max_model_len
+            max_model_len=max_model_len,
         )
 
         # Process only the batches that need work
@@ -238,12 +243,13 @@ def worker_process(worker_id: int,
             print(f"[Worker {worker_id}] Processing batch {batch_id}: rows {start}-{end} ({end-start} rows)")
 
             # Run model
-            _, resp_texts, elig, verdicts = ask_about_trials_loosely(
+            _, resp_reasonings, resp_texts, elig, verdicts = ask_about_trials_loosely(
                 batch["patient_summary"].astype(str).tolist(),
                 batch["this_space"].astype(str).tolist(),
                 llm_model=llm
             )
 
+            batch["trialcheck_llm_reasoning"] = resp_reasonings
             batch["trialcheck_llm_response"] = resp_texts
             batch["eligibility_result"] = elig
             batch["eligibility_verdict"] = verdicts

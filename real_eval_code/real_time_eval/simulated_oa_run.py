@@ -25,7 +25,7 @@ Examples:
         --embeddings trial_space_embeddings.parquet \
         --trial-checker ../../../models/trialchecker \
         --boilerplate-checker ../../../models/boilerplatechecker \
-        --summarization-model Qwen/Qwen3.6-35B-A3B \
+        --summarization-model google/gemma-4-31b-it \
         --batch-size 64 --checker-batch-size 64 \
         --gpu 0,1
 """

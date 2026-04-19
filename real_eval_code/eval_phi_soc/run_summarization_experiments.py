@@ -76,6 +76,16 @@ DATA_DIR = REPO_ROOT.parent / "data/phi/soc"
 # Qwen instruct (non-thinking) mode for reasoning tasks.
 # gpt-oss defaults.
 MODEL_CONFIGS = {
+    "google/gemma-4-31b-it": {
+        "max_model_len": 260_000,
+        "reasoning_marker": "<channel|>",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repetition_penalty": 1.0,
+    },
     "Qwen/Qwen3.5-9B": {
         "max_model_len": 260_000,
         "reasoning_marker": "</think>",

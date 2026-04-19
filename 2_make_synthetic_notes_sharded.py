@@ -287,7 +287,7 @@ CRITICAL: Do not invent treatments that are not included in the semi-structured 
 Within clinical notes, sometimes patients should have adverse events of therapy and/or comorbidities described that are consistent with their clinical trajectories.
 Do not include any disclaimers or notes about the fact that the document is synthetic; this is all for research purposes only.
 Here is the list of events:\n""" + masked_text + """\nNow, generate the synthetic document corresponding to the notated event."""}]
-        prompt = tokenizer.apply_chat_template(conversation=messages, add_generation_prompt=True, tokenize=False)
+        prompt = tokenizer.apply_chat_template(conversation=messages, add_generation_prompt=True, tokenize=False, enable_thinking=True)
         prompts.append(prompt)
     return prompts
 
@@ -376,7 +376,7 @@ def run_worker(
     llm = None
     tokenizer = None
     sampling = None
-    reasoning_marker = "assistantfinal"  # adjust if your model uses a different separator
+    reasoning_marker = "<channel|>"  # adjust if your model uses a different separator
 
     # NEW: prepare perturbation machinery once per worker
     do_perturb = perturb_prob and perturb_prob > 0.0
@@ -409,7 +409,7 @@ def run_worker(
                 download_dir=download_dir,
                 gpu_memory_utilization=gpu_mem_util,
                 max_num_seqs=max_num_seqs,
-                max_model_len=max_model_len
+                max_model_len=max_model_len,
             )
             tokenizer = llm.get_tokenizer()
             sampling = SamplingParams(
@@ -417,21 +417,20 @@ def run_worker(
                 top_p=top_p,
                 max_tokens=max_new_tokens,
                 repetition_penalty=repetition_penalty,
+                skip_special_tokens=False,
             )
 
         prompts = build_prompts(batch['masked_text'].tolist(), tokenizer)
         responses = llm.generate(prompts, sampling)
 
         # Parse outputs
+        from vllm.reasoning.gemma4_utils import parse_thinking_output
         all_full = []
         all_final = []
         for out in responses:
             txt = out.outputs[0].text
             all_full.append(txt)
-            if reasoning_marker in txt:
-                all_final.append(txt.split(reasoning_marker, 1)[-1])
-            else:
-                all_final.append(txt)
+            all_final.append(parse_thinking_output(txt)["answer"])
 
         batch['synth_note_reasoning_and_note'] = all_full
         batch['synthetic_note'] = all_final

@@ -89,7 +89,7 @@ def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model)
         ]
 
         prompt = tokenizer.apply_chat_template(
-            conversation=messages, add_generation_prompt=True, tokenize=False
+            conversation=messages, add_generation_prompt=True, tokenize=False, enable_thinking=True
         )
         prompts.append(prompt)
 
@@ -100,10 +100,15 @@ def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model)
             top_k=1,
             max_tokens=7500,
             repetition_penalty=1.2,
+            skip_special_tokens=False,
         )
     )
 
-    response_texts = [x.outputs[0].text for x in responses]
+    from vllm.reasoning.gemma4_utils import parse_thinking_output
+
+    parsed = [parse_thinking_output(x.outputs[0].text) for x in responses]
+    response_reasonings = [(p["thinking"] or "") for p in parsed]
+    response_texts = [(p["answer"] or "") for p in parsed]
     exclusion_results = []
 
     for response_text in response_texts:
@@ -112,7 +117,7 @@ def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model)
         else:
             exclusion_results.append(0.0)
 
-    return responses, response_texts, exclusion_results
+    return responses, response_reasonings, response_texts, exclusion_results
 
 
 def get_completed_batches(output_dir):
@@ -209,7 +214,7 @@ def main():
         download_dir=args.download_dir,
         gpu_memory_utilization=args.gpu_mem_util,
         max_num_seqs=args.max_num_seqs,
-        max_model_len=args.max_model_len
+        max_model_len=args.max_model_len,
     )
 
     # Check for resume point
@@ -228,7 +233,7 @@ def main():
         if (num_in_batch == args.batch_size) or (i == (candidates.shape[0] - 1)):
             output = pd.concat(batch_list, axis=0)
 
-            _, output['llm_boilerplate_response'], output['exclusion_result'] = ask_about_boilerplate(
+            _, output['llm_boilerplate_reasoning'], output['llm_boilerplate_response'], output['exclusion_result'] = ask_about_boilerplate(
                 output['patient_boilerplate_text'].astype(str).tolist(),
                 output['trial_boilerplate_text'].astype(str).tolist(),
                 llm

@@ -1,33 +1,4 @@
-# note: vllm steps can fail for parallelized scripts if there is no pre-compiled cache yet for that vllm config. if this happens, restarting script at that stage should allow training to proceed.
 
-# pull a JSON file from ctgov 
-# clinicaltrials.gov API can be challenging to work with, so we just did it manually by going to this link:
-# https://clinicaltrials.gov/search?cond=cancer%20OR%20lymphoma%20OR%20carcinoma%20OR%20leukemia%20OR%20sarcoma%20OR%20melanoma%20OR%20myeloma%20OR%20myelodysplastic%20OR%20myeloproliferative&aggFilters=phase:0%201%202%203%204,status:not%20rec,studyType:int
-# and then selecting "Download" and a JSON download option.
-
-# to work with the same file we started with, do:
-wget -P ../data/no_phi https://huggingface.co/datasets/ksg-dfci/mmai-synthetic/resolve/main/ctgov_interventional_phased_cancer_trials_11-3-25.json
-
-
-# try to pre-compile relevant vllm configurations
-
-aggregator=$(cat << EOF
-from vllm import LLM
-llm = LLM(
-        model='google/gemma-4-31b-it',
-        tensor_parallel_size=1,
-        download_dir="~/models",
-        gpu_memory_utilization=0.95,
-        max_model_len=220000,
-    )
-
-EOF
-)
-
-
-
-
-python 0a_parse_ctgov_json.py 
 
 python 0b_create_trial_spaces.py --input ../data/no_phi/ctgov_trials.csv --gpus 0,1,2,3 --gpus-per-instance 1 \
   --model google/gemma-4-31b-it --download-dir /data1/ken/models --reasoning-marker "<channel|>" --max-model-len 30000 --max-tokens 20000 --gpu-mem-util 0.90

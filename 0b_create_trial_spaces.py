@@ -77,7 +77,7 @@ PROMPT_SUFFIX = (
     "looks at the text for one space will not have access to text for other spaces, and so output like \"Same criteria as #1...\" renders a space useless!"
 )
 
-REASONING_MARKER = "</think>"   # default; override with --reasoning-marker
+REASONING_MARKER = "<channel|>"   # default; override with --reasoning-marker
 BOILERPLATE_MARKER = "Boilerplate"
 
 
@@ -106,13 +106,15 @@ def postprocess_outputs(raw_texts, reasoning_marker=REASONING_MARKER):
     The boilerplate split is performed on the ENTIRE line containing
     the marker, removing that line from both resultant parts.
     """
+    from vllm.reasoning.gemma4_utils import parse_thinking_output
+
     no_reasoning = []
     space_only = []
     boiler_only = []
 
     for t in raw_texts:
-        # 1. Handle Reasoning Split (Same as original)
-        final_t = t.split(reasoning_marker, 1)[-1] if reasoning_marker in t else t
+        # 1. Use vLLM's Gemma4 parser to strip reasoning + trailing sentinels
+        final_t = parse_thinking_output(t)["answer"]
 
         # 2. Handle Boilerplate Split (Line-based)
         if BOILERPLATE_MARKER in final_t:
@@ -187,9 +189,9 @@ def worker_process(
         tensor_parallel_size=tp_size,
         download_dir=download_dir,
         gpu_memory_utilization=gpu_mem_util,
-        max_num_seqs=max_num_seqs,
+        #max_num_seqs=max_num_seqs, # needed for qwen 3.5 style models
         max_model_len=max_model_len,
-        language_model_only=True
+        language_model_only=True,
     )
     tokenizer = llm.get_tokenizer()
 
@@ -200,6 +202,7 @@ def worker_process(
             conversation=build_messages(t),
             add_generation_prompt=True,
             tokenize=False,
+            enable_thinking=True
         )
         for t in trial_texts
     ]
@@ -214,6 +217,7 @@ def worker_process(
         presence_penalty=presence_penalty,
         repetition_penalty=repetition_penalty,
         max_tokens=max_tokens,
+        skip_special_tokens=False,
     )
 
     for i in range(0, len(prompts), batch_size):
@@ -254,7 +258,7 @@ def main():
     parser.add_argument("--work-dir", default="../data/no_phi/trial_space_shards", help="Directory for shard inputs/outputs")
     parser.add_argument("--gpus", required=True, help="Comma-separated GPU IDs, e.g. 0,1,2,3")
     parser.add_argument("--gpus-per-instance", type=int, default=1, help="Tensor-parallel GPUs per instance (set >1 for very large models)")
-    parser.add_argument("--model", default="Qwen/Qwen3.5-35B-A3B")
+    parser.add_argument("--model", default="google/gemma-4-31b-it")
     parser.add_argument("--download-dir", default="/data1/ken/models")
     parser.add_argument("--max-model-len", type=int, default=220000)
     parser.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
@@ -267,7 +271,7 @@ def main():
     parser.add_argument("--repetition-penalty", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=200000)
     parser.add_argument("--batch-size", type=int, default=1000, help="Prompts per generate() call per instance")
-    parser.add_argument("--reasoning-marker", default="</think>", help="Marker that separates reasoning from final output (default: </think>)")
+    parser.add_argument("--reasoning-marker", default="<channel|>", help="Marker that separates reasoning from final output (default: <channel|>)")
     parser.add_argument("--seed", type=int, default=42, help="Seed for split assignment")
     args = parser.parse_args()
 

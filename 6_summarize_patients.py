@@ -322,7 +322,8 @@ Do not add preceding text before the abstraction, and do not add commentary afte
     prompt = tokenizer.apply_chat_template(
         conversation=messages,
         add_generation_prompt=True,
-        tokenize=False
+        tokenize=False,
+        enable_thinking=True,
     )
     return prompt
 
@@ -354,20 +355,15 @@ def _build_prompt_worker(item):
     return (chunk_idx, prompt, prompt_token_count)
 
 
-def postprocess_output(raw_text: str, reasoning_marker: str = "assistantfinal") -> Tuple[str, str]:
+def postprocess_output(raw_text: str, reasoning_marker: str = "<channel|>") -> Tuple[str, str]:
     """
     Split output into reasoning (before reasoning_marker) and summary (after).
     Returns (reasoning, summary).
     """
-    if reasoning_marker in raw_text:
-        parts = raw_text.split(reasoning_marker, 1)
-        reasoning = parts[0].strip()
-        summary = parts[1].strip()
-    else:
-        # If no marker, treat entire output as summary
-        reasoning = ""
-        summary = raw_text.strip()
-
+    from vllm.reasoning.gemma4_utils import parse_thinking_output
+    parsed = parse_thinking_output(raw_text)
+    reasoning = (parsed["thinking"] or "").strip()
+    summary = (parsed["answer"] or "").strip()
     return reasoning, summary
 
 
@@ -749,7 +745,7 @@ async def single_inference_request(
     presence_penalty: float = 0.0,
     min_p: float = 0.0,
     repetition_penalty: float = 1.0,
-    reasoning_marker: str = "assistantfinal",
+    reasoning_marker: str = "<channel|>",
     max_retries: int = 6,
     base_timeout: float = 600.0,
 ) -> Tuple[int, str, str]:
@@ -762,6 +758,7 @@ async def single_inference_request(
             extra = {
                 "top_k": top_k,
                 "repetition_penalty": repetition_penalty,
+                "skip_special_tokens": False,
             }
             if min_p > 0.0:
                 extra["min_p"] = min_p
@@ -812,7 +809,7 @@ async def run_inference_batch(
     presence_penalty: float = 0.0,
     min_p: float = 0.0,
     repetition_penalty: float = 1.0,
-    reasoning_marker: str = "assistantfinal",
+    reasoning_marker: str = "<channel|>",
     max_concurrent: int = 16,
     batch_size: int = 64,
     max_retries: int = 6,
@@ -1052,8 +1049,8 @@ def main():
     ap.add_argument("--max_tokens", type=int, default=20000,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
     ap.add_argument("--repetition_penalty", type=float, default=1.3)
-    ap.add_argument("--reasoning_marker", type=str, default="assistantfinal",
-                    help="Marker string that separates reasoning from final summary in model output (default: assistantfinal)")
+    ap.add_argument("--reasoning_marker", type=str, default="<channel|>",
+                    help="Marker string that separates reasoning from final summary in model output (default: <channel|>)")
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     ap.add_argument("--base_port", type=int, default=8000,
                     help="Base port for vLLM servers. Server i uses base_port + i (default: 8000)")

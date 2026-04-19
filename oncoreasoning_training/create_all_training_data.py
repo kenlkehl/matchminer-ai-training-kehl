@@ -382,7 +382,7 @@ def build_prompt_with_truncation(
     cannot fit even after truncation.
     """
     messages = build_messages_fn(row)
-    prompt = tokenizer.apply_chat_template(conversation=messages, tokenize=False)
+    prompt = tokenizer.apply_chat_template(conversation=messages, tokenize=False, enable_thinking=True)
     total_tokens = token_len(prompt, tokenizer)
 
     if total_tokens <= max_seq_length:
@@ -416,7 +416,7 @@ def build_prompt_with_truncation(
 
     # Rebuild the prompt with truncated fields
     new_messages = rebuild_fn(row, truncated)
-    new_prompt = tokenizer.apply_chat_template(conversation=new_messages, tokenize=False)
+    new_prompt = tokenizer.apply_chat_template(conversation=new_messages, tokenize=False, enable_thinking=True)
     new_total = token_len(new_prompt, tokenizer)
 
     if new_total <= max_seq_length:

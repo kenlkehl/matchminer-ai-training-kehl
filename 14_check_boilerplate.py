@@ -68,7 +68,7 @@ def build_prompts(patient_boilerplates: List[str], trial_boilerplates: List[str]
                 "No introductory text or concluding text after that final answer."
             )}
         ]
-        prompt = tokenizer.apply_chat_template(conversation=messages, add_generation_prompt=True, tokenize=False)
+        prompt = tokenizer.apply_chat_template(conversation=messages, add_generation_prompt=True, tokenize=False, enable_thinking=True)
         prompts.append(prompt)
     return prompts
 
@@ -87,12 +87,15 @@ def parse_yes_no_at_end(text: str) -> int:
 
 
 def ask_about_boilerplate_batch(patient_boilerplates, trial_boilerplates, llm, sampling_params):
+    from vllm.reasoning.gemma4_utils import parse_thinking_output
     tokenizer = llm.get_tokenizer()
     prompts = build_prompts(patient_boilerplates, trial_boilerplates, tokenizer)
     responses = llm.generate(prompts, sampling_params)
-    response_texts = [r.outputs[0].text for r in responses]
+    parsed = [parse_thinking_output(r.outputs[0].text) for r in responses]
+    response_reasonings = [(p["thinking"] or "") for p in parsed]
+    response_texts = [(p["answer"] or "") for p in parsed]
     exclusion_results = [parse_yes_no_at_end(t) for t in response_texts]
-    return response_texts, exclusion_results
+    return response_reasonings, response_texts, exclusion_results
 
 
 # ----------------------------
@@ -194,7 +197,7 @@ def worker_process(worker_id: int,
             download_dir=args.download_dir,
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_num_seqs=args.max_num_seqs,
-            max_model_len=args.max_model_len
+            max_model_len=args.max_model_len,
         )
 
         sampling_params = SamplingParams(
@@ -202,6 +205,7 @@ def worker_process(worker_id: int,
             top_k=1,
             max_tokens=args.max_new_tokens,
             repetition_penalty=1.2,
+            skip_special_tokens=False,
         )
 
         # Process only the batches that don't exist yet
@@ -214,14 +218,16 @@ def worker_process(worker_id: int,
             t_blp = batch['trial_boilerplate_text'].tolist()
 
             try:
-                resp_texts, excl = ask_about_boilerplate_batch(p_blp, t_blp, llm, sampling_params)
+                resp_reasonings, resp_texts, excl = ask_about_boilerplate_batch(p_blp, t_blp, llm, sampling_params)
             except Exception as e:
                 # Fail-safe: record error strings so we can debug later
                 err = f"[Worker {worker_id}] ERROR batch {b}: {e}"
                 print(err, flush=True)
+                resp_reasonings = [""] * len(batch)
                 resp_texts = [err] * len(batch)
                 excl = [0] * len(batch)
 
+            batch['boilerplate_check_llm_reasoning'] = resp_reasonings
             batch['boilerplate_check_llm_response'] = resp_texts
             batch['exclusion_result'] = excl
 

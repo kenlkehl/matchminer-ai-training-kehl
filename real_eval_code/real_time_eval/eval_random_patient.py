@@ -149,19 +149,23 @@ def run_trial_check(patient_summary, trial_texts, llm):
             )}
         ]
         prompt = tokenizer.apply_chat_template(
-            conversation=messages, add_generation_prompt=True, tokenize=False
+            conversation=messages, add_generation_prompt=True, tokenize=False, enable_thinking=True
         )
         prompts.append(prompt)
 
     responses = llm.generate(
         prompts,
-        SamplingParams(temperature=0.0, top_k=1, max_tokens=5000, repetition_penalty=1.2),
+        SamplingParams(temperature=0.0, top_k=1, max_tokens=5000, repetition_penalty=1.2, skip_special_tokens=False),
     )
+
+    from vllm.reasoning.gemma4_utils import parse_thinking_output
 
     score_pattern = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")
     results = []
     for resp in responses:
-        txt = resp.outputs[0].text
+        parsed = parse_thinking_output(resp.outputs[0].text)
+        reasoning = parsed["thinking"] or ""
+        txt = parsed["answer"] or ""
         tail = txt[-60:].replace("*", "").replace("\u202f", " ")
         m = score_pattern.search(tail)
         if m:
@@ -175,7 +179,7 @@ def run_trial_check(patient_summary, trial_texts, llm):
                 score = 0
             else:
                 score = -1
-        results.append((txt, score))
+        results.append((reasoning, txt, score))
     return results
 
 
@@ -215,20 +219,24 @@ def run_boilerplate_check(patient_boilerplate, trial_boilerplates, llm):
             )}
         ]
         prompt = tokenizer.apply_chat_template(
-            conversation=messages, add_generation_prompt=True, tokenize=False
+            conversation=messages, add_generation_prompt=True, tokenize=False, enable_thinking=True
         )
         prompts.append(prompt)
 
     responses = llm.generate(
         prompts,
-        SamplingParams(temperature=0.0, top_k=1, max_tokens=7500, repetition_penalty=1.2),
+        SamplingParams(temperature=0.0, top_k=1, max_tokens=7500, repetition_penalty=1.2, skip_special_tokens=False),
     )
+
+    from vllm.reasoning.gemma4_utils import parse_thinking_output
 
     results = []
     for resp in responses:
-        txt = resp.outputs[0].text
+        parsed = parse_thinking_output(resp.outputs[0].text)
+        reasoning = parsed["thinking"] or ""
+        txt = parsed["answer"] or ""
         excluded = ("Yes!" in txt[-10:]) or ("YES!" in txt[-10:])
-        results.append((txt, excluded))
+        results.append((reasoning, txt, excluded))
     return results
 
 
@@ -395,22 +403,28 @@ def main():
         if tc_scores is not None:
             line += f" | tc_score={tc_scores[rank - 1]:.4f}"
         if tc_llm_results is not None:
-            score = tc_llm_results[rank - 1][1]
+            score = tc_llm_results[rank - 1][2]
             line += f" | eligibility={score}"
         if bp_llm_results is not None:
-            excluded = bp_llm_results[rank - 1][1]
+            excluded = bp_llm_results[rank - 1][2]
             line += f" | excluded={'Yes' if excluded else 'No'}"
         line += " ---"
         print(line)
         print(space_texts[idx])
 
         if tc_llm_results is not None:
-            print(f"\n  >> TRIAL CHECK REASONING (score={tc_llm_results[rank - 1][1]}):")
-            print(tc_llm_results[rank - 1][0])
+            tc_reasoning, tc_answer, tc_score = tc_llm_results[rank - 1]
+            print(f"\n  >> TRIAL CHECK REASONING (score={tc_score}):")
+            print(tc_reasoning)
+            print(f"\n  >> TRIAL CHECK ANSWER:")
+            print(tc_answer)
         if bp_llm_results is not None:
-            label = "EXCLUDED" if bp_llm_results[rank - 1][1] else "NOT EXCLUDED"
+            bp_reasoning, bp_answer, bp_excluded = bp_llm_results[rank - 1]
+            label = "EXCLUDED" if bp_excluded else "NOT EXCLUDED"
             print(f"\n  >> BOILERPLATE CHECK REASONING ({label}):")
-            print(bp_llm_results[rank - 1][0])
+            print(bp_reasoning)
+            print(f"\n  >> BOILERPLATE CHECK ANSWER:")
+            print(bp_answer)
 
 
 if __name__ == "__main__":

@@ -214,6 +214,7 @@ def worker_process(
         top_p=args.top_p,
         max_tokens=args.max_tokens,
         repetition_penalty=args.repetition_penalty,
+        skip_special_tokens=False,
     )
     
     for batch_start, batch_end in batches:
@@ -267,34 +268,40 @@ def worker_process(
             prompt = tokenizer.apply_chat_template(
                 conversation=messages,
                 add_generation_prompt=True,
-                tokenize=False
+                tokenize=False,
+                enable_thinking=True,
             )
             prompts.append(prompt)
         
         # Run inference
         responses = llm.generate(prompts, sampling_params)
-        
+
+        from vllm.reasoning.gemma4_utils import parse_thinking_output
+
         # Process results
         results = []
         batch_df_reset = batch_df.reset_index(drop=True)
-        
+
         for prompt_id, request_output in enumerate(responses):
             original_idx = batch_start + prompt_id
             row_data = batch_df_reset.iloc[prompt_id]
-            
+
             for completion_output in request_output.outputs:
-                response_text = completion_output.text
+                parsed = parse_thinking_output(completion_output.text)
+                reasoning_text = parsed["thinking"] or ""
+                response_text = parsed["answer"] or ""
                 response_id = completion_output.index
-                
+
                 # Parse exclusion result
                 if ("Yes!" in response_text[-10:]) or ("YES!" in response_text[-10:]):
                     exclusion_result = 1.0
                 else:
                     exclusion_result = 0.0
-                
+
                 result = {
                     "prompt_id": original_idx,
                     "response_id": response_id,
+                    "llm_boilerplate_reasoning": reasoning_text,
                     "llm_boilerplate_response": response_text,
                     "exclusion_result": exclusion_result,
                     # Include dedup keys for later joining back to original rows

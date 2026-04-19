@@ -85,7 +85,7 @@ SECOND_PRIMARY_INSTRUCTION = (
     "the cancer relevant to the trial. Incorporate events for the prior cancer as well as the current cancer into your output."
 )
 
-REASONING_MARKER = "</think>"  # adjust if your model uses a different delimiter
+REASONING_MARKER = "<channel|>"  # adjust if your model uses a different delimiter
 
 
 
@@ -101,14 +101,12 @@ def build_messages(criteria_text: str, rng: random.Random):
 
 
 def process_outputs(request_outputs, reasoning_marker=REASONING_MARKER):
+    from vllm.reasoning.gemma4_utils import parse_thinking_output
     full_responses, final_outputs = [], []
     for ro in request_outputs:
         text = ro.outputs[0].text
         full_responses.append(text)
-        if reasoning_marker and reasoning_marker in text:
-            final_outputs.append(text.split(reasoning_marker, 1)[-1])
-        else:
-            final_outputs.append(text)
+        final_outputs.append(parse_thinking_output(text)["answer"])
     return full_responses, final_outputs
 
 
@@ -122,7 +120,7 @@ def parse_args():
     p.add_argument("--output-dir", default="../data/no_phi/trial_spaces_negative_prompts_shards/", help="Directory for shard outputs and logs.")
     p.add_argument("--gpu-groups", default="0|1|2|3|4|5|6|7",
                    help='GPU groups string. Examples: "0,1,2,3|4,5,6,7" (two workers, TP=4 each) or "0,1,2,3,4,5,6,7" (one worker, TP=8).')
-    p.add_argument("--model-name", default="Qwen/Qwen3.6-35B-A3B", help="vLLM-compatible model name or path.")
+    p.add_argument("--model-name", default="google/gemma-4-31b-it", help="vLLM-compatible model name or path.")
     p.add_argument("--download-dir", default="../models")
     p.add_argument("--gpu-mem-util", type=float, default=0.95)
     p.add_argument("--max-model-len", type=int, default=150000)
@@ -201,6 +199,7 @@ def worker_process_shards(
         top_p=top_p,
         max_tokens=max_tokens,
         repetition_penalty=repetition_penalty,
+        skip_special_tokens=False,
     )
 
     completed = []
@@ -225,6 +224,7 @@ def worker_process_shards(
                     conversation=messages,
                     add_generation_prompt=True,
                     tokenize=False,
+                    enable_thinking=True,
                 )
                 order_keys.append(ridx)
                 prompts.append(prompt)
