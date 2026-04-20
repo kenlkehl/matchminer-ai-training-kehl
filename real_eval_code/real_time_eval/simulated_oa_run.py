@@ -111,7 +111,7 @@ def parse_args():
         help="Path to ../../6_summarize_patients.py",
     )
     parser.add_argument(
-        "--summarization-model", type=str, default="openai/gpt-oss-120b",
+        "--summarization-model", type=str, default="google/gemma-4-31b-it",
         help="Model passed to 6_summarize_patients.py",
     )
     parser.add_argument(
@@ -131,11 +131,11 @@ def parse_args():
         help="Comma-separated existing vLLM server URLs for summarization",
     )
     parser.add_argument(
-        "--summarization-chunk-size", type=int, default=50000,
-        help="Chunk size passed to 6_summarize_patients.py (default: 50000)",
+        "--summarization-chunk-size", type=int, default=10000,
+        help="Chunk size passed to 6_summarize_patients.py (default: 10000)",
     )
     parser.add_argument(
-        "--summarization-chunk-overlap", type=int, default=500,
+        "--summarization-chunk-overlap", type=int, default=50,
         help="Chunk overlap passed to 6_summarize_patients.py (default: 500)",
     )
     parser.add_argument(
@@ -170,6 +170,15 @@ def parse_args():
     parser.add_argument(
         "--summarization-run-deterministic", action="store_true",
         help="Pass --run_deterministic to 6_summarize_patients.py",
+    )
+    parser.add_argument(
+        "--summarization-max-model-len", type=int, default=30000,
+        help="max_model_len passed to 6_summarize_patients.py (default: 30000)",
+    )
+    parser.add_argument(
+        "--summarization-enforce-eager", action="store_true",
+        help="Pass --enforce_eager to 6_summarize_patients.py "
+             "(disables CUDA graphs; helps surface engine crash tracebacks)",
     )
     parser.add_argument(
         "--summarization-artifact-root", type=str,
@@ -499,6 +508,10 @@ def run_or_resume_summarization(notes_df, args):
         cmd.extend(["--server_urls", args.summarization_server_urls])
     if args.summarization_run_deterministic:
         cmd.append("--run_deterministic")
+    if args.summarization_max_model_len is not None:
+        cmd.extend(["--max_model_len", str(args.summarization_max_model_len)])
+    if args.summarization_enforce_eager:
+        cmd.append("--enforce_eager")
 
     print("Running patient summarization pipeline:")
     print(f"  {shlex.join(cmd)}")
