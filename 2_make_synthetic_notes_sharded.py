@@ -513,7 +513,7 @@ def main():
     ap.add_argument("--max_new_tokens", type=int, default=15000)
     ap.add_argument("--temperature", type=float, default=0.5)
     ap.add_argument("--top_p", type=float, default=0.2)
-    ap.add_argument("--repetition_penalty", type=float, default=1.2)
+    ap.add_argument("--repetition_penalty", type=float, default=1.0)
     ap.add_argument("--gpu_mem_util", type=float, default=0.94)
     ap.add_argument("--compose_only", action="store_true",
                     help="Skip generation and only compose existing shard files")

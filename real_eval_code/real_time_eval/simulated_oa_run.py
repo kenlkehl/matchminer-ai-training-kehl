@@ -197,6 +197,15 @@ def parse_args():
         help="If provided, only consider outbound email drafts from "
              "activate_emails with this exact execution_timestamp value.",
     )
+    parser.add_argument(
+        "--sample-mrns", type=int, default=None,
+        help="If provided, randomly sample this many MRNs from the eligible "
+             "patients and run the pipeline only on them.",
+    )
+    parser.add_argument(
+        "--sample-seed", type=int, default=None,
+        help="Random seed for --sample-mrns (default: non-deterministic).",
+    )
     return parser.parse_args()
 
 
@@ -537,6 +546,13 @@ def main():
         conn.close()
         print("No patients generated outbound email drafts. Nothing to do.")
         return
+
+    if args.sample_mrns is not None and args.sample_mrns < len(patient_rows):
+        rng = np.random.default_rng(args.sample_seed)
+        sampled_idx = rng.choice(len(patient_rows), size=args.sample_mrns, replace=False)
+        patient_rows = [patient_rows[i] for i in sorted(sampled_idx.tolist())]
+        print(f"Randomly sampled {len(patient_rows)} MRNs "
+              f"(seed={args.sample_seed}).")
 
     patient_ids = [r[0] for r in patient_rows]
     patient_mrns = [r[1] for r in patient_rows]

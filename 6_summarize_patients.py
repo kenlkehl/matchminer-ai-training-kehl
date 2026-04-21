@@ -1053,7 +1053,7 @@ def main():
     ap.add_argument("--min_p", type=float, default=0.0)
     ap.add_argument("--max_tokens", type=int, default=7500,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
-    ap.add_argument("--repetition_penalty", type=float, default=1.3)
+    ap.add_argument("--repetition_penalty", type=float, default=1.0)
     ap.add_argument("--reasoning_marker", type=str, default="<channel|>",
                     help="Marker string that separates reasoning from final summary in model output (default: <channel|>)")
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
@@ -1077,7 +1077,7 @@ def main():
                     help="Limit to first N patients (for testing)")
     ap.add_argument("--run_deterministic", action="store_true",
                     help="Override LLM parameters for deterministic output: "
-                         "temperature=0.0, top_k=1, repetition_penalty=1.3, "
+                         "temperature=0.0, top_k=1, repetition_penalty=1.0, "
                          "max_model_len=120000, chunk_size=50000, max_tokens=10000")
     args = ap.parse_args()
 
@@ -1085,11 +1085,11 @@ def main():
     if args.run_deterministic:
         args.temperature = 0.0
         args.top_k = 1
-        args.repetition_penalty = 1.3
+        args.repetition_penalty = 1.0
         args.max_model_len = 120000
         args.chunk_size = 50000
         args.max_tokens = 10000
-        print("Deterministic mode: temperature=0.0, top_k=1, repetition_penalty=1.3, "
+        print("Deterministic mode: temperature=0.0, top_k=1, repetition_penalty=1.0, "
               "max_model_len=120000, chunk_size=50000, max_tokens=10000")
 
     # Try loading cached prepared chunks first to skip expensive data prep

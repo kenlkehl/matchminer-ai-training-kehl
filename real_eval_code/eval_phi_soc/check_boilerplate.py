@@ -99,7 +99,7 @@ def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model)
             temperature=0.0,
             top_k=1,
             max_tokens=7500,
-            repetition_penalty=1.2,
+            repetition_penalty=1.0,
             skip_special_tokens=False,
         )
     )

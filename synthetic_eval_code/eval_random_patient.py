@@ -144,7 +144,7 @@ def run_trial_check(patient_summary, trial_texts, llm):
 
     responses = llm.generate(
         prompts,
-        SamplingParams(temperature=0.0, top_k=1, max_tokens=5000, repetition_penalty=1.2, skip_special_tokens=False),
+        SamplingParams(temperature=0.0, top_k=1, max_tokens=5000, repetition_penalty=1.0, skip_special_tokens=False),
     )
 
     from vllm.reasoning.gemma4_utils import parse_thinking_output
@@ -214,7 +214,7 @@ def run_boilerplate_check(patient_boilerplate, trial_boilerplates, llm):
 
     responses = llm.generate(
         prompts,
-        SamplingParams(temperature=0.0, top_k=1, max_tokens=7500, repetition_penalty=1.2, skip_special_tokens=False),
+        SamplingParams(temperature=0.0, top_k=1, max_tokens=7500, repetition_penalty=1.0, skip_special_tokens=False),
     )
 
     from vllm.reasoning.gemma4_utils import parse_thinking_output
