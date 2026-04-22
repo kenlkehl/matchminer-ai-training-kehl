@@ -204,7 +204,7 @@ def worker_process(worker_id: int,
             temperature=0.0,
             top_k=1,
             max_tokens=args.max_new_tokens,
-            repetition_penalty=1.0,
+            repetition_penalty=1.1,
             skip_special_tokens=False,
         )
 

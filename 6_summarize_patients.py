@@ -267,7 +267,7 @@ Age: (patient's most recent age)
 Sex: (patient's sex)
 Cancer type: (patient's cancer type/primary site (eg breast cancer, lung cancer, etc))
 Histology: (patient's histology (eg adenocarcinoma, squamous carcinoma, etc))
-Current extent: (patient's current extent (localized, advanced, metastatic, etc); this is also where tumor markers for following disease status over time, such as CEA or PSA, should be documented if relevant)
+Current extent: (patient's current extent (localized, advanced, metastatic, etc); this is also where tumor markers for following disease status, such as CEA or PSA, should be documented if relevant. Don't list every such marker the patient has had checked over time, though, because these can get lengthy; just list the most recent value and trend if relevant to disease status.)
 Biomarkers: (genomic results, protein expression, etc, relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings. However, critically, standard lab values (eg CBC, CMP, LFTs, etc) MUST NOT be included in this section - only tumor biomarkers relevant to cancer treatment selection should be included. Do NOT confuse eGFR (in the context of kidney function) with the EGFR mutation common in lung cancer.)
 Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically. For cancer drug names, use generic names whenever you know them. Expand abbreviations where possible ,(eg "carbo" -> "carboplatin", "pembro" -> "pembrolizumab", "AC/T" -> "doxorubicin + cyclophosphamide followed by paclitaxel", etc)
 
@@ -299,6 +299,77 @@ Treatment history:
 
 Boilerplate:
 ECOG 1. Remote history of prostate cancer (inactive).
+
+Reference: common systemic therapy regimen abbreviations (use this list to expand abbreviations into generic drug names whenever they appear in the clinical record):
+- AC: doxorubicin + cyclophosphamide
+- AC-T / AC followed by T: doxorubicin + cyclophosphamide followed by paclitaxel
+- ddAC-T: dose-dense doxorubicin + cyclophosphamide followed by paclitaxel
+- TC: docetaxel + cyclophosphamide
+- TCH: docetaxel + carboplatin + trastuzumab
+- TCHP: docetaxel + carboplatin + trastuzumab + pertuzumab
+- THP: paclitaxel + trastuzumab + pertuzumab
+- HP: trastuzumab + pertuzumab
+- T-DM1: ado-trastuzumab emtansine
+- T-DXd: trastuzumab deruxtecan
+- CMF: cyclophosphamide + methotrexate + 5-fluorouracil
+- CAF / FAC: cyclophosphamide + doxorubicin + 5-fluorouracil
+- FEC: 5-fluorouracil + epirubicin + cyclophosphamide
+- CDK4/6i: CDK4/6 inhibitor (e.g., palbociclib, ribociclib, abemaciclib)
+- AI: aromatase inhibitor (e.g., anastrozole, letrozole, exemestane); note this abbreviation can also mean doxorubicin + ifosfamide in sarcoma contexts — disambiguate by cancer type
+- FOLFOX: 5-fluorouracil + leucovorin + oxaliplatin
+- FOLFIRI: 5-fluorouracil + leucovorin + irinotecan
+- FOLFOXIRI / FOLFIRINOX: 5-fluorouracil + leucovorin + oxaliplatin + irinotecan
+- mFOLFIRINOX: modified FOLFIRINOX (reduced doses of 5-fluorouracil + leucovorin + oxaliplatin + irinotecan)
+- CAPOX / XELOX: capecitabine + oxaliplatin
+- CAPIRI / XELIRI: capecitabine + irinotecan
+- DCF: docetaxel + cisplatin + 5-fluorouracil
+- FLOT: 5-fluorouracil + leucovorin + oxaliplatin + docetaxel
+- ECF: epirubicin + cisplatin + 5-fluorouracil
+- ECX: epirubicin + cisplatin + capecitabine
+- Gem/Cis: gemcitabine + cisplatin
+- Gem/Carbo: gemcitabine + carboplatin
+- Gem/Abraxane / Gem/nab-pac: gemcitabine + nab-paclitaxel
+- GemOx: gemcitabine + oxaliplatin
+- Carbo/Tax: carboplatin + paclitaxel
+- EP / PE: cisplatin + etoposide
+- CE: carboplatin + etoposide
+- BEP / PEB: bleomycin + etoposide + cisplatin
+- VIP: etoposide + ifosfamide + cisplatin
+- TIP: paclitaxel + ifosfamide + cisplatin
+- MVAC / ddMVAC: methotrexate + vinblastine + doxorubicin + cisplatin (dose-dense variant)
+- GC: gemcitabine + cisplatin (or gemcitabine + carboplatin in bladder cancer)
+- EV: enfortumab vedotin
+- EV+P: enfortumab vedotin + pembrolizumab
+- CHOP: cyclophosphamide + doxorubicin + vincristine + prednisone
+- R-CHOP: rituximab + cyclophosphamide + doxorubicin + vincristine + prednisone
+- EPOCH / R-EPOCH: etoposide + prednisone + vincristine + cyclophosphamide + doxorubicin (+/- rituximab)
+- DA-EPOCH-R: dose-adjusted EPOCH + rituximab
+- ABVD: doxorubicin + bleomycin + vinblastine + dacarbazine
+- BEACOPP: bleomycin + etoposide + doxorubicin + cyclophosphamide + vincristine + procarbazine + prednisone
+- BV-AVD: brentuximab vedotin + doxorubicin + vinblastine + dacarbazine
+- ICE / R-ICE: ifosfamide + carboplatin + etoposide (+/- rituximab)
+- DHAP / R-DHAP: dexamethasone + high-dose cytarabine + cisplatin (+/- rituximab)
+- ESHAP: etoposide + methylprednisolone + cytarabine + cisplatin
+- GDP: gemcitabine + dexamethasone + cisplatin
+- BR: bendamustine + rituximab
+- HyperCVAD: cyclophosphamide + vincristine + doxorubicin + dexamethasone, alternating with high-dose methotrexate + cytarabine
+- 7+3: cytarabine (7 days) + daunorubicin or idarubicin (3 days), induction for AML
+- HiDAC: high-dose cytarabine
+- VRd / RVd: bortezomib + lenalidomide + dexamethasone
+- KRd: carfilzomib + lenalidomide + dexamethasone
+- DRd: daratumumab + lenalidomide + dexamethasone
+- DVd: daratumumab + bortezomib + dexamethasone
+- D-VRd: daratumumab + bortezomib + lenalidomide + dexamethasone
+- VAD: vincristine + doxorubicin + dexamethasone
+- MAP: methotrexate + doxorubicin + cisplatin (osteosarcoma)
+- VAC: vincristine + actinomycin-D + cyclophosphamide
+- VDC/IE: vincristine + doxorubicin + cyclophosphamide alternating with ifosfamide + etoposide (Ewing sarcoma)
+- AI: doxorubicin + ifosfamide (sarcoma)
+- Common single-agent abbreviations: pembro = pembrolizumab; nivo = nivolumab; ipi = ipilimumab; atezo = atezolizumab; durva = durvalumab; cemi = cemiplimab; dostarlimab; cetux = cetuximab; pani = panitumumab; bev = bevacizumab; ram = ramucirumab; trastuzumab = Herceptin; pertuzumab = Perjeta; carbo = carboplatin; cis = cisplatin; tax / pac = paclitaxel; doce = docetaxel; gem = gemcitabine; cape = capecitabine; 5-FU = fluorouracil; oxali = oxaliplatin; iri = irinotecan; etop = etoposide; doxo / adria = doxorubicin; cyclo / CTX = cyclophosphamide; ifos = ifosfamide; vinc / VCR = vincristine; len = lenalidomide; pom = pomalidomide; bort / Velcade = bortezomib; carfilzomib = Kyprolis; dara = daratumumab; ven = venetoclax.
+- Ipi/Nivo: ipilimumab + nivolumab
+- Chemo-IO: chemotherapy combined with immune checkpoint inhibitor (specify the agents based on context)
+
+If an abbreviation in the record is not on this list and you are not confident of its expansion, write the abbreviation as-is rather than guessing.
 
 The following are the patient's data.
 ---
@@ -1031,7 +1102,7 @@ def main():
                     help="Minimum days between consecutive notes")
     ap.add_argument("--synthetic_max_days", type=int, default=90,
                     help="Maximum days between consecutive notes")
-    ap.add_argument("--chunk_size", type=int, default=10000,
+    ap.add_argument("--chunk_size", type=int, default=20000,
                     help="Maximum tokens per chunk when concatenating patient notes (default: 10000)")
     ap.add_argument("--chunk_overlap", type=int, default=500,
                     help="Token overlap between consecutive chunks (default: 500)")
@@ -1042,7 +1113,7 @@ def main():
     ap.add_argument("--gpus_per_server", type=int, required=True,
                     help="Number of GPUs per vLLM server. n_servers = len(gpu_ids) // gpus_per_server. "
                          "tensor_parallel_size is set to this value.")
-    ap.add_argument("--max_model_len", type=int, default=30000)
+    ap.add_argument("--max_model_len", type=int, default=50000)
     ap.add_argument("--enforce_eager", action="store_true",
                     help="Pass --enforce-eager to vLLM (disables CUDA graphs; helps surface engine crash tracebacks)")
     ap.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
@@ -1051,9 +1122,9 @@ def main():
     ap.add_argument("--top_p", type=float, default=1.0)
     ap.add_argument("--presence_penalty", type=float, default=0.0)
     ap.add_argument("--min_p", type=float, default=0.0)
-    ap.add_argument("--max_tokens", type=int, default=7500,
+    ap.add_argument("--max_tokens", type=int, default=20000,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
-    ap.add_argument("--repetition_penalty", type=float, default=1.0)
+    ap.add_argument("--repetition_penalty", type=float, default=1.1)
     ap.add_argument("--reasoning_marker", type=str, default="<channel|>",
                     help="Marker string that separates reasoning from final summary in model output (default: <channel|>)")
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)

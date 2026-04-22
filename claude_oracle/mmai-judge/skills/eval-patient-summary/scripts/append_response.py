@@ -8,6 +8,7 @@ Stable command prefix so the user grants one "always allow" for
 `python .../append_response.py *` across all rows.
 """
 import argparse
+import fcntl
 import json
 import sys
 from pathlib import Path
@@ -56,8 +57,13 @@ def main() -> None:
         {"__row_id__": args.row_id, "summary_judge_response": text},
         ensure_ascii=False,
     )
+    # LOCK_EX serializes concurrent appenders so parallel subagents do
+    # not interleave bytes within a single JSON line. The OS releases
+    # the lock when the file handle closes.
     with out_path.open("a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(line + "\n")
+        f.flush()
     print(f"appended row_id={args.row_id} ({len(text)} chars) -> {out_path}")
 
 

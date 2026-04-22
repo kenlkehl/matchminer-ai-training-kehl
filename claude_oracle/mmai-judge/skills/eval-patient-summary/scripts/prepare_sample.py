@@ -52,6 +52,12 @@ def require_cols(df: pd.DataFrame, cols: list[str], label: str) -> None:
 def concat_notes_per_patient(notes: pd.DataFrame, note_col: str) -> pd.DataFrame:
     notes = notes.sort_values(["patient_id", "date"], kind="mergesort").reset_index(drop=True)
 
+    n_before = len(notes)
+    notes = notes.drop_duplicates(subset=["patient_id", note_col], keep="first").reset_index(drop=True)
+    n_after = len(notes)
+    if n_after < n_before:
+        print(f"deduped notes: {n_before} -> {n_after} rows after dropping identical (patient_id, {note_col}) duplicates")
+
     rows = []
     for patient_id, group in notes.groupby("patient_id", sort=False):
         parts = []
