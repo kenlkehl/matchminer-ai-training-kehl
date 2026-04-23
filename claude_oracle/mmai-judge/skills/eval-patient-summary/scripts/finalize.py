@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Merge judge responses into the staging dataframe and parse verdicts.
 
-Parses the final line `Final verdict: <LABEL>` where LABEL is one of
+Reads each subagent's response from `<work_dir>/responses/row_<id>.txt`
+(written by the subagent via the Write tool) and parses the final line
+`Final verdict: <LABEL>` where LABEL is one of
 AGREE / OMISSION / INCORRECT / OMISSION_AND_INCORRECT. On parse failure writes
 "PARSE_FAILED" to the verdict column.
 """
 import argparse
-import json
 import re
 import sys
 from pathlib import Path
@@ -52,31 +53,28 @@ def main() -> None:
     reject_if_inside_skill(output_path, "output")
 
     staging = work_dir / "staging.parquet"
-    responses = work_dir / "responses.jsonl"
+    responses_dir = work_dir / "responses"
     if not staging.is_file():
         sys.exit(f"ERROR: {staging} not found.")
-    if not responses.is_file():
-        sys.exit(f"ERROR: {responses} not found.")
+    if not responses_dir.is_dir():
+        sys.exit(f"ERROR: {responses_dir} not found.")
 
     df = pd.read_parquet(staging)
 
-    resp_map: dict[int, str] = {}
-    with responses.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            resp_map[int(rec["__row_id__"])] = rec["summary_judge_response"]
-
-    missing = [rid for rid in df["__row_id__"] if rid not in resp_map]
+    texts: list[str] = []
+    missing: list[int] = []
+    for rid in df["__row_id__"]:
+        rid_int = int(rid)
+        path = responses_dir / f"row_{rid_int}.txt"
+        if not path.is_file():
+            missing.append(rid_int)
+            continue
+        texts.append(path.read_text())
     if missing:
         sys.exit(
-            f"ERROR: missing responses for __row_id__ values: {missing[:10]}"
+            f"ERROR: missing response file(s) for row_id(s): {missing[:10]}"
             f"{' ...' if len(missing) > 10 else ''}"
         )
-
-    texts = [resp_map[int(rid)] for rid in df["__row_id__"]]
     df["summary_judge_response"] = texts
     df["summary_judge_verdict"] = [parse_verdict(t) for t in texts]
     df = df.drop(columns=["__row_id__"])

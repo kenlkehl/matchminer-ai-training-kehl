@@ -142,12 +142,14 @@ def main() -> None:
 
     staging_parquet = work_dir / "staging.parquet"
     rows_dir = work_dir / "rows"
+    responses_dir = work_dir / "responses"
     merged.to_parquet(staging_parquet, index=False)
 
-    if rows_dir.exists():
-        for old in rows_dir.glob("row_*.txt"):
-            old.unlink()
-    rows_dir.mkdir(parents=True, exist_ok=True)
+    for d in (rows_dir, responses_dir):
+        if d.exists():
+            for old in d.glob("row_*.txt"):
+                old.unlink()
+        d.mkdir(parents=True, exist_ok=True)
 
     width = max(2, len(str(max(len(merged) - 1, 0))))
     boilerplate_merged = 0
@@ -171,6 +173,7 @@ def main() -> None:
     print(f"wrote {len(merged)} rows")
     print(f"  {staging_parquet}")
     print(f"  {rows_dir}/row_*.txt  ({len(merged)} files)")
+    print(f"  {responses_dir}/  (empty; subagents Write row_<id>.txt here)")
     if has_boilerplate:
         print(f"  boilerplate column: present, merged into {boilerplate_merged}/{len(merged)} rows")
     else:

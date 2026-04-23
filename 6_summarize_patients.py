@@ -268,11 +268,11 @@ Sex: (patient's sex)
 Cancer type: (patient's cancer type/primary site (eg breast cancer, lung cancer, etc))
 Histology: (patient's histology (eg adenocarcinoma, squamous carcinoma, etc))
 Current extent: (patient's current extent (localized, advanced, metastatic, etc); this is also where tumor markers for following disease status, such as CEA or PSA, should be documented if relevant. Don't list every such marker the patient has had checked over time, though, because these can get lengthy; just list the most recent value and trend if relevant to disease status.)
-Biomarkers: (genomic results, protein expression, etc, relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings. However, critically, standard lab values (eg CBC, CMP, LFTs, etc) MUST NOT be included in this section - only tumor biomarkers relevant to cancer treatment selection should be included. Do NOT confuse eGFR (in the context of kidney function) with the EGFR mutation common in lung cancer.)
+Biomarkers: (genomic results, protein expression, etc, relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings. However, critically, standard lab values (eg CBC, CMP, LFTs, etc) MUST NOT be included in this section - only tumor biomarkers relevant to cancer treatment selection should be included. Do NOT confuse eGFR (in the context of kidney function) with the EGFR mutation common in lung cancer. Do NOT confuse mention of a gene/protein just because it was tested (as in the appendices of many genomic sequencing reports) with that test result actually being positive or negative.)
 Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically. For cancer drug names, use generic names whenever you know them. Expand abbreviations where possible ,(eg "carbo" -> "carboplatin", "pembro" -> "pembrolizumab", "AC/T" -> "doxorubicin + cyclophosphamide followed by paclitaxel", etc)
 
 Boilerplate conditions:
-(any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, poor performance status, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, prior unrelated cancer diagnoses, etc)
+(any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, poor performance status, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, prior unrelated cancer diagnoses, etc.)
 
 Clearly separate the "boilerplate" section by adding a newline after the patient history; then the "Boilerplate conditions:' text VERBATIM; then another newline; and then the boilerplate condition output text.
 --(end of sections)
@@ -295,9 +295,7 @@ Treatment history:
 # 1/2021: Palliative radiation for progressive spinal metastases
 # 3/2021-present: docetaxel; achieved partial response, ongoing as of last note
 
---(then if there is a second active cancer, repeat the above format for that cancer, then proceed to Boilerplate section)--
-
-Boilerplate:
+Boilerplate conditions:
 ECOG 1. Remote history of prostate cancer (inactive).
 
 Reference: common systemic therapy regimen abbreviations (use this list to expand abbreviations into generic drug names whenever they appear in the clinical record):
@@ -382,6 +380,7 @@ NEXT CLINICAL RECORD SEGMENT (covering {first_date} to {last_date}):
 Now, write your updated summary, or if there is no new relevant information, output the prior summary exactly as it was. 
 If any information is still relevant but is unchanged, just restate it in the updated summary, but do NOT state "no change" or similar - just produce the updated summary text as if you were writing it fresh, incorporating any new information but keeping relevant old information, without calling out what changed vs what stayed the same from the prior summary. 
 You may update the old summary content in your output if the new information demonstrates that there was an error in the old output.
+You may sometimes encounter contradictory information across notes (eg different biomarker results, or different cancer stage descriptions) - in that case, use your best judgment to determine which information is most likely to be correct based on the dates and context, and update the summary accordingly to reflect the most likely current state of the patient.
 Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
     system_content = 'Reasoning: high' if 'gpt-oss' in model_name.lower() else ''
@@ -1372,7 +1371,7 @@ def main():
         """Split summary into main summary and boilerplate text."""
         if not text:
             return "", ""
-        markers = ["Boilerplate:", "BOILERPLATE:", "boilerplate:"]
+        markers = ["Boilerplate:", "BOILERPLATE:", "boilerplate:", "Boilerplate conditions:", "BOILERPLATE CONDITIONS:", "boilerplate conditions:"]
         for marker in markers:
             if marker in text:
                 parts = text.split(marker, 1)

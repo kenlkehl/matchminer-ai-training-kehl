@@ -3,7 +3,7 @@ name: eval-patient-summary
 description: Judge MM-AI patient summaries against the underlying clinical notes. Classifies each summary as AGREE (no clinically material differences), OMISSION (missed information that would affect treatment/trial eligibility), INCORRECT (fabricated or wrong information), or OMISSION_AND_INCORRECT. Use when the user asks to evaluate MM-AI patient summaries with Claude as judge, or mentions 6_summarize_patients / patient_summary eval.
 disable-model-invocation: true
 argument-hint: [summaries_parquet_or_csv] [notes_parquet_or_csv]
-allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *) Bash(wc *) Bash(: *)
+allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *) Bash(wc *)
 ---
 
 # eval-patient-summary
@@ -72,48 +72,46 @@ python "${CLAUDE_SKILL_DIR}/scripts/prepare_sample.py" \
 
 The script sorts the notes df by `(patient_id, date)` with stable mergesort,
 concatenates them per patient (separated by `--- NOTE <date> ---` blocks),
-truncates to the last ~1M-token tail, and writes `staging.parquet` and
+truncates to the last ~1M-token tail, and writes `staging.parquet`,
 `<work_dir>/rows/row_NN.txt` (one per sampled row, containing the source
-notes block followed by the MM-AI summary). Reading those per-row files is
-how you load each row for judging — do NOT copy rows elsewhere.
+notes block followed by the MM-AI summary), and an empty
+`<work_dir>/responses/` directory the subagents will Write into.
+Reading the per-row input files is how you load each row for judging —
+do NOT copy rows elsewhere.
 
 ### 4. Judge each row in a per-patient subagent
 
-Initialize `<work_dir>/responses.jsonl` as empty with a single command:
-
-```bash
-: > <work_dir>/responses.jsonl
-```
-
-Then dispatch **one `general-purpose` subagent per sampled row** via the
+Dispatch **one `general-purpose` subagent per sampled row** via the
 Agent tool. Each subagent reads its row file, judges that single patient
-with extended thinking, and appends its verdict via `append_response.py`.
-Run subagents in parallel by issuing multiple Agent tool calls in a
-single message — cap concurrency at ~10 in flight so the context fan-out
-stays manageable. The orchestrator does NOT do the judging itself.
+with extended thinking, and persists its full response by **Write**ing it
+to `<work_dir>/responses/row_<row_id>.txt`. Run subagents in parallel by
+issuing multiple Agent tool calls in a single message — cap concurrency
+at ~10 in flight so the context fan-out stays manageable. The
+orchestrator does NOT do the judging itself.
 
 Each subagent has no view of this conversation, so its prompt must be
 fully self-contained. For row `NN` with file
 `<work_dir>/rows/row_NN.txt`, send the subagent the verbatim template
-below, substituting `{row_path}`, `{row_id}`, `{work_dir}`, and
-`{skill_dir}` (the absolute value of `${CLAUDE_SKILL_DIR}`).
+below, substituting `{row_path}`, `{row_id}`, and `{response_path}`
+(which is `<work_dir>/responses/row_<row_id>.txt`, no zero-padding).
 
 When all subagents return, sanity-check that
-`wc -l <work_dir>/responses.jsonl` equals the sample size before
+`ls <work_dir>/responses/ | wc -l` equals the sample size before
 proceeding to step 5; re-dispatch any missing row_ids.
 
-Notes on the append command:
+Notes on response persistence:
 
-- Always keep the exact same command prefix
-  (`python "<skill_dir>/scripts/append_response.py" *`) so one user
-  "always allow" grant covers every subagent invocation.
-- The helper writes one line per call:
-  `{"__row_id__": <int>, "summary_judge_response": <full response>}`,
-  and uses `fcntl.flock` to serialize concurrent appends.
-- Use a unique heredoc sentinel (`SUMMARY_JUDGE_EOF`) so the body can
-  contain arbitrary characters.
+- Persistence is **Write-only** for subagents — they never run any helper
+  script. The harness blocks Bash inside subagents in some environments
+  even when allowed for the orchestrator, so a Bash-based helper is
+  fragile. `Write` is always available to a `general-purpose` subagent.
+- One file per row at `<work_dir>/responses/row_<row_id>.txt`. No
+  shared-file locking is needed because each subagent owns a distinct
+  path.
+- `finalize.py` reads each `row_<row_id>.txt` directly; there is no
+  intermediate JSONL log.
 
-#### Subagent prompt template (verbatim — substitute the four placeholders)
+#### Subagent prompt template (verbatim — substitute the three placeholders)
 
 ```
 You are a brilliant oncologist serving as a judge in an AI evaluation of MM-AI patient summarization. Use **ultrathink** while reading and reasoning — the verdict hinges on whether an omission or fabrication in the summary would plausibly change a trial-eligibility or treatment decision, and that needs careful reading.
@@ -161,16 +159,13 @@ Your full reasoning response MUST end with the following line and nothing else a
 Final verdict: X
 where X is one of the four labels above, written exactly (uppercase, with underscores where shown).
 
-After producing your full response, append it to the run log via:
+After producing your full response, persist it by **Write**ing the full response text (ending with the Final verdict line) to:
 
-  python "{skill_dir}/scripts/append_response.py" \
-    --work_dir {work_dir} --row_id {row_id} <<'SUMMARY_JUDGE_EOF'
-  <your full response text, ending with the Final verdict line>
-  SUMMARY_JUDGE_EOF
+  {response_path}
 
-Use the heredoc sentinel `SUMMARY_JUDGE_EOF` exactly so the response body can contain arbitrary characters. The helper appends one JSON line under a file lock, so parallel sibling subagents are safe.
+Use the Write tool — do NOT call any helper script and do NOT use Bash. The directory already exists; one file per row, you own this path. The orchestrator will pick it up and `finalize.py` will read it directly.
 
-Once the append succeeds, reply to the orchestrator with only the row_id and the verdict label (under 30 words). Do not echo your reasoning back — the full response is already captured by `append_response.py`.
+Once the Write succeeds, reply to the orchestrator with only the row_id and the verdict label (under 30 words). Do not echo your reasoning back — the full response is already in the file you just wrote.
 ```
 
 ### 5. Finalize
@@ -277,6 +272,8 @@ verdict-mix summary, and the absolute paths of both `output_path` and
 - Do not write any file inside this skill directory at any step.
 - Parsing only inspects the last ~400 chars of the response, so the final
   line must be `Final verdict: X` with nothing after it.
-- Re-running over the same `work_dir` overwrites `staging.parquet`;
-  `responses.jsonl` is yours to recreate each run. The synthesis report
-  at `report_path` is overwritten on each finalize+synthesize pass.
+- Re-running over the same `work_dir` overwrites `staging.parquet` and
+  clears any stale `row_*.txt` files in both `rows/` and `responses/`,
+  so a fresh sample never reuses a previous run's responses. The
+  synthesis report at `report_path` is overwritten on each
+  finalize+synthesize pass.
