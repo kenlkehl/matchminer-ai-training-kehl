@@ -72,10 +72,17 @@ def parse_args():
                         help="Maximum context length for the LLM")
     parser.add_argument("--llm-max-num-seqs", type=int, default=900,
                         help="vLLM max_num_seqs (concurrent request cap).")
+
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+    from vllm_reasoning_utils import add_reasoning_cli_args
+    add_reasoning_cli_args(parser)
+
     return parser.parse_args()
 
 
-def run_trial_check(patient_summary, trial_texts, llm):
+def run_trial_check(patient_summary, trial_texts, llm, reasoning_parser):
     """Run LLM-based eligibility check on each (patient, trial) pair.
 
     Returns list of (response_text, score) tuples where score is 0-5 or -1 on
@@ -147,14 +154,12 @@ def run_trial_check(patient_summary, trial_texts, llm):
         SamplingParams(temperature=0.0, top_k=1, max_tokens=5000, repetition_penalty=1.0, skip_special_tokens=False),
     )
 
-    from vllm.reasoning.gemma4_utils import parse_thinking_output
+    from vllm_reasoning_utils import parse_reasoning_output
 
     score_pattern = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")
     results = []
     for resp in responses:
-        parsed = parse_thinking_output(resp.outputs[0].text)
-        reasoning = parsed["thinking"] or ""
-        txt = parsed["answer"] or ""
+        reasoning, txt = parse_reasoning_output(resp.outputs[0].text, reasoning_parser, tokenizer)
         tail = txt[-60:].replace("*", "").replace("\u202f", " ")
         m = score_pattern.search(tail)
         if m:
@@ -172,7 +177,7 @@ def run_trial_check(patient_summary, trial_texts, llm):
     return results
 
 
-def run_boilerplate_check(patient_boilerplate, trial_boilerplates, llm):
+def run_boilerplate_check(patient_boilerplate, trial_boilerplates, llm, reasoning_parser):
     """Run LLM-based boilerplate exclusion check on each (patient, trial) pair.
 
     Returns list of (response_text, excluded) tuples where excluded is True/False.
@@ -217,13 +222,11 @@ def run_boilerplate_check(patient_boilerplate, trial_boilerplates, llm):
         SamplingParams(temperature=0.0, top_k=1, max_tokens=7500, repetition_penalty=1.0, skip_special_tokens=False),
     )
 
-    from vllm.reasoning.gemma4_utils import parse_thinking_output
+    from vllm_reasoning_utils import parse_reasoning_output
 
     results = []
     for resp in responses:
-        parsed = parse_thinking_output(resp.outputs[0].text)
-        reasoning = parsed["thinking"] or ""
-        txt = parsed["answer"] or ""
+        reasoning, txt = parse_reasoning_output(resp.outputs[0].text, reasoning_parser, tokenizer)
         excluded = ("Yes!" in txt[-10:]) or ("YES!" in txt[-10:])
         results.append((reasoning, txt, excluded))
     return results
@@ -332,6 +335,8 @@ def main():
     if args.llm_model:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
         from vllm import LLM
+        from vllm_reasoning_utils import resolve_parser_name
+        reasoning_parser = resolve_parser_name(args.llm_model, args.reasoning_parser)
 
         print(f"\nInitializing LLM from {args.llm_model} ...")
         llm = LLM(
@@ -346,7 +351,7 @@ def main():
         top_trial_texts = [space_texts[idx] for idx in top_indices]
 
         print("Running LLM trial check on top 10 ...")
-        tc_llm_results = run_trial_check(patient_summary, top_trial_texts, llm)
+        tc_llm_results = run_trial_check(patient_summary, top_trial_texts, llm, reasoning_parser)
 
         top_trial_boilerplates = [trial_boilerplates[idx] for idx in top_indices]
         has_boilerplate = (
@@ -362,6 +367,7 @@ def main():
                 patient_boilerplate,
                 [tb if (isinstance(tb, str)) else "" for tb in top_trial_boilerplates],
                 llm,
+                reasoning_parser,
             )
         else:
             print("Skipping boilerplate check (no boilerplate data available).")

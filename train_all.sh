@@ -1,6 +1,12 @@
 # note: vllm steps can fail for parallelized scripts if there is no pre-compiled cache yet for that vllm config. if this happens, restarting script at that stage should allow training to proceed.
 
-# pull a JSON file from ctgov 
+# Override MODEL / REASONING_PARSER via env to swap LLMs. REASONING_PARSER=auto
+# infers from MODEL (see vllm_reasoning_utils.MODEL_TO_PARSER).
+# Example: MODEL=Qwen/Qwen3.6-27B-FP8 REASONING_PARSER=qwen3 bash train_all.sh
+MODEL="${MODEL:-google/gemma-4-31b-it}"
+REASONING_PARSER="${REASONING_PARSER:-auto}"
+
+# pull a JSON file from ctgov
 # clinicaltrials.gov API can be challenging to work with, so we just did it manually by going to this link:
 # https://clinicaltrials.gov/search?cond=cancer%20OR%20lymphoma%20OR%20carcinoma%20OR%20leukemia%20OR%20sarcoma%20OR%20melanoma%20OR%20myeloma%20OR%20myelodysplastic%20OR%20myeloproliferative&aggFilters=phase:0%201%202%203%204,status:not%20rec,studyType:int
 # and then selecting "Download" and a JSON download option.
@@ -14,7 +20,7 @@ wget -P ../data/no_phi https://huggingface.co/datasets/ksg-dfci/mmai-synthetic/r
 aggregator=$(cat << EOF
 from vllm import LLM
 llm = LLM(
-        model='google/gemma-4-31b-it',
+        model='${MODEL}',
         tensor_parallel_size=1,
         download_dir="~/models",
         gpu_memory_utilization=0.95,
@@ -30,7 +36,8 @@ EOF
 python 0a_parse_ctgov_json.py 
 
 python 0b_create_trial_spaces.py --input ../data/no_phi/ctgov_trials.csv --gpus 0,1,2,3 --gpus-per-instance 1 \
-  --model google/gemma-4-31b-it --download-dir /data1/ken/models --reasoning-marker "<channel|>" --max-model-len 30000 --max-tokens 20000 --gpu-mem-util 0.90
+  --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
+  --download-dir /data1/ken/models --max-model-len 30000 --max-tokens 20000 --gpu-mem-util 0.90
 
 echo 0 done
 
@@ -48,7 +55,8 @@ echo 1b done
 python 2_make_synthetic_notes_sharded.py \
   --input_csv ../data/no_phi/trial_spaces_with_positive_prompts.csv \
   --out_dir ../data/no_phi/synthetic_notes \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --download_dir ~/models \
   --max_model_len 25000 --max_new_tokens 20000 \
@@ -62,7 +70,8 @@ echo 2a done
 python 2_make_synthetic_notes_sharded.py \
   --input_csv ../data/no_phi/trial_spaces_with_negative_prompts.csv \
   --out_dir ../data/no_phi/synthetic_negative_notes \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --download_dir ~/models \
   --max_model_len 25000 --max_new_tokens 20000 \
@@ -108,7 +117,8 @@ python 6_summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --gpus_per_server 1 \
@@ -158,7 +168,8 @@ python llm_check_trials.py \
  --gpus 0,1,2,3,4,5,6,7 \
  --gpus_per_kernel 1 \
  --prompt_batch_size 2000 \
- --model google/gemma-4-31b-it \
+ --model "$MODEL" \
+ --reasoning-parser "$REASONING_PARSER" \
  --download_dir ~/models \
  --max_model_len 100000 \
  --gpu_memory_utilization 0.95
@@ -195,7 +206,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --max_model_len 100000 \
   --gpu_memory_utilization 0.95
@@ -209,7 +221,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --max_model_len 100000 \
   --gpu_memory_utilization 0.95
@@ -248,7 +261,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --max_model_len 100000 \
   --gpu_memory_utilization 0.95
@@ -262,7 +276,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --max_model_len 100000 \
   --gpu_memory_utilization 0.95
@@ -302,7 +317,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --max_model_len 100000 \
   --gpu_memory_utilization 0.95
@@ -316,7 +332,8 @@ python llm_check_trials.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 2000 \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --max_model_len 100000 \
   --gpu_memory_utilization 0.95
@@ -324,7 +341,8 @@ python llm_check_trials.py \
 echo 13c done
 
 python 14_check_boilerplate.py \
-  --model google/gemma-4-31b-it \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \

@@ -86,14 +86,14 @@ def parse_yes_no_at_end(text: str) -> int:
 
 
 
-def ask_about_boilerplate_batch(patient_boilerplates, trial_boilerplates, llm, sampling_params):
-    from vllm.reasoning.gemma4_utils import parse_thinking_output
+def ask_about_boilerplate_batch(patient_boilerplates, trial_boilerplates, llm, sampling_params, reasoning_parser):
+    from vllm_reasoning_utils import parse_reasoning_output
     tokenizer = llm.get_tokenizer()
     prompts = build_prompts(patient_boilerplates, trial_boilerplates, tokenizer)
     responses = llm.generate(prompts, sampling_params)
-    parsed = [parse_thinking_output(r.outputs[0].text) for r in responses]
-    response_reasonings = [(p["thinking"] or "") for p in parsed]
-    response_texts = [(p["answer"] or "") for p in parsed]
+    parsed = [parse_reasoning_output(r.outputs[0].text, reasoning_parser, tokenizer) for r in responses]
+    response_reasonings = [r for r, _ in parsed]
+    response_texts = [a for _, a in parsed]
     exclusion_results = [parse_yes_no_at_end(t) for t in response_texts]
     return response_reasonings, response_texts, exclusion_results
 
@@ -134,7 +134,14 @@ def prep_unique_pairs(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def chunk_dataframe(df: pd.DataFrame, n_chunks: int) -> List[pd.DataFrame]:
-    return list(np.array_split(df, n_chunks))
+    n = len(df)
+    sizes = [n // n_chunks + (1 if i < n % n_chunks else 0) for i in range(n_chunks)]
+    chunks = []
+    start = 0
+    for sz in sizes:
+        chunks.append(df.iloc[start:start + sz].reset_index(drop=True))
+        start += sz
+    return chunks
 
 
 def group_gpus(gpu_list: List[int], gpus_per_kernel: int) -> List[List[int]]:
@@ -218,7 +225,7 @@ def worker_process(worker_id: int,
             t_blp = batch['trial_boilerplate_text'].tolist()
 
             try:
-                resp_reasonings, resp_texts, excl = ask_about_boilerplate_batch(p_blp, t_blp, llm, sampling_params)
+                resp_reasonings, resp_texts, excl = ask_about_boilerplate_batch(p_blp, t_blp, llm, sampling_params, args.reasoning_parser)
             except Exception as e:
                 # Fail-safe: record error strings so we can debug later
                 err = f"[Worker {worker_id}] ERROR batch {b}: {e}"
@@ -274,11 +281,16 @@ def parse_args():
                    default="../data/no_phi/top_patients_tocheck_round1.parquet,../data/no_phi/top_patients_tocheck_round2.parquet,../data/no_phi/top_patients_tocheck_round3.parquet",
                    help="Comma-separated CSVs of trial candidates")
 
+    from vllm_reasoning_utils import add_reasoning_cli_args
+    add_reasoning_cli_args(p)
+
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    from vllm_reasoning_utils import resolve_parser_name
+    args.reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
     out_dir = Path(args.out_dir)
     (out_dir / "shards").mkdir(parents=True, exist_ok=True)
 

@@ -425,16 +425,10 @@ def _build_prompt_worker(item):
     return (chunk_idx, prompt, prompt_token_count)
 
 
-def postprocess_output(raw_text: str, reasoning_marker: str = "<channel|>") -> Tuple[str, str]:
-    """
-    Split output into reasoning (before reasoning_marker) and summary (after).
-    Returns (reasoning, summary).
-    """
-    from vllm.reasoning.gemma4_utils import parse_thinking_output
-    parsed = parse_thinking_output(raw_text)
-    reasoning = (parsed["thinking"] or "").strip()
-    summary = (parsed["answer"] or "").strip()
-    return reasoning, summary
+def postprocess_output(raw_text: str, parser_name: str, tokenizer) -> Tuple[str, str]:
+    """Split output into (reasoning, summary) via the vLLM reasoning parser."""
+    from vllm_reasoning_utils import parse_reasoning_output
+    return parse_reasoning_output(raw_text, parser_name, tokenizer)
 
 
 # -------------------------
@@ -682,6 +676,7 @@ def start_vllm_server(
     tensor_parallel_size: int,
     max_model_len: int,
     gpu_memory_utilization: float,
+    reasoning_parser: str,
     max_num_seqs: int = 900,
     port: int = 8000,
     log_file: Optional[str] = None,
@@ -700,6 +695,7 @@ def start_vllm_server(
         "--max-num-seqs", str(max_num_seqs),
         "--gpu-memory-utilization", str(gpu_memory_utilization),
         "--port", str(port),
+        "--reasoning-parser", reasoning_parser,
     ]
     if enforce_eager:
         cmd.append("--enforce-eager")
@@ -814,11 +810,12 @@ async def single_inference_request(
     temperature: float,
     max_tokens: int,
     top_k: int,
+    parser_name: str,
+    tokenizer,
     top_p: float = 1.0,
     presence_penalty: float = 0.0,
     min_p: float = 0.0,
     repetition_penalty: float = 1.0,
-    reasoning_marker: str = "<channel|>",
     max_retries: int = 6,
     base_timeout: float = 600.0,
 ) -> Tuple[int, str, str]:
@@ -848,7 +845,7 @@ async def single_inference_request(
                 timeout=base_timeout
             )
             raw_text = response.choices[0].text
-            reasoning, summary = postprocess_output(raw_text, reasoning_marker)
+            reasoning, summary = postprocess_output(raw_text, parser_name, tokenizer)
             return (row_idx, reasoning, summary)
 
         except asyncio.TimeoutError:
@@ -878,11 +875,12 @@ async def run_inference_batch(
     model: str,
     temperature: float,
     top_k: int,
+    parser_name: str,
+    tokenizer,
     top_p: float = 1.0,
     presence_penalty: float = 0.0,
     min_p: float = 0.0,
     repetition_penalty: float = 1.0,
-    reasoning_marker: str = "<channel|>",
     max_concurrent: int = 16,
     batch_size: int = 64,
     max_retries: int = 6,
@@ -939,11 +937,12 @@ async def run_inference_batch(
                     temperature=temperature,
                     max_tokens=prompt_max_tokens,
                     top_k=top_k,
+                    parser_name=parser_name,
+                    tokenizer=tokenizer,
                     top_p=top_p,
                     presence_penalty=presence_penalty,
                     min_p=min_p,
                     repetition_penalty=repetition_penalty,
-                    reasoning_marker=reasoning_marker,
                     max_retries=max_retries,
                     base_timeout=base_timeout,
                 )
@@ -974,6 +973,8 @@ async def process_all_rounds(
     args: argparse.Namespace,
     server_clients: List[Tuple[AsyncOpenAI, int]],
     prompt_pool: Pool,
+    parser_name: str,
+    tokenizer,
 ):
     """
     Process all remaining rounds using async inference across multiple servers.
@@ -1045,11 +1046,12 @@ async def process_all_rounds(
                         model=args.model,
                         temperature=args.temperature,
                         top_k=args.top_k,
+                        parser_name=parser_name,
+                        tokenizer=tokenizer,
                         top_p=args.top_p,
                         presence_penalty=args.presence_penalty,
                         min_p=args.min_p,
                         repetition_penalty=args.repetition_penalty,
-                        reasoning_marker=args.reasoning_marker,
                         max_concurrent=args.max_concurrent_requests,
                         batch_size=args.batch_size,
                         max_retries=args.max_retries,
@@ -1124,8 +1126,8 @@ def main():
     ap.add_argument("--max_tokens", type=int, default=20000,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
     ap.add_argument("--repetition_penalty", type=float, default=1.1)
-    ap.add_argument("--reasoning_marker", type=str, default="<channel|>",
-                    help="Marker string that separates reasoning from final summary in model output (default: <channel|>)")
+    from vllm_reasoning_utils import add_reasoning_cli_args
+    add_reasoning_cli_args(ap)
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     ap.add_argument("--base_port", type=int, default=8000,
                     help="Base port for vLLM servers. Server i uses base_port + i (default: 8000)")
@@ -1151,6 +1153,11 @@ def main():
                          "max_model_len=120000, chunk_size=50000, max_tokens=10000")
     args = ap.parse_args()
 
+    # Resolve reasoning parser from --model + --reasoning-parser (default auto)
+    from vllm_reasoning_utils import resolve_parser_name
+    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
+    print(f"Using vLLM reasoning parser: {reasoning_parser}")
+
     # Apply deterministic overrides
     if args.run_deterministic:
         args.temperature = 0.0
@@ -1161,6 +1168,16 @@ def main():
         args.max_tokens = 10000
         print("Deterministic mode: temperature=0.0, top_k=1, repetition_penalty=1.0, "
               "max_model_len=120000, chunk_size=50000, max_tokens=10000")
+
+    # Load tokenizer up front — used for chunking (when not cached) AND for
+    # parsing server responses through the reasoning parser.
+    print("Loading tokenizer...")
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        cache_dir=args.download_dir,
+        trust_remote_code=True
+    )
 
     # Try loading cached prepared chunks first to skip expensive data prep
     cached = load_prepared_chunks(args.shard_dir)
@@ -1203,15 +1220,6 @@ def main():
             print(f"Limited to {args.max_patients} patients ({len(df)} rows)")
 
         df = df.reset_index(drop=True)
-
-        # Load tokenizer for chunking (needed by prepare_rounds)
-        print("Loading tokenizer...")
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.model,
-            cache_dir=args.download_dir,
-            trust_remote_code=True
-        )
 
         print("Preparing work rounds (concatenating and chunking notes per patient)...")
         rounds, patient_chunk_order, patient_last_dates = prepare_rounds(
@@ -1311,6 +1319,7 @@ def main():
                     tensor_parallel_size=args.gpus_per_server,
                     max_model_len=args.max_model_len,
                     gpu_memory_utilization=args.gpu_memory_utilization,
+                    reasoning_parser=reasoning_parser,
                     max_num_seqs=args.max_num_seqs,
                     port=server_port,
                     log_file=log_file,
@@ -1350,6 +1359,8 @@ def main():
                 args=args,
                 server_clients=server_clients,
                 prompt_pool=prompt_pool,
+                parser_name=reasoning_parser,
+                tokenizer=tokenizer,
             ))
 
         finally:

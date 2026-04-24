@@ -72,13 +72,13 @@ _build_prompt_worker = _summarize._build_prompt_worker
 # ---------------------------------------------------------------------------
 DATA_DIR = REPO_ROOT.parent / "data/phi/enrollments"
 
-# Per-model configs: reasoning marker + sampling parameters.
+# Per-model configs: reasoning parser + sampling parameters.
 # Qwen instruct (non-thinking) mode for reasoning tasks.
 # gpt-oss defaults.
 MODEL_CONFIGS = {
     "google/gemma-4-31b-it": {
         "max_model_len": 260_000,
-        "reasoning_marker": "<channel|>",
+        "reasoning_parser": "gemma4",
         "temperature": 1.0,
         "top_p": 0.95,
         "top_k": 20,
@@ -88,7 +88,7 @@ MODEL_CONFIGS = {
     },
     "Qwen/Qwen3.5-9B": {
         "max_model_len": 260_000,
-        "reasoning_marker": "</think>",
+        "reasoning_parser": "qwen3",
         "temperature": 1.0,
         "top_p": 0.95,
         "top_k": 20,
@@ -98,7 +98,27 @@ MODEL_CONFIGS = {
     },
     "Qwen/Qwen3.5-35B-A3B": {
         "max_model_len": 260_000,
-        "reasoning_marker": "</think>",
+        "reasoning_parser": "qwen3",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repetition_penalty": 1.0,
+    },
+    "Qwen/Qwen3.6-27B": {
+        "max_model_len": 260_000,
+        "reasoning_parser": "qwen3",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repetition_penalty": 1.0,
+    },
+    "Qwen/Qwen3.6-27B-FP8": {
+        "max_model_len": 260_000,
+        "reasoning_parser": "qwen3",
         "temperature": 1.0,
         "top_p": 0.95,
         "top_k": 20,
@@ -108,7 +128,7 @@ MODEL_CONFIGS = {
     },
     "openai/gpt-oss-20b": {
         "max_model_len": 120_000,
-        "reasoning_marker": "assistantfinal",
+        "reasoning_parser": "openai_gptoss",
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": -1,
@@ -118,7 +138,7 @@ MODEL_CONFIGS = {
     },
     "openai/gpt-oss-120b": {
         "max_model_len": 120_000,
-        "reasoning_marker": "assistantfinal",
+        "reasoning_parser": "openai_gptoss",
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": -1,
@@ -149,9 +169,9 @@ def get_model_config(model: str) -> dict:
     return _GPT_DEFAULTS
 
 
-def get_reasoning_marker(model: str) -> str:
-    """Get reasoning marker for a model."""
-    return get_model_config(model)["reasoning_marker"]
+def get_reasoning_parser(model: str) -> str:
+    """Get reasoning parser name for a model."""
+    return get_model_config(model)["reasoning_parser"]
 
 
 def sanitize_model_name(model: str) -> str:
@@ -187,7 +207,7 @@ async def run_single_experiment(
     batch_size: int,
     request_timeout: float,
     max_retries: int,
-    reasoning_marker: str,
+    reasoning_parser: str,
     temperature: float,
     top_k: int,
     top_p: float,
@@ -289,11 +309,12 @@ async def run_single_experiment(
                             model=model,
                             temperature=temperature,
                             top_k=top_k,
+                            parser_name=reasoning_parser,
+                            tokenizer=tokenizer,
                             top_p=top_p,
                             presence_penalty=presence_penalty,
                             min_p=min_p,
                             repetition_penalty=repetition_penalty,
-                            reasoning_marker=reasoning_marker,
                             max_concurrent=max_concurrent,
                             batch_size=batch_size,
                             max_retries=max_retries,
@@ -477,7 +498,7 @@ def main():
         print(f"    sampling: temp={cfg['temperature']}, top_p={cfg['top_p']}, top_k={cfg['top_k']}, "
               f"min_p={cfg['min_p']}, presence_penalty={cfg['presence_penalty']}, "
               f"repetition_penalty={cfg['repetition_penalty']}")
-        print(f"    reasoning_marker: {cfg['reasoning_marker']}")
+        print(f"    reasoning_parser: {cfg['reasoning_parser']}")
         for cs in chunk_sizes:
             exp_dir = output_dir / sanitize_model_name(model) / f"chunk_{cs:05d}"
             done = (exp_dir / "patient_summaries.parquet").exists()
@@ -533,7 +554,7 @@ def main():
         models_to_run = []
         for model in batch_models:
             model_dir_name = sanitize_model_name(model)
-            reasoning_marker = get_model_config(model)["reasoning_marker"]
+            reasoning_parser = get_model_config(model)["reasoning_parser"]
             all_done = all(
                 (output_dir / model_dir_name / f"chunk_{cs:05d}" / "patient_summaries.parquet").exists()
                 for cs in chunk_sizes
@@ -545,7 +566,7 @@ def main():
                     result_df = pd.read_parquet(exp_dir / "patient_summaries.parquet")
                     result_df["model"] = model
                     result_df["chunk_size"] = cs
-                    result_df["reasoning_marker"] = reasoning_marker
+                    result_df["reasoning_parser"] = reasoning_parser
                     all_experiment_results.append(result_df)
             else:
                 models_to_run.append(model)
@@ -580,6 +601,7 @@ def main():
                 tensor_parallel_size=args.gpus_per_server,
                 max_model_len=model_max_len,
                 gpu_memory_utilization=args.gpu_memory_utilization,
+                reasoning_parser=model_cfg["reasoning_parser"],
                 max_num_seqs=args.max_num_seqs,
                 port=server_port,
                 log_file=log_file,
@@ -621,7 +643,7 @@ def main():
             for model in models_to_run:
                 model_cfg = get_model_config(model)
                 model_dir_name = sanitize_model_name(model)
-                reasoning_marker = model_cfg["reasoning_marker"]
+                reasoning_parser = model_cfg["reasoning_parser"]
                 model_max_len = args.max_model_len or model_cfg["max_model_len"]
 
                 for chunk_size in chunk_sizes:
@@ -634,7 +656,7 @@ def main():
                         result_df = pd.read_parquet(exp_dir / "patient_summaries.parquet")
                         result_df["model"] = model
                         result_df["chunk_size"] = chunk_size
-                        result_df["reasoning_marker"] = reasoning_marker
+                        result_df["reasoning_parser"] = reasoning_parser
                         all_experiment_results.append(result_df)
                         continue
 
@@ -657,7 +679,7 @@ def main():
                         "batch_size": args.batch_size,
                         "request_timeout": args.request_timeout,
                         "max_retries": args.max_retries,
-                        "reasoning_marker": reasoning_marker,
+                        "reasoning_parser": reasoning_parser,
                         "temperature": model_cfg["temperature"],
                         "top_k": model_cfg["top_k"],
                         "top_p": model_cfg["top_p"],
@@ -678,13 +700,13 @@ def main():
                 for exp_kwargs, result in zip(batch_experiments, results):
                     model = exp_kwargs["model"]
                     chunk_size = exp_kwargs["chunk_size"]
-                    reasoning_marker = exp_kwargs["reasoning_marker"]
+                    reasoning_parser = exp_kwargs["reasoning_parser"]
                     if isinstance(result, Exception):
                         print(f"  ERROR: {model} / chunk_size={chunk_size}: {result}")
                     else:
                         result["model"] = model
                         result["chunk_size"] = chunk_size
-                        result["reasoning_marker"] = reasoning_marker
+                        result["reasoning_parser"] = reasoning_parser
                         all_experiment_results.append(result)
 
         except Exception as e:

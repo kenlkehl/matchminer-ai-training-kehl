@@ -85,9 +85,6 @@ SECOND_PRIMARY_INSTRUCTION = (
     "the cancer relevant to the trial. Incorporate events for the prior cancer as well as the current cancer into your output."
 )
 
-REASONING_MARKER = "<channel|>"  # adjust if your model uses a different delimiter
-
-
 def build_messages(criteria_text: str, rng: random.Random):
     content = USER_PROMPT_TEMPLATE_PREFIX + criteria_text + USER_PROMPT_TEMPLATE_SUFFIX
     # ~10% chance to include second-primary instruction
@@ -99,13 +96,14 @@ def build_messages(criteria_text: str, rng: random.Random):
     ]
 
 
-def process_outputs(request_outputs, reasoning_marker=REASONING_MARKER):
-    from vllm.reasoning.gemma4_utils import parse_thinking_output
+def process_outputs(request_outputs, reasoning_parser: str, tokenizer):
+    from vllm_reasoning_utils import parse_reasoning_output
     full_responses, final_outputs = [], []
     for ro in request_outputs:
         text = ro.outputs[0].text
         full_responses.append(text)
-        final_outputs.append(parse_thinking_output(text)["answer"])
+        _, answer = parse_reasoning_output(text, reasoning_parser, tokenizer)
+        final_outputs.append(answer)
     return full_responses, final_outputs
 
 
@@ -133,6 +131,10 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=1000, help="Prompts per llm.generate() call inside a shard.")
     p.add_argument("--assemble-partial", action="store_true",
                    help="If not all shards are done, write a partial combined CSV (<output_csv>.partial).")
+
+    from vllm_reasoning_utils import add_reasoning_cli_args
+    add_reasoning_cli_args(p)
+
     return p.parse_args()
 
 
@@ -176,6 +178,7 @@ def worker_process_shards(
     base_seed: int,
     batch_size: int,
     out_dir: str,
+    reasoning_parser: str,
 ):
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_group
     # Lazy import post CUDA visibility
@@ -233,7 +236,7 @@ def worker_process_shards(
             for i in range(0, len(prompts), batch_size):
                 sub_prompts = prompts[i:i+batch_size]
                 request_outputs = llm.generate(sub_prompts, sampling)
-                fr, fo = process_outputs(request_outputs)
+                fr, fo = process_outputs(request_outputs, reasoning_parser, tokenizer)
                 full_responses_all.extend(fr)
                 final_outputs_all.extend(fo)
 
@@ -330,6 +333,8 @@ def main():
         pass
 
     args = parse_args()
+    from vllm_reasoning_utils import resolve_parser_name
+    reasoning_parser = resolve_parser_name(args.model_name, args.reasoning_parser)
     rng = np.random.default_rng(args.seed)
 
     output_csv = Path(args.output_csv)
@@ -405,6 +410,7 @@ def main():
                     args.seed,
                     args.batch_size,
                     str(out_dir),
+                    reasoning_parser,
                 )
             )
 

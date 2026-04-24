@@ -330,6 +330,7 @@ def run_worker(
     perturb_prob: float,
     drug_map_csv: str | None,
     perturb_seed: int,
+    reasoning_parser: str,
 ):
     """
     gpu_spec:
@@ -376,7 +377,6 @@ def run_worker(
     llm = None
     tokenizer = None
     sampling = None
-    reasoning_marker = "<channel|>"  # adjust if your model uses a different separator
 
     # NEW: prepare perturbation machinery once per worker
     do_perturb = perturb_prob and perturb_prob > 0.0
@@ -424,13 +424,14 @@ def run_worker(
         responses = llm.generate(prompts, sampling)
 
         # Parse outputs
-        from vllm.reasoning.gemma4_utils import parse_thinking_output
+        from vllm_reasoning_utils import parse_reasoning_output
         all_full = []
         all_final = []
         for out in responses:
             txt = out.outputs[0].text
             all_full.append(txt)
-            all_final.append(parse_thinking_output(txt)["answer"])
+            _, answer = parse_reasoning_output(txt, reasoning_parser, tokenizer)
+            all_final.append(answer)
 
         batch['synth_note_reasoning_and_note'] = all_full
         batch['synthetic_note'] = all_final
@@ -528,7 +529,11 @@ def main():
     ap.add_argument("--perturb_seed", type=int, default=42,
                     help="Seed for perturbation RNG to make replacements reproducible")
 
+    from vllm_reasoning_utils import add_reasoning_cli_args, resolve_parser_name
+    add_reasoning_cli_args(ap)
+
     args = ap.parse_args()
+    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
 
     os.makedirs(args.out_dir, exist_ok=True)
     shards_dir = os.path.join(args.out_dir, "shards")
@@ -580,6 +585,7 @@ def main():
                 args.overwrite_existing,
                 # NEW: pass perturbation controls
                 args.perturb_prob, args.drug_map_csv, args.perturb_seed,
+                reasoning_parser,
             ),
         )
         p.start()

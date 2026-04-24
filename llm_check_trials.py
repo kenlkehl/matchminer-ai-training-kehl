@@ -43,7 +43,8 @@ import numpy as np
 
 def ask_about_trials_loosely(patient_summaries: List[str],
                              trial_summaries: List[str],
-                             llm_model):
+                             llm_model,
+                             reasoning_parser: str):
     """
     Given aligned lists of patient_summaries and trial_summaries, return
     (responses, response_reasonings, response_texts, eligibility_results, eligibility_verdicts)
@@ -125,10 +126,10 @@ def ask_about_trials_loosely(patient_summaries: List[str],
         )
     )
 
-    from vllm.reasoning.gemma4_utils import parse_thinking_output
-    parsed = [parse_thinking_output(x.outputs[0].text) for x in responses]
-    response_reasonings = [(p["thinking"] or "") for p in parsed]
-    response_texts = [(p["answer"] or "") for p in parsed]
+    from vllm_reasoning_utils import parse_reasoning_output
+    parsed = [parse_reasoning_output(x.outputs[0].text, reasoning_parser, tokenizer) for x in responses]
+    response_reasonings = [r for r, _ in parsed]
+    response_texts = [a for _, a in parsed]
 
     SCORE_PATTERN = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")
 
@@ -173,7 +174,8 @@ def worker_process(worker_id: int,
                    max_model_len: int,
                    max_num_seqs: int,
                    gpu_memory_utilization: float,
-                   prompt_batch_size: int):
+                   prompt_batch_size: int,
+                   reasoning_parser: str):
     """
     One process = one vLLM kernel pinned to a GPU group.
     Reads its shard parquet, runs inference in batches, writes parquet shards.
@@ -246,7 +248,8 @@ def worker_process(worker_id: int,
             _, resp_reasonings, resp_texts, elig, verdicts = ask_about_trials_loosely(
                 batch["patient_summary"].astype(str).tolist(),
                 batch["this_space"].astype(str).tolist(),
-                llm_model=llm
+                llm_model=llm,
+                reasoning_parser=reasoning_parser
             )
 
             batch["trialcheck_llm_reasoning"] = resp_reasonings
@@ -289,8 +292,14 @@ def parse_gpu_groups(gpu_str: str, gpus_per_kernel: int) -> List[List[str]]:
 
 def shard_input_across_kernels(df: pd.DataFrame, n_kernels: int) -> List[pd.DataFrame]:
     """Evenly split rows across kernels."""
-    splits = np.array_split(df, n_kernels)
-    return [s.reset_index(drop=True) for s in splits]
+    n = len(df)
+    sizes = [n // n_kernels + (1 if i < n % n_kernels else 0) for i in range(n_kernels)]
+    splits = []
+    start = 0
+    for sz in sizes:
+        splits.append(df.iloc[start:start + sz].reset_index(drop=True))
+        start += sz
+    return splits
 
 
 def finalize(out_dir: str, final_output: str):
@@ -336,7 +345,12 @@ def main():
     parser.add_argument("--max_model_len", type=int, default=30000, help="vLLM max_model_len.")
     parser.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.92, help="vLLM gpu_memory_utilization.")
+
+    from vllm_reasoning_utils import add_reasoning_cli_args, resolve_parser_name
+    add_reasoning_cli_args(parser)
+
     args = parser.parse_args()
+    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
 
     # Read input once; filter; then shard to per-worker parquet to avoid N× re-reads.
     df = pd.read_parquet(args.input_parquet)
@@ -382,7 +396,8 @@ def main():
                 args.max_model_len,
                 args.max_num_seqs,
                 args.gpu_memory_utilization,
-                args.prompt_batch_size
+                args.prompt_batch_size,
+                reasoning_parser,
             ),
             daemon=False
         )

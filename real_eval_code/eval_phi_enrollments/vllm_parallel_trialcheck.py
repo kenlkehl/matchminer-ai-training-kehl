@@ -136,6 +136,12 @@ def parse_args():
         default=None,
         help="Maximum number of rows to process (for testing)",
     )
+
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from vllm_reasoning_utils import add_reasoning_cli_args
+    add_reasoning_cli_args(parser)
+
     return parser.parse_args()
 
 
@@ -190,6 +196,10 @@ def worker_process(
     
     # Import vLLM after setting CUDA_VISIBLE_DEVICES
     from vllm import LLM, SamplingParams
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from vllm_reasoning_utils import resolve_parser_name, parse_reasoning_output
+    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
     
     print(f"[Worker {worker_id}] Starting on GPUs {gpu_ids}, processing {len(batches)} batches")
     
@@ -298,8 +308,6 @@ def worker_process(
         # Run inference
         responses = llm.generate(prompts, sampling_params)
 
-        from vllm.reasoning.gemma4_utils import parse_thinking_output
-
         # Process results
         results = []
         batch_df_reset = batch_df.reset_index(drop=True)
@@ -309,9 +317,9 @@ def worker_process(
             row_data = batch_df_reset.iloc[prompt_id].to_dict()
 
             for completion_output in request_output.outputs:
-                parsed = parse_thinking_output(completion_output.text)
-                reasoning_text = parsed["thinking"] or ""
-                response_text = parsed["answer"] or ""
+                reasoning_text, response_text = parse_reasoning_output(
+                    completion_output.text, reasoning_parser, tokenizer
+                )
                 response_id = completion_output.index
 
                 SCORE_PATTERN = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")

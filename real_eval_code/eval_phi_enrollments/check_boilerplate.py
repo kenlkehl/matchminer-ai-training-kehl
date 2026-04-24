@@ -52,10 +52,16 @@ def parse_args():
                         help="Maximum model context length")
     parser.add_argument("--max-num-seqs", type=int, default=900,
                         help="vLLM max_num_seqs (concurrent request cap).")
+
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_ROOT))
+    from vllm_reasoning_utils import add_reasoning_cli_args
+    add_reasoning_cli_args(parser)
+
     return parser.parse_args()
 
 
-def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model):
+def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model, reasoning_parser):
     """Ask LLM whether patients are excluded by boilerplate criteria."""
     from vllm import SamplingParams
 
@@ -104,11 +110,11 @@ def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model)
         )
     )
 
-    from vllm.reasoning.gemma4_utils import parse_thinking_output
+    from vllm_reasoning_utils import parse_reasoning_output
 
-    parsed = [parse_thinking_output(x.outputs[0].text) for x in responses]
-    response_reasonings = [(p["thinking"] or "") for p in parsed]
-    response_texts = [(p["answer"] or "") for p in parsed]
+    parsed = [parse_reasoning_output(x.outputs[0].text, reasoning_parser, tokenizer) for x in responses]
+    response_reasonings = [r for r, _ in parsed]
+    response_texts = [a for _, a in parsed]
     exclusion_results = []
 
     for response_text in response_texts:
@@ -197,6 +203,10 @@ def main():
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
     from vllm import LLM
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_ROOT))
+    from vllm_reasoning_utils import resolve_parser_name
+    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -236,7 +246,8 @@ def main():
             _, output['llm_boilerplate_reasoning'], output['llm_boilerplate_response'], output['exclusion_result'] = ask_about_boilerplate(
                 output['patient_boilerplate_text'].astype(str).tolist(),
                 output['trial_boilerplate_text'].astype(str).tolist(),
-                llm
+                llm,
+                reasoning_parser,
             )
 
             # Determine shard filename based on mode

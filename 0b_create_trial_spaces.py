@@ -78,7 +78,6 @@ PROMPT_SUFFIX = (
     "looks at the text for one space will not have access to text for other spaces, and so output like \"Same criteria as #1...\" renders a space useless!"
 )
 
-REASONING_MARKER = "<channel|>"   # default; override with --reasoning-marker
 BOILERPLATE_MARKER = "Boilerplate"
 
 
@@ -99,7 +98,7 @@ def build_messages(trial_text: str):
     ]
 
 
-def postprocess_outputs(raw_texts, reasoning_marker=REASONING_MARKER):
+def postprocess_outputs(raw_texts, reasoning_parser: str, tokenizer):
     """
     Split out (1) full raw text (reasoning+final), (2) final only,
     (3) space_text (before boilerplate line), and (4) boilerplate text.
@@ -107,15 +106,15 @@ def postprocess_outputs(raw_texts, reasoning_marker=REASONING_MARKER):
     The boilerplate split is performed on the ENTIRE line containing
     the marker, removing that line from both resultant parts.
     """
-    from vllm.reasoning.gemma4_utils import parse_thinking_output
+    from vllm_reasoning_utils import parse_reasoning_output
 
     no_reasoning = []
     space_only = []
     boiler_only = []
 
     for t in raw_texts:
-        # 1. Use vLLM's Gemma4 parser to strip reasoning + trailing sentinels
-        final_t = parse_thinking_output(t)["answer"]
+        # 1. Use vLLM's reasoning parser to strip reasoning + trailing sentinels
+        _, final_t = parse_reasoning_output(t, reasoning_parser, tokenizer)
 
         # 2. Handle Boilerplate Split (Line-based)
         if BOILERPLATE_MARKER in final_t:
@@ -167,7 +166,7 @@ def worker_process(
     repetition_penalty: float,
     max_tokens: int,
     batch_size: int,
-    reasoning_marker: str = REASONING_MARKER,
+    reasoning_parser: str,
 ):
     """
     Worker: loads its own vLLM on the specified GPU group (via CUDA_VISIBLE_DEVICES),
@@ -228,7 +227,7 @@ def worker_process(
             raw_texts.append(r.outputs[0].text)
 
     # Post-process
-    no_reasoning, space_only, boiler_only = postprocess_outputs(raw_texts, reasoning_marker)
+    no_reasoning, space_only, boiler_only = postprocess_outputs(raw_texts, reasoning_parser, tokenizer)
 
     # Attach outputs
     out_df = shard_df.copy()
@@ -272,9 +271,13 @@ def main():
     parser.add_argument("--repetition-penalty", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=45000)
     parser.add_argument("--batch-size", type=int, default=1000, help="Prompts per generate() call per instance")
-    parser.add_argument("--reasoning-marker", default="<channel|>", help="Marker that separates reasoning from final output (default: <channel|>)")
     parser.add_argument("--seed", type=int, default=42, help="Seed for split assignment")
+
+    from vllm_reasoning_utils import add_reasoning_cli_args, resolve_parser_name
+    add_reasoning_cli_args(parser)
+
     args = parser.parse_args()
+    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
 
     os.makedirs(args.work_dir, exist_ok=True)
 
@@ -346,7 +349,7 @@ def main():
                 repetition_penalty=args.repetition_penalty,
                 max_tokens=args.max_tokens,
                 batch_size=args.batch_size,
-                reasoning_marker=args.reasoning_marker,
+                reasoning_parser=reasoning_parser,
             ),
             name=f"vllm_worker_{i}",
             daemon=False,
