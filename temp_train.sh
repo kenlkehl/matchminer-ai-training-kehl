@@ -25,7 +25,7 @@ python 6_summarize_patients.py \
   --base_port 8000 \
   --chunk_size 50000 \
   --chunk_overlap 500 \
-  --max_concurrent_requests 100 \
+  --max_concurrent_requests 25 \
   --generate_dates \
   --synthetic_start_date 2017-01-01 \
   --synthetic_min_days 0 \
