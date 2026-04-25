@@ -20,10 +20,10 @@ python 6_summarize_patients.py \
   --download_dir ~/models \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --gpus_per_server 1 \
-  --max_model_len 100000 \
-  --max_tokens 20000 \
+  --max_model_len 50000 \
+  --max_tokens 10000 \
   --base_port 8000 \
-  --chunk_size 50000 \
+  --chunk_size 20000 \
   --chunk_overlap 500 \
   --max_concurrent_requests 5 \
   --generate_dates \
