@@ -18,7 +18,7 @@ negative_notes = pd.read_parquet("../data/no_phi/synthetic_negative_notes/synthe
 
 print(negative_notes.info())
 
-spaces = pd.read_csv('trial_spaces_with_positive_prompts.csv')
+spaces = pd.read_csv('../data/no_phi/trial_spaces_with_positive_prompts.csv')
 
 negative_notes['pseudo_mrn'] = negative_notes.pseudo_mrn * 1000000
 
