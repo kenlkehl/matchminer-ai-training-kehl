@@ -5,51 +5,6 @@
 MODEL="${MODEL:-google/gemma-4-31b-it}"
 REASONING_PARSER="${REASONING_PARSER:-auto}"
 
-python 0b_create_trial_spaces.py --input ../data/no_phi/ctgov_trials.csv --gpus 0,1,2,3 --gpus-per-instance 1 \
-  --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
-  --download-dir /data1/ken/models --max-model-len 30000 --max-tokens 20000 --gpu-mem-util 0.90
-
-echo 0 done
-
-python 0c_sample_trial_spaces.py
-
-python 1a_make_synthetic_enrollee_prompts.py
-
-echo 1a done
-
-python 1b_make_synthetic_negative_enrollee_prompts.py
-
-echo 1b done
-
-
-python 2_make_synthetic_notes_sharded.py \
-  --input_csv ../data/no_phi/trial_spaces_with_positive_prompts.csv \
-  --out_dir ../data/no_phi/synthetic_notes \
-  --model "$MODEL" \
-  --reasoning-parser "$REASONING_PARSER" \
-  --gpu_ids 0,1,2,3,4,5,6,7 \
-  --download_dir ~/models \
-  --max_model_len 25000 --max_new_tokens 20000 \
-  --batch_size 1000 --tp 1 --temperature 0.75 --top_p 0.5 \
-  --perturb_prob 0.3
-
-echo 2a done
-
-
-
-python 2_make_synthetic_notes_sharded.py \
-  --input_csv ../data/no_phi/trial_spaces_with_negative_prompts.csv \
-  --out_dir ../data/no_phi/synthetic_negative_notes \
-  --model "$MODEL" \
-  --reasoning-parser "$REASONING_PARSER" \
-  --gpu_ids 0,1,2,3,4,5,6,7 \
-  --download_dir ~/models \
-  --max_model_len 25000 --max_new_tokens 20000 \
-  --batch_size 1000 --tp 1 --temperature 0.75 --top_p 0.5 \
-  --perturb_prob 0.3
-
-echo 2b done
-
 
 
 aggregator=$(cat << EOF
