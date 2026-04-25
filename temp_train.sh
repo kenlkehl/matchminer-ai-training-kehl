@@ -7,33 +7,6 @@ REASONING_PARSER="${REASONING_PARSER:-auto}"
 
 
 
-aggregator=$(cat << EOF
-import pandas as pd
-
-positive_notes = pd.read_parquet("../data/no_phi/synthetic_notes/synthetic_notes.parquet")
-
-print(positive_notes.info())
-
-negative_notes = pd.read_parquet("../data/no_phi/synthetic_negative_notes/synthetic_notes.parquet")
-
-print(negative_notes.info())
-
-spaces = pd.read_csv('../data/no_phi/trial_spaces_with_positive_prompts.csv')
-
-negative_notes['pseudo_mrn'] = negative_notes.pseudo_mrn * 1000000
-
-output = pd.concat([positive_notes, negative_notes], ignore_index=True)
-
-output = pd.merge(output, spaces, on='space_index')
-
-output.to_parquet("../data/no_phi/all_synthetic_notes.parquet")
-
-EOF
-)
-
-python -c "$aggregator"
-
-
 
 
 
