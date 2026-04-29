@@ -11,55 +11,6 @@ REASONING_PARSER="${REASONING_PARSER:-auto}"
 
 
 
-
-python 6_summarize_patients.py \
-  --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
-  --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
-  --shard_dir ../data/no_phi/summary_shards \
-  --model "$MODEL" \
-  --reasoning-parser "$REASONING_PARSER" \
-  --download_dir ~/models \
-  --gpu_ids 0,1,2,3,4,5,6,7 \
-  --gpus_per_server 1 \
-  --max_model_len 50000 \
-  --max_tokens 10000 \
-  --base_port 8000 \
-  --chunk_size 20000 \
-  --chunk_overlap 500 \
-  --max_concurrent_requests 5 \
-  --generate_dates \
-  --synthetic_start_date 2017-01-01 \
-  --synthetic_min_days 0 \
-  --synthetic_max_days 180 
-
-echo 6 done
-
-
-
-
-aggregator=$(cat << EOF
-import pandas as pd
-
-spaces = pd.read_csv('../data/no_phi/sample_trial_space_lineitems.csv')
-summaries = pd.read_parquet('../data/no_phi/patient_summaries.parquet')
-
-notes = pd.read_parquet('../data/no_phi/all_synthetic_notes.parquet')[['pseudo_mrn','space_index']].groupby('pseudo_mrn').first().reset_index()
-summaries['pseudo_mrn'] = pd.to_numeric(summaries.pseudo_mrn)
-
-summaries = pd.merge(summaries, notes, on='pseudo_mrn')
-summaries = pd.merge(summaries, spaces, on='space_index')
-
-summaries.to_parquet('../data/no_phi/patient_summaries_with_spaces.parquet')
-
-EOF
-)
-
-python -c "$aggregator"
-
-
-
-
-
 python llm_check_trials.py \
  --input_parquet ../data/no_phi/patient_summaries_with_spaces.parquet \
  --out_dir ../data/no_phi/initial_trialcheck_outputs \
@@ -70,7 +21,7 @@ python llm_check_trials.py \
  --model "$MODEL" \
  --reasoning-parser "$REASONING_PARSER" \
  --download_dir ~/models \
- --max_model_len 100000 \
+ --max_model_len 50000 \
  --gpu_memory_utilization 0.95
 
 echo 7 done
@@ -108,7 +59,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 9b done
@@ -163,7 +114,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 11b done
@@ -178,7 +129,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 11c done
@@ -219,7 +170,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 13b done
@@ -234,7 +185,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 13c done

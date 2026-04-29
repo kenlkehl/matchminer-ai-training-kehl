@@ -3,7 +3,8 @@
 # Override MODEL / REASONING_PARSER via env to swap LLMs. REASONING_PARSER=auto
 # infers from MODEL (see vllm_reasoning_utils.MODEL_TO_PARSER).
 # Example: MODEL=Qwen/Qwen3.6-27B-FP8 REASONING_PARSER=qwen3 bash train_all.sh
-MODEL="${MODEL:-google/gemma-4-31b-it}"
+#MODEL="${MODEL:-google/gemma-4-31b-it}"
+MODEL="${MODEL:-nvidia/Gemma-4-31B-IT-NVFP4}"  # made change 4/28/26 at point of first trialchecks, after patient summarization on synth data.
 REASONING_PARSER="${REASONING_PARSER:-auto}"
 
 # pull a JSON file from ctgov
@@ -171,7 +172,7 @@ python llm_check_trials.py \
  --model "$MODEL" \
  --reasoning-parser "$REASONING_PARSER" \
  --download_dir ~/models \
- --max_model_len 100000 \
+ --max_model_len 50000 \
  --gpu_memory_utilization 0.95
 
 echo 7 done
@@ -209,7 +210,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 9b done
@@ -224,7 +225,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 9c done
@@ -264,7 +265,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 11b done
@@ -279,7 +280,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 11c done
@@ -320,7 +321,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 13b done
@@ -335,7 +336,7 @@ python llm_check_trials.py \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --gpu_memory_utilization 0.95
 
 echo 13c done
