@@ -186,7 +186,7 @@ echo 8 done
 
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ~/models/pt_trial_summary_perspace_finetuned.model \
+  --model ../models/pt_trial_summary_perspace_finetuned.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
@@ -233,15 +233,15 @@ echo 9c done
 accelerate launch finetune_embedder.py \
    -i ../data/no_phi/round1_trialcentric_checks/top_patients_checked_round1.parquet \
    -i ../data/no_phi/round1_patientcentric_checks/top_cohorts_checked_round1.parquet \
-   -c ~/models/reranker1_training \
-   -m ~/models/pt_trial_summary_perspace_finetuned.model \
-   -o ~/models/reranker_round1.model
+   -c ../models/reranker1_training \
+   -m ../models/pt_trial_summary_perspace_finetuned.model \
+   -o ../models/reranker_round1.model
 
 echo 10 done
 
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ~/models/reranker_round1.model \
+  --model ../models/reranker_round1.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
@@ -288,16 +288,16 @@ echo 11c done
 accelerate launch finetune_embedder.py \
    -i ../data/no_phi/round2_trialcentric_checks/top_patients_checked_round2.parquet \
    -i ../data/no_phi/round2_patientcentric_checks/top_cohorts_checked_round2.parquet \
-   -c ~/models/reranker2_training \
-   -m ~/models/reranker_round1.model \
-   -o ~/models/reranker_round2.model
+   -c ../models/reranker2_training \
+   -m ../models/reranker_round1.model \
+   -o ../models/reranker_round2.model
 
 echo 12 done
 
 
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ~/models/reranker_round2.model \
+  --model ../models/reranker_round2.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
