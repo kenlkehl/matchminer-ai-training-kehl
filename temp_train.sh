@@ -10,26 +10,8 @@ REASONING_PARSER="${REASONING_PARSER:-auto}"
 
 
 
-
-python llm_check_trials.py \
- --input_parquet ../data/no_phi/patient_summaries_with_spaces.parquet \
- --out_dir ../data/no_phi/initial_trialcheck_outputs \
- --final_output space_specific_eligibility_checks.parquet \
- --gpus 0,1,2,3,4,5,6,7 \
- --gpus_per_kernel 1 \
- --prompt_batch_size 2000 \
- --model "$MODEL" \
- --reasoning-parser "$REASONING_PARSER" \
- --download_dir ~/models \
- --max_model_len 50000 \
- --gpu_memory_utilization 0.95
-
-echo 7 done
-
-mv ../data/no_phi/initial_trialcheck_outputs/space_specific_eligibility_checks.parquet ../data/no_phi/space_specific_eligibility_checks.parquet
-
 accelerate launch finetune_embedder.py -i ../data/no_phi/space_specific_eligibility_checks.parquet \
--c ~/models/initial_embedder_training -m Qwen/Qwen3-Embedding-0.6B -o ~/models/pt_trial_summary_perspace_finetuned.model
+-c ~/models/initial_embedder_training -m Qwen/Qwen3-Embedding-0.6B -o ../models/pt_trial_summary_perspace_finetuned.model
 
 echo 8 done
 

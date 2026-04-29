@@ -180,7 +180,7 @@ echo 7 done
 mv ../data/no_phi/initial_trialcheck_outputs/space_specific_eligibility_checks.parquet ../data/no_phi/space_specific_eligibility_checks.parquet
 
 accelerate launch finetune_embedder.py -i ../data/no_phi/space_specific_eligibility_checks.parquet \
--c ~/models/initial_embedder_training -m Qwen/Qwen3-Embedding-0.6B -o ~/models/pt_trial_summary_perspace_finetuned.model
+-c ~/models/initial_embedder_training -m Qwen/Qwen3-Embedding-0.6B -o ../models/pt_trial_summary_perspace_finetuned.model
 
 echo 8 done
 
