@@ -348,7 +348,7 @@ python 14_check_boilerplate.py \
   --gpus 0,1,2,3,4,5,6,7 \
   --gpus_per_kernel 1 \
   --prompt_batch_size 1000 \
-  --max_model_len 100000 \
+  --max_model_len 50000 \
   --max_new_tokens 20000 \
   --gpu_memory_utilization 0.95 \
   --out_dir ../data/no_phi/boilerplate_checks
