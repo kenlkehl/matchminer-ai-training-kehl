@@ -2,7 +2,8 @@
 # Override MODEL / REASONING_PARSER via env to swap LLMs. REASONING_PARSER=auto
 # infers from MODEL (see vllm_reasoning_utils.MODEL_TO_PARSER).
 # Example: MODEL=Qwen/Qwen3.6-27B-FP8 REASONING_PARSER=qwen3 bash temp_train.sh
-MODEL="${MODEL:-google/gemma-4-31b-it}"
+#MODEL="${MODEL:-google/gemma-4-31b-it}"
+MODEL="${MODEL:-nvidia/Gemma-4-31B-IT-NVFP4}"  # made change 4/28/26 at point of first trialchecks, after patient summarization on synth data.
 REASONING_PARSER="${REASONING_PARSER:-auto}"
 
 
