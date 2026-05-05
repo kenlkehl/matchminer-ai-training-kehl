@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+
+# 5/2/26: may need VLLM_USE_DEEP_GEMM=0 env var to run on camus
+
 Run the real-time trial-matching pipeline on freshly regenerated summaries for
 patients who generated outbound email drafts.
 
@@ -326,6 +329,9 @@ def _encode_worker(texts, device_str, model_path, encode_batch_size,
                    max_seq_length, query_prompt):
     """Runs in a subprocess on one GPU; returns float32 numpy (N, D)."""
     torch.cuda.set_device(int(device_str.split(":")[-1]))
+    # cuDNN 9.x SDPA backend can fail with "No valid execution plans built"
+    # on Qwen3 attention shapes; force SDPA to fall back to flash/mem-efficient/math.
+    torch.backends.cuda.enable_cudnn_sdp(False)
     model = SentenceTransformer(model_path, trust_remote_code=True,
                                 device=device_str)
     model.max_seq_length = max_seq_length
@@ -1011,9 +1017,11 @@ def main():
                 "mrn": patient_mrns[i],
                 "oncologist_name": oncologist_by_mrn.get(patient_mrns[i]),
                 "patient_summary": patient_summaries[i],
+                "patient_boilerplate_text": patient_boilerplates[i] or "",
                 "space_id": space_ids[idx],
                 "nct_id": nct_ids[idx],
                 "trial_space_text": space_texts[idx],
+                "trial_boilerplate_text": trial_boilerplates[idx] or "",
                 "cosine_similarity": top_selected_cos_sims[i][j],
                 "trialchecker_score": top_selected_tc_scores[i][j],
                 "boilerplate_score": bp_scores_per_patient[i][j],

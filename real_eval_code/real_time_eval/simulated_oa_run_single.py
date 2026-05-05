@@ -480,11 +480,16 @@ def print_patient_header(mrn, patient_id, oncologist_name):
     print(SEPARATOR)
 
 
-def print_patient_summary(summary):
+def print_patient_summary(summary, boilerplate=None):
     print(f"\n{'─' * 80}")
     print("PATIENT SUMMARY")
     print(f"{'─' * 80}")
     print(summary)
+    if boilerplate:
+        print(f"\n{'─' * 80}")
+        print("PATIENT BOILERPLATE TEXT")
+        print(f"{'─' * 80}")
+        print(boilerplate)
 
 
 def print_trial_results(trials):
@@ -504,6 +509,12 @@ def print_trial_results(trials):
         wrapped = textwrap.fill(t["trial_space_text"], width=74)
         for line in wrapped.splitlines():
             print(f"  │ {line}")
+        if t.get("trial_boilerplate_text"):
+            print(f"  │")
+            print(f"  │ TRIAL BOILERPLATE TEXT:")
+            wrapped_bp = textwrap.fill(t["trial_boilerplate_text"], width=74)
+            for line in wrapped_bp.splitlines():
+                print(f"  │ {line}")
         print(f"  └{'─' * 77}")
 
     print(f"\n{SEPARATOR}\n")
@@ -669,6 +680,7 @@ def main():
             "space_id": space_ids[idx],
             "nct_id": nct_ids[idx],
             "trial_space_text": space_texts[idx],
+            "trial_boilerplate_text": trial_boilerplates[idx] or "",
             "cosine_similarity": float(sim_scores[idx]),
             "trialchecker_score": float(tc_scores[j]),
             "boilerplate_score": float(bp),
@@ -677,7 +689,7 @@ def main():
 
     # --- Print to console -------------------------------------------------
     print_patient_header(mrn, patient_id, oncologist_name)
-    print_patient_summary(patient_summary)
+    print_patient_summary(patient_summary, patient_boilerplate)
     print_trial_results(trials)
 
 

@@ -36,6 +36,8 @@ import psycopg2
 import torch
 from sentence_transformers import SentenceTransformer
 
+torch.backends.cuda.enable_cudnn_sdp(False)
+
 SECRETS_FILE = Path(__file__).resolve().parents[3] / "data" / "phi" / "database_secrets.txt"
 
 QUERY_PROMPT = (
