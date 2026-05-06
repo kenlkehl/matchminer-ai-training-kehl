@@ -66,6 +66,20 @@ python 6_summarize_patients.py \
   --chunk_size 10000 \
   --chunk_overlap 500 \
   --max_concurrent_requests 100
+
+
+# Pass extra flags through to the vLLM server (quoted, shell-style; split with shlex)
+python 6_summarize_patients.py \
+  --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
+  --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
+  --shard_dir ../data/no_phi/summary_shards \
+  --model openai/gpt-oss-120b \
+  --download_dir /data1/ken/models \
+  --gpu_ids 0,1,2,3 \
+  --gpus_per_server 1 \
+  --max_model_len 120000 \
+  --chunk_size 50000 \
+  --additional_vllm_args "--quantization nvfp4 --kv-cache-dtype fp8"
 """
 
 import argparse
@@ -74,6 +88,7 @@ import glob
 import os
 import random
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -681,6 +696,7 @@ def start_vllm_server(
     port: int = 8000,
     log_file: Optional[str] = None,
     enforce_eager: bool = False,
+    additional_vllm_args: Optional[List[str]] = None,
 ) -> subprocess.Popen:
     """Start vLLM server as a subprocess."""
     env = os.environ.copy()
@@ -699,6 +715,8 @@ def start_vllm_server(
     ]
     if enforce_eager:
         cmd.append("--enforce-eager")
+    if additional_vllm_args:
+        cmd.extend(additional_vllm_args)
 
     print(f"Starting vLLM server: {' '.join(cmd)}")
     print(f"Using GPUs: {gpu_ids}")
@@ -1117,6 +1135,11 @@ def main():
     ap.add_argument("--max_model_len", type=int, default=50000)
     ap.add_argument("--enforce_eager", action="store_true",
                     help="Pass --enforce-eager to vLLM (disables CUDA graphs; helps surface engine crash tracebacks)")
+    ap.add_argument("--additional_vllm_args", type=str, default="",
+                    help="Extra arguments to append verbatim to the vLLM server command. "
+                         "Pass as a single shell-quoted string, e.g. "
+                         "--additional_vllm_args \"--quantization nvfp4 --kv-cache-dtype fp8\". "
+                         "Ignored when --server_urls is set.")
     ap.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_k", type=int, default=1)
@@ -1303,6 +1326,10 @@ def main():
 
             print(f"Starting {n_servers} vLLM server(s), each with {args.gpus_per_server} GPU(s)")
 
+            extra_vllm_args = shlex.split(args.additional_vllm_args) if args.additional_vllm_args else []
+            if extra_vllm_args:
+                print(f"Appending additional vLLM args: {extra_vllm_args}")
+
             # Start N vLLM servers (subprocess spawns are non-blocking, so models load concurrently)
             for server_idx in range(n_servers):
                 gpu_start = server_idx * args.gpus_per_server
@@ -1324,6 +1351,7 @@ def main():
                     port=server_port,
                     log_file=log_file,
                     enforce_eager=args.enforce_eager,
+                    additional_vllm_args=extra_vllm_args,
                 )
                 server_infos.append((process, server_port))
 

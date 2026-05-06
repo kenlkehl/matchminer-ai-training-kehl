@@ -239,6 +239,13 @@ def parse_args():
              "(disables CUDA graphs; helps surface engine crash tracebacks)",
     )
     parser.add_argument(
+        "--summarization-additional-vllm-args", type=str, default="",
+        help="Extra arguments forwarded to 6_summarize_patients.py "
+             "via --additional_vllm_args (a single shell-quoted string), e.g. "
+             "--summarization-additional-vllm-args "
+             "\"--quantization nvfp4 --kv-cache-dtype fp8\"",
+    )
+    parser.add_argument(
         "--summarization-artifact-root", type=str,
         default=str(DEFAULT_SUMMARIZATION_ARTIFACT_ROOT),
         help="Directory where fresh summarization artifacts are written",
@@ -582,6 +589,8 @@ def run_or_resume_summarization(notes_df, args):
         cmd.extend(["--max_model_len", str(args.summarization_max_model_len)])
     if args.summarization_enforce_eager:
         cmd.append("--enforce_eager")
+    if args.summarization_additional_vllm_args:
+        cmd.extend(["--additional_vllm_args", args.summarization_additional_vllm_args])
 
     print("Running patient summarization pipeline:")
     print(f"  {shlex.join(cmd)}")
