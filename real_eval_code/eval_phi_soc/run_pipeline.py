@@ -49,7 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]  # matchminer-ai-training
 SCRIPTS_DIR = Path(__file__).resolve().parent  
 SOC_SCRIPTS_DIR = REPO_ROOT / "real_eval_code/eval_phi_soc"
 DATA_DIR = REPO_ROOT.parent / "data/phi/soc"
-GOLD_LLM = 'openai/gpt-oss-120b'
+GOLD_LLM = 'nvidia/Gemma-4-31B-IT-NVFP4'
 BASELINE_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 ONCOREASONING_MODEL = "../../../models/onco_reasoning_lfm/checkpoint-121000"  # Update with actual path or HuggingFace ID
 
@@ -121,7 +121,7 @@ Examples:
                         help="Path to derived data directory with parquet files")
     parser.add_argument("--start-date", type=str, default="2016-01-01",
                         help="Start date for treatment filtering")
-    parser.add_argument("--end-date", type=str, default="2023-01-01",
+    parser.add_argument("--end-date", type=str, default="2024-01-01",
                         help="End date for treatment filtering")
     parser.add_argument("--days-buffer", type=int, default=5,
                         help="Number of days after treatment start to include reports")
