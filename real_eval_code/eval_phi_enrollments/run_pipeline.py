@@ -50,7 +50,7 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[2]  # matchminer-ai-training
 SCRIPTS_DIR = Path(__file__).resolve().parent  # eval_phi_enrollments
 DATA_DIR = REPO_ROOT.parent / "data/phi/enrollments"
-GOLD_LLM = "openai/gpt-oss-120b"
+GOLD_LLM = "nvidia/Gemma-4-31B-IT-NVFP4"
 BASELINE_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 ONCOREASONING_MODEL = "../../../models/onco_reasoning_lfm/checkpoint-121000"
 
