@@ -84,7 +84,7 @@ def main(checkpoint_dir: str, output_dir: str):
             return (loss, outputs) if return_outputs else loss
 
     model = AutoModelForSequenceClassification.from_pretrained(
-        "answerdotai/ModernBERT-large", num_labels=1, reference_compile=False
+        "answerdotai/ModernBERT-large", num_labels=1
     )
     model.config.problem_type = "regression"
 

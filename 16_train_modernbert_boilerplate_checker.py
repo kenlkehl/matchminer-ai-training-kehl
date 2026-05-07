@@ -75,8 +75,7 @@ def main(checkpoint_dir: str, output_dir: str):
     
     
     model = AutoModelForSequenceClassification.from_pretrained(
-        "answerdotai/ModernBERT-large", num_labels=2, id2label=id2label, label2id=label2id, reference_compile=False
-    )
+        "answerdotai/ModernBERT-large", num_labels=2, id2label=id2label, label2id=label2id
     
     
     training_args = TrainingArguments(
