@@ -36,7 +36,7 @@ def parse_args():
                         default=None,
                         help="Input CSV with trial spaces (default: data/phi/trial_space_lineitems.csv)")
     parser.add_argument("--trial-openings", type=str,
-                        default="/clin-ksg/clin_notes_outcomes/james_analysis/v6/data/v7/trials.parquet",
+                        default="../../../data/phi/enrollments/trials.parquet",
                         help="Parquet with trial open/close dates")
     parser.add_argument("--output-file", type=str,
                         default=None,
