@@ -403,9 +403,14 @@ def merge_retrieval_shards(shard_root: Path, output_file: Path) -> bool:
 
 
 def count_rows(csv_path: Path) -> int:
-    """Cheap row count for sharding decisions."""
+    """Row count for sharding decisions.
+
+    Uses pandas (single column) rather than raw line counting because CSV cells
+    in this pipeline (patient summaries, trial spaces) contain embedded newlines
+    that would otherwise inflate the count by ~10-20x and produce empty shards.
+    """
     try:
-        return sum(1 for _ in open(csv_path)) - 1  # subtract header
+        return len(pd.read_csv(csv_path, usecols=[0]))
     except Exception as e:
         print(f"  Warning: could not count rows in {csv_path}: {e}")
         return 0
