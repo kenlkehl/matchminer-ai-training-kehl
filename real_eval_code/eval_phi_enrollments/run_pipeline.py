@@ -342,6 +342,214 @@ def run_parallel_commands(commands: List[Dict], max_workers: int, dry_run: bool 
     return results
 
 
+def distribute_shards(num_workers: int, num_tasks: int) -> List[int]:
+    """Distribute num_workers GPU slots across num_tasks tasks.
+
+    When workers >= tasks, each task gets at least one shard and the remainder is
+    spread across the first few tasks (so all GPUs are used). When workers < tasks,
+    every task gets a single shard and the caller will batch the resulting commands.
+    """
+    if num_tasks <= 0:
+        return []
+    if num_workers >= num_tasks:
+        base = num_workers // num_tasks
+        remainder = num_workers % num_tasks
+        return [base + (1 if i < remainder else 0) for i in range(num_tasks)]
+    return [1] * num_tasks
+
+
+def merge_check_shards(output_dir: Path, output_file: Path) -> bool:
+    """Concatenate all *_through_*.csv shard files in output_dir into output_file."""
+    shard_files = sorted(output_dir.glob("*_through_*.csv"))
+    if not shard_files:
+        print(f"  Warning: no check shards found in {output_dir}")
+        return False
+    dfs = []
+    for f in shard_files:
+        try:
+            dfs.append(pd.read_csv(f))
+        except Exception as e:
+            print(f"  Warning: could not read {f}: {e}")
+    if not dfs:
+        return False
+    merged = pd.concat(dfs, ignore_index=True)
+    if 'Unnamed: 0' in merged.columns:
+        merged = merged.sort_values(by='Unnamed: 0').reset_index(drop=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(output_file, index=False)
+    print(f"  Merged {len(shard_files)} check shards into {output_file} ({len(merged)} rows)")
+    return True
+
+
+def merge_retrieval_shards(shard_root: Path, output_file: Path) -> bool:
+    """Concatenate retrieval shards (flat shard_*.csv or nested shard_s*/shard_*.csv)."""
+    files = sorted(shard_root.glob("shard_*.csv")) + sorted(shard_root.glob("shard_s*/shard_*.csv"))
+    if not files:
+        print(f"  Warning: no retrieval shards found in {shard_root}")
+        return False
+    dfs = []
+    for f in files:
+        try:
+            dfs.append(pd.read_csv(f))
+        except Exception as e:
+            print(f"  Warning: could not read {f}: {e}")
+    if not dfs:
+        return False
+    merged = pd.concat(dfs, ignore_index=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(output_file, index=False)
+    print(f"  Merged {len(files)} retrieval shards into {output_file} ({len(merged)} rows)")
+    return True
+
+
+def count_rows(csv_path: Path) -> int:
+    """Cheap row count for sharding decisions."""
+    try:
+        return sum(1 for _ in open(csv_path)) - 1  # subtract header
+    except Exception as e:
+        print(f"  Warning: could not count rows in {csv_path}: {e}")
+        return 0
+
+
+def run_sharded_checks(
+    check_tasks: List[Dict],
+    gpu_list: List[str],
+    download_dir: str,
+    scripts_dir: Optional[Path],
+    dry_run: bool,
+) -> bool:
+    """Run a list of LLM check tasks, sharding each across multiple GPUs when possible.
+
+    Each task represents one (script, mode) combination. When the number of GPUs
+    exceeds the number of tasks, each task is partitioned into multiple row-range
+    shards that run in parallel on separate GPUs. After all shards complete the
+    runner merges shard CSVs into the per-task consolidated output file.
+
+    Returns True on success.
+    """
+    if not check_tasks:
+        return True
+    num_gpus = len(gpu_list)
+    shards_per_task = distribute_shards(num_gpus, len(check_tasks))
+    commands = []
+    gpu_cursor = 0
+    for task, n_shards in zip(check_tasks, shards_per_task):
+        total_rows = count_rows(Path(task['input']))
+        if total_rows <= 0:
+            print(f"  Skipping {task['description']}: input has no rows")
+            continue
+        # Don't make more shards than rows available
+        n_shards = max(1, min(n_shards, total_rows))
+        chunk = (total_rows + n_shards - 1) // n_shards
+        for shard_id in range(n_shards):
+            row_start = shard_id * chunk
+            row_end = min(row_start + chunk, total_rows)
+            if row_start >= row_end:
+                continue
+            gpu = gpu_list[gpu_cursor % num_gpus]
+            gpu_cursor += 1
+            script_path = task['script'] if scripts_dir is None else str(scripts_dir / task['script'])
+            cmd = [
+                "python", script_path,
+                "--gpu", gpu,
+                "--download-dir", download_dir,
+                "--input", task['input'],
+                "--output-dir", task['output_dir'],
+                "--output-file", task['output_file'],
+                "--model", task['model'],
+                "--row-start", str(row_start),
+                "--row-end", str(row_end),
+                "--skip-merge",
+            ] + task['args']
+            commands.append({
+                'cmd': cmd,
+                'description': f"{task['description']} (shard {shard_id + 1}/{n_shards}, GPU {gpu})",
+                'show_output': True,
+            })
+
+    if not commands:
+        return True
+
+    success = True
+    # If we generated more commands than GPUs (because num_tasks > num_gpus),
+    # run them in batches sized to the available GPUs.
+    batch_size = min(num_gpus, len(commands))
+    for batch_start in range(0, len(commands), batch_size):
+        batch = commands[batch_start:batch_start + batch_size]
+        print(f"\nRunning batch of {len(batch)} sharded check processes...")
+        results = run_parallel_commands(batch, len(batch), dry_run)
+        if any(r != 0 for r in results):
+            success = False
+
+    # Merge each task's shards into its consolidated output (skip in dry-run)
+    if not dry_run:
+        print("\n--- Merging sharded check outputs ---")
+        for task in check_tasks:
+            merge_check_shards(Path(task['output_dir']), Path(task['output_file']))
+
+    return success
+
+
+def run_sharded_retrieval(
+    retrieval_tasks: List[Dict],
+    gpu_list: List[str],
+    scripts_dir: Optional[Path],
+    common_args: List[str],
+    dry_run: bool,
+) -> bool:
+    """Run patient-/trial-centric retrieval tasks, sharding each across GPUs.
+
+    Each task is a dict with keys: script, output_file, shard_dir, description.
+    When num_gpus >= num_tasks, work is sharded. After all shards complete the
+    runner merges shard CSVs into the consolidated output file for each task.
+    """
+    if not retrieval_tasks:
+        return True
+    num_gpus = len(gpu_list)
+    shards_per_task = distribute_shards(num_gpus, len(retrieval_tasks))
+    commands = []
+    gpu_cursor = 0
+    for task, n_shards in zip(retrieval_tasks, shards_per_task):
+        n_shards = max(1, n_shards)
+        for shard_id in range(n_shards):
+            gpu = gpu_list[gpu_cursor % num_gpus]
+            gpu_cursor += 1
+            script_path = task['script'] if scripts_dir is None else str(scripts_dir / task['script'])
+            cmd = [
+                "python", script_path,
+                "--gpu", gpu,
+                "--output-file", task['output_file'],
+                "--shard-dir", task['shard_dir'],
+                "--shard-id", str(shard_id),
+                "--num-shards", str(n_shards),
+                "--skip-consolidate",
+            ] + common_args
+            commands.append({
+                'cmd': cmd,
+                'description': f"{task['description']} (shard {shard_id + 1}/{n_shards}, GPU {gpu})",
+                'show_output': True,
+            })
+
+    if not commands:
+        return True
+
+    success = True
+    batch_size = min(num_gpus, len(commands))
+    for batch_start in range(0, len(commands), batch_size):
+        batch = commands[batch_start:batch_start + batch_size]
+        print(f"\nRunning batch of {len(batch)} sharded retrieval processes...")
+        results = run_parallel_commands(batch, len(batch), dry_run)
+        if any(r != 0 for r in results):
+            success = False
+
+    if not dry_run:
+        print("\n--- Merging sharded retrieval outputs ---")
+        for task in retrieval_tasks:
+            merge_retrieval_shards(Path(task['shard_dir']), Path(task['output_file']))
+
+    return success
+
+
 def get_stages_to_run(args) -> List[str]:
     """Determine which stages to run based on arguments."""
     if args.stages:
@@ -501,50 +709,25 @@ def main():
                 "--embedding-model", str(REPO_ROOT.parent / "models/trialspace"),
             ]
 
-            if num_gpus >= 2:
-                # Run patient-centric and trial-centric in parallel
-                commands = [
-                    {
-                        'cmd': [
-                            "python", "patient_centric_retrieval.py",
-                            "--gpu", gpu_list[0],
-                            "--output-file", str(DATA_DIR / "patient_centric_candidates.csv"),
-                            "--shard-dir", str(DATA_DIR / "shards_patient_centric"),
-                        ] + retrieval_common_args,
-                        'description': "Patient-centric retrieval",
-                        'show_output': True,
-                    },
-                    {
-                        'cmd': [
-                            "python", "trial_centric_retrieval.py",
-                            "--gpu", gpu_list[1],
-                            "--output-file", str(DATA_DIR / "trial_centric_candidates.csv"),
-                            "--shard-dir", str(DATA_DIR / "shards_trial_centric"),
-                        ] + retrieval_common_args,
-                        'description': "Trial-centric retrieval",
-                        'show_output': True,
-                    }
-                ]
-                results = run_parallel_commands(commands, 2, args.dry_run)
-                if any(r != 0 for r in results):
-                    failures.append("retrieval")
-            else:
-                # Run sequentially with single GPU
-                for script_name, desc, output_file, shard_dir in [
-                    ("patient_centric_retrieval.py", "Patient-centric retrieval",
-                     "patient_centric_candidates.csv", "shards_patient_centric"),
-                    ("trial_centric_retrieval.py", "Trial-centric retrieval",
-                     "trial_centric_candidates.csv", "shards_trial_centric"),
-                ]:
-                    cmd = [
-                        "python", str(SCRIPTS_DIR / script_name),
-                        "--gpu", gpu_list[0],
-                        "--output-file", str(DATA_DIR / output_file),
-                        "--shard-dir", str(DATA_DIR / shard_dir),
-                    ] + retrieval_common_args
-                    ret = run_command(cmd, desc, args.dry_run)
-                    if ret != 0:
-                        failures.append("retrieval")
+            retrieval_tasks = [
+                {
+                    'script': "patient_centric_retrieval.py",
+                    'output_file': str(DATA_DIR / "patient_centric_candidates.csv"),
+                    'shard_dir': str(DATA_DIR / "shards_patient_centric"),
+                    'description': "Patient-centric retrieval",
+                },
+                {
+                    'script': "trial_centric_retrieval.py",
+                    'output_file': str(DATA_DIR / "trial_centric_candidates.csv"),
+                    'shard_dir': str(DATA_DIR / "shards_trial_centric"),
+                    'description': "Trial-centric retrieval",
+                },
+            ]
+            ok = run_sharded_retrieval(
+                retrieval_tasks, gpu_list, SCRIPTS_DIR, retrieval_common_args, args.dry_run
+            )
+            if not ok:
+                failures.append("retrieval")
 
     # Stage 4: LLM checks (eligibility + boilerplate for both directions)
     if "llm_checks" in stages_to_run:
@@ -618,34 +801,11 @@ def main():
         if not tasks_to_run:
             print("  [SKIP] LLM checks: All sub-tasks already complete")
         else:
-            # Distribute remaining tasks across available GPUs
-            commands = []
-            for i, task in enumerate(tasks_to_run):
-                gpu_idx = i % num_gpus
-                cmd = [
-                    "python", task['script'],
-                    "--gpu", gpu_list[gpu_idx],
-                    "--download-dir", args.download_dir,
-                    "--input", task['input'],
-                    "--output-dir", task['output_dir'],
-                    "--output-file", task['output_file'],
-                    "--model", task['model'],
-                ] + task['args']
-
-                commands.append({
-                    'cmd': cmd,
-                    'description': task['description'],
-                    'show_output': True,
-                })
-
-            # Run as many in parallel as we have GPUs
-            batch_size = min(num_gpus, len(commands))
-            for batch_start in range(0, len(commands), batch_size):
-                batch = commands[batch_start:batch_start + batch_size]
-                print(f"\nRunning batch of {len(batch)} LLM checks in parallel...")
-                results = run_parallel_commands(batch, len(batch), args.dry_run)
-                if any(r != 0 for r in results):
-                    failures.append("llm_checks")
+            ok = run_sharded_checks(
+                tasks_to_run, gpu_list, args.download_dir, SCRIPTS_DIR, args.dry_run
+            )
+            if not ok:
+                failures.append("llm_checks")
 
     # Stage 5: OncoReasoning LLM inference (trial check + boilerplate via vLLM)
     if "oncoreasoning" in stages_to_run:
@@ -747,50 +907,26 @@ def main():
                 "--embedding-model", BASELINE_EMBEDDING_MODEL,
             ]
 
-            if num_gpus >= 2:
-                # Run patient-centric and trial-centric in parallel
-                commands = [
-                    {
-                        'cmd': [
-                            "python", "patient_centric_retrieval.py",
-                            "--gpu", gpu_list[0],
-                            "--output-file", str(DATA_DIR / "baseline_patient_centric_candidates.csv"),
-                            "--shard-dir", str(DATA_DIR / "shards_baseline_patient_centric"),
-                        ] + baseline_retrieval_common_args,
-                        'description': "Baseline patient-centric retrieval (Qwen3)",
-                        'show_output': True,
-                    },
-                    {
-                        'cmd': [
-                            "python", "trial_centric_retrieval.py",
-                            "--gpu", gpu_list[1],
-                            "--output-file", str(DATA_DIR / "baseline_trial_centric_candidates.csv"),
-                            "--shard-dir", str(DATA_DIR / "shards_baseline_trial_centric"),
-                        ] + baseline_retrieval_common_args,
-                        'description': "Baseline trial-centric retrieval (Qwen3)",
-                        'show_output': True,
-                    }
-                ]
-                results = run_parallel_commands(commands, 2, args.dry_run)
-                if any(r != 0 for r in results):
-                    failures.append("baseline")
-            else:
-                # Run sequentially with single GPU
-                for script_name, desc, output_file, shard_dir in [
-                    ("patient_centric_retrieval.py", "Baseline patient-centric retrieval (Qwen3)",
-                     "baseline_patient_centric_candidates.csv", "shards_baseline_patient_centric"),
-                    ("trial_centric_retrieval.py", "Baseline trial-centric retrieval (Qwen3)",
-                     "baseline_trial_centric_candidates.csv", "shards_baseline_trial_centric"),
-                ]:
-                    cmd = [
-                        "python", str(SCRIPTS_DIR / script_name),
-                        "--gpu", gpu_list[0],
-                        "--output-file", str(DATA_DIR / output_file),
-                        "--shard-dir", str(DATA_DIR / shard_dir),
-                    ] + baseline_retrieval_common_args
-                    ret = run_command(cmd, desc, args.dry_run)
-                    if ret != 0:
-                        failures.append("baseline")
+            baseline_retrieval_tasks = [
+                {
+                    'script': "patient_centric_retrieval.py",
+                    'output_file': str(DATA_DIR / "baseline_patient_centric_candidates.csv"),
+                    'shard_dir': str(DATA_DIR / "shards_baseline_patient_centric"),
+                    'description': "Baseline patient-centric retrieval (Qwen3)",
+                },
+                {
+                    'script': "trial_centric_retrieval.py",
+                    'output_file': str(DATA_DIR / "baseline_trial_centric_candidates.csv"),
+                    'shard_dir': str(DATA_DIR / "shards_baseline_trial_centric"),
+                    'description': "Baseline trial-centric retrieval (Qwen3)",
+                },
+            ]
+            ok = run_sharded_retrieval(
+                baseline_retrieval_tasks, gpu_list, SCRIPTS_DIR,
+                baseline_retrieval_common_args, args.dry_run,
+            )
+            if not ok:
+                failures.append("baseline")
 
             # Step 2: Baseline eligibility checks (no boilerplate for baseline)
             # These self-aggregate to consolidated output files
@@ -834,33 +970,12 @@ def main():
                     baseline_tasks_to_run.append(task)
 
             if baseline_tasks_to_run:
-                # Distribute remaining tasks across available GPUs
-                commands = []
-                for i, task in enumerate(baseline_tasks_to_run):
-                    gpu_idx = i % num_gpus
-                    cmd = [
-                        "python", task['script'],
-                        "--gpu", gpu_list[gpu_idx],
-                        "--download-dir", args.download_dir,
-                        "--input", task['input'],
-                        "--output-dir", task['output_dir'],
-                        "--output-file", task['output_file'],
-                        "--model", task['model'],
-                    ] + task['args']
-
-                    commands.append({
-                        'cmd': cmd,
-                        'description': task['description'],
-                        'show_output': True,
-                    })
-
-                batch_size = min(num_gpus, len(commands))
-                for batch_start in range(0, len(commands), batch_size):
-                    batch = commands[batch_start:batch_start + batch_size]
-                    print(f"\nRunning batch of {len(batch)} baseline eligibility checks in parallel...")
-                    results = run_parallel_commands(batch, len(batch), args.dry_run)
-                    if any(r != 0 for r in results):
-                        failures.append("baseline")
+                ok = run_sharded_checks(
+                    baseline_tasks_to_run, gpu_list, args.download_dir,
+                    SCRIPTS_DIR, args.dry_run,
+                )
+                if not ok:
+                    failures.append("baseline")
             else:
                 print("  [SKIP] Baseline eligibility checks: All sub-tasks already complete")
 

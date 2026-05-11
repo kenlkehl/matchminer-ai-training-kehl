@@ -50,6 +50,12 @@ def parse_args():
                         help="Directory for checkpoint shards (default: data/phi/shards_trial_centric)")
     parser.add_argument("--shard-size", type=int, default=100,
                         help="Number of spaces per shard")
+    parser.add_argument("--shard-id", type=int, default=0,
+                        help="Shard ID (0-indexed) when sharding work across multiple GPUs")
+    parser.add_argument("--num-shards", type=int, default=1,
+                        help="Total number of parallel shards (1 = no sharding)")
+    parser.add_argument("--skip-consolidate", action="store_true",
+                        help="Skip the final consolidation (caller will merge after all shards finish)")
     return parser.parse_args()
 
 
@@ -68,9 +74,14 @@ def get_completed_shards(shard_dir):
 
 
 def consolidate_shards(shard_dir, output_file):
-    """Consolidate all shards into a single file."""
-    pattern = os.path.join(shard_dir, "shard_*.csv")
-    files = sorted(glob.glob(pattern))
+    """Consolidate all shards into a single file.
+
+    Looks for both the legacy flat layout (shard_dir/shard_*.csv) and the sharded
+    layout written when --num-shards > 1 (shard_dir/shard_s*/shard_*.csv).
+    """
+    flat_pattern = os.path.join(shard_dir, "shard_*.csv")
+    nested_pattern = os.path.join(shard_dir, "shard_s*", "shard_*.csv")
+    files = sorted(glob.glob(flat_pattern) + glob.glob(nested_pattern))
     if not files:
         print(f"No shards found")
         return None
@@ -104,8 +115,15 @@ def main():
 
     output_dir = Path(args.output_file).parent
     output_dir.mkdir(parents=True, exist_ok=True)
-    shard_dir = Path(args.shard_dir)
-    shard_dir.mkdir(parents=True, exist_ok=True)
+    shard_root = Path(args.shard_dir)
+    shard_root.mkdir(parents=True, exist_ok=True)
+    # When sharding across multiple GPUs, each parallel process writes to its own
+    # subdirectory so resume state and shard filenames don't collide.
+    if args.num_shards > 1:
+        shard_dir = shard_root / f"shard_s{args.shard_id}"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        shard_dir = shard_root
 
     # Load patient summaries
     print("Loading patient summaries...")
@@ -139,6 +157,17 @@ def main():
     ]
     spaces = pd.merge(spaces, trial_openings, on='nct_id')
     print(f"Matched {spaces.shape[0]} spaces with opening dates")
+
+    # If running as one of multiple parallel shards, slice the spaces to this
+    # shard. Each shard then computes embeddings only for its own spaces (and all
+    # patients, which are needed for matching).
+    if args.num_shards > 1:
+        total_spaces_full = spaces.shape[0]
+        chunk = (total_spaces_full + args.num_shards - 1) // args.num_shards
+        slice_start = args.shard_id * chunk
+        slice_end = min(slice_start + chunk, total_spaces_full)
+        print(f"Shard {args.shard_id}/{args.num_shards}: spaces [{slice_start}, {slice_end}) of {total_spaces_full}")
+        spaces = spaces.iloc[slice_start:slice_end].reset_index(drop=True)
 
     # Load embedding model
     print(f"Loading embedding model from {args.embedding_model}...")
@@ -225,9 +254,12 @@ def main():
             shard_df.to_csv(str(shard_file), index=False)
             print(f"Saved shard {shard_num} ({len(shard_df)} records)")
 
-    # Consolidate shards
-    print("Consolidating shards...")
-    consolidate_shards(str(shard_dir), args.output_file)
+    # Consolidate shards (skip when caller will merge across multiple shards)
+    if args.skip_consolidate:
+        print("--skip-consolidate set; leaving consolidation to caller.")
+    else:
+        print("Consolidating shards...")
+        consolidate_shards(str(shard_root), args.output_file)
 
     print("\n=== Done ===")
 

@@ -53,6 +53,12 @@ def parse_args():
                         help="Maximum model context length")
     parser.add_argument("--max-num-seqs", type=int, default=900,
                         help="vLLM max_num_seqs (concurrent request cap).")
+    parser.add_argument("--row-start", type=int, default=0,
+                        help="First row index (inclusive) to process. Used for sharding across GPUs.")
+    parser.add_argument("--row-end", type=int, default=None,
+                        help="Last row index (exclusive) to process. Defaults to total row count.")
+    parser.add_argument("--skip-merge", action="store_true",
+                        help="Skip the final merge step (caller will merge after all shards complete).")
 
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -171,8 +177,13 @@ def ask_about_trials_loosely(patient_summaries, trial_summaries, llama_model, re
     return responses, response_reasonings, response_texts, eligibility_results, eligibility_verdicts
 
 
-def get_completed_batches(output_dir):
-    """Get the highest completed batch index."""
+def get_completed_batches(output_dir, row_start=None, row_end=None):
+    """Get the highest completed batch index, optionally restricted to a row range.
+
+    When row_start/row_end are provided, only batches whose ending index falls within
+    [row_start, row_end) are considered. This lets sharded callers resume their slice
+    independently of other shards writing to the same directory.
+    """
     pattern = os.path.join(output_dir, "*_through_*.csv")
     files = glob.glob(pattern)
     max_idx = -1
@@ -182,6 +193,10 @@ def get_completed_batches(output_dir):
             basename = os.path.basename(f)
             idx_str = basename.split("_through_")[1].replace(".csv", "")
             idx = int(idx_str)
+            if row_start is not None and idx < row_start:
+                continue
+            if row_end is not None and idx >= row_end:
+                continue
             max_idx = max(max_idx, idx)
         except:
             pass
@@ -262,6 +277,17 @@ def main():
     candidates = pd.read_csv(args.input)
     print(f"Loaded {candidates.shape[0]} candidate pairs")
 
+    # Resolve row range for sharding
+    row_start = max(0, args.row_start)
+    row_end = args.row_end if args.row_end is not None else candidates.shape[0]
+    row_end = min(row_end, candidates.shape[0])
+    if row_start >= row_end:
+        print(f"Empty shard (row_start={row_start}, row_end={row_end}); nothing to do.")
+        if not args.skip_merge:
+            merge_shards(str(output_dir), args.output_file)
+        return
+    print(f"Processing rows [{row_start}, {row_end})")
+
     # Initialize LLM
     print(f"Initializing LLM from {args.model}...")
     llm = LLM(
@@ -273,20 +299,20 @@ def main():
         max_model_len=args.max_model_len,
     )
 
-    # Check for resume point
-    last_completed = get_completed_batches(str(output_dir))
-    start_idx = last_completed + 1 if last_completed >= 0 else 0
+    # Check for resume point within this shard's row range
+    last_completed = get_completed_batches(str(output_dir), row_start=row_start, row_end=row_end)
+    start_idx = max(row_start, last_completed + 1) if last_completed >= 0 else row_start
     print(f"Starting from index {start_idx}")
 
     # Process in batches
     batch_list = []
     num_in_batch = 0
 
-    for i in range(start_idx, candidates.shape[0]):
+    for i in range(start_idx, row_end):
         batch_list.append(candidates.iloc[[i]])
         num_in_batch += 1
 
-        if (num_in_batch == args.batch_size) or (i == (candidates.shape[0] - 1)):
+        if (num_in_batch == args.batch_size) or (i == (row_end - 1)):
             output = pd.concat(batch_list, axis=0)
 
             _, output['trialcheck_llm_reasoning'], output['trialcheck_llm_response'], output['eligibility_result'], output['eligibility_verdict'] = ask_about_trials_loosely(
@@ -308,8 +334,11 @@ def main():
             num_in_batch = 0
             batch_list = []
 
-    # Merge all shards into final output file
-    merge_shards(str(output_dir), args.output_file)
+    # Merge all shards into final output file (skip when caller is sharding)
+    if args.skip_merge:
+        print("\n--skip-merge set; leaving consolidation to caller.")
+    else:
+        merge_shards(str(output_dir), args.output_file)
     print("\n=== Done ===")
 
 
