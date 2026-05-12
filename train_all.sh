@@ -18,25 +18,25 @@ wget -P ../data/no_phi https://huggingface.co/datasets/ksg-dfci/mmai-synthetic/r
 
 # try to pre-compile relevant vllm configurations
 
-aggregator=$(cat << EOF
-from vllm import LLM
-llm = LLM(
-        model='${MODEL}',
-        tensor_parallel_size=1,
-        download_dir="~/models",
-        gpu_memory_utilization=0.95,
-        max_model_len=220000,
-    )
+# aggregator=$(cat << EOF
+# from vllm import LLM
+# llm = LLM(
+#         model='${MODEL}',
+#         tensor_parallel_size=1,
+#         download_dir="~/models",
+#         gpu_memory_utilization=0.95,
+#         max_model_len=220000,
+#     )
 
-EOF
-)
+# EOF
+# )
 
 
 
 
 python 0a_parse_ctgov_json.py 
 
-python 0b_create_trial_spaces.py --input ../data/no_phi/ctgov_trials.csv --gpus 0,1,2,3 --gpus-per-instance 1 \
+python 0b_create_trial_spaces.py --input ../data/no_phi/ctgov_trials.csv --gpus 0,1,2,3,4,5,6,7 --gpus-per-instance 1 \
   --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
   --download-dir /data1/ken/models --max-model-len 30000 --max-tokens 20000 --gpu-mem-util 0.90
 
