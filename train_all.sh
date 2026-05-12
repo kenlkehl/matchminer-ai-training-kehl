@@ -38,7 +38,7 @@ python 0a_parse_ctgov_json.py
 
 python 0b_create_trial_spaces.py --input ../data/no_phi/ctgov_trials.csv --gpus 0,1,2,3,4,5,6,7 --gpus-per-instance 1 \
   --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
-  --download-dir /data1/ken/models --max-model-len 30000 --max-tokens 20000 --gpu-mem-util 0.90
+  --download-dir ~/models --max-model-len 30000 --max-tokens 20000 --gpu-mem-util 0.90
 
 echo 0 done
 
