@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 
-# 5/2/26: may need VLLM_USE_DEEP_GEMM=0 env var to run on camus
+# 5/2/26: note - if need to install deep_gemm package, that may need to come from github.
 
 Run the real-time trial-matching pipeline on freshly regenerated summaries for
 patients who generated outbound email drafts.
@@ -28,9 +28,10 @@ Examples:
         --embeddings trial_space_embeddings.parquet \
         --trial-checker ../../../models/trialchecker \
         --boilerplate-checker ../../../models/boilerplatechecker \
-        --summarization-model google/gemma-4-31b-it \
+        --summarization-model RedHatAI/gemma-4-31B-it-FP8-block \
         --batch-size 64 --checker-batch-size 64 \
-        --gpu 0,1
+        --summarization-additional-vllm-args "--kv-cache-dtype fp8" \
+        --gpu 3
 """
 
 import argparse

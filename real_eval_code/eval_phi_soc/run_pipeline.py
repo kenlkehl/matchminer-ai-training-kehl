@@ -393,6 +393,47 @@ def distribute_shards(num_workers: int, num_tasks: int) -> List[int]:
     return [1] * num_tasks
 
 
+def distribute_shards_by_size(num_workers: int, sizes: List[int]) -> List[int]:
+    """Allocate num_workers GPU slots across tasks proportional to input row counts.
+
+    Each task with size > 0 gets at least 1 shard so it actually runs; remaining
+    slots are distributed proportional to size via the largest-remainder method.
+    This keeps all GPUs busy when tasks differ in size by 5-10x (e.g., trial-centric
+    has ~10x more rows than patient-centric, so equal sharding leaves trial-centric
+    shards running long after patient-centric shards finish).
+    """
+    n = len(sizes)
+    if n == 0 or num_workers <= 0:
+        return [0] * n
+
+    nonzero = [i for i, s in enumerate(sizes) if s > 0]
+    if not nonzero:
+        return [0] * n
+
+    # Match the original distribute_shards fallback when there are fewer workers
+    # than tasks: 1 shard per task and the caller batches them.
+    if num_workers <= len(nonzero):
+        return [1 if s > 0 else 0 for s in sizes]
+
+    allocations = [1 if s > 0 else 0 for s in sizes]
+    remaining = num_workers - len(nonzero)
+    total_size = sum(sizes[i] for i in nonzero)
+
+    fractions = []
+    for i in nonzero:
+        ideal = remaining * sizes[i] / total_size
+        whole = int(ideal)
+        allocations[i] += whole
+        fractions.append((ideal - whole, i))
+
+    leftover = num_workers - sum(allocations)
+    fractions.sort(key=lambda x: (-x[0], x[1]))
+    for j in range(min(leftover, len(fractions))):
+        allocations[fractions[j][1]] += 1
+
+    return allocations
+
+
 def merge_check_shards(output_dir: Path, output_file: Path) -> bool:
     """Concatenate all *_through_*.csv shard files in output_dir into output_file."""
     shard_files = sorted(output_dir.glob("*_through_*.csv"))
@@ -470,11 +511,14 @@ def run_sharded_checks(
     if not check_tasks:
         return True
     num_gpus = len(gpu_list)
-    shards_per_task = distribute_shards(num_gpus, len(check_tasks))
+    # Count rows once per task and shard proportionally to input size. Equal sharding
+    # (e.g., [2,2,2,2] for 4 tasks on 8 GPUs) leaves GPUs idle once the smaller tasks
+    # finish; trial-centric inputs are typically ~10x larger than patient-centric.
+    row_counts = [count_rows(Path(t['input'])) for t in check_tasks]
+    shards_per_task = distribute_shards_by_size(num_gpus, row_counts)
     commands = []
     gpu_cursor = 0
-    for task, n_shards in zip(check_tasks, shards_per_task):
-        total_rows = count_rows(Path(task['input']))
+    for task, n_shards, total_rows in zip(check_tasks, shards_per_task, row_counts):
         if total_rows <= 0:
             print(f"  Skipping {task['description']}: input has no rows")
             continue

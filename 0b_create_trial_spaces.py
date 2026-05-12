@@ -54,7 +54,7 @@ PROMPT_HEADER = (
     "Structure your output like this, as a list of spaces, with spaces separated by newlines, as below. STRICTLY adhere to the formatting.\n"
     "1. Age range allowed: <age_range_allowed>. Sex allowed: <sex_allowed>. Cancer type allowed: <cancer_type_allowed>. Histology allowed: <histology_allowed>. Cancer burden allowed: <cancer_burden_allowed>. Prior treatment required: <prior_treatments_requred>. Prior treatment excluded: <prior_treatments_excluded>. Biomarkers required: <biomarkers_required>. Biomarkers excluded: <biomarkers_excluded>. \n"
     "2. Cancer type allowed: <cancer_type_allowed>, etc.\n"
-    "If a concept is not relevant, such as if there are no prior treatents required, simply output NA for that concept.\n"
+    "If a concept is not relevant, such as if there are no prior treatments required, simply output NA for that concept.\n"
     "CRITICAL: Anytime you provide a list for a particular concept, you must be completely clear on whether \"or\" versus \"and\" logic applies "
     "to the list. For example, do not output \"EGFR L858R mutant, TP53 mutant\"; if both are required, output \"EGFR L858R mutant and TP53 mutant\". "
     "As another example, do not output \"ER+, PR+\"; if the patient can have either an ER or a PR positive tumor, output \"ER+ or PR+\".\n"
@@ -65,6 +65,7 @@ PROMPT_HEADER = (
     "to clinical trials in general.\n"
     "Common boilerplate exclusion criteria include a history of pneumonitis, heart failure, renal dysfunction, liver dysfunction, uncontrolled brain "
     "metastases, HIV or hepatitis, and poor performance status.\n"
+    "Make sure your boilerplate exclusions are clearly phrased as exclusion criteria, not as requirements for exclusion. For example, if a trial requires ECOG 0 or 1 for eligibility, do NOT write \"ECOG 0 or 1\" in the boilerplate exclusions. Instead, write \"Poor performance status (eg ECOG >1)\" or similar language that clearly indicates this is an exclusion criterion.\n"
     "ALWAYS output plain text only. NEVER output unicode, Markdown, or tables.\n"
 )
 
