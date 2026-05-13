@@ -145,7 +145,7 @@ def add_common_args(
     request_group = parser.add_argument_group("request")
     request_group.add_argument("--workers", type=int, default=4, help="Concurrent labeling requests.")
     request_group.add_argument("--temperature", type=float, default=0.0)
-    request_group.add_argument("--max-tokens", type=int, default=2200)
+    request_group.add_argument("--max-tokens", type=int, default=10000)
     request_group.add_argument("--request-timeout", type=float, default=240.0)
     request_group.add_argument("--retries", type=int, default=2, help="Retries per record after the first attempt.")
     request_group.add_argument("--retry-sleep", type=float, default=2.0, help="Base seconds to sleep between retries.")
@@ -244,8 +244,8 @@ REASONING_PARSER_HEURISTICS: list[tuple[str, str]] = [
     ("deepseek-r1", "deepseek_r1"),
     ("deepseek_r1", "deepseek_r1"),
     ("r1-distill", "deepseek_r1"),
-    ("gemma-4", "gemma4"),
-    ("gemma4", "gemma4"),
+    ("gemma-4", "gemma"),
+    ("gemma4", "gemma"),
     ("granite", "granite"),
     ("glm-4.5", "glm45"),
     ("glm4.5", "glm45"),

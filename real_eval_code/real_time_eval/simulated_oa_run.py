@@ -41,6 +41,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 
 import matplotlib
 matplotlib.use("Agg")
@@ -813,7 +814,17 @@ def main():
 
     if notes_df is not None:
         notes_df = notes_df[notes_df["mrn"].isin(patient_mrns)].copy()
+    summarization_start = time.monotonic()
     refreshed_summaries, summarization_run_dir = run_or_resume_summarization(notes_df, args)
+    summarization_wall_seconds = time.monotonic() - summarization_start
+    summarization_n_patients = len(refreshed_summaries)
+    hours, rem = divmod(summarization_wall_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    summarization_wall_str = f"{int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}"
+    print(
+        f"Patient summarization wall time: {summarization_wall_str} "
+        f"({summarization_wall_seconds:.2f} s) for {summarization_n_patients} patients."
+    )
     refreshed_by_mrn = (
         refreshed_summaries.set_index("mrn")[
             ["patient_summary", "patient_boilerplate_text"]
@@ -1054,6 +1065,20 @@ def main():
 
     excel_path = output_path.with_suffix(".xlsx")
     df_out.to_excel(excel_path, index=False)
+
+    timing_path = output_path.parent / f"{output_path.stem}_summarization_walltime.txt"
+    seconds_per_patient = (
+        summarization_wall_seconds / summarization_n_patients
+        if summarization_n_patients else float("nan")
+    )
+    timing_path.write_text(
+        f"Patient summarization wall time: {summarization_wall_str} "
+        f"({summarization_wall_seconds:.2f} seconds)\n"
+        f"Patients summarized: {summarization_n_patients}\n"
+        f"Seconds per patient: {seconds_per_patient:.2f}\n"
+        f"Summarization run dir: {summarization_run_dir}\n"
+    )
+    print(f"  Summarization wall-time text: {timing_path}")
 
     trials_per_patient = df_out.groupby("patient_id").size()
     print(f"\nSaved {len(df_out)} rows to {output_path}")

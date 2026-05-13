@@ -311,8 +311,7 @@ def run_worker(
     worker_id: int,
     gpu_spec: str,
     parquet_path: str,
-    row_id_start: int,
-    row_id_end: int,
+    batches: List[Tuple[int, int]],
     out_dir: str,
     model: str,
     download_dir: str,
@@ -320,7 +319,6 @@ def run_worker(
     max_model_len: int,
     max_num_seqs: int,
     max_new_tokens: int,
-    batch_size: int,
     temperature: float,
     top_p: float,
     repetition_penalty: float,
@@ -336,69 +334,54 @@ def run_worker(
     gpu_spec:
       - For tp=1: a single GPU id string, e.g., "3"
       - For tp>1: semicolon-joined group like "0,1" (already grouped by caller)
+    batches: list of (global_lo, global_hi) row ranges this worker should generate.
+             Each entry corresponds to one shard file rows{lo}-{hi}.parquet.
     """
     # --- GPU scoping BEFORE importing vllm ---
     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_spec
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+    if not batches:
+        print(f"[worker {worker_id}] No batches assigned; nothing to do.")
+        return
+
     # Import here to avoid CUDA re-init issues
     from vllm import LLM, SamplingParams
 
-    # Load my shard
+    # Load promptframe once. row_id is dense 0..n-1 (np.arange in main), so after
+    # sorting by row_id we can slice batches with iloc[lo:hi].
     df = pd.read_parquet(parquet_path)
-    shard = df[(df['row_id'] >= row_id_start) & (df['row_id'] < row_id_end)].copy()
-    shard = shard.reset_index(drop=True)
-    if shard.empty:
-        print(f"[worker {worker_id}] No rows for range {row_id_start}:{row_id_end}")
-        return
+    df = df.sort_values('row_id').reset_index(drop=True)
 
-    # Output folder for this worker's parts
     shard_out_dir = os.path.join(out_dir, "shards")
     os.makedirs(shard_out_dir, exist_ok=True)
 
-    # Determine planned parts
-    n = shard.shape[0]
-    num_parts = math.ceil(n / batch_size)
-
-    # Pre-scan to count how many to skip
-    to_skip = 0
-    for part_idx in range(num_parts):
-        rel_lo = part_idx * batch_size
-        rel_hi = min((part_idx + 1) * batch_size, n)
-        global_lo = row_id_start + rel_lo
-        global_hi = row_id_start + rel_hi
-        existing = _find_existing_shard(shard_out_dir, global_lo, global_hi)
-        if existing and not overwrite_existing:
-            to_skip += 1
-    print(f"[worker {worker_id}] Planned parts: {num_parts}; skipping {to_skip} existing; generating {num_parts - to_skip}.")
+    print(f"[worker {worker_id}] Assigned {len(batches)} batches.")
 
     # Init vLLM lazily
     llm = None
     tokenizer = None
     sampling = None
 
-    # NEW: prepare perturbation machinery once per worker
     do_perturb = perturb_prob and perturb_prob > 0.0
-    rng = np.random.default_rng((perturb_seed ^ (worker_id + 1) ^ (row_id_start + 1234567)) & 0xFFFFFFFF)
     drug_map = load_drug_map(drug_map_csv) if do_perturb else {}
     repl_patterns = _compile_replacement_patterns(drug_map) if do_perturb else []
 
-    for part_idx in range(num_parts):
-        rel_lo = part_idx * batch_size
-        rel_hi = min((part_idx + 1) * batch_size, n)
-        global_lo = row_id_start + rel_lo
-        global_hi = row_id_start + rel_hi
+    for (global_lo, global_hi) in batches:
+        out_path = os.path.join(shard_out_dir, f"rows{global_lo}-{global_hi}.parquet")
 
-        out_path = os.path.join(shards_dir := shard_out_dir, f"rows{global_lo}-{global_hi}.parquet")
-
-        # Resume: skip if it already exists
-        existing_path = _find_existing_shard(shards_dir, global_lo, global_hi)
+        # Defensive: main() pre-filters complete batches, but re-check in case of
+        # races or stale arguments.
+        existing_path = _find_existing_shard(shard_out_dir, global_lo, global_hi)
         if existing_path and not overwrite_existing:
             print(f"[worker {worker_id}] SKIP existing shard for rows {global_lo}-{global_hi}: {os.path.basename(existing_path)}")
             continue
 
-        batch = shard.iloc[rel_lo:rel_hi].copy()
+        batch = df.iloc[global_lo:global_hi].copy().reset_index(drop=True)
+        if batch.empty:
+            print(f"[worker {worker_id}] WARN no rows for {global_lo}-{global_hi}, skipping.")
+            continue
 
         # Initialize vLLM when we actually need to generate
         if llm is None:
@@ -436,14 +419,16 @@ def run_worker(
         batch['synth_note_reasoning_and_note'] = all_full
         batch['synthetic_note'] = all_final
 
-        # NEW: Per-note perturbation (generic -> brand/abbrev) with probability 'perturb_prob'
+        # Per-batch RNG seed so perturbations are reproducible regardless of
+        # which worker picks up the batch or in what order.
         if do_perturb:
+            rng = np.random.default_rng((perturb_seed ^ (global_lo + 1234567)) & 0xFFFFFFFF)
+
             def maybe_perturb(t: str) -> str:
                 if rng.random() < float(perturb_prob):
                     return replace_generics_with_alternatives(t, repl_patterns, rng)
                 return t
 
-            # Apply to the final note text; optionally to the full reasoning+note as well
             batch['synthetic_note'] = [maybe_perturb(t) for t in batch['synthetic_note']]
             batch['synth_note_reasoning_and_note'] = [maybe_perturb(t) for t in batch['synth_note_reasoning_and_note']]
 
@@ -490,6 +475,24 @@ def even_ranges(n_rows: int, n_shards: int) -> List[Tuple[int, int]]:
         ranges.append((start, end))
         start = end
     return ranges
+
+
+def enumerate_planned_batches(n_rows: int, n_workers: int, batch_size: int) -> List[Tuple[int, int]]:
+    """Enumerate every batch's (global_lo, global_hi) using the same per-worker
+    chunking the original run used, so shard filenames (rows{lo}-{hi}.parquet)
+    line up with anything already on disk from a prior run.
+    """
+    batches: List[Tuple[int, int]] = []
+    for lo, hi in even_ranges(n_rows, n_workers):
+        n = hi - lo
+        if n <= 0:
+            continue
+        num_parts = math.ceil(n / batch_size)
+        for part_idx in range(num_parts):
+            rel_lo = part_idx * batch_size
+            rel_hi = min((part_idx + 1) * batch_size, n)
+            batches.append((lo + rel_lo, lo + rel_hi))
+    return batches
 
 
 # ------------------------------
@@ -562,25 +565,47 @@ def main():
         compose_outputs(args.out_dir)
         return
 
-    # 3) Load row count and shard across workers
+    # 3) Enumerate planned batches across the original per-worker partition
+    #    (so shard filenames match anything already on disk), then drop any
+    #    that are already complete and round-robin the rest across workers.
+    #    This keeps every GPU busy on resume even if only one worker had failed.
     meta = pd.read_parquet(promptframe_parquet, columns=['row_id'])
     n_rows = meta.shape[0]
     gpu_specs = parse_gpu_ids(args.gpu_ids, args.tp)
     n_workers = len(gpu_specs)
-    ranges = even_ranges(n_rows, n_workers)
-    print(f"[main] Total rows: {n_rows}; workers: {n_workers}; ranges: {ranges}")
+
+    all_batches = enumerate_planned_batches(n_rows, n_workers, args.batch_size)
+    if args.overwrite_existing:
+        pending = list(all_batches)
+    else:
+        pending = [(lo, hi) for (lo, hi) in all_batches
+                   if not _find_existing_shard(shards_dir, lo, hi)]
+    print(f"[main] Total rows: {n_rows}; workers: {n_workers}; "
+          f"batches total: {len(all_batches)}; pending: {len(pending)}; "
+          f"complete: {len(all_batches) - len(pending)}")
+
+    if not pending:
+        print("[main] Nothing to generate; composing existing shards.")
+        compose_outputs(args.out_dir)
+        return
+
+    worker_batches: List[List[Tuple[int, int]]] = [[] for _ in range(n_workers)]
+    for i, b in enumerate(pending):
+        worker_batches[i % n_workers].append(b)
+    for wid, bs in enumerate(worker_batches):
+        print(f"[main] worker {wid} (GPUs {gpu_specs[wid]}): {len(bs)} batches")
 
     # 4) Spawn workers with 'spawn' context (safe for CUDA)
     ctx = mp.get_context("spawn")
     procs = []
-    for wid, (gpu_spec, (lo, hi)) in enumerate(zip(gpu_specs, ranges)):
+    for wid, gpu_spec in enumerate(gpu_specs):
         p = ctx.Process(
             target=run_worker,
             args=(
                 wid, gpu_spec,
-                promptframe_parquet, lo, hi,
+                promptframe_parquet, worker_batches[wid],
                 args.out_dir, args.model, args.download_dir,
-                args.tp, args.max_model_len, args.max_num_seqs, args.max_new_tokens, args.batch_size,
+                args.tp, args.max_model_len, args.max_num_seqs, args.max_new_tokens,
                 args.temperature, args.top_p, args.repetition_penalty, args.gpu_mem_util,
                 args.overwrite_existing,
                 # NEW: pass perturbation controls
