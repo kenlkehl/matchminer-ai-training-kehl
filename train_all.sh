@@ -123,9 +123,9 @@ python 3_compress_notes.py \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --gpus_per_server 1 \
   --base_port 8000 \
-  --max_model_len 25000 \
-  --max_tokens 1024 \
-  --max_concurrent_requests 25 \
+  --max_model_len 50000 \
+  --max_tokens 10000 \
+  --max_concurrent_requests 125 \
   --patient_id_col pseudo_mrn \
   --text_col synthetic_note
 
