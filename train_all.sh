@@ -110,14 +110,52 @@ EOF
 python -c "$aggregator"
 
 
+# Per-document compression: turn each full synthetic note into a concise
+# oncology-focused summary so the patient-level summarizer below operates on
+# compressed input rather than raw notes.
+python 3_compress_notes.py \
+  --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
+  --output_parquet ../data/no_phi/compressed_synthetic_notes.parquet \
+  --shard_dir ../data/no_phi/compressed_note_shards \
+  --model "$MODEL" \
+  --reasoning-parser "$REASONING_PARSER" \
+  --download_dir ~/models \
+  --gpu_ids 0,1,2,3,4,5,6,7 \
+  --gpus_per_server 1 \
+  --base_port 8000 \
+  --max_model_len 25000 \
+  --max_tokens 1024 \
+  --max_concurrent_requests 25 \
+  --patient_id_col pseudo_mrn \
+  --text_col synthetic_note
+
+echo 3 done
 
 
+# Rename patient_id -> pseudo_mrn and drop empty/error summaries so the patient
+# summarizer below can consume the compressed notes with its default schema.
+aggregator=$(cat << EOF
+import pandas as pd
+
+compressed = pd.read_parquet('../data/no_phi/compressed_synthetic_notes.parquet')
+compressed = compressed.rename(columns={'patient_id': 'pseudo_mrn'})
+summary_str = compressed['summary'].astype(str)
+mask = (summary_str.str.strip() != '') & (~summary_str.str.startswith('ERROR:'))
+compressed = compressed[mask].reset_index(drop=True)
+compressed.to_parquet('../data/no_phi/compressed_synthetic_notes_for_patient_summary.parquet')
+print(f"Kept {len(compressed)} compressed notes for patient summarization")
+EOF
+)
+
+python -c "$aggregator"
 
 
 python 6_summarize_patients.py \
-  --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
+  --input_parquet ../data/no_phi/compressed_synthetic_notes_for_patient_summary.parquet \
+  --patient_id_col pseudo_mrn \
+  --text_col summary \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
-  --shard_dir ../data/no_phi/summary_shards \
+  --shard_dir ../data/no_phi/summary_shards_compressed \
   --model "$MODEL" \
   --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
@@ -132,7 +170,7 @@ python 6_summarize_patients.py \
   --generate_dates \
   --synthetic_start_date 2017-01-01 \
   --synthetic_min_days 0 \
-  --synthetic_max_days 180 
+  --synthetic_max_days 180
 
 echo 6 done
 
