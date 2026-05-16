@@ -69,6 +69,20 @@ def add_remote_cli_args(parser: argparse.ArgumentParser) -> None:
         help="Per-server concurrency ceiling (adaptive; backs off on errors).",
     )
     g.add_argument(
+        "--concurrency_success_threshold", type=int, default=10,
+        help="Successful requests needed before increasing a server's adaptive "
+             "concurrency limit by --concurrency_increase_step.",
+    )
+    g.add_argument(
+        "--concurrency_increase_step", type=int, default=1,
+        help="Adaptive concurrency slots to add after each clean success streak.",
+    )
+    g.add_argument(
+        "--concurrency_backoff_factor", type=float, default=0.5,
+        help="Multiplier applied to a server's adaptive concurrency limit after "
+             "a request error.",
+    )
+    g.add_argument(
         "--results_per_shard", type=int, default=200,
         help="Number of completed items per shard written by the pool.",
     )
@@ -98,18 +112,27 @@ class AdaptiveSemaphore:
     """
     A condition-variable semaphore whose capacity can shrink (on failure)
     and slowly grow back (on sustained success). AIMD-style:
-      - failure: multiplicative decrease, limit //= 2 (min 1)
+      - failure: multiplicative decrease by `backoff_factor` (min 1)
       - success: after `success_threshold` consecutive successes since the
-        last decrease, additive increase limit += 1 up to max_limit.
+        last decrease, additive increase limit += `increase_step` up to max_limit.
     """
 
-    def __init__(self, max_limit: int, *, success_threshold: int = 20):
+    def __init__(
+        self,
+        max_limit: int,
+        *,
+        success_threshold: int = 10,
+        increase_step: int = 1,
+        backoff_factor: float = 0.5,
+    ):
         self.max_limit = max(1, int(max_limit))
         self.limit = self.max_limit
         self.in_flight = 0
         self._cond = asyncio.Condition()
         self._success_streak = 0
-        self._success_threshold = success_threshold
+        self._success_threshold = max(1, int(success_threshold))
+        self._increase_step = max(1, int(increase_step))
+        self._backoff_factor = min(0.99, max(0.01, float(backoff_factor)))
 
     async def acquire(self):
         async with self._cond:
@@ -124,11 +147,12 @@ class AdaptiveSemaphore:
                 self._success_streak += 1
                 if (self._success_streak >= self._success_threshold
                         and self.limit < self.max_limit):
-                    self.limit += 1
+                    self.limit = min(self.max_limit,
+                                     self.limit + self._increase_step)
                     self._success_streak = 0
             else:
                 old = self.limit
-                self.limit = max(1, self.limit // 2)
+                self.limit = max(1, int(self.limit * self._backoff_factor))
                 self._success_streak = 0
                 if self.limit != old:
                     # capacity shrank; some waiters may need to re-check
@@ -178,6 +202,9 @@ class DynamicServerRegistry:
         *,
         max_concurrent_per_server: int,
         request_timeout: float,
+        concurrency_success_threshold: int = 10,
+        concurrency_increase_step: int = 1,
+        concurrency_backoff_factor: float = 0.5,
         servers_file: Optional[str] = None,
         static_urls: Optional[List[str]] = None,
         refresh_seconds: float = 15.0,
@@ -188,6 +215,9 @@ class DynamicServerRegistry:
         self._static_urls = list(static_urls) if static_urls else []
         self._refresh_seconds = max(1.0, float(refresh_seconds))
         self._max_concurrent = max_concurrent_per_server
+        self._concurrency_success_threshold = concurrency_success_threshold
+        self._concurrency_increase_step = concurrency_increase_step
+        self._concurrency_backoff_factor = concurrency_backoff_factor
         self._request_timeout = request_timeout
 
         self._entries: dict[str, ServerEntry] = {}
@@ -283,7 +313,12 @@ class DynamicServerRegistry:
                 self._entries[url] = ServerEntry(
                     url=url,
                     client=client,
-                    semaphore=AdaptiveSemaphore(self._max_concurrent),
+                    semaphore=AdaptiveSemaphore(
+                        self._max_concurrent,
+                        success_threshold=self._concurrency_success_threshold,
+                        increase_step=self._concurrency_increase_step,
+                        backoff_factor=self._concurrency_backoff_factor,
+                    ),
                     instance=info.get("instance", ""),
                 )
                 changed = True
@@ -748,6 +783,9 @@ def build_registry_from_args(args) -> DynamicServerRegistry:
     static_urls = parse_static_urls(getattr(args, "server_urls", None))
     return DynamicServerRegistry(
         max_concurrent_per_server=int(getattr(args, "max_concurrent_per_server", 25)),
+        concurrency_success_threshold=int(getattr(args, "concurrency_success_threshold", 10)),
+        concurrency_increase_step=int(getattr(args, "concurrency_increase_step", 1)),
+        concurrency_backoff_factor=float(getattr(args, "concurrency_backoff_factor", 0.5)),
         request_timeout=float(getattr(args, "request_timeout", 600.0)),
         servers_file=getattr(args, "server_urls_file", None) or None,
         static_urls=static_urls or None,
