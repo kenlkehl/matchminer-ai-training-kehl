@@ -125,7 +125,7 @@ python 3_compress_notes.py \
   --base_port 8000 \
   --max_model_len 50000 \
   --max_tokens 10000 \
-  --max_concurrent_requests 125 \
+  --max_concurrent_requests 50 \
   --patient_id_col pseudo_mrn \
   --text_col synthetic_note
 
