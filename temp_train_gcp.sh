@@ -78,7 +78,7 @@ start_vllm_cluster() {
     ORCH_PID=$!
 
     python gcp_vllm_orchestrator.py wait-for-ready \
-        --servers-file "$SERVERS_FILE" --timeout 1800
+        --servers-file "$SERVERS_FILE" --timeout 1800 --require-all
 }
 
 # Tear down vLLM processes on workers (instances remain RUNNING for cheap

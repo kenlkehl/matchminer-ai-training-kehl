@@ -237,8 +237,10 @@ def _build_vllm_cmd(
     # Single command: clean any prior PID file, exec vLLM in background,
     # record PID, then exit so SSH session can close.
     quoted = " ".join(_shquote(a) for a in args)
+    env_bin = os.path.join(python_env.rstrip("/"), "bin")
     return (
         f"rm -f {pid_file}; "
+        f"PATH={_shquote(env_bin)}:$PATH "
         f"CUDA_VISIBLE_DEVICES={_shquote(cuda_visible_devices)} "
         f"nohup {quoted} > {log_file} 2>&1 < /dev/null & "
         f"echo $! > {pid_file}; "
@@ -417,6 +419,7 @@ def write_servers_file(
     payload = {
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "ready": len(entries) > 0,
+        "expected_servers": sum(len(w.slots) for w in workers.values()) + len(local_slots),
         "servers": entries,
     }
     _atomic_write_json(servers_file, payload)
@@ -902,6 +905,8 @@ async def cmd_wait_for_ready(args) -> int:
             with open(args.servers_file) as fh:
                 data = json.load(fh)
             servers = data.get("servers") or []
+            if args.require_all:
+                target = max(target, int(data.get("expected_servers") or 0), 1)
             ready = bool(data.get("ready")) and len(servers) >= target
             if ready:
                 print(f"[orch] {len(servers)} server(s) ready")
@@ -964,6 +969,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--servers-file", required=True)
     sp.add_argument("--timeout", type=float, default=1800.0)
     sp.add_argument("--min-servers", type=int, default=1)
+    sp.add_argument("--require-all", action="store_true",
+                    help="Wait for every server slot discovered by the serve process.")
 
     return p
 
