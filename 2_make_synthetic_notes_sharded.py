@@ -508,8 +508,8 @@ def main():
                     help="Optional: if provided and exists, reuse this parquet instead of recomputing")
     ap.add_argument("--model", type=str, default="openai/gpt-oss-120b")
     ap.add_argument("--download_dir", type=str, default="./vllm_cache")
-    ap.add_argument("--gpu_ids", type=str, required=True,
-                    help='Comma-separated GPU ids (e.g., "0,1,2") or grouped for tp>1 ("0,1;2,3")')
+    ap.add_argument("--gpu_ids", type=str, default=None,
+                    help='Comma-separated GPU ids (e.g., "0,1,2") or grouped for tp>1 ("0,1;2,3") (required for local mode; omit when using --server_urls / --server_urls_file)')
     ap.add_argument("--tp", type=int, default=1, help="tensor_parallel_size per worker")
     ap.add_argument("--batch_size", type=int, default=8, help="prompts per vLLM.generate() call")
     ap.add_argument("--max_model_len", type=int, default=20000)
@@ -534,6 +534,9 @@ def main():
 
     from vllm_reasoning_utils import add_reasoning_cli_args, resolve_parser_name
     add_reasoning_cli_args(ap)
+
+    from remote_vllm_pool import add_remote_cli_args
+    add_remote_cli_args(ap)
 
     args = ap.parse_args()
     reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
@@ -565,10 +568,17 @@ def main():
         compose_outputs(args.out_dir)
         return
 
-    # 3) Enumerate planned batches across the original per-worker partition
-    #    (so shard filenames match anything already on disk), then drop any
-    #    that are already complete and round-robin the rest across workers.
-    #    This keeps every GPU busy on resume even if only one worker had failed.
+    # 3) Decide mode: remote vLLM pool vs local multi-process.
+    if args.server_urls or args.server_urls_file:
+        print("[main] dispatching to remote vLLM pool")
+        remote_main(args, promptframe_parquet, shards_dir, reasoning_parser)
+        compose_outputs(args.out_dir)
+        print("[main] All done (remote).")
+        return
+
+    # ---- Local mode ----
+    if not args.gpu_ids:
+        raise SystemExit("--gpu_ids is required for local mode (or use --server_urls / --server_urls_file).")
     meta = pd.read_parquet(promptframe_parquet, columns=['row_id'])
     n_rows = meta.shape[0]
     gpu_specs = parse_gpu_ids(args.gpu_ids, args.tp)
@@ -624,6 +634,129 @@ def main():
     # 5) Compose shards to a single parquet
     compose_outputs(args.out_dir)
     print("[main] All done.")
+
+
+def remote_main(args, promptframe_parquet: str, shards_dir: str, reasoning_parser: str):
+    """Generate synthetic notes via a remote vLLM pool. Writes per-batch
+    parquet shards into shards_dir in the same schema as the local
+    `run_worker`, so the existing `compose_outputs()` merges them
+    transparently."""
+    import asyncio
+    from transformers import AutoTokenizer
+    from remote_vllm_pool import (
+        CompletionSampling,
+        make_completion_work_fn,
+        run_pool,
+        build_registry_from_args,
+    )
+
+    print("[remote] loading tokenizer for prompt building...")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        cache_dir=args.download_dir or None,
+        trust_remote_code=True,
+    )
+
+    df = pd.read_parquet(promptframe_parquet)
+    df = df.sort_values('row_id').reset_index(drop=True)
+    print(f"[remote] promptframe rows: {len(df)}")
+
+    # Resume: skip row_ids already covered by any existing shard parquet
+    # (numeric local shards OR previously-written remote shards).
+    done_row_ids: set = set()
+    if os.path.isdir(shards_dir):
+        for fname in sorted(os.listdir(shards_dir)):
+            if not fname.endswith(".parquet"):
+                continue
+            try:
+                ser = pd.read_parquet(os.path.join(shards_dir, fname),
+                                      columns=["row_id"])
+                done_row_ids.update(int(x) for x in ser["row_id"].tolist())
+            except Exception:
+                pass
+    if done_row_ids:
+        print(f"[remote] {len(done_row_ids)} row_ids already in shards; skipping.")
+
+    work_df = df[~df["row_id"].isin(done_row_ids)].reset_index(drop=True)
+    if len(work_df) == 0:
+        print("[remote] nothing to do.")
+        return
+
+    print(f"[remote] building {len(work_df)} prompts...")
+    prompts = build_prompts(work_df['masked_text'].tolist(), tokenizer)
+
+    do_perturb = bool(args.perturb_prob) and args.perturb_prob > 0.0
+    drug_map = load_drug_map(args.drug_map_csv) if do_perturb else {}
+    repl_patterns = _compile_replacement_patterns(drug_map) if do_perturb else []
+
+    work_items = []
+    for i in range(len(work_df)):
+        rid = int(work_df.iloc[i]["row_id"])
+        work_items.append((rid, {
+            "prompt": prompts[i],
+            "max_tokens": int(args.max_new_tokens),
+        }))
+
+    df_indexed = work_df.set_index("row_id")
+
+    sampling = CompletionSampling(
+        model=args.model,
+        temperature=float(args.temperature),
+        top_p=float(args.top_p),
+        top_k=1,
+        repetition_penalty=float(args.repetition_penalty),
+        request_timeout=float(getattr(args, "request_timeout", 600.0)),
+    )
+    work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
+    registry = build_registry_from_args(args)
+
+    # Compute starting remote shard index for fresh-file naming.
+    remote_pat = re.compile(r"remote_rows_(\d+)\.parquet$")
+    next_idx = 0
+    if os.path.isdir(shards_dir):
+        for f in os.listdir(shards_dir):
+            m = remote_pat.match(f)
+            if m:
+                next_idx = max(next_idx, int(m.group(1)) + 1)
+
+    def shard_writer(payload, shard_idx):
+        rows = []
+        for rid, result in payload:
+            if isinstance(result, str) and result.startswith("ERROR:"):
+                reasoning, final = "", result
+            else:
+                reasoning, final = result
+            full = reasoning + final if reasoning else final
+            try:
+                orig = df_indexed.loc[rid].to_dict()
+            except KeyError:
+                orig = {}
+            orig["row_id"] = rid
+
+            note_text = final
+            full_text = full
+            if do_perturb:
+                rng = np.random.default_rng((int(args.perturb_seed) ^ (rid + 1234567)) & 0xFFFFFFFF)
+                if rng.random() < float(args.perturb_prob):
+                    note_text = replace_generics_with_alternatives(note_text, repl_patterns, rng)
+                    full_text = replace_generics_with_alternatives(full_text, repl_patterns, rng)
+
+            orig["synth_note_reasoning_and_note"] = full_text
+            orig["synthetic_note"] = note_text
+            rows.append(orig)
+        out_path = os.path.join(shards_dir, f"remote_rows_{shard_idx:06d}.parquet")
+        _write_parquet_atomic(pd.DataFrame(rows), out_path)
+        print(f"[remote] wrote {out_path} ({len(rows)} rows)")
+
+    asyncio.run(run_pool(
+        work_items=work_items,
+        work_fn=work_fn,
+        registry=registry,
+        shard_writer=shard_writer,
+        results_per_shard=int(getattr(args, "results_per_shard", 200)),
+        starting_shard_idx=next_idx,
+        max_attempts=int(getattr(args, "max_attempts", 200)),
+    ))
 
 
 def compose_outputs(out_dir: str):

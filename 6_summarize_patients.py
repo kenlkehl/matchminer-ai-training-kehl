@@ -1099,6 +1099,121 @@ async def process_all_rounds(
         print(f"Round {round_idx + 1} complete.")
 
 
+async def process_all_rounds_via_pool(
+    rounds: List[List[Tuple[str, int, str, str, str]]],
+    patient_chunk_order: Dict[str, List[int]],
+    patient_summaries: Dict[str, str],
+    all_results: Dict[int, Tuple[str, str, str]],
+    completed_rounds: int,
+    args: argparse.Namespace,
+    prompt_pool: Pool,
+    parser_name: str,
+    tokenizer,
+):
+    """Remote-pool variant of process_all_rounds. Runs each round as a
+    separate run_pool call against a single DynamicServerRegistry so the
+    sequential dependency (chunk N depends on chunk N-1's summary) is
+    preserved while still benefiting from the pool's fault tolerance and
+    adaptive concurrency."""
+    from remote_vllm_pool import (
+        CompletionSampling,
+        make_completion_work_fn,
+        run_pool,
+        build_registry_from_args,
+    )
+
+    if args.max_concurrent_per_server is None:
+        args.max_concurrent_per_server = int(args.max_concurrent_requests)
+
+    sampling = CompletionSampling(
+        model=args.model,
+        temperature=float(args.temperature),
+        top_k=int(args.top_k),
+        top_p=float(args.top_p),
+        presence_penalty=float(args.presence_penalty),
+        min_p=float(args.min_p),
+        repetition_penalty=float(args.repetition_penalty),
+        request_timeout=float(args.request_timeout),
+    )
+    work_fn = make_completion_work_fn(sampling, parser_name, tokenizer)
+    registry = build_registry_from_args(args)
+    await registry.start()
+
+    chunk_to_patient: Dict[int, str] = {}
+    for pid, chunk_indices in patient_chunk_order.items():
+        for cidx in chunk_indices:
+            chunk_to_patient[cidx] = pid
+
+    try:
+        for round_idx in range(completed_rounds, len(rounds)):
+            round_items = rounds[round_idx]
+            print(f"\n=== Round {round_idx + 1}/{len(rounds)}: "
+                  f"{len(round_items)} patients (remote pool) ===")
+
+            # Build per-chunk inputs for the prompt pool (same shape as
+            # process_all_rounds).
+            round_prior_summaries: Dict[int, str] = {}
+            prompt_inputs = []
+            for pid, chunk_idx, first_date, last_date, chunk_text in round_items:
+                prior_summary = patient_summaries.get(pid, None)
+                prior_text = prior_summary if prior_summary else "None - this is the first segment for this patient"
+                round_prior_summaries[chunk_idx] = prior_text
+                prompt_inputs.append(
+                    (chunk_idx, prior_summary, first_date, last_date, chunk_text, args.max_model_len)
+                )
+
+            print(f"Building {len(prompt_inputs)} prompts in parallel...")
+            chunksize = max(1, len(prompt_inputs) // (prompt_pool._processes * 4))
+            prompt_results = list(
+                prompt_pool.map(_build_prompt_worker, prompt_inputs, chunksize=chunksize)
+            )
+
+            work_items = []
+            for chunk_idx, prompt, prompt_token_count in prompt_results:
+                gen_tokens = args.max_model_len - prompt_token_count
+                if args.max_tokens is not None:
+                    gen_tokens = min(gen_tokens, args.max_tokens)
+                gen_tokens = max(gen_tokens, 1)
+                work_items.append((int(chunk_idx),
+                                   {"prompt": prompt, "max_tokens": int(gen_tokens)}))
+
+            # Collect results into memory; we will then save_round_shard for
+            # the whole round (matching the existing local-mode shard layout).
+            collected: List[Tuple[int, str, str]] = []
+
+            def shard_writer(payload, shard_idx):
+                for chunk_idx, result in payload:
+                    if isinstance(result, str) and result.startswith("ERROR:"):
+                        reasoning, summary = "", result
+                    else:
+                        reasoning, summary = result
+                    collected.append((int(chunk_idx), reasoning, summary))
+
+            await run_pool(
+                work_items=work_items,
+                work_fn=work_fn,
+                registry=registry,
+                shard_writer=shard_writer,
+                results_per_shard=10 ** 9,  # one flush at end-of-round
+                starting_shard_idx=0,
+                max_attempts=int(args.max_attempts),
+            )
+
+            # Update state and write the round shard.
+            round_results_with_prior: List[Tuple[int, str, str, str]] = []
+            for chunk_idx, reasoning, summary in collected:
+                prior_text = round_prior_summaries[chunk_idx]
+                all_results[chunk_idx] = (reasoning, summary, prior_text)
+                round_results_with_prior.append((chunk_idx, reasoning, summary, prior_text))
+                pid = chunk_to_patient[chunk_idx]
+                patient_summaries[pid] = summary
+
+            save_round_shard(args.shard_dir, round_idx, round_results_with_prior)
+            print(f"Round {round_idx + 1} complete.")
+    finally:
+        await registry.stop()
+
+
 # -------------------------
 # Main
 # -------------------------
@@ -1127,11 +1242,11 @@ def main():
                     help="Token overlap between consecutive chunks (default: 500)")
     ap.add_argument("--model", default="gpt-oss-120b")
     ap.add_argument("--download_dir", required=True)
-    ap.add_argument("--gpu_ids", required=True,
-                    help="Comma-separated list of GPU IDs (e.g., 0,1,2,3). Used with --gpus_per_server to determine number of servers.")
-    ap.add_argument("--gpus_per_server", type=int, required=True,
+    ap.add_argument("--gpu_ids", default=None,
+                    help="Comma-separated list of GPU IDs (e.g., 0,1,2,3). Used with --gpus_per_server to determine number of servers. Required for local mode (omit when using --server_urls / --server_urls_file).")
+    ap.add_argument("--gpus_per_server", type=int, default=None,
                     help="Number of GPUs per vLLM server. n_servers = len(gpu_ids) // gpus_per_server. "
-                         "tensor_parallel_size is set to this value.")
+                         "tensor_parallel_size is set to this value. Required for local mode.")
     ap.add_argument("--max_model_len", type=int, default=50000)
     ap.add_argument("--enforce_eager", action="store_true",
                     help="Pass --enforce-eager to vLLM (disables CUDA graphs; helps surface engine crash tracebacks)")
@@ -1158,6 +1273,17 @@ def main():
                     help="Comma-separated URLs of existing vLLM servers "
                          "(e.g. 'http://localhost:8000/v1,http://localhost:8001/v1'). "
                          "When set, no servers are started or stopped.")
+    ap.add_argument("--server_urls_file", type=str, default=None,
+                    help="Path to JSON file maintained by gcp_vllm_orchestrator.py "
+                         "with the dynamic list of healthy server URLs. Mutually "
+                         "exclusive with --server_urls.")
+    ap.add_argument("--server_urls_refresh", type=float, default=15.0,
+                    help="Seconds between re-reads of --server_urls_file.")
+    ap.add_argument("--max_concurrent_per_server", type=int, default=None,
+                    help="Per-server concurrency ceiling for remote-pool mode "
+                         "(adaptive). Defaults to --max_concurrent_requests.")
+    ap.add_argument("--max_attempts", type=int, default=200,
+                    help="Per-item max retries before recording an ERROR placeholder.")
     ap.add_argument("--max_concurrent_requests", type=int, default=16,
                     help="Maximum concurrent requests to vLLM server (default: 16)")
     ap.add_argument("--batch_size", type=int, default=1000,
@@ -1175,6 +1301,12 @@ def main():
                          "temperature=0.0, top_k=1, repetition_penalty=1.0, "
                          "max_model_len=120000, chunk_size=50000, max_tokens=10000")
     args = ap.parse_args()
+
+    if args.server_urls and args.server_urls_file:
+        ap.error("Specify only one of --server_urls / --server_urls_file.")
+    remote_mode = bool(args.server_urls or args.server_urls_file)
+    if not remote_mode and (not args.gpu_ids or args.gpus_per_server is None):
+        ap.error("--gpu_ids and --gpus_per_server are required unless --server_urls / --server_urls_file is set.")
 
     # Resolve reasoning parser from --model + --reasoning-parser (default auto)
     from vllm_reasoning_utils import resolve_parser_name
@@ -1286,14 +1418,20 @@ def main():
             initargs=(args.model, args.download_dir),
         )
 
-        # --- Server setup: external URLs or launch our own ---
+        # --- Server setup: remote pool, static URLs, or launch our own ---
         server_infos: List[Tuple[subprocess.Popen, int]] = []  # (process, port)
+        server_clients: List[Tuple[AsyncOpenAI, int]] = []
 
-        if args.server_urls:
-            # Connect to externally-managed servers — no startup/shutdown
+        if remote_mode:
+            # Server discovery / health / failover is handled inside the
+            # remote_vllm_pool via DynamicServerRegistry. No clients here.
+            n_servers = 0
+            print("Remote-pool mode: using DynamicServerRegistry "
+                  "(servers managed by gcp_vllm_orchestrator).")
+        elif args.server_urls:
+            # Legacy static --server_urls path
             urls = [u.strip() for u in args.server_urls.split(",") if u.strip()]
             print(f"Using {len(urls)} external server(s): {urls}")
-            server_clients: List[Tuple[AsyncOpenAI, int]] = []
             for url in urls:
                 # Extract port from URL for logging (e.g. http://localhost:8000/v1 → 8000)
                 from urllib.parse import urlparse
@@ -1365,7 +1503,6 @@ def main():
                     sys.exit(1)
 
             # Create async OpenAI clients, one per server
-            server_clients: List[Tuple[AsyncOpenAI, int]] = []
             for i, (process, port) in enumerate(server_infos):
                 client = AsyncOpenAI(
                     base_url=f"http://localhost:{port}/v1",
@@ -1377,19 +1514,31 @@ def main():
             print(f"All {n_servers} vLLM server(s) ready.")
 
         try:
-            # Process all rounds
-            asyncio.run(process_all_rounds(
-                rounds=rounds,
-                patient_chunk_order=patient_chunk_order,
-                patient_summaries=patient_summaries_dict,
-                all_results=all_results,
-                completed_rounds=completed_rounds,
-                args=args,
-                server_clients=server_clients,
-                prompt_pool=prompt_pool,
-                parser_name=reasoning_parser,
-                tokenizer=tokenizer,
-            ))
+            if remote_mode:
+                asyncio.run(process_all_rounds_via_pool(
+                    rounds=rounds,
+                    patient_chunk_order=patient_chunk_order,
+                    patient_summaries=patient_summaries_dict,
+                    all_results=all_results,
+                    completed_rounds=completed_rounds,
+                    args=args,
+                    prompt_pool=prompt_pool,
+                    parser_name=reasoning_parser,
+                    tokenizer=tokenizer,
+                ))
+            else:
+                asyncio.run(process_all_rounds(
+                    rounds=rounds,
+                    patient_chunk_order=patient_chunk_order,
+                    patient_summaries=patient_summaries_dict,
+                    all_results=all_results,
+                    completed_rounds=completed_rounds,
+                    args=args,
+                    server_clients=server_clients,
+                    prompt_pool=prompt_pool,
+                    parser_name=reasoning_parser,
+                    tokenizer=tokenizer,
+                ))
 
         finally:
             # Always shutdown prompt pool
@@ -1402,6 +1551,8 @@ def main():
                     print(f"  Shutting down server {i} (port {port})...")
                     shutdown_server(process)
                 print("All servers shut down.")
+            elif remote_mode:
+                print("Remote vLLM servers (managed by orchestrator) left running.")
             else:
                 print("External servers left running (not managed by this script).")
 

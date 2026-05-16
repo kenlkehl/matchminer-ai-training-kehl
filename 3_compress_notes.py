@@ -659,6 +659,92 @@ async def process_all_batches(
     return new_results
 
 
+async def process_all_batches_via_pool(
+    work_rows: List[Tuple[int, str, Dict[str, Any]]],
+    args: argparse.Namespace,
+    prompt_pool: Pool,
+    parser_name: str,
+    tokenizer,
+    starting_shard_idx: int,
+) -> Dict[int, Tuple[str, str]]:
+    """Remote-pool variant of process_all_batches. Builds prompts via the
+    existing multiprocessing pool, then dispatches the entire workload
+    through remote_vllm_pool.run_pool — which owns server discovery,
+    adaptive concurrency, retry-forever, and persistence."""
+    from remote_vllm_pool import (
+        CompletionSampling,
+        make_completion_work_fn,
+        run_pool,
+        build_registry_from_args,
+    )
+
+    # Build all prompts up-front. Same parallel chunking as
+    # process_all_batches but for the whole work_rows.
+    print(f"Building {len(work_rows)} prompts in parallel (remote-pool mode)...")
+    prompt_inputs = [
+        (row_idx, document_text, metadata, args.max_model_len)
+        for row_idx, document_text, metadata in work_rows
+    ]
+    chunksize = max(1, len(prompt_inputs) // (prompt_pool._processes * 4))
+    prompt_results: List[Tuple[int, str, int]] = list(
+        prompt_pool.map(_build_prompt_worker, prompt_inputs, chunksize=chunksize)
+    )
+
+    # Compute per-prompt max_tokens (room for prompt within max_model_len).
+    work_items = []
+    for row_idx, prompt, prompt_token_count in prompt_results:
+        gen_tokens = args.max_model_len - prompt_token_count
+        if args.max_tokens is not None:
+            gen_tokens = min(gen_tokens, args.max_tokens)
+        gen_tokens = max(gen_tokens, 1)
+        work_items.append((int(row_idx), {"prompt": prompt, "max_tokens": int(gen_tokens)}))
+    print("Prompts built.")
+
+    new_results: Dict[int, Tuple[str, str]] = {}
+
+    def shard_writer(payload, shard_idx):
+        rows: List[Tuple[int, str, str]] = []
+        for row_idx, result in payload:
+            if isinstance(result, str) and result.startswith("ERROR:"):
+                reasoning, summary = "", result
+            else:
+                reasoning, raw_answer = result
+                summary = normalize_summary(raw_answer)
+            rows.append((row_idx, reasoning, summary))
+            new_results[row_idx] = (reasoning, summary)
+        save_shard(args.shard_dir, shard_idx, rows)
+
+    sampling = CompletionSampling(
+        model=args.model,
+        temperature=float(args.temperature),
+        top_k=int(args.top_k),
+        top_p=float(args.top_p),
+        presence_penalty=float(args.presence_penalty),
+        min_p=float(args.min_p),
+        repetition_penalty=float(args.repetition_penalty),
+        request_timeout=float(args.request_timeout),
+    )
+    work_fn = make_completion_work_fn(sampling, parser_name, tokenizer)
+
+    # Allow --max_concurrent_per_server to override the older
+    # --max_concurrent_requests when set explicitly.
+    if args.max_concurrent_per_server is None:
+        args.max_concurrent_per_server = int(args.max_concurrent_requests)
+    registry = build_registry_from_args(args)
+
+    await run_pool(
+        work_items=work_items,
+        work_fn=work_fn,
+        registry=registry,
+        shard_writer=shard_writer,
+        results_per_shard=int(args.batch_size),
+        starting_shard_idx=starting_shard_idx,
+        max_attempts=int(args.max_attempts),
+    )
+    await registry.stop()
+    return new_results
+
+
 def main():
     ap = argparse.ArgumentParser(
         "Per-document clinical note compression using vLLM server(s)."
@@ -709,6 +795,19 @@ def main():
                     help="Comma-separated URLs of existing vLLM servers "
                          "(e.g. 'http://localhost:8000/v1,http://localhost:8001/v1'). "
                          "When set, no servers are started or stopped.")
+    ap.add_argument("--server_urls_file", type=str, default=None,
+                    help="Path to JSON file maintained by gcp_vllm_orchestrator.py "
+                         "with the dynamic list of healthy server URLs. Mutually "
+                         "exclusive with --server_urls.")
+    ap.add_argument("--server_urls_refresh", type=float, default=15.0,
+                    help="Seconds between re-reads of --server_urls_file.")
+    ap.add_argument("--max_concurrent_per_server", type=int, default=None,
+                    help="Per-server concurrency ceiling for remote-pool mode "
+                         "(adaptive; backs off on errors). Defaults to "
+                         "--max_concurrent_requests if not set.")
+    ap.add_argument("--max_attempts", type=int, default=200,
+                    help="Per-item max retries before recording an ERROR placeholder. "
+                         "Default 200 (effectively 'retry until done').")
 
     ap.add_argument("--max_concurrent_requests", type=int, default=25,
                     help="Maximum concurrent requests per server.")
@@ -729,8 +828,11 @@ def main():
         ap.error("One of --input_parquet or --input_csv is required.")
     if args.input_parquet and args.input_csv:
         ap.error("Specify only one of --input_parquet / --input_csv.")
-    if not args.server_urls and (not args.gpu_ids or args.gpus_per_server is None):
-        ap.error("--gpu_ids and --gpus_per_server are required unless --server_urls is set.")
+    if args.server_urls and args.server_urls_file:
+        ap.error("Specify only one of --server_urls / --server_urls_file.")
+    remote_mode = bool(args.server_urls or args.server_urls_file)
+    if not remote_mode and (not args.gpu_ids or args.gpus_per_server is None):
+        ap.error("--gpu_ids and --gpus_per_server are required unless --server_urls / --server_urls_file is set.")
 
     # Resolve reasoning parser from --model + --reasoning-parser (default auto)
     from vllm_reasoning_utils import resolve_parser_name
@@ -815,8 +917,9 @@ def main():
     server_infos: List[Tuple[subprocess.Popen, int]] = []
     server_clients: List[Tuple[AsyncOpenAI, int]] = []
 
-    if work_rows:
+    if work_rows and not remote_mode:
         if args.server_urls:
+            # Legacy static --server_urls path (no dynamic registry)
             urls = [u.strip() for u in args.server_urls.split(",") if u.strip()]
             print(f"Using {len(urls)} external server(s): {urls}")
             for url in urls:
@@ -905,17 +1008,29 @@ def main():
 
         try:
             starting_shard_idx = next_shard_index(args.shard_dir)
-            new_results = asyncio.run(
-                process_all_batches(
-                    work_rows=work_rows,
-                    args=args,
-                    server_clients=server_clients,
-                    prompt_pool=prompt_pool,
-                    parser_name=reasoning_parser,
-                    tokenizer=tokenizer,
-                    starting_shard_idx=starting_shard_idx,
+            if remote_mode:
+                new_results = asyncio.run(
+                    process_all_batches_via_pool(
+                        work_rows=work_rows,
+                        args=args,
+                        prompt_pool=prompt_pool,
+                        parser_name=reasoning_parser,
+                        tokenizer=tokenizer,
+                        starting_shard_idx=starting_shard_idx,
+                    )
                 )
-            )
+            else:
+                new_results = asyncio.run(
+                    process_all_batches(
+                        work_rows=work_rows,
+                        args=args,
+                        server_clients=server_clients,
+                        prompt_pool=prompt_pool,
+                        parser_name=reasoning_parser,
+                        tokenizer=tokenizer,
+                        starting_shard_idx=starting_shard_idx,
+                    )
+                )
             existing_results.update(new_results)
         finally:
             prompt_pool.close()
@@ -926,6 +1041,8 @@ def main():
                     print(f"  Shutting down server {i} (port {port})...")
                     shutdown_server(process)
                 print("All servers shut down.")
+            elif remote_mode:
+                print("Remote vLLM servers (managed by orchestrator) left running.")
             else:
                 print("External servers left running (not managed by this script).")
     else:

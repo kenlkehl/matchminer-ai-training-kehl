@@ -39,6 +39,90 @@ from typing import List, Tuple
 import pandas as pd
 import numpy as np
 
+
+# ---------- Prompt building (shared between local and remote modes) ----------
+
+TRIAL_CHECK_SCORE_PATTERN = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")
+
+
+def build_trial_check_prompt(tokenizer, patient_summary: str, trial_summary: str) -> str:
+    """Render one trial-check chat prompt to a string via the model's
+    chat template. Behavior must match ask_about_trials_loosely() below."""
+    messages = [
+        {'role': 'system', 'content': "Reasoning: high"},
+        {'role': 'user', 'content': (
+            "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
+            "Your job is to evaluate whether a given clinical trial is a reasonable consideration for a patient, "
+            "given a clinical trial summary and a patient summary, and then score how targeted the trial is for "
+            "this specific patient.\n\n"
+            f"Here is a summary of the clinical trial:\n{trial_summary}\n"
+            f"Here is a summary of the patient:\n{patient_summary}\n"
+            "Base your judgment on whether the patient generally fits the age requirements if any, sex requirements if any, cancer type(s), cancer burden, prior treatment(s), "
+            "and biomarker criteria specified for the trial.\n"
+            "You do not have to determine if the patient is actually eligible; instead please just evaluate whether it is reasonable "
+            "for the trial to be considered further by the patient's oncologist.\n"
+            "Biomarker criteria have to be considered carefully. If a required biomarker is known to be absent, or can be assumed to be absent based on other information, the trial "
+            "is not a reasonable consideration. For example, if a trial for lung cancer requires an EGFR mutation, documentation that there "
+            "is no EGFR mutation indicates the trial is not a reasonable consideration. Similarly, documentation of a KRAS mutation in the "
+            "patient indicates the trial is not a reasonable consideration, since, as you know, KRAS and EGFR driver mutations in lung cancer "
+            "are mutually exclusive.\n"
+            "Many trials describe required washout periods for prior treatments for eligibility. For example, the eligibility criteria might state "
+            "that patients may not have received radiation or chemotherapy in the last 14 days or 30 days. It is CRITICAL that you IGNORE these "
+            "eligibility criteria when considering prior treatment requirements. Assume that patients could wait for the washout period to enroll. "
+            "Also CRITICAL: Ignore your knowledge of today's current date. Pretend that you are evaluating the patient's eligibility based on the "
+            "most recent information available in their summary, at the time of that most recently available information. "
+            "Do not provide ethical judgments or comment on resource constraints with respect whether the trial is a reasonable clinical "
+            "consideration; just evaluate whether it is, given the available information.\n\n"
+            "SCORING INSTRUCTIONS:\n"
+            "After reasoning step by step, compute a score from 0 to 5 using the following rubric:\n\n"
+            "Start with 0 points.\n"
+            "1) REASONABLENESS (0 or 1 point): If the trial is at least a reasonable consideration for this patient "
+            "(i.e., the patient does not clearly meet an exclusion criterion such as wrong cancer type, wrong age group, "
+            "wrong sex, having an excluded biomarker, etc.), award 1 point. If the trial is NOT reasonable, the final score is 0 — "
+            "skip the remaining categories.\n"
+            "2) CANCER TYPE SPECIFICITY (+1 point): If the trial specifies the patient's cancer type (e.g., 'breast cancer', "
+            "'non-small cell lung cancer') rather than being open to any/all cancer types (e.g., 'solid tumors', 'advanced cancers'), "
+            "award +1 point.\n"
+            "3) CANCER BURDEN/STAGE SPECIFICITY (+1 point): If the trial specifies a particular disease stage or burden "
+            "(e.g., 'metastatic', 'locally advanced', 'stage III-IV') that matches the patient's disease status, award +1 point. "
+            "If the trial has no stage/burden requirements or is open to any stage, do not award a point.\n"
+            "4) PRIOR TREATMENT SPECIFICITY (+1 point): If the trial has specific prior treatment requirements "
+            "(e.g., 'must have progressed on platinum-based chemotherapy', 'prior immunotherapy required') "
+            "and the patient's treatment history matches those requirements, award +1 point. "
+            "If the trial has no specific prior treatment requirements, do not award a point.\n"
+            "5) BIOMARKER SPECIFICITY (+1 point): If the trial requires a specific biomarker (e.g., 'EGFR mutation', "
+            "'PD-L1 ≥ 50%', 'HER2-positive') AND the patient is known to have that biomarker, award +1 point. "
+            "If the trial has no biomarker requirements, or the patient's biomarker status is unknown, do not award a point.\n\n"
+            "Your response MUST end with the following line and nothing else after it:\n"
+            "Final score: X\n"
+            "where X is the total score (an integer from 0 to 5)."
+        )}
+    ]
+    return tokenizer.apply_chat_template(
+        conversation=messages,
+        add_generation_prompt=True,
+        tokenize=False,
+        enable_thinking=True,
+    )
+
+
+def parse_score_from_response(response_text: str) -> Tuple[int, str]:
+    """Extract (eligibility_result, eligibility_verdict) from the response."""
+    tail = response_text[-60:].replace("*", "").replace(" ", " ")
+    m = TRIAL_CHECK_SCORE_PATTERN.search(tail)
+    if m:
+        score = min(int(m.group(1)), 5)
+        return score, f"Score:{score}"
+    tail_upper = tail.upper()
+    fallback_m = re.search(r"SCORE\s*[:\-=]\s*(\d)", tail_upper)
+    if fallback_m:
+        score = min(int(fallback_m.group(1)), 5)
+        return score, f"Score:{score}"
+    if "NOT REASONABLE" in tail_upper or "NOT A REASONABLE" in tail_upper:
+        return 0, "Score:0"
+    return -1, "PARSE_FAILED"
+
+
 # ---------- Prompting logic (same behavior as your single-GPU version) ----------
 
 def ask_about_trials_loosely(patient_summaries: List[str],
@@ -302,6 +386,145 @@ def shard_input_across_kernels(df: pd.DataFrame, n_kernels: int) -> List[pd.Data
     return splits
 
 
+# ---------- Remote-mode (GCP-orchestrated) ----------
+
+def _collect_done_indices(shards_dir: str) -> set:
+    """Read all existing shards and return the set of _orig_order indices
+    that are already covered (so we can resume after partial runs)."""
+    done = set()
+    if not os.path.isdir(shards_dir):
+        return done
+    for fname in sorted(os.listdir(shards_dir)):
+        if not fname.endswith(".parquet"):
+            continue
+        try:
+            ser = pd.read_parquet(os.path.join(shards_dir, fname),
+                                  columns=["_orig_order"])
+            done.update(int(x) for x in ser["_orig_order"].tolist())
+        except Exception:
+            pass
+    return done
+
+
+def _next_remote_shard_idx(shards_dir: str) -> int:
+    pat = re.compile(r"remote_shard_(\d+)\.parquet$")
+    mx = -1
+    if os.path.isdir(shards_dir):
+        for f in os.listdir(shards_dir):
+            m = pat.match(f)
+            if m:
+                mx = max(mx, int(m.group(1)))
+    return mx + 1
+
+
+def remote_main(args, df: pd.DataFrame) -> int:
+    """Run trial-check inference against a remote vLLM pool (GCP orchestrator)."""
+    import asyncio
+    from transformers import AutoTokenizer
+    from vllm_reasoning_utils import resolve_parser_name
+    from remote_vllm_pool import (
+        CompletionSampling,
+        make_completion_work_fn,
+        run_pool,
+        build_registry_from_args,
+    )
+
+    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
+    print(f"[remote] reasoning parser: {reasoning_parser}")
+
+    print(f"[remote] loading tokenizer for prompt building...")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        cache_dir=args.download_dir or None,
+        trust_remote_code=True,
+    )
+
+    df = df.copy().reset_index(drop=True)
+    df["_orig_order"] = np.arange(len(df), dtype=np.int64)
+
+    shards_dir = os.path.join(args.out_dir, "shards")
+    os.makedirs(shards_dir, exist_ok=True)
+
+    done = _collect_done_indices(shards_dir)
+    if done:
+        print(f"[remote] {len(done)} rows already covered by existing shards; will skip.")
+    work_df = df[~df["_orig_order"].isin(done)].reset_index(drop=True) if done else df
+
+    if len(work_df) == 0:
+        print("[remote] nothing to do.")
+        if args.final_output:
+            finalize(args.out_dir, args.final_output)
+        return 0
+
+    # Build prompts upfront
+    print(f"[remote] building {len(work_df)} prompts...")
+    prompts: List[str] = []
+    for _, row in work_df.iterrows():
+        prompts.append(build_trial_check_prompt(
+            tokenizer,
+            str(row["patient_summary"]),
+            str(row["this_space"]),
+        ))
+
+    df_indexed = work_df.set_index("_orig_order")
+
+    work_items = [
+        (int(work_df.iloc[i]["_orig_order"]),
+         {"prompt": prompts[i], "max_tokens": 15000})
+        for i in range(len(work_df))
+    ]
+
+    sampling = CompletionSampling(
+        model=args.model,
+        temperature=0.0,
+        top_k=1,
+        top_p=1.0,
+        repetition_penalty=1.1,
+        request_timeout=float(getattr(args, "request_timeout", 600.0)),
+    )
+    work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
+    registry = build_registry_from_args(args)
+
+    next_idx = _next_remote_shard_idx(shards_dir)
+
+    def shard_writer(payload, shard_idx):
+        rows = []
+        for item_id, result in payload:
+            if isinstance(result, str) and result.startswith("ERROR:"):
+                reasoning, response_text = "", result
+                score, verdict = -1, "PARSE_FAILED"
+            else:
+                reasoning, response_text = result
+                score, verdict = parse_score_from_response(response_text)
+            try:
+                orig = df_indexed.loc[item_id].to_dict()
+            except KeyError:
+                orig = {}
+            orig["_orig_order"] = item_id
+            orig["trialcheck_llm_reasoning"] = reasoning
+            orig["trialcheck_llm_response"] = response_text
+            orig["eligibility_result"] = score
+            orig["eligibility_verdict"] = verdict
+            rows.append(orig)
+        out_path = os.path.join(shards_dir, f"remote_shard_{shard_idx:06d}.parquet")
+        pd.DataFrame(rows).to_parquet(out_path, index=False)
+        print(f"[remote] wrote {out_path} ({len(rows)} rows)")
+
+    asyncio.run(run_pool(
+        work_items=work_items,
+        work_fn=work_fn,
+        registry=registry,
+        shard_writer=shard_writer,
+        results_per_shard=int(getattr(args, "results_per_shard", 200)),
+        starting_shard_idx=next_idx,
+        max_attempts=int(getattr(args, "max_attempts", 200)),
+    ))
+
+    if args.final_output:
+        finalize(args.out_dir, args.final_output)
+    return 0
+
+
 def finalize(out_dir: str, final_output: str):
     """Concat all worker parquet shards into one file; sort by pseudo_mrn if present."""
     shards_dir = os.path.join(out_dir, "shards")
@@ -336,8 +559,8 @@ def main():
     parser.add_argument("--out_dir", required=True, help="Output directory; shards go to {out_dir}/shards")
     parser.add_argument("--final_output", default="", help="If provided, write a combined parquet at the end with this filename (inside out_dir).")
 
-    parser.add_argument("--gpus", required=True, help='Comma-separated GPU ids, e.g., "0,1,2,3"')
-    parser.add_argument("--gpus_per_kernel", type=int, required=True, help="Number of GPUs to assign to each kernel (tensor_parallel_size).")
+    parser.add_argument("--gpus", default=None, help='Comma-separated GPU ids, e.g., "0,1,2,3". Required for local mode (omit when using --server_urls / --server_urls_file).')
+    parser.add_argument("--gpus_per_kernel", type=int, default=None, help="Number of GPUs to assign to each kernel (tensor_parallel_size). Required for local mode.")
 
     parser.add_argument("--prompt_batch_size", type=int, default=2000, help="Rows per generation batch inside each kernel.")
     parser.add_argument("--model", default="openai/gpt-oss-120b", help="HF model id for vLLM.")
@@ -348,6 +571,9 @@ def main():
 
     from vllm_reasoning_utils import add_reasoning_cli_args, resolve_parser_name
     add_reasoning_cli_args(parser)
+
+    from remote_vllm_pool import add_remote_cli_args
+    add_remote_cli_args(parser)
 
     args = parser.parse_args()
     reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
@@ -361,8 +587,15 @@ def main():
 
     df['this_space'] = df['this_space'].str.replace(r'^\s*\d+\.', '', regex=True)
 
+    # Remote-mode dispatch (GCP orchestrator). When --server_urls or
+    # --server_urls_file is set, skip local multiprocess + vLLM init entirely.
+    if args.server_urls or args.server_urls_file:
+        print("[main] dispatching to remote vLLM pool")
+        rc = remote_main(args, df)
+        raise SystemExit(rc)
 
-
+    if not args.gpus or args.gpus_per_kernel is None:
+        raise SystemExit("--gpus and --gpus_per_kernel are required for local mode (or use --server_urls / --server_urls_file).")
     groups = parse_gpu_groups(args.gpus, args.gpus_per_kernel)
     n_kernels = len(groups)
     print(f"[Main] Found {len(df)} rows; launching {n_kernels} kernels "

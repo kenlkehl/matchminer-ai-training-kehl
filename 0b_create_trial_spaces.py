@@ -241,6 +241,138 @@ def worker_process(
     out_df.to_parquet(shard_out_path, index=False)
 
 
+def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str):
+    """Run trial-space extraction against a remote vLLM pool. Writes one
+    or more parquet shards into args.work_dir and returns the list of
+    paths for the caller's existing merge code."""
+    import asyncio
+    import glob
+    import re
+    from transformers import AutoTokenizer
+    from remote_vllm_pool import (
+        CompletionSampling,
+        make_completion_work_fn,
+        run_pool,
+        build_registry_from_args,
+    )
+
+    print(f"[remote] loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        cache_dir=args.download_dir or None,
+        trust_remote_code=True,
+    )
+
+    # Build per-trial prompts upfront
+    trials = trials.copy().reset_index(drop=True)
+    trials["_work_id"] = np.arange(len(trials), dtype=np.int64)
+    trial_texts = trials["trial_text"].astype(str).tolist()
+    print(f"[remote] building {len(trial_texts)} prompts...")
+    prompts = [
+        tokenizer.apply_chat_template(
+            conversation=build_messages(t),
+            add_generation_prompt=True,
+            tokenize=False,
+            enable_thinking=True,
+        )
+        for t in trial_texts
+    ]
+
+    # Resume: skip _work_ids already covered by prior remote shards
+    remote_pat = re.compile(r"remote_output_shard_(\d+)\.parquet$")
+    done_ids = set()
+    next_idx = 0
+    for f in sorted(os.listdir(args.work_dir)):
+        m = remote_pat.match(f)
+        if not m:
+            continue
+        next_idx = max(next_idx, int(m.group(1)) + 1)
+        try:
+            df_prev = pd.read_parquet(os.path.join(args.work_dir, f),
+                                      columns=["_work_id"])
+            done_ids.update(int(x) for x in df_prev["_work_id"].tolist())
+        except Exception:
+            pass
+    if done_ids:
+        print(f"[remote] skipping {len(done_ids)} trials already in remote shards")
+
+    work_items = [
+        (int(trials.iloc[i]["_work_id"]),
+         {"prompt": prompts[i], "max_tokens": int(args.max_tokens)})
+        for i in range(len(trials))
+        if int(trials.iloc[i]["_work_id"]) not in done_ids
+    ]
+    if not work_items:
+        print("[remote] all trials already complete; just merging existing shards.")
+        return sorted(glob.glob(os.path.join(args.work_dir, "remote_output_shard_*.parquet")))
+
+    trials_indexed = trials.set_index("_work_id")
+
+    sampling = CompletionSampling(
+        model=args.model,
+        temperature=float(args.temperature),
+        top_k=int(args.top_k),
+        top_p=float(args.top_p),
+        min_p=float(args.min_p),
+        presence_penalty=float(args.presence_penalty),
+        repetition_penalty=float(args.repetition_penalty),
+        request_timeout=float(getattr(args, "request_timeout", 600.0)),
+    )
+    work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
+    registry = build_registry_from_args(args)
+
+    def shard_writer(payload, shard_idx):
+        rows = []
+        raw_texts = []
+        # We need post-processing in the same form as the local worker.
+        for work_id, result in payload:
+            if isinstance(result, str) and result.startswith("ERROR:"):
+                reasoning, final = "", result
+            else:
+                reasoning, final = result
+            try:
+                orig = trials_indexed.loc[work_id].to_dict()
+            except KeyError:
+                orig = {}
+            # raw_text reconstruction: combine reasoning + final so downstream
+            # consumers of space_reasoning_and_output keep working.
+            raw_text = reasoning + "\n" + final if reasoning else final
+            row_payload = {**{c: orig.get(c) for c in base_cols}}
+            row_payload["_work_id"] = work_id
+            row_payload["_raw_text"] = raw_text
+            row_payload["_final_text"] = final
+            rows.append(row_payload)
+            raw_texts.append(raw_text)
+
+        # Use the existing post-processor for parity with local mode.
+        no_reasoning, space_only, boiler_only = postprocess_outputs(
+            raw_texts, reasoning_parser, tokenizer
+        )
+        for i, r in enumerate(rows):
+            r["space_reasoning_and_output"] = raw_texts[i]
+            r["space_output_no_reasoning"] = no_reasoning[i]
+            r["space_text"] = space_only[i]
+            r["trial_boilerplate_text"] = boiler_only[i]
+            r.pop("_raw_text", None)
+            r.pop("_final_text", None)
+
+        out_path = os.path.join(args.work_dir, f"remote_output_shard_{shard_idx:06d}.parquet")
+        pd.DataFrame(rows).to_parquet(out_path, index=False)
+        print(f"[remote] wrote {out_path} ({len(rows)} rows)")
+
+    asyncio.run(run_pool(
+        work_items=work_items,
+        work_fn=work_fn,
+        registry=registry,
+        shard_writer=shard_writer,
+        results_per_shard=int(getattr(args, "results_per_shard", 200)),
+        starting_shard_idx=next_idx,
+        max_attempts=int(getattr(args, "max_attempts", 200)),
+    ))
+
+    return sorted(glob.glob(os.path.join(args.work_dir, "remote_output_shard_*.parquet")))
+
+
 def split_into_groups(items, group_size):
     """Split a list into fixed-size groups; drop any remainder smaller than group_size."""
     groups = []
@@ -257,7 +389,7 @@ def main():
     parser.add_argument("--output-trials", default="../data/no_phi/trials_with_spaces.csv")
     parser.add_argument("--output-spaces", default="../data/no_phi/trial_space_lineitems.csv")
     parser.add_argument("--work-dir", default="../data/no_phi/trial_space_shards", help="Directory for shard inputs/outputs")
-    parser.add_argument("--gpus", required=True, help="Comma-separated GPU IDs, e.g. 0,1,2,3")
+    parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs, e.g. 0,1,2,3 (required for local mode; omit when using --server_urls / --server_urls_file)")
     parser.add_argument("--gpus-per-instance", type=int, default=1, help="Tensor-parallel GPUs per instance (set >1 for very large models)")
     parser.add_argument("--model", default="google/gemma-4-31b-it")
     parser.add_argument("--download-dir", default="/data1/ken/models")
@@ -276,6 +408,9 @@ def main():
 
     from vllm_reasoning_utils import add_reasoning_cli_args, resolve_parser_name
     add_reasoning_cli_args(parser)
+
+    from remote_vllm_pool import add_remote_cli_args
+    add_remote_cli_args(parser)
 
     args = parser.parse_args()
     reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
@@ -299,74 +434,83 @@ def main():
     print(trials.columns)
     print(base_cols)
 
-    # Determine GPU groups / instances
-    gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip() != ""]
-    if len(gpu_list) == 0:
-        raise ValueError("No GPUs provided.")
-    if args.gpus_per_instance < 1:
-        raise ValueError("--gpus-per-instance must be >= 1")
+    # ---- Remote-mode dispatch ----
+    if args.server_urls or args.server_urls_file:
+        print("[main] dispatching to remote vLLM pool")
+        shard_out_paths = remote_main(args, trials, base_cols, reasoning_parser)
+    else:
+        # ---- Local mode ----
+        if not args.gpus:
+            raise SystemExit("--gpus is required for local mode (or use --server_urls / --server_urls_file).")
 
-    gpu_groups = split_into_groups(gpu_list, args.gpus_per_instance)
-    if len(gpu_groups) == 0:
-        raise ValueError(
-            f"Not enough GPUs ({len(gpu_list)}) to form at least one instance with --gpus-per-instance={args.gpus_per_instance}"
-        )
+        # Determine GPU groups / instances
+        gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip() != ""]
+        if len(gpu_list) == 0:
+            raise ValueError("No GPUs provided.")
+        if args.gpus_per_instance < 1:
+            raise ValueError("--gpus-per-instance must be >= 1")
 
-    n_instances = len(gpu_groups)
-    shards = [trials.iloc[idx] for idx in np.array_split(range(len(trials)), n_instances)]
+        gpu_groups = split_into_groups(gpu_list, args.gpus_per_instance)
+        if len(gpu_groups) == 0:
+            raise ValueError(
+                f"Not enough GPUs ({len(gpu_list)}) to form at least one instance with --gpus-per-instance={args.gpus_per_instance}"
+            )
 
-    # Persist shard inputs and schedule workers
-    shard_in_paths = []
-    shard_out_paths = []
-    for i, shard_df in enumerate(shards):
-        in_path = os.path.join(args.work_dir, f"input_shard_{i:03d}.parquet")
-        out_path = os.path.join(args.work_dir, f"output_shard_{i:03d}.parquet")
-        # Ensure column order preserved
-        shard_df = shard_df[base_cols]
-        shard_df.to_parquet(in_path, index=False)
-        shard_in_paths.append(in_path)
-        shard_out_paths.append(out_path)
+        n_instances = len(gpu_groups)
+        shards = [trials.iloc[idx] for idx in np.array_split(range(len(trials)), n_instances)]
 
-    # Launch one process per instance
-    procs = []
-    ctx = mp.get_context("spawn")
-    for i, gpu_group in enumerate(gpu_groups):
-        p = ctx.Process(
-            target=worker_process,
-            kwargs=dict(
-                shard_in_path=shard_in_paths[i],
-                shard_out_path=shard_out_paths[i],
-                gpu_group=gpu_group,
-                model=args.model,
-                download_dir=args.download_dir,
-                max_model_len=args.max_model_len,
-                max_num_seqs=args.max_num_seqs,
-                gpu_mem_util=args.gpu_mem_util,
-                temperature=args.temperature,
-                top_p=args.top_p,
-                top_k=args.top_k,
-                min_p=args.min_p,
-                presence_penalty=args.presence_penalty,
-                repetition_penalty=args.repetition_penalty,
-                max_tokens=args.max_tokens,
-                batch_size=args.batch_size,
-                reasoning_parser=reasoning_parser,
-            ),
-            name=f"vllm_worker_{i}",
-            daemon=False,
-        )
-        p.start()
-        procs.append(p)
+        # Persist shard inputs and schedule workers
+        shard_in_paths = []
+        shard_out_paths = []
+        for i, shard_df in enumerate(shards):
+            in_path = os.path.join(args.work_dir, f"input_shard_{i:03d}.parquet")
+            out_path = os.path.join(args.work_dir, f"output_shard_{i:03d}.parquet")
+            # Ensure column order preserved
+            shard_df = shard_df[base_cols]
+            shard_df.to_parquet(in_path, index=False)
+            shard_in_paths.append(in_path)
+            shard_out_paths.append(out_path)
 
-    # Join all
-    exit_codes = []
-    for p in procs:
-        p.join()
-        exit_codes.append(p.exitcode)
+        # Launch one process per instance
+        procs = []
+        ctx = mp.get_context("spawn")
+        for i, gpu_group in enumerate(gpu_groups):
+            p = ctx.Process(
+                target=worker_process,
+                kwargs=dict(
+                    shard_in_path=shard_in_paths[i],
+                    shard_out_path=shard_out_paths[i],
+                    gpu_group=gpu_group,
+                    model=args.model,
+                    download_dir=args.download_dir,
+                    max_model_len=args.max_model_len,
+                    max_num_seqs=args.max_num_seqs,
+                    gpu_mem_util=args.gpu_mem_util,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    top_k=args.top_k,
+                    min_p=args.min_p,
+                    presence_penalty=args.presence_penalty,
+                    repetition_penalty=args.repetition_penalty,
+                    max_tokens=args.max_tokens,
+                    batch_size=args.batch_size,
+                    reasoning_parser=reasoning_parser,
+                ),
+                name=f"vllm_worker_{i}",
+                daemon=False,
+            )
+            p.start()
+            procs.append(p)
 
-    if any(ec != 0 for ec in exit_codes):
-        bad = [i for i, ec in enumerate(exit_codes) if ec != 0]
-        raise RuntimeError(f"One or more workers failed: {bad}")
+        # Join all
+        exit_codes = []
+        for p in procs:
+            p.join()
+            exit_codes.append(p.exitcode)
+
+        if any(ec != 0 for ec in exit_codes):
+            bad = [i for i, ec in enumerate(exit_codes) if ec != 0]
+            raise RuntimeError(f"One or more workers failed: {bad}")
 
     # Merge shard outputs
     out_parts = [pd.read_parquet(pth) for pth in shard_out_paths]

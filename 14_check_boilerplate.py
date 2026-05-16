@@ -264,8 +264,8 @@ def parse_args():
     p.add_argument("--gpu_memory_utilization", type=float, default=0.97)
 
     # GPUs / kernels
-    p.add_argument("--gpus", type=str, required=True, help="Comma-separated GPU ids, e.g., '0,1,2,3'")
-    p.add_argument("--gpus_per_kernel", type=int, required=True, help="GPUs per vLLM kernel (tensor_parallel_size)")
+    p.add_argument("--gpus", type=str, default=None, help="Comma-separated GPU ids, e.g., '0,1,2,3' (required for local mode; omit when using --server_urls / --server_urls_file)")
+    p.add_argument("--gpus_per_kernel", type=int, default=None, help="GPUs per vLLM kernel (tensor_parallel_size) — required for local mode.")
 
     # Batching
     p.add_argument("--prompt_batch_size", type=int, default=512, help="Number of prompt pairs per generate() call")
@@ -284,7 +284,133 @@ def parse_args():
     from vllm_reasoning_utils import add_reasoning_cli_args
     add_reasoning_cli_args(p)
 
+    from remote_vllm_pool import add_remote_cli_args
+    add_remote_cli_args(p)
+
     return p.parse_args()
+
+
+# ----------------------------
+# Remote-mode (GCP orchestrator)
+# ----------------------------
+
+def _collect_done_row_ids(shards_dir: Path) -> set:
+    done = set()
+    if not shards_dir.is_dir():
+        return done
+    for f in sorted(shards_dir.glob("*.parquet")):
+        try:
+            df = pd.read_parquet(f, columns=["row_id"])
+            done.update(int(x) for x in df["row_id"].tolist())
+        except Exception:
+            pass
+    return done
+
+
+def _next_remote_shard_idx(shards_dir: Path) -> int:
+    pat = re.compile(r"remote_shard_(\d+)\.parquet$")
+    mx = -1
+    if shards_dir.is_dir():
+        for f in shards_dir.iterdir():
+            m = pat.match(f.name)
+            if m:
+                mx = max(mx, int(m.group(1)))
+    return mx + 1
+
+
+def remote_main(args, unique_df: pd.DataFrame) -> int:
+    import asyncio
+    from transformers import AutoTokenizer
+    from vllm_reasoning_utils import resolve_parser_name
+    from remote_vllm_pool import (
+        CompletionSampling,
+        make_completion_work_fn,
+        run_pool,
+        build_registry_from_args,
+    )
+
+    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
+    print(f"[remote] reasoning parser: {reasoning_parser}", flush=True)
+
+    print("[remote] loading tokenizer...", flush=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        cache_dir=args.download_dir or None,
+        trust_remote_code=True,
+    )
+
+    out_dir = Path(args.out_dir)
+    shards_dir = out_dir / "shards"
+    shards_dir.mkdir(parents=True, exist_ok=True)
+
+    done = _collect_done_row_ids(shards_dir)
+    if done:
+        print(f"[remote] {len(done)} row_ids already covered; skipping.", flush=True)
+    work_df = unique_df[~unique_df["row_id"].isin(done)].reset_index(drop=True) if done else unique_df
+
+    if len(work_df) == 0:
+        print("[remote] nothing to do.", flush=True)
+        return 0
+
+    print(f"[remote] building {len(work_df)} prompts...", flush=True)
+    prompts = build_prompts(
+        work_df["patient_boilerplate_text"].tolist(),
+        work_df["trial_boilerplate_text"].tolist(),
+        tokenizer,
+    )
+
+    df_indexed = work_df.set_index("row_id")
+
+    work_items = [
+        (int(work_df.iloc[i]["row_id"]),
+         {"prompt": prompts[i], "max_tokens": int(args.max_new_tokens)})
+        for i in range(len(work_df))
+    ]
+
+    sampling = CompletionSampling(
+        model=args.model,
+        temperature=0.0,
+        top_k=1,
+        repetition_penalty=1.1,
+        request_timeout=float(getattr(args, "request_timeout", 600.0)),
+    )
+    work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
+    registry = build_registry_from_args(args)
+
+    next_idx = _next_remote_shard_idx(shards_dir)
+
+    def shard_writer(payload, shard_idx):
+        rows = []
+        for row_id, result in payload:
+            if isinstance(result, str) and result.startswith("ERROR:"):
+                reasoning, response_text = "", result
+                exclusion = 0.0
+            else:
+                reasoning, response_text = result
+                exclusion = float(parse_yes_no_at_end(response_text))
+            try:
+                orig = df_indexed.loc[row_id].to_dict()
+            except KeyError:
+                orig = {}
+            orig["row_id"] = row_id
+            orig["boilerplate_check_llm_reasoning"] = reasoning
+            orig["boilerplate_check_llm_response"] = response_text
+            orig["exclusion_result"] = exclusion
+            rows.append(orig)
+        out_path = shards_dir / f"remote_shard_{shard_idx:06d}.parquet"
+        pd.DataFrame(rows).to_parquet(out_path, index=False)
+        print(f"[remote] wrote {out_path.name} ({len(rows)} rows)", flush=True)
+
+    asyncio.run(run_pool(
+        work_items=work_items,
+        work_fn=work_fn,
+        registry=registry,
+        shard_writer=shard_writer,
+        results_per_shard=int(getattr(args, "results_per_shard", 200)),
+        starting_shard_idx=next_idx,
+        max_attempts=int(getattr(args, "max_attempts", 200)),
+    ))
+    return 0
 
 
 def main():
@@ -294,19 +420,7 @@ def main():
     out_dir = Path(args.out_dir)
     (out_dir / "shards").mkdir(parents=True, exist_ok=True)
 
-    # Resolve GPUs
-    gpu_list = [int(x) for x in args.gpus.replace(" ", "").split(",") if x != ""]
-    if args.gpus_per_kernel < 1:
-        raise ValueError("--gpus_per_kernel must be >= 1")
-    gpu_groups = group_gpus(gpu_list, args.gpus_per_kernel)
-    if not gpu_groups:
-        raise ValueError("Not enough GPUs for at least one kernel. "
-                         f"Provided {len(gpu_list)}, need at least {args.gpus_per_kernel}.")
-    if len(gpu_list) % args.gpus_per_kernel != 0:
-        warnings.warn(f"GPU count {len(gpu_list)} not divisible by gpus_per_kernel {args.gpus_per_kernel}. "
-                      f"Dropping {len(gpu_list) % args.gpus_per_kernel} GPU(s): {gpu_list[len(gpu_groups)*args.gpus_per_kernel:]}")
-
-    # Load inputs and build unique combos
+    # Load inputs and build unique combos (needed for both modes)
     patients_rounds = [s for s in args.patients_rounds.split(",") if s]
     trials_rounds = [s for s in args.trials_rounds.split(",") if s]
 
@@ -315,45 +429,66 @@ def main():
     unique_df = prep_unique_pairs(pc)
     print(f"[Main] Unique cohort combos: {len(unique_df)}", flush=True)
 
-    # Check for existing final output
     final_parquet = out_dir / "final_boilerplate_checks.parquet"
     final_csv = out_dir / "final_boilerplate_checks.csv"
-    
+
     if final_parquet.exists() and final_csv.exists():
         print(f"[Main] WARNING: Final output files already exist:", flush=True)
         print(f"  - {final_parquet}", flush=True)
         print(f"  - {final_csv}", flush=True)
         print(f"[Main] Individual shard processing will still resume from existing shards.", flush=True)
 
-    # Shard dataframe across workers
-    n_workers = len(gpu_groups)
-    shards = chunk_dataframe(unique_df, n_workers)
+    # ---- Remote-mode dispatch (GCP orchestrator) ----
+    if args.server_urls or args.server_urls_file:
+        print("[Main] dispatching to remote vLLM pool", flush=True)
+        remote_main(args, unique_df)
+    else:
+        # ---- Local mode ----
+        if not args.gpus or args.gpus_per_kernel is None:
+            raise SystemExit("--gpus and --gpus_per_kernel are required for local mode (or use --server_urls / --server_urls_file).")
 
-    # Multiprocessing with 'spawn' to avoid CUDA fork issues
-    mp.set_start_method("spawn", force=True)
-    procs = []
+        # Resolve GPUs
+        gpu_list = [int(x) for x in args.gpus.replace(" ", "").split(",") if x != ""]
+        if args.gpus_per_kernel < 1:
+            raise ValueError("--gpus_per_kernel must be >= 1")
+        gpu_groups = group_gpus(gpu_list, args.gpus_per_kernel)
+        if not gpu_groups:
+            raise ValueError("Not enough GPUs for at least one kernel. "
+                             f"Provided {len(gpu_list)}, need at least {args.gpus_per_kernel}.")
+        if len(gpu_list) % args.gpus_per_kernel != 0:
+            warnings.warn(f"GPU count {len(gpu_list)} not divisible by gpus_per_kernel {args.gpus_per_kernel}. "
+                          f"Dropping {len(gpu_list) % args.gpus_per_kernel} GPU(s): {gpu_list[len(gpu_groups)*args.gpus_per_kernel:]}")
 
-    for wid, (gids, shard) in enumerate(zip(gpu_groups, shards)):
-        if shard.empty:
-            print(f"[Main] Worker {wid} got empty shard. Skipping.", flush=True)
-            continue
-        p = mp.Process(
-            target=worker_process,
-            args=(wid, gids, shard, args),
-            daemon=False
-        )
-        p.start()
-        procs.append(p)
-        print(f"[Main] Launched worker {wid} on GPUs {gids} with {len(shard)} rows", flush=True)
+        # Shard dataframe across workers
+        n_workers = len(gpu_groups)
+        shards = chunk_dataframe(unique_df, n_workers)
 
-    # Wait for workers
-    for p in procs:
-        p.join()
-        if p.exitcode != 0:
-            print(f"[Main] WARNING: worker exit code {p.exitcode}", flush=True)
+        # Multiprocessing with 'spawn' to avoid CUDA fork issues
+        mp.set_start_method("spawn", force=True)
+        procs = []
 
-    # Combine outputs in original order
-    shard_files = sorted((out_dir / "shards").glob("worker*_part*.parquet"))
+        for wid, (gids, shard) in enumerate(zip(gpu_groups, shards)):
+            if shard.empty:
+                print(f"[Main] Worker {wid} got empty shard. Skipping.", flush=True)
+                continue
+            p = mp.Process(
+                target=worker_process,
+                args=(wid, gids, shard, args),
+                daemon=False
+            )
+            p.start()
+            procs.append(p)
+            print(f"[Main] Launched worker {wid} on GPUs {gids} with {len(shard)} rows", flush=True)
+
+        # Wait for workers
+        for p in procs:
+            p.join()
+            if p.exitcode != 0:
+                print(f"[Main] WARNING: worker exit code {p.exitcode}", flush=True)
+
+    # Combine outputs in original order (covers both local worker shards
+    # and remote_shard_*.parquet files written by remote_main)
+    shard_files = sorted((out_dir / "shards").glob("*.parquet"))
     if not shard_files:
         raise RuntimeError("No shard outputs found. Workers may have failed early.")
 

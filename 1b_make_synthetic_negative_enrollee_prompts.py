@@ -134,6 +134,10 @@ def parse_args():
 
     from vllm_reasoning_utils import add_reasoning_cli_args
     add_reasoning_cli_args(p)
+
+    from remote_vllm_pool import add_remote_cli_args
+    add_remote_cli_args(p)
+
     return p.parse_args()
 
 
@@ -323,18 +327,120 @@ def assemble_if_ready(spaces: pd.DataFrame, out_dir: Path, output_csv: Path, ass
 
 
 # -----------------------------
+# Remote-mode (GCP orchestrator)
+# -----------------------------
+def remote_main(args, spaces: pd.DataFrame, out_dir: Path, reasoning_parser: str):
+    """Run synthetic-enrollee generation through a remote vLLM pool. Writes
+    per-batch shard CSVs in the same format as the local worker so
+    assemble_if_ready() can merge them."""
+    import asyncio
+    import re
+    from transformers import AutoTokenizer
+    from remote_vllm_pool import (
+        CompletionSampling,
+        make_completion_work_fn,
+        run_pool,
+        build_registry_from_args,
+    )
+
+    print("[remote] loading tokenizer...", flush=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name,
+        cache_dir=args.download_dir or None,
+        trust_remote_code=True,
+    )
+
+    shard_dir = out_dir / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+
+    done_indices = set()
+    for f in sorted(shard_dir.glob("shard_*.csv")):
+        try:
+            df_prev = pd.read_csv(f, usecols=["criteria_index"])
+            done_indices.update(int(x) for x in df_prev["criteria_index"].tolist())
+        except Exception:
+            pass
+    if done_indices:
+        print(f"[remote] {len(done_indices)} rows already in shards; skipping.", flush=True)
+
+    work_mask = ~spaces["criteria_index"].isin(done_indices)
+    work_df = spaces[work_mask].reset_index(drop=True)
+    if len(work_df) == 0:
+        print("[remote] nothing to do.", flush=True)
+        return
+
+    print(f"[remote] building {len(work_df)} prompts...", flush=True)
+    prompts_by_id: dict = {}
+    for _, row in work_df.iterrows():
+        ridx = int(row["criteria_index"])
+        messages = build_messages(row["criteria"], rng=random.Random(args.seed + ridx))
+        prompt = tokenizer.apply_chat_template(
+            conversation=messages,
+            add_generation_prompt=True,
+            tokenize=False,
+            enable_thinking=True,
+        )
+        prompts_by_id[ridx] = prompt
+
+    work_items = [
+        (cid, {"prompt": prompts_by_id[cid], "max_tokens": int(args.max_tokens)})
+        for cid in prompts_by_id
+    ]
+
+    sampling = CompletionSampling(
+        model=args.model_name,
+        temperature=float(args.temperature),
+        top_p=float(args.top_p),
+        top_k=1,
+        repetition_penalty=float(args.repetition_penalty),
+        request_timeout=float(getattr(args, "request_timeout", 600.0)),
+    )
+    work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
+    registry = build_registry_from_args(args)
+
+    remote_pat = re.compile(r"shard_R(\d+)\.csv$")
+    next_idx = 0
+    for f in shard_dir.iterdir():
+        m = remote_pat.match(f.name)
+        if m:
+            next_idx = max(next_idx, int(m.group(1)) + 1)
+
+    def shard_writer(payload, shard_idx):
+        rows = []
+        for cid, result in payload:
+            if isinstance(result, str) and result.startswith("ERROR:"):
+                reasoning, final = "", result
+            else:
+                reasoning, final = result
+            rows.append({
+                "criteria_index": int(cid),
+                "synthetic_patient_prompt_generation_reasoning": reasoning,
+                "synthetic_patient_prompts": final,
+            })
+        out_path = shard_dir / f"shard_R{shard_idx:06d}.csv"
+        tmp = out_path.with_suffix(".csv.part")
+        pd.DataFrame(rows).to_csv(tmp, index=False)
+        os.replace(tmp, out_path)
+        print(f"[remote] wrote {out_path.name} ({len(rows)} rows)", flush=True)
+
+    asyncio.run(run_pool(
+        work_items=work_items,
+        work_fn=work_fn,
+        registry=registry,
+        shard_writer=shard_writer,
+        results_per_shard=int(getattr(args, "results_per_shard", 200)),
+        starting_shard_idx=next_idx,
+        max_attempts=int(getattr(args, "max_attempts", 200)),
+    ))
+
+
+# -----------------------------
 # Main
 # -----------------------------
 def main():
-    try:
-        set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
-
     args = parse_args()
     from vllm_reasoning_utils import resolve_parser_name
     reasoning_parser = resolve_parser_name(args.model_name, args.reasoning_parser)
-    rng = np.random.default_rng(args.seed)
 
     output_csv = Path(args.output_csv)
     out_dir = Path(args.output_dir) if args.output_dir else Path(f"{output_csv.stem}_shards")
@@ -357,10 +463,28 @@ def main():
         print(f"Final output already exists: {output_csv}")
         return
 
+    # ---- Remote-mode dispatch ----
+    if args.server_urls or args.server_urls_file:
+        print("[main] dispatching to remote vLLM pool", flush=True)
+        remote_main(args, spaces, out_dir, reasoning_parser)
+        assemble_if_ready(spaces, out_dir, output_csv, args.assemble_partial)
+        return
+
+    # ---- Local mode ----
+    try:
+        set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+    rng = np.random.default_rng(args.seed)
+
     # Build payloads per shard (contiguous blocks)
     all_shard_ids = list(range(total_shards))
     shard_dir = out_dir / "shards"
-    done_shard_ids = sorted([int(p.stem.split("_")[-1]) for p in shard_dir.glob("shard_*.csv")])
+    done_shard_ids = sorted([
+        int(p.stem.split("_")[-1])
+        for p in shard_dir.glob("shard_*.csv")
+        if p.stem.split("_")[-1].isdigit()
+    ])
 
     missing_shard_ids = [sid for sid in all_shard_ids if sid not in done_shard_ids]
     if not missing_shard_ids:
