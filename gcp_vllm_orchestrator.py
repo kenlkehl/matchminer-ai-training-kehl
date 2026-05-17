@@ -69,6 +69,7 @@ DEFAULT_DOWNLOAD_DIR = "~/models"
 DEFAULT_HEALTH_INTERVAL = 20.0
 DEFAULT_RESTART_INTERVAL = 120.0
 DEFAULT_SERVER_READY_TIMEOUT = 1800  # 30 min: weights can be huge
+DEFAULT_STARTUP_GRACE = 900.0  # 15 min: vLLM model load can take this long
 
 PID_FILE_FMT = "/tmp/mmai_vllm_{port}.pid"
 LOG_FILE_FMT = "/tmp/mmai_vllm_{port}.log"
@@ -339,6 +340,8 @@ class ServerSlot:
     kind: str             # "remote" or "local"
     healthy: bool = False
     local_proc: object = None  # subprocess.Popen for local kind
+    launched_ts: float = 0.0    # monotonic time the vLLM process was launched
+    last_healthy_ts: float = 0.0  # monotonic time of most recent OK health check
 
 
 @dataclass
@@ -369,6 +372,7 @@ class ServeConfig:
     server_ready_timeout: int
     health_interval: float
     restart_interval: float
+    startup_grace_seconds: float
     extra_vllm_args: List[str]
 
 
@@ -493,6 +497,7 @@ async def launch_one_remote_server(
         gpus=gpus,
         url=url,
         kind="remote",
+        launched_ts=time.monotonic(),
     )
 
 
@@ -523,6 +528,7 @@ async def launch_one_local_server(cfg: ServeConfig, gpus: List[int], port: int) 
         url=f"http://127.0.0.1:{port}/v1",
         kind="local",
         local_proc=proc,
+        launched_ts=time.monotonic(),
     )
 
 
@@ -615,9 +621,12 @@ async def health_pass(
 ) -> bool:
     """Check health of all known servers. Returns True if anything changed."""
     changed = False
+    now = time.monotonic()
     for state in workers.values():
         for slot in state.slots:
             healthy = await http_health(slot.url, timeout=5.0)
+            if healthy:
+                slot.last_healthy_ts = now
             if healthy != slot.healthy:
                 changed = True
                 slot.healthy = healthy
@@ -625,6 +634,8 @@ async def health_pass(
                 print(f"[orch] {slot.instance}:{slot.port} -> {marker}")
     for slot in local_slots:
         healthy = await http_health(slot.url, timeout=5.0)
+        if healthy:
+            slot.last_healthy_ts = now
         if healthy != slot.healthy:
             changed = True
             slot.healthy = healthy
@@ -638,16 +649,27 @@ async def relaunch_dead_remote_slots(
     cfg: ServeConfig,
 ) -> bool:
     """For unhealthy remote slots, try to relaunch the vLLM process on the
-    same instance. Returns True if anything was attempted."""
+    same instance. Returns True if anything was attempted.
+
+    Skips slots that have never been healthy yet and are still within the
+    configured startup grace — vLLM model loading routinely takes several
+    minutes and a hot-restart loop would prevent it from ever finishing."""
     attempted = False
+    now = time.monotonic()
     for state in workers.values():
         if state.status != "running":
             continue
         for slot in list(state.slots):
             if slot.healthy:
                 continue
+            if slot.last_healthy_ts == 0.0 and \
+               (now - slot.launched_ts) < cfg.startup_grace_seconds:
+                # Still in initial model-load window; leave it alone.
+                continue
             attempted = True
-            print(f"[orch] relaunching {slot.instance}:{slot.port}")
+            reason = "was healthy, now down" if slot.last_healthy_ts else \
+                     "never healthy past grace"
+            print(f"[orch] relaunching {slot.instance}:{slot.port} ({reason})")
             await remote_kill_vllm(state.spec, slot.port)
             new = await launch_one_remote_server(state, cfg, slot.gpus, slot.port)
             if new is not None:
@@ -662,10 +684,22 @@ async def relaunch_dead_local_slots(
     cfg: ServeConfig,
 ) -> bool:
     attempted = False
+    now = time.monotonic()
     for i, slot in enumerate(local_slots):
         if slot.healthy:
             continue
         proc = slot.local_proc
+        proc_alive = proc is not None and proc.poll() is None
+        # If the process is still running and either we're inside the startup
+        # grace window or it was healthy at some point recently, leave it
+        # alone — vLLM may still be loading or temporarily unresponsive.
+        if proc_alive and slot.last_healthy_ts == 0.0 and \
+           (now - slot.launched_ts) < cfg.startup_grace_seconds:
+            continue
+        reason = "process exited" if not proc_alive else \
+                 ("was healthy, now down" if slot.last_healthy_ts else
+                  "never healthy past grace")
+        print(f"[orch] relaunching local:{slot.port} ({reason})")
         if proc is not None:
             try:
                 proc.terminate()
@@ -759,6 +793,7 @@ async def cmd_serve(args) -> int:
         server_ready_timeout=args.server_ready_timeout,
         health_interval=args.health_interval,
         restart_interval=args.restart_interval,
+        startup_grace_seconds=args.startup_grace_seconds,
         extra_vllm_args=args.extra_vllm_args or [],
     )
 
@@ -979,6 +1014,10 @@ def build_parser() -> argparse.ArgumentParser:
                     default=DEFAULT_SERVER_READY_TIMEOUT)
     sp.add_argument("--health-interval", type=float, default=DEFAULT_HEALTH_INTERVAL)
     sp.add_argument("--restart-interval", type=float, default=DEFAULT_RESTART_INTERVAL)
+    sp.add_argument("--startup-grace-seconds", type=float, default=DEFAULT_STARTUP_GRACE,
+                    help="Don't relaunch a never-yet-healthy slot until this "
+                         "many seconds after launch; lets vLLM finish loading "
+                         "the model before being declared dead.")
     sp.add_argument("--extra-vllm-args", nargs=argparse.REMAINDER, default=[],
                     help="Extra args appended verbatim to the vLLM server command.")
 
