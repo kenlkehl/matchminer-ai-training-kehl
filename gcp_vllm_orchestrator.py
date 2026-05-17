@@ -179,20 +179,26 @@ async def gcloud_ssh(name: str, zone: str, remote_cmd: str,
 # Health checks
 # -------------------------
 
-def _http_health(url: str, *, timeout: float = 5.0) -> bool:
-    # url is base_url like http://10.0.0.5:8000/v1; health lives at /health.
+def _http_health(url: str, *, timeout: float = 5.0) -> Tuple[bool, Optional[str]]:
+    """Probe /health and return (ok, error_msg). error_msg is None on success."""
     base = url.rstrip("/")
     if base.endswith("/v1"):
         base = base[:-3]
     health_url = base.rstrip("/") + "/health"
     try:
         with urllib.request.urlopen(health_url, timeout=timeout) as resp:
-            return 200 <= resp.status < 300
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
-        return False
+            if 200 <= resp.status < 300:
+                return (True, None)
+            return (False, f"HTTP {resp.status}")
+    except urllib.error.HTTPError as e:
+        return (False, f"HTTP {e.code}")
+    except urllib.error.URLError as e:
+        return (False, f"URLError: {e.reason}")
+    except OSError as e:
+        return (False, f"OSError: {e}")
 
 
-async def http_health(url: str, *, timeout: float = 5.0) -> bool:
+async def http_health(url: str, *, timeout: float = 5.0) -> Tuple[bool, Optional[str]]:
     return await asyncio.to_thread(_http_health, url, timeout=timeout)
 
 
@@ -342,6 +348,7 @@ class ServerSlot:
     local_proc: object = None  # subprocess.Popen for local kind
     launched_ts: float = 0.0    # monotonic time the vLLM process was launched
     last_healthy_ts: float = 0.0  # monotonic time of most recent OK health check
+    last_health_error: Optional[str] = None  # most recent /health failure text
 
 
 @dataclass
@@ -622,25 +629,36 @@ async def health_pass(
     """Check health of all known servers. Returns True if anything changed."""
     changed = False
     now = time.monotonic()
-    for state in workers.values():
-        for slot in state.slots:
-            healthy = await http_health(slot.url, timeout=5.0)
-            if healthy:
-                slot.last_healthy_ts = now
-            if healthy != slot.healthy:
-                changed = True
-                slot.healthy = healthy
-                marker = "OK" if healthy else "DOWN"
-                print(f"[orch] {slot.instance}:{slot.port} -> {marker}")
-    for slot in local_slots:
-        healthy = await http_health(slot.url, timeout=5.0)
+
+    def _record(slot: ServerSlot, label: str, healthy: bool, err: Optional[str]) -> bool:
+        nonlocal changed
         if healthy:
             slot.last_healthy_ts = now
+            slot.last_health_error = None
+        else:
+            # Log the first failure and every change in failure reason so the
+            # user can distinguish "still loading" (HTTP failed/Connection
+            # refused) from "firewall blocking" (timeout/no route) from
+            # "vLLM up but unhealthy" (HTTP 5xx).
+            if err and err != slot.last_health_error:
+                print(f"[orch] {label} probe failed: {err}  ({slot.url})")
+                slot.last_health_error = err
         if healthy != slot.healthy:
-            changed = True
             slot.healthy = healthy
             marker = "OK" if healthy else "DOWN"
-            print(f"[orch] local:{slot.port} -> {marker}")
+            print(f"[orch] {label} -> {marker}")
+            return True
+        return False
+
+    for state in workers.values():
+        for slot in state.slots:
+            healthy, err = await http_health(slot.url, timeout=5.0)
+            if _record(slot, f"{slot.instance}:{slot.port}", healthy, err):
+                changed = True
+    for slot in local_slots:
+        healthy, err = await http_health(slot.url, timeout=5.0)
+        if _record(slot, f"local:{slot.port}", healthy, err):
+            changed = True
     return changed
 
 
