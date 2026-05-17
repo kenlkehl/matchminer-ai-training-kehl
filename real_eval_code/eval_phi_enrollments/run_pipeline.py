@@ -7,15 +7,17 @@ and allowing for resumability.
 
 Pipeline stages:
 0. prepare: Prepare data (uses prepare_data.py)
-1. summarize: Summarize patient EHR (uses 6_summarize_patients.py)
-2. spacify: Create trial spaces
-3. retrieval: Patient-centric + trial-centric retrieval (trialspace embedding)
-4. llm_checks: Eligibility + boilerplate LLM checks via API (GPT)
-5. oncoreasoning: OncoReasoning LLM inference via vLLM (trial check + boilerplate)
-6. aggregation: Consolidate results (for trialspace retrieval)
-7. baseline: Baseline evaluation using Qwen3 embedding - includes retrieval,
+1. compress: (optional, opt-in via --compress-notes) Per-note compression
+             via 3_compress_notes.py
+2. summarize: Summarize patient EHR (uses 6_summarize_patients.py)
+3. spacify: Create trial spaces
+4. retrieval: Patient-centric + trial-centric retrieval (trialspace embedding)
+5. llm_checks: Eligibility + boilerplate LLM checks via API (GPT)
+6. oncoreasoning: OncoReasoning LLM inference via vLLM (trial check + boilerplate)
+7. aggregation: Consolidate results (for trialspace retrieval)
+8. baseline: Baseline evaluation using Qwen3 embedding - includes retrieval,
              eligibility checks, and aggregation (no boilerplate checks)
-8. evaluation: Run model evaluations and generate PDF reports
+9. evaluation: Run model evaluations and generate PDF reports
 
 Usage:
     # Run full pipeline with 4 GPUs
@@ -56,6 +58,7 @@ ONCOREASONING_MODEL = "../../../models/onco_reasoning_lfm/checkpoint-121000"
 
 STAGES = [
     "prepare",        # Data preparation
+    "compress",       # (optional) Per-note compression via 3_compress_notes.py
     "summarize",      # Patient summarization
     "spacify",        # Trial space creation
     "retrieval",      # Patient-centric + trial-centric retrieval (trialspace embedding)
@@ -104,6 +107,27 @@ Examples:
                         help="Token overlap between chunks for patient summarization (default: 500)")
     parser.add_argument("--summarize-gpus-per-server", type=int, default=1,
                         help="GPUs per vLLM server for summarization (default: 1). ")
+    # Optional per-note compression (3_compress_notes.py) before summarization.
+    parser.add_argument("--compress-notes", action="store_true",
+                        help="Run 3_compress_notes.py over the note-level dataset "
+                             "before summarization, and feed the compressed "
+                             "per-note summaries (one paragraph per note) into "
+                             "6_summarize_patients.py instead of raw notes.")
+    parser.add_argument("--compress-script", type=str,
+                        default=str(REPO_ROOT / "3_compress_notes.py"),
+                        help="Path to per-note compression script")
+    parser.add_argument("--compress-model", type=str, default=GOLD_LLM,
+                        help="Model used for per-note compression (default: GOLD_LLM)")
+    parser.add_argument("--compress-max-model-len", type=int, default=50000,
+                        help="max_model_len passed to 3_compress_notes.py (default: 50000)")
+    parser.add_argument("--compress-max-tokens", type=int, default=10000,
+                        help="max_tokens passed to 3_compress_notes.py (default: 10000)")
+    parser.add_argument("--compress-max-concurrent-requests", type=int, default=25,
+                        help="Max concurrent compression requests per server (default: 25)")
+    parser.add_argument("--compress-gpus-per-server", type=int, default=1,
+                        help="GPUs per vLLM server for compression (default: 1)")
+    parser.add_argument("--compress-gpu-memory-utilization", type=float, default=0.90,
+                        help="GPU memory utilization for compression vLLM servers (default: 0.90)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without executing")
     parser.add_argument("--verbose", action="store_true",
@@ -282,6 +306,21 @@ def check_oncoreasoning_shards_complete(
             return False
 
     return True
+
+
+def filter_compressed_for_summary(in_path: Path, out_path: Path) -> int:
+    """Drop empty/ERROR rows from a 3_compress_notes.py output parquet.
+
+    Mirrors the inline aggregator in temp_train_gcp.sh that prepares the
+    compressed notes for 6_summarize_patients.py. Returns the number of
+    rows kept.
+    """
+    df = pd.read_parquet(in_path)
+    summary = df["summary"].astype(str)
+    mask = (summary.str.strip() != "") & (~summary.str.startswith("ERROR:"))
+    df_keep = df[mask].reset_index(drop=True)
+    df_keep.to_parquet(out_path, index=False)
+    return len(df_keep)
 
 
 def run_command(cmd: List[str], description: str, dry_run: bool = False,
@@ -661,10 +700,52 @@ def main():
             if ret != 0:
                 failures.append("prepare")
 
-    # Stage 1: Summarize patients
+    # Stage 1: (Optional) Per-note compression via 3_compress_notes.py
+    compressed_parquet = DATA_DIR / "compressed_note_level_dataset.parquet"
+    compressed_for_summary = DATA_DIR / "compressed_note_level_dataset_for_summary.parquet"
+    if "compress" in stages_to_run:
+        if not args.compress_notes:
+            print("\n[SKIP] STAGE 1: COMPRESS NOTES (pass --compress-notes to enable)")
+        else:
+            print("\n" + "="*70)
+            print("STAGE 1: COMPRESS NOTES")
+            print("="*70)
+
+            compress_outputs = [compressed_for_summary]
+            if not args.force and check_outputs_exist(compress_outputs, "Per-note compression"):
+                pass  # Skip
+            else:
+                cmd = [
+                    "python", args.compress_script,
+                    "--input_parquet", args.input_notes,
+                    "--output_parquet", str(compressed_parquet),
+                    "--shard_dir", str(DATA_DIR / "compressed_note_shards"),
+                    "--model", args.compress_model,
+                    "--download_dir", args.download_dir,
+                    "--gpu_ids", ",".join(gpu_list),
+                    "--gpus_per_server", str(args.compress_gpus_per_server),
+                    "--max_model_len", str(args.compress_max_model_len),
+                    "--max_tokens", str(args.compress_max_tokens),
+                    "--max_concurrent_requests", str(args.compress_max_concurrent_requests),
+                    "--gpu_memory_utilization", str(args.compress_gpu_memory_utilization),
+                    "--patient_id_col", "pseudo_mrn",
+                    "--text_col", "text",
+                ]
+
+                ret = run_command(cmd, "Per-note compression", args.dry_run)
+                if ret != 0:
+                    failures.append("compress")
+                elif not args.dry_run:
+                    kept = filter_compressed_for_summary(
+                        compressed_parquet, compressed_for_summary,
+                    )
+                    print(f"  Filtered compressed notes: {kept} rows kept "
+                          f"(written to {compressed_for_summary})")
+
+    # Stage 2: Summarize patients
     if "summarize" in stages_to_run:
         print("\n" + "="*70)
-        print("STAGE 1: SUMMARIZE PATIENTS")
+        print("STAGE 2: SUMMARIZE PATIENTS")
         print("="*70)
 
         summarize_outputs = [
@@ -673,9 +754,16 @@ def main():
         if not args.force and check_outputs_exist(summarize_outputs, "Patient summarization"):
             pass  # Skip
         else:
+            if args.compress_notes:
+                summarize_input = str(compressed_for_summary)
+                summarize_text_col = "summary"
+                print(f"  Using compressed notes as summarization input: {summarize_input}")
+            else:
+                summarize_input = args.input_notes
+                summarize_text_col = "text"
             cmd = [
                 "python", args.summarize_script,
-                "--input_parquet", args.input_notes,
+                "--input_parquet", summarize_input,
                 "--output_parquet", str(DATA_DIR / "patient_summaries_full.parquet"),
                 "--patient_summaries_parquet", str(DATA_DIR / "patient_summaries.parquet"),
                 "--shard_dir", str(DATA_DIR / "summary_shards"),
@@ -684,7 +772,7 @@ def main():
                 "--gpu_ids", ",".join(gpu_list),
                 "--gpus_per_server", str(args.summarize_gpus_per_server),
                 "--patient_id_col", "pseudo_mrn",
-                "--text_col", "text",
+                "--text_col", summarize_text_col,
                 "--chunk_size", str(args.chunk_size),
                 "--chunk_overlap", str(args.chunk_overlap),
             ]
@@ -714,7 +802,7 @@ def main():
     # Stage 2: Create trial spaces
     if "spacify" in stages_to_run:
         print("\n" + "="*70)
-        print("STAGE 2: CREATE TRIAL SPACES")
+        print("STAGE 3: CREATE TRIAL SPACES")
         print("="*70)
 
         spacify_outputs = [
@@ -741,7 +829,7 @@ def main():
     # Stage 3: Retrieval (patient-centric and trial-centric can run in parallel)
     if "retrieval" in stages_to_run:
         print("\n" + "="*70)
-        print("STAGE 3: PATIENT-TRIAL RETRIEVAL")
+        print("STAGE 4: PATIENT-TRIAL RETRIEVAL")
         print("="*70)
 
         retrieval_outputs = [
@@ -781,7 +869,7 @@ def main():
     # Stage 4: LLM checks (eligibility + boilerplate for both directions)
     if "llm_checks" in stages_to_run:
         print("\n" + "="*70)
-        print("STAGE 4: LLM ELIGIBILITY/BOILERPLATE CHECKS")
+        print("STAGE 5: LLM ELIGIBILITY/BOILERPLATE CHECKS")
         print("="*70)
 
         # Define all check tasks with input/output paths and shard checking info
@@ -859,7 +947,7 @@ def main():
     # Stage 5: OncoReasoning LLM inference (trial check + boilerplate via vLLM)
     if "oncoreasoning" in stages_to_run:
         print("\n" + "="*70)
-        print("STAGE 5: ONCOREASONING LLM INFERENCE (vLLM)")
+        print("STAGE 6: ONCOREASONING LLM INFERENCE (vLLM)")
         print("="*70)
 
         gpu_str = ",".join(gpu_list)
@@ -938,7 +1026,7 @@ def main():
     # Stage 7: Baseline evaluation (uses Qwen3 embedding, eligibility checks only - no boilerplate)
     if "baseline" in stages_to_run:
         print("\n" + "="*70)
-        print("STAGE 7: BASELINE EVALUATION (Qwen3 embedding + eligibility checks)")
+        print("STAGE 8: BASELINE EVALUATION (Qwen3 embedding + eligibility checks)")
         print("="*70)
 
         baseline_outputs = [
@@ -1031,7 +1119,7 @@ def main():
     # Stage 8: Evaluation (generate PDF reports with metrics)
     if "evaluation" in stages_to_run:
         print("\n" + "="*70)
-        print("STAGE 8: MODEL EVALUATION")
+        print("STAGE 9: MODEL EVALUATION")
         print("="*70)
 
         eval_output_dir = Path(args.eval_output_dir) if args.eval_output_dir else DATA_DIR / "evaluation"

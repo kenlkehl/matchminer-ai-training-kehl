@@ -349,6 +349,7 @@ class WorkerState:
     slots: List[ServerSlot] = field(default_factory=list)
     last_attempt_ts: float = 0.0
     status: str = "unknown"   # unknown|stopped|running|down|error
+    bring_up_task: Optional["asyncio.Task"] = None
 
 
 @dataclass
@@ -766,6 +767,7 @@ async def cmd_serve(args) -> int:
         s.name: WorkerState(spec=s) for s in specs
     }
     local_slots: List[ServerSlot] = []
+    local_setup_tasks: List[asyncio.Task] = []
 
     # Best-effort cleanup of leftover processes from a prior run.
     await asyncio.gather(
@@ -773,14 +775,21 @@ async def cmd_serve(args) -> int:
         return_exceptions=True,
     )
 
-    # Initial bring-up in parallel.
-    print(f"[orch] initial bring-up of {len(workers)} worker(s)...")
-    await asyncio.gather(
-        *[bring_up_worker(w, cfg, cfg.base_port) for w in workers.values()],
-        return_exceptions=True,
-    )
+    # Publish an empty (but valid) servers file immediately so wait-for-ready
+    # can begin polling without "file not found" noise while bring-up runs.
+    write_servers_file(cfg.servers_file, workers, local_slots)
 
-    # Local servers on orchestrator GPUs (optional).
+    # Fire-and-forget remote bring-up. Each worker publishes its slots into
+    # state.slots as it completes; the maintenance loop re-publishes the JSON
+    # every health_interval seconds, so downstream code sees servers appear
+    # as soon as they're ready instead of waiting for the slowest one.
+    print(f"[orch] launching bring-up for {len(workers)} worker(s) in background")
+    for w in workers.values():
+        w.bring_up_task = asyncio.create_task(
+            bring_up_worker(w, cfg, cfg.base_port)
+        )
+
+    # Local servers on orchestrator GPUs (optional) — also fire-and-forget.
     if cfg.include_self:
         local_gpus = [int(g.strip()) for g in cfg.include_self.split(",") if g.strip() != ""]
         gps = max(1, cfg.gpus_per_server)
@@ -791,25 +800,17 @@ async def cmd_serve(args) -> int:
         n_local = len(local_gpus) // gps
         # Use a port range that won't collide with remote ports; pick a high base.
         local_base = cfg.base_port + 100
-        for i in range(n_local):
-            grp = local_gpus[i * gps:(i + 1) * gps]
-            slot = await launch_one_local_server(cfg, grp, local_base + i)
+
+        async def _spawn_local(grp: List[int], port: int) -> None:
+            slot = await launch_one_local_server(cfg, grp, port)
             if slot is not None:
                 local_slots.append(slot)
 
-    # Initial health wait with timeout
-    deadline = time.monotonic() + cfg.server_ready_timeout
-    while time.monotonic() < deadline:
-        await health_pass(workers, local_slots, cfg)
-        write_servers_file(cfg.servers_file, workers, local_slots)
-        n_healthy = sum(1 for w in workers.values() for s in w.slots if s.healthy) + \
-                    sum(1 for s in local_slots if s.healthy)
-        n_expected = sum(len(w.slots) for w in workers.values()) + len(local_slots)
-        if n_healthy >= max(1, n_expected):
-            break
-        print(f"[orch] healthy {n_healthy}/{n_expected}; waiting...")
-        await asyncio.sleep(15.0)
-    write_servers_file(cfg.servers_file, workers, local_slots)
+        for i in range(n_local):
+            grp = local_gpus[i * gps:(i + 1) * gps]
+            local_setup_tasks.append(
+                asyncio.create_task(_spawn_local(grp, local_base + i))
+            )
 
     # Set up signal handling
     stop_event = asyncio.Event()
@@ -842,26 +843,43 @@ async def cmd_serve(args) -> int:
             relaunched_remote = await relaunch_dead_remote_slots(workers, cfg)
             relaunched_local = await relaunch_dead_local_slots(local_slots, cfg)
 
-            # Try to recover errored/down instances on a slower cadence
+            # Try to recover errored/down instances on a slower cadence. Skip
+            # any worker whose bring-up task is still in flight, otherwise the
+            # restart would race the initial spawn.
             now = time.monotonic()
             if now - last_restart_attempt >= cfg.restart_interval:
                 last_restart_attempt = now
                 to_recover = [
                     w for w in workers.values()
-                    if w.status in ("error", "stopped", "unknown")
-                    or not any(s.healthy for s in w.slots)
+                    if (w.bring_up_task is None or w.bring_up_task.done())
+                    and (w.status in ("error", "stopped", "unknown")
+                         or not any(s.healthy for s in w.slots))
                 ]
                 if to_recover:
                     print(f"[orch] restart-loop: attempting {len(to_recover)} worker(s)")
-                    await asyncio.gather(
-                        *[bring_up_worker(w, cfg, cfg.base_port) for w in to_recover],
-                        return_exceptions=True,
-                    )
+                    for w in to_recover:
+                        w.bring_up_task = asyncio.create_task(
+                            bring_up_worker(w, cfg, cfg.base_port)
+                        )
 
             if changed or relaunched_remote or relaunched_local:
                 await health_pass(workers, local_slots, cfg)
             write_servers_file(cfg.servers_file, workers, local_slots)
     finally:
+        # Cancel any still-pending bring-up tasks so half-started workers
+        # don't race the teardown that follows.
+        pending_setup = []
+        for w in workers.values():
+            if w.bring_up_task is not None and not w.bring_up_task.done():
+                w.bring_up_task.cancel()
+                pending_setup.append(w.bring_up_task)
+        for t in local_setup_tasks:
+            if not t.done():
+                t.cancel()
+                pending_setup.append(t)
+        if pending_setup:
+            await asyncio.gather(*pending_setup, return_exceptions=True)
+
         print("[orch] tearing down vLLM processes...")
         # Best-effort: kill remote vLLM processes
         await asyncio.gather(
