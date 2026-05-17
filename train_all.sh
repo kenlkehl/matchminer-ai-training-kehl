@@ -138,7 +138,8 @@ aggregator=$(cat << EOF
 import pandas as pd
 
 compressed = pd.read_parquet('../data/no_phi/compressed_synthetic_notes.parquet')
-compressed = compressed.rename(columns={'patient_id': 'pseudo_mrn'})
+if 'pseudo_mrn' not in compressed.columns and 'patient_id' in compressed.columns:
+    compressed = compressed.rename(columns={'patient_id': 'pseudo_mrn'})
 summary_str = compressed['summary'].astype(str)
 mask = (summary_str.str.strip() != '') & (~summary_str.str.startswith('ERROR:'))
 compressed = compressed[mask].reset_index(drop=True)
@@ -400,7 +401,6 @@ echo 15 done
 accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 
 echo 16 done
-
 
 
 
