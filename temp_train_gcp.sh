@@ -117,22 +117,6 @@ set -e
 
 
 # ---------------------------------------------------------------------------
-# Step 9a — make_top_matches (no vLLM) → workers stay stopped
-# ---------------------------------------------------------------------------
-python make_top_matches.py \
-  --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ../models/pt_trial_summary_perspace_finetuned.model \
-  --gpus 0,1,2,3,4,5,6,7 \
-  --sample_trials_per_patient 500 \
-  --sample_patients_per_trial 20000 \
-  --top_k_spaces 20 --top_k_patients 40 \
-  --encode_batch_size 128 --score_batch_size 2048 \
-  --max_seq_length 2500 \
-  --out_cohorts_parquet ../data/no_phi/top_cohorts_tocheck_round1.parquet \
-  --out_patients_parquet ../data/no_phi/top_patients_tocheck_round1.parquet
-echo 9a done
-
-# ---------------------------------------------------------------------------
 # Steps 9b / 9c — vLLM
 # ---------------------------------------------------------------------------
 start_vllm_cluster 50000 900 0.95 1
