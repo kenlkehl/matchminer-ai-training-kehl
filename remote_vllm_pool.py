@@ -702,15 +702,21 @@ async def run_pool(
     # force-flush any buffered shard and (if needed) write error placeholders
     # for items the pool never recorded — otherwise the loop would hang
     # forever on a tiny number of lost items.
+    # We exit when every item has been processed (success or poison-pill
+    # placeholder) — i.e. len(completed_ids) >= total. This works regardless
+    # of whether shards have been flushed yet, which matters for callers
+    # like 6_summarize_patients.py that use a giant results_per_shard and
+    # rely on the final flush() in `finally` to write the whole round.
     last_progress = time.monotonic()
     last_warned_at = last_progress
-    last_done = 0
+    last_completed = 0
     gave_up = False
     try:
-        while results.total_written < total and not gave_up:
+        while len(results.completed_ids) < total and not gave_up:
             await asyncio.sleep(2.0)
-            if results.total_written != last_done:
-                last_done = results.total_written
+            current_completed = len(results.completed_ids)
+            if current_completed != last_completed:
+                last_completed = current_completed
                 last_progress = time.monotonic()
                 last_warned_at = last_progress
                 continue
