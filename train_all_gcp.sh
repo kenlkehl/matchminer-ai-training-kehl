@@ -90,6 +90,16 @@ stop_vllm_cluster() {
         wait "$ORCH_PID" 2>/dev/null || true
         ORCH_PID=""
     fi
+    # Belt-and-suspenders: the orchestrator's finally block only does
+    # proc.terminate() on the local vLLM leader, but vLLM is spawned with
+    # start_new_session=True and its engine workers can be orphaned and
+    # keep holding GPU memory — which then blocks either the next
+    # start_vllm_cluster (--include-self GPUs already used) or the next
+    # non-vLLM step (accelerate launch can't allocate).
+    pkill -TERM -f 'vllm.entrypoints.openai.api_server' 2>/dev/null || true
+    sleep 3
+    pkill -KILL -f 'vllm.entrypoints.openai.api_server' 2>/dev/null || true
+    rm -f /tmp/local_mmai_vllm_*.log 2>/dev/null || true
 }
 
 # Stop everything (vLLM processes + the worker VMs). Used before the

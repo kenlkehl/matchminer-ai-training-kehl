@@ -290,6 +290,47 @@ async def remote_kill_all_vllm(spec: InstanceSpec) -> None:
 # Local server lifecycle (orchestrator GPUs)
 # -------------------------
 
+def _local_stop_vllm(proc, *, timeout: float = 15.0) -> None:
+    """Stop a local vLLM subprocess and any engine workers it spawned.
+
+    vLLM is launched with start_new_session=True, so the leader is the
+    process group leader for a brand-new session. proc.terminate() on
+    the leader alone does NOT propagate to the multiprocessing engine
+    workers vLLM forks — they get orphaned, keep holding GPU memory,
+    and block the next GPU allocation. Kill the whole process group
+    instead, then SIGKILL anything still alive after the timeout."""
+    import errno
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        pgid = None
+
+    def _signal_group(sig):
+        if pgid is None:
+            return
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError as e:
+            if e.errno != errno.ESRCH:
+                raise
+
+    _signal_group(signal.SIGTERM)
+    try:
+        proc.wait(timeout=timeout)
+    except Exception:
+        pass
+    if proc.poll() is None:
+        _signal_group(signal.SIGKILL)
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
 def _local_start_vllm(
     *,
     model: str,
@@ -718,15 +759,7 @@ async def relaunch_dead_local_slots(
                  ("was healthy, now down" if slot.last_healthy_ts else
                   "never healthy past grace")
         print(f"[orch] relaunching local:{slot.port} ({reason})")
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=10)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+        _local_stop_vllm(proc, timeout=10)
         attempted = True
         new = await launch_one_local_server(cfg, slot.gpus, slot.port)
         if new is not None:
@@ -939,18 +972,9 @@ async def cmd_serve(args) -> int:
             *[remote_kill_all_vllm(w.spec) for w in workers.values()],
             return_exceptions=True,
         )
-        # Stop local processes
+        # Stop local processes (kill the whole session, not just the leader)
         for slot in local_slots:
-            proc = slot.local_proc
-            if proc is not None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=15)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+            _local_stop_vllm(slot.local_proc, timeout=15)
         # Final servers file: nothing ready
         try:
             _atomic_write_json(cfg.servers_file, {

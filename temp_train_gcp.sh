@@ -90,6 +90,16 @@ stop_vllm_cluster() {
         wait "$ORCH_PID" 2>/dev/null || true
         ORCH_PID=""
     fi
+    # Belt-and-suspenders: the orchestrator's finally block only does
+    # proc.terminate() on the local vLLM leader, but vLLM is spawned with
+    # start_new_session=True and its engine workers can be orphaned and
+    # keep holding GPU memory — which then blocks either the next
+    # start_vllm_cluster (--include-self GPUs already used) or the next
+    # non-vLLM step (accelerate launch can't allocate).
+    pkill -TERM -f 'vllm.entrypoints.openai.api_server' 2>/dev/null || true
+    sleep 3
+    pkill -KILL -f 'vllm.entrypoints.openai.api_server' 2>/dev/null || true
+    rm -f /tmp/local_mmai_vllm_*.log 2>/dev/null || true
 }
 
 # Stop everything (vLLM processes + the worker VMs). Used before the
@@ -103,75 +113,6 @@ stop_workers_fully() {
 
 set -e
 
-
-
-
-# Local rename / filter (no vLLM)
-aggregator=$(cat << 'EOF'
-import pandas as pd
-compressed = pd.read_parquet('../data/no_phi/compressed_synthetic_notes.parquet')
-if 'pseudo_mrn' not in compressed.columns and 'patient_id' in compressed.columns:
-    compressed = compressed.rename(columns={'patient_id': 'pseudo_mrn'})
-summary_str = compressed['summary'].astype(str)
-mask = (summary_str.str.strip() != '') & (~summary_str.str.startswith('ERROR:'))
-compressed = compressed[mask].reset_index(drop=True)
-compressed.to_parquet('../data/no_phi/compressed_synthetic_notes_for_patient_summary.parquet')
-print(f"Kept {len(compressed)} compressed notes for patient summarization")
-EOF
-)
-python -c "$aggregator"
-
-# ---------------------------------------------------------------------------
-# Step 6 — vLLM (max_model_len=100000)
-# ---------------------------------------------------------------------------
-start_vllm_cluster 100000 900 0.90 1
-python 6_summarize_patients.py \
-  --input_parquet ../data/no_phi/compressed_synthetic_notes_for_patient_summary.parquet \
-  --patient_id_col pseudo_mrn --text_col summary \
-  --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
-  --shard_dir ../data/no_phi/summary_shards_compressed \
-  --server_urls_file "$SERVERS_FILE" \
-  --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
-  --download_dir ~/models \
-  --max_model_len 100000 --max_tokens 20000 \
-  --chunk_size 50000 --chunk_overlap 500 \
-  --max_concurrent_requests 25 \
-  --generate_dates \
-  --synthetic_start_date 2017-01-01 \
-  --synthetic_min_days 0 --synthetic_max_days 180
-echo 6 done
-stop_vllm_cluster
-
-aggregator=$(cat << 'EOF'
-import pandas as pd
-spaces = pd.read_csv('../data/no_phi/sample_trial_space_lineitems.csv')
-summaries = pd.read_parquet('../data/no_phi/patient_summaries.parquet')
-notes = pd.read_parquet('../data/no_phi/all_synthetic_notes.parquet')[['pseudo_mrn','space_index']].groupby('pseudo_mrn').first().reset_index()
-summaries['pseudo_mrn'] = pd.to_numeric(summaries.pseudo_mrn)
-summaries = pd.merge(summaries, notes, on='pseudo_mrn')
-summaries = pd.merge(summaries, spaces, on='space_index')
-summaries.to_parquet('../data/no_phi/patient_summaries_with_spaces.parquet')
-EOF
-)
-python -c "$aggregator"
-
-# ---------------------------------------------------------------------------
-# Step 7 — vLLM
-# ---------------------------------------------------------------------------
-start_vllm_cluster 50000 900 0.95 1
-python llm_check_trials.py \
- --input_parquet ../data/no_phi/patient_summaries_with_spaces.parquet \
- --out_dir ../data/no_phi/initial_trialcheck_outputs \
- --final_output space_specific_eligibility_checks.parquet \
- --server_urls_file "$SERVERS_FILE" \
- --prompt_batch_size 2000 \
- --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
- --download_dir ~/models \
- --max_model_len 50000 --gpu_memory_utilization 0.95
-echo 7 done
-stop_vllm_cluster
-
-mv ../data/no_phi/initial_trialcheck_outputs/space_specific_eligibility_checks.parquet ../data/no_phi/space_specific_eligibility_checks.parquet
 
 # ---------------------------------------------------------------------------
 # Step 8 — finetune_embedder (no vLLM) → stop workers
