@@ -104,24 +104,9 @@ stop_workers_fully() {
 set -e
 
 
-# ---------------------------------------------------------------------------
-# Step 3 — vLLM (max_model_len=50000)
-# ---------------------------------------------------------------------------
-start_vllm_cluster 50000 900 0.90 1
-python 3_compress_notes.py \
-  --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
-  --output_parquet ../data/no_phi/compressed_synthetic_notes.parquet \
-  --shard_dir ../data/no_phi/compressed_note_shards \
-  --server_urls_file "$SERVERS_FILE" \
-  --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
-  --download_dir ~/models \
-  --max_model_len 50000 --max_tokens 10000 \
-  --max_concurrent_requests 50 \
-  --patient_id_col pseudo_mrn --text_col synthetic_note
-echo 3 done
-stop_vllm_cluster
 
-# Local rename / dedup (no vLLM)
+
+# Local rename / filter (no vLLM)
 aggregator=$(cat << 'EOF'
 import pandas as pd
 compressed = pd.read_parquet('../data/no_phi/compressed_synthetic_notes.parquet')

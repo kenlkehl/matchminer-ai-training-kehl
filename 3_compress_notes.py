@@ -1088,14 +1088,6 @@ def main():
 
     print("\nBuilding final output...")
 
-    # One-off merge for older compressed outputs that did not carry the input
-    # columns. This is not needed for new outputs from this version.
-    #
-    # notes = pd.read_parquet("../data/no_phi/all_synthetic_notes.parquet").reset_index(drop=True)
-    # notes["row_idx"] = notes.index.astype(int)
-    # compressed = pd.read_parquet("../data/no_phi/compressed_synthetic_notes.parquet")
-    # merged = compressed.merge(notes, on="row_idx", how="left", suffixes=("", "_original"))
-    # merged.to_parquet("../data/no_phi/compressed_synthetic_notes_with_original_notes.parquet", index=False)
 
     include_generated_document_id = "document_id" not in input_df_for_output.columns
     generated_values: Dict[str, List[Any]] = {"row_idx": []}
