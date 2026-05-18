@@ -28,6 +28,17 @@
 
 set -uo pipefail
 
+# Many remote vLLM servers × adaptive per-server concurrency × pyarrow shard
+# writes can blow past the default 1024 FD limit, which surfaces as
+# "Too many open files" during shard writes. Raise the soft limit up to the
+# hard limit (best effort; fall back silently if denied).
+_hard_nofile=$(ulimit -Hn 2>/dev/null || echo 65536)
+if [[ "$_hard_nofile" == "unlimited" ]]; then
+    ulimit -n 1048576 || true
+else
+    ulimit -n "$_hard_nofile" || true
+fi
+
 MODEL="${MODEL:-nvidia/Gemma-4-31B-IT-NVFP4}"
 REASONING_PARSER="${REASONING_PARSER:-auto}"
 

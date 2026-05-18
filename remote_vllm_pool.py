@@ -378,6 +378,9 @@ class ResultBuffer:
         results_per_shard: int,
         shard_writer: ShardWriter,
         starting_shard_idx: int = 0,
+        requeue_fn: Optional[Callable[[List[Tuple[Any, Any]]], Awaitable[None]]] = None,
+        write_retry_attempts: int = 5,
+        write_retry_initial_sleep: float = 1.0,
     ):
         self._buf: List[Tuple[Any, Any]] = []
         self._lock = asyncio.Lock()
@@ -390,6 +393,13 @@ class ResultBuffer:
         # by run_pool to identify items that never finished so it can write
         # placeholders for them rather than wait forever.
         self.completed_ids: set = set()
+        # Called with the list of (item_id, result) tuples whose shard write
+        # permanently failed; the callback should put them back on the work
+        # queue. Without this, failed-shard items would be silently lost
+        # (they're already in completed_ids by the time _call_writer runs).
+        self._requeue_fn = requeue_fn
+        self._write_retry_attempts = max(1, int(write_retry_attempts))
+        self._write_retry_initial_sleep = max(0.1, float(write_retry_initial_sleep))
 
     @property
     def buf_size(self) -> int:
@@ -422,19 +432,58 @@ class ResultBuffer:
 
     async def _call_writer(self, payload: List[Tuple[Any, Any]], idx: int) -> None:
         # Run sync writer in a thread so disk I/O doesn't block the loop.
-        # Note: on failure the items in `payload` are DROPPED (the buffer
-        # was already cleared in add()), so log loudly — the caller's
-        # `except Exception` will otherwise swallow the cause and only
-        # requeue the one item that triggered the flush.
-        try:
-            await asyncio.to_thread(self._writer, payload, idx)
-        except Exception as e:
+        # Retry transient failures (e.g. EMFILE under FD pressure) with
+        # exponential backoff. If still failing, hand the payload back to
+        # the requeue callback so the items can be re-inferenced; otherwise
+        # those rows would be silently lost (they're already in
+        # completed_ids by the time we get here).
+        last_err: Optional[BaseException] = None
+        for attempt in range(self._write_retry_attempts):
+            try:
+                await asyncio.to_thread(self._writer, payload, idx)
+                self.total_written += len(payload)
+                return
+            except Exception as e:
+                last_err = e
+                if attempt + 1 < self._write_retry_attempts:
+                    sleep_s = self._write_retry_initial_sleep * (2 ** attempt)
+                    print(
+                        f"[remote_vllm_pool] shard writer failed for "
+                        f"shard_idx={idx} (attempt {attempt + 1}/"
+                        f"{self._write_retry_attempts}): {e!r}; "
+                        f"retrying in {sleep_s:.1f}s"
+                    )
+                    await asyncio.sleep(sleep_s)
+                    continue
+
+        ids = [iid for iid, _ in payload]
+        async with self._lock:
+            for iid in ids:
+                self.completed_ids.discard(iid)
+        if self._requeue_fn is not None:
             print(
                 f"[remote_vllm_pool] CRITICAL: shard writer failed for "
-                f"shard_idx={idx}, dropping {len(payload)} buffered item(s): {e!r}"
+                f"shard_idx={idx} after {self._write_retry_attempts} attempts "
+                f"({last_err!r}); requeuing {len(payload)} item(s) for retry."
             )
-            raise
-        self.total_written += len(payload)
+            try:
+                await self._requeue_fn(payload)
+                return
+            except Exception as e:
+                print(
+                    f"[remote_vllm_pool] requeue callback failed for "
+                    f"shard_idx={idx}: {e!r}; the {len(payload)} item(s) "
+                    f"are now lost."
+                )
+                raise
+        else:
+            print(
+                f"[remote_vllm_pool] CRITICAL: shard writer failed for "
+                f"shard_idx={idx} after {self._write_retry_attempts} attempts "
+                f"and no requeue_fn was set; dropping {len(payload)} item(s): "
+                f"{last_err!r}"
+            )
+            raise last_err  # type: ignore[misc]
 
 
 # -------------------------
@@ -679,10 +728,25 @@ async def run_pool(
         return 0
     all_ids = set(payload_by_id.keys())
 
+    async def _requeue_failed_shard(payload: List[Tuple[Any, Any]]) -> None:
+        # Put items back on the work_queue with attempt=0 so a permanent
+        # shard-write failure (e.g. exhausted FD-pressure retries) doesn't
+        # silently lose them. Items have already been removed from
+        # completed_ids by _call_writer.
+        for item_id, _result in payload:
+            payload_for_item = payload_by_id.get(item_id)
+            if payload_for_item is None:
+                # Should not happen: items in a shard payload were always
+                # enqueued in this run.
+                print(f"[pool] cannot requeue unknown item_id {item_id!r}")
+                continue
+            await work_queue.put((item_id, payload_for_item, 0))
+
     results = ResultBuffer(
         results_per_shard=results_per_shard,
         shard_writer=shard_writer,
         starting_shard_idx=starting_shard_idx,
+        requeue_fn=_requeue_failed_shard,
     )
 
     stop_event = asyncio.Event()
