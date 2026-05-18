@@ -39,6 +39,15 @@ or pack multiple flags into one shell-quoted string):
         --vllm-arg "--gpu-memory-utilization 0.92" \
         --vllm-arg "--dtype bfloat16"
 
+Example: use the GCP-orchestrated dynamic vLLM pool from the repository root.
+
+    python label_imaging_reports.py \
+        --input ../../data/no_phi/synthetic_imaging.parquet \
+        --model Qwen/Qwen2.5-72B-Instruct \
+        --server_urls_file /tmp/mmai_gcp_servers.json \
+        --max_concurrent_per_server 50 \
+        --results_per_shard 200
+
 Inputs may be Parquet, CSV, TSV, JSONL, JSON, a single TXT file, or a directory
 of TXT files. Use --resume to skip record_ids already present in the output.
 """

@@ -4,7 +4,8 @@ GCP-based vLLM orchestrator for the matchminer-ai-training pipeline.
 
 This program is invoked by train_all_gcp.sh around each vLLM step. It:
 
-  - Starts a configurable list of GCP instances (worker VMs);
+  - Ensures a configurable list of GCP instances (worker VMs) are running,
+    reusing workers that are already RUNNING;
   - SSHes into each instance to count GPUs and launch one vLLM OpenAI
     server per (gpus_per_server) GPU group;
   - Writes the canonical list of healthy server URLs to a JSON file
@@ -25,11 +26,11 @@ replace `networkInterfaces[0].networkIP` with
 
 Subcommands
 -----------
-  start-instances  Start every instance in the file (parallel). Exit
-                   when all are RUNNING (or marked unreachable).
+  start-instances  Ensure every instance in the file is RUNNING (parallel),
+                   skipping workers that are already RUNNING.
   stop-instances   Stop every instance in the file (parallel).
-  serve            The main loop. Start instances, launch vLLM servers,
-                   write/maintain the servers JSON, restart dead
+  serve            The main loop. Ensure instances are running, launch vLLM
+                   servers, write/maintain the servers JSON, restart dead
                    things. Runs until SIGTERM/SIGINT.
   wait-for-ready   Poll the servers JSON until at least one healthy
                    server is present (or timeout). Used by bash.
@@ -83,6 +84,14 @@ LOG_FILE_FMT = "/tmp/mmai_vllm_{port}.log"
 class InstanceSpec:
     name: str
     zone: str
+
+
+@dataclass
+class EnsureInstanceResult:
+    ok: bool
+    started: bool
+    status: str
+    message: str = ""
 
 
 def parse_instances_file(path: str) -> List[InstanceSpec]:
@@ -155,6 +164,114 @@ async def gcloud_describe(name: str, zone: str) -> Optional[dict]:
         return json.loads(out)
     except json.JSONDecodeError:
         return None
+
+
+async def wait_for_instance_running(
+    spec: InstanceSpec,
+    *,
+    timeout: float = 600.0,
+    poll_interval: float = 10.0,
+) -> Tuple[bool, str]:
+    """Poll GCE until the instance reports RUNNING, or return the last status."""
+    deadline = time.monotonic() + timeout
+    last_status = "UNKNOWN"
+    while True:
+        desc = await gcloud_describe(spec.name, spec.zone)
+        last_status = (desc or {}).get("status", "UNKNOWN")
+        if last_status == "RUNNING":
+            return True, last_status
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, last_status
+        await asyncio.sleep(min(poll_interval, remaining))
+
+
+async def wait_while_instance_status(
+    spec: InstanceSpec,
+    statuses: set[str],
+    *,
+    timeout: float = 120.0,
+    poll_interval: float = 10.0,
+) -> str:
+    """Poll until the instance leaves one of the given statuses."""
+    deadline = time.monotonic() + timeout
+    last_status = "UNKNOWN"
+    while True:
+        desc = await gcloud_describe(spec.name, spec.zone)
+        last_status = (desc or {}).get("status", "UNKNOWN")
+        if last_status not in statuses:
+            return last_status
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return last_status
+        await asyncio.sleep(min(poll_interval, remaining))
+
+
+async def ensure_instance_running(spec: InstanceSpec) -> EnsureInstanceResult:
+    """Make the instance RUNNING, without issuing a start for an already-running VM."""
+    desc = await gcloud_describe(spec.name, spec.zone)
+    status = (desc or {}).get("status", "UNKNOWN")
+
+    if status == "RUNNING":
+        return EnsureInstanceResult(
+            ok=True,
+            started=False,
+            status=status,
+            message="already RUNNING; reusing",
+        )
+
+    if status in {"PROVISIONING", "STAGING", "REPAIRING"}:
+        ok, final_status = await wait_for_instance_running(spec)
+        return EnsureInstanceResult(
+            ok=ok,
+            started=False,
+            status=final_status,
+            message=(
+                f"already starting ({status}); reached RUNNING"
+                if ok else f"already starting ({status}); timed out at {final_status}"
+            ),
+        )
+
+    if status in {"STOPPING", "SUSPENDING"}:
+        final_status = await wait_while_instance_status(
+            spec,
+            {"STOPPING", "SUSPENDING"},
+        )
+        if final_status == "RUNNING":
+            return EnsureInstanceResult(
+                ok=True,
+                started=False,
+                status=final_status,
+                message=f"was {status}; reached RUNNING",
+            )
+        if final_status in {"STOPPING", "SUSPENDING"}:
+            return EnsureInstanceResult(
+                ok=False,
+                started=False,
+                status=final_status,
+                message=f"timed out waiting for {status} to finish",
+            )
+        status = final_status
+
+    ok, err = await gcloud_start(spec.name, spec.zone)
+    if not ok:
+        return EnsureInstanceResult(
+            ok=False,
+            started=False,
+            status=status,
+            message=f"start failed from {status}: {err}",
+        )
+
+    ok, final_status = await wait_for_instance_running(spec)
+    return EnsureInstanceResult(
+        ok=ok,
+        started=True,
+        status=final_status,
+        message=(
+            "started"
+            if ok else f"start command returned but status is {final_status}"
+        ),
+    )
 
 
 def _internal_ip(desc: dict) -> Optional[str]:
@@ -589,15 +706,12 @@ async def bring_up_worker(
     has one vLLM server per GPU group. Leaves slots in `state.slots`."""
     state.last_attempt_ts = time.monotonic()
 
-    desc = await gcloud_describe(state.spec.name, state.spec.zone)
-    status = (desc or {}).get("status", "UNKNOWN")
-    if status != "RUNNING":
-        print(f"[orch] {state.spec.name}: status={status}; starting...")
-        ok, err = await gcloud_start(state.spec.name, state.spec.zone)
-        if not ok:
-            print(f"[orch] {state.spec.name}: start failed: {err}")
-            state.status = "error"
-            return
+    ensure_result = await ensure_instance_running(state.spec)
+    print(f"[orch] {state.spec.name}: {ensure_result.message}")
+    if not ensure_result.ok:
+        state.status = "error"
+        return
+    if ensure_result.started:
         # SSH may not be ready immediately; loop a couple times on nvidia-smi.
         await asyncio.sleep(10.0)
 
@@ -773,23 +887,25 @@ async def relaunch_dead_local_slots(
 
 async def cmd_start_instances(args) -> int:
     specs = parse_instances_file(args.instances_file)
-    print(f"[orch] starting {len(specs)} instance(s)...")
+    print(f"[orch] ensuring {len(specs)} instance(s) are RUNNING...")
     results = await asyncio.gather(
-        *[gcloud_start(s.name, s.zone) for s in specs],
+        *[ensure_instance_running(s) for s in specs],
         return_exceptions=True,
     )
     n_ok = 0
+    n_started = 0
     for s, r in zip(specs, results):
         if isinstance(r, Exception):
             print(f"[orch] {s.name}: exception {r}")
             continue
-        ok, err = r
-        if ok:
+        if r.ok:
             n_ok += 1
-            print(f"[orch] {s.name}: started")
+            if r.started:
+                n_started += 1
+            print(f"[orch] {s.name}: {r.message}")
         else:
-            print(f"[orch] {s.name}: start failed: {err}")
-    print(f"[orch] {n_ok}/{len(specs)} instance(s) started")
+            print(f"[orch] {s.name}: {r.message}")
+    print(f"[orch] {n_ok}/{len(specs)} instance(s) RUNNING ({n_started} newly started)")
     return 0 if n_ok > 0 else 1
 
 
@@ -1027,7 +1143,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--instances-file", required=True,
                         help="File with one 'name:zone' line per worker.")
 
-    sp = sub.add_parser("start-instances", help="Start every instance in the file.")
+    sp = sub.add_parser("start-instances", help="Ensure every instance in the file is RUNNING.")
     add_instances(sp)
 
     sp = sub.add_parser("stop-instances", help="Stop every instance in the file.")

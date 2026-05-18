@@ -10,6 +10,7 @@ Usage:
 
 import os
 import argparse
+import re
 from datetime import datetime
 
 import numpy as np
@@ -23,15 +24,45 @@ from transformers import AutoTokenizer, AutoModel, get_scheduler
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve
 from tqdm import tqdm
 
+from teacher_label_utils import (
+    cancer_presence_label,
+    field_code,
+    labels_are_usable,
+    merge_labels_with_notes,
+    parse_labels_json,
+    progression_label,
+    read_table,
+    response_label,
+    split_train_val_test,
+)
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 OUTCOME_COLUMNS = [
     'any_cancer', 'response', 'progression',
-    'brain_met', 'bone_met', 'adrenal_met',
-    'liver_met', 'lung_met', 'node_met', 'peritoneal_met',
+    'brain_involved_with_cancer',
+    'bone_involved_with_cancer',
+    'adrenal_involved_with_cancer',
+    'liver_involved_with_cancer',
+    'lung_involved_with_cancer',
+    'node_involved_with_cancer',
+    'peritoneal_involved_with_cancer',
 ]
+SITE_COLUMNS = OUTCOME_COLUMNS[3:]
+LEGACY_SITE_COLUMN_MAP = {
+    'brain_met': 'brain_involved_with_cancer',
+    'bone_met': 'bone_involved_with_cancer',
+    'adrenal_met': 'adrenal_involved_with_cancer',
+    'liver_met': 'liver_involved_with_cancer',
+    'lung_met': 'lung_involved_with_cancer',
+    'node_met': 'node_involved_with_cancer',
+    'peritoneal_met': 'peritoneal_involved_with_cancer',
+}
 MODEL_NAME = 'answerdotai/ModernBERT-base'
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../../data/no_phi'))
+DEFAULT_DATA_PATH = os.path.join(DATA_DIR, 'synthetic_imaging_vllm_labeled.parquet')
+DEFAULT_NOTES_PATH = os.path.join(DATA_DIR, 'synthetic_imaging.parquet')
 
 
 def parse_args():
@@ -51,8 +82,11 @@ def parse_args():
 
     # Paths
     parser.add_argument('--data_path', type=str,
-                        default=os.path.join(SCRIPT_DIR, '../../../labels/imaging_labels_with_text.csv'),
-                        help='Path to training data CSV')
+                        default=DEFAULT_DATA_PATH,
+                        help='Path to VLLM-labeled synthetic imaging parquet, or legacy flat CSV/parquet')
+    parser.add_argument('--notes_path', type=str,
+                        default=DEFAULT_NOTES_PATH,
+                        help='Synthetic imaging notes parquet used to join text/split onto VLLM label outputs')
     parser.add_argument('--model_dir', type=str, default=os.path.join(SCRIPT_DIR, '../../../models'),
                         help='Directory to save model weights')
     parser.add_argument('--model_name', type=str, default='modernbert_imaging_teacher.model',
@@ -75,6 +109,7 @@ def parse_args():
 
     # Resolve paths
     args.data_path = os.path.abspath(args.data_path)
+    args.notes_path = os.path.abspath(args.notes_path)
     args.model_dir = os.path.abspath(args.model_dir)
     args.output_dir = os.path.abspath(args.output_dir)
 
@@ -134,22 +169,143 @@ class ImagingTeacherModel(nn.Module):
         return [self.heads[name](pooled) for name in OUTCOME_COLUMNS]
 
 
-def load_data(data_path):
+def has_synthetic_labels(df):
+    return 'labels_json' in df.columns
+
+
+def text_blob(*parts):
+    return ' '.join(str(part) for part in parts if part not in (None, '')).lower()
+
+
+def site_is_excluded(site):
+    blob = text_blob(
+        site.get('site_text'),
+        site.get('icdo_topography_label'),
+        site.get('basis'),
+        site.get('evidence'),
+    )
+    return any(
+        re.search(pattern, blob)
+        for pattern in (
+            r'\bresolved\b',
+            r'\bno longer\b',
+            r'\bindeterminate\b',
+            r'\bequivocal\b',
+            r'\bpossible\b',
+            r'\bquestionable\b',
+            r'\brule out\b',
+        )
+    )
+
+
+def site_targets_from_labels(labels, any_cancer):
+    values = {name: float('nan') for name in SITE_COLUMNS}
+    if pd.isna(any_cancer):
+        return values
+    values = {name: 0.0 for name in SITE_COLUMNS}
+    if any_cancer != 1:
+        return values
+
+    sites = labels.get('image_cancer_sites') or []
+    if not isinstance(sites, list):
+        return values
+
+    for site in sites:
+        if not isinstance(site, dict) or site_is_excluded(site):
+            continue
+        code = str(site.get('icdo_topography_code') or site.get('code') or '').upper().strip()
+        blob = text_blob(
+            site.get('site_text'),
+            site.get('icdo_topography_label'),
+            site.get('basis'),
+            site.get('evidence'),
+        )
+
+        if code.startswith(('C70', 'C71')) or re.search(r'\b(brain|cerebr|cerebell|intracranial|leptomening|meningeal|dural)\b', blob):
+            values['brain_involved_with_cancer'] = 1.0
+        if code.startswith(('C40', 'C41')) or re.search(r'\b(bone|osseous|skeletal|spine|spinal|vertebr|rib|skull|sacrum|iliac|femur|humerus|sclerotic|lytic)\b', blob):
+            values['bone_involved_with_cancer'] = 1.0
+        if code.startswith('C74') or re.search(r'\badrenal\b', blob):
+            values['adrenal_involved_with_cancer'] = 1.0
+        if code.startswith('C22') or re.search(r'\b(liver|hepatic)\b', blob):
+            values['liver_involved_with_cancer'] = 1.0
+        if code.startswith('C34') or re.search(r'\b(lung|pulmonary)\b', blob):
+            values['lung_involved_with_cancer'] = 1.0
+        if code.startswith('C77') or re.search(r'\b(lymph|node|nodes|nodal|adenopathy|lymphadenopathy)\b', blob):
+            values['node_involved_with_cancer'] = 1.0
+        if code.startswith(('C48.1', 'C48.2', 'C48.8')) or re.search(r'\b(peritone|omentum|omental|mesenter|carcinomatosis|ascites)\b', blob):
+            values['peritoneal_involved_with_cancer'] = 1.0
+
+    return values
+
+
+def flatten_synthetic_labels(df, notes_path):
+    df = merge_labels_with_notes(df, notes_path)
+    rows = []
+    for _, row in df.iterrows():
+        labels = parse_labels_json(row.get('labels_json'))
+        flattened = {name: float('nan') for name in OUTCOME_COLUMNS}
+        if labels and labels_are_usable(labels):
+            any_cancer = cancer_presence_label(field_code(labels, 'image_ca'))
+            status = field_code(labels, 'image_overall')
+            flattened['any_cancer'] = any_cancer
+            flattened['response'] = response_label(any_cancer, status)
+            flattened['progression'] = progression_label(any_cancer, status)
+            flattened.update(site_targets_from_labels(labels, any_cancer))
+        rows.append(flattened)
+
+    label_df = pd.DataFrame(rows)
+    df = pd.concat([df.reset_index(drop=True), label_df], axis=1)
+    df['text'] = df['synthetic_note'].fillna('').astype(str).str.lower()
+    return df
+
+
+def prepare_legacy_labels(df):
+    for old_name, new_name in LEGACY_SITE_COLUMN_MAP.items():
+        if new_name not in df.columns and old_name in df.columns:
+            df[new_name] = df[old_name]
+
+    if 'class_status' in df.columns and 'progression' in df.columns:
+        df.loc[df['class_status'] == 3, 'progression'] = 1
+
+    if 'text' not in df.columns:
+        if 'synthetic_note' in df.columns:
+            df['text'] = df['synthetic_note']
+        elif 'report_text' in df.columns:
+            df['text'] = df['report_text']
+        else:
+            raise SystemExit("Legacy imaging data must contain text, synthetic_note, or report_text.")
+
+    return df
+
+
+def load_data(data_path, notes_path=None):
     print(f'Loading data from {data_path}...')
-    df = pd.read_csv(data_path)
+    df = read_table(data_path)
     print(f'  Total rows: {len(df)}')
 
-    # Remap mixed response to progression
-    df.loc[df['class_status'] == 3, 'progression'] = 1
+    if has_synthetic_labels(df):
+        if not notes_path:
+            raise SystemExit("--notes_path is required when --data_path contains nested VLLM labels.")
+        df = flatten_synthetic_labels(df, notes_path)
+    else:
+        df = prepare_legacy_labels(df)
 
-    # Lowercase text
-    df['text'] = df['text'].str.lower()
+    missing = [name for name in OUTCOME_COLUMNS if name not in df.columns]
+    if missing:
+        raise SystemExit(f"Training data is missing outcome column(s): {', '.join(missing)}")
 
-    train_df = df[df['split'] == 'train'].copy()
-    val_df = df[df['split'] == 'validation'].copy()
-    test_df = df[df['split'] == 'test'].copy()
+    for name in OUTCOME_COLUMNS:
+        df[name] = pd.to_numeric(df[name], errors='coerce')
+    df['text'] = df['text'].fillna('').astype(str).str.lower()
+
+    train_df, val_df, test_df = split_train_val_test(df)
 
     print(f'  Train: {len(train_df)}, Validation: {len(val_df)}, Test: {len(test_df)}')
+    for name in OUTCOME_COLUMNS:
+        valid = df[name].notna().sum()
+        positives = int((df[name] == 1).sum())
+        print(f'  {name}: valid={valid}, positive={positives}')
     return train_df, val_df, test_df
 
 
@@ -439,7 +595,7 @@ def main():
     print(f'  eval_only={args.eval_only}, run_test={args.run_test}')
 
     # Load data
-    train_df, val_df, test_df = load_data(args.data_path)
+    train_df, val_df, test_df = load_data(args.data_path, args.notes_path)
 
     # Initialize model
     print(f'\nInitializing model ({MODEL_NAME})...')

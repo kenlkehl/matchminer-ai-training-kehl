@@ -23,11 +23,26 @@ from transformers import AutoTokenizer, AutoModel, get_scheduler
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve
 from tqdm import tqdm
 
+from teacher_label_utils import (
+    cancer_presence_label,
+    field_code,
+    labels_are_usable,
+    merge_labels_with_notes,
+    parse_labels_json,
+    progression_label,
+    read_table,
+    response_label,
+    split_train_val_test,
+)
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 OUTCOME_COLUMNS = ['any_cancer', 'response', 'progression']
 MODEL_NAME = 'answerdotai/ModernBERT-base'
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../../data/no_phi'))
+DEFAULT_DATA_PATH = os.path.join(DATA_DIR, 'synthetic_clinical_vllm_labeled.parquet')
+DEFAULT_NOTES_PATH = os.path.join(DATA_DIR, 'synthetic_clinical.parquet')
 
 
 def parse_args():
@@ -49,8 +64,11 @@ def parse_args():
 
     # Paths
     parser.add_argument('--data_path', type=str,
-                        default=os.path.join(SCRIPT_DIR, '../../../labels/medonc_labels_with_text.csv'),
-                        help='Path to training data CSV')
+                        default=DEFAULT_DATA_PATH,
+                        help='Path to VLLM-labeled synthetic clinical-note parquet, or legacy flat CSV/parquet')
+    parser.add_argument('--notes_path', type=str,
+                        default=DEFAULT_NOTES_PATH,
+                        help='Synthetic clinical-note parquet used to join text/split onto VLLM label outputs')
     parser.add_argument('--model_dir', type=str, default=os.path.join(SCRIPT_DIR, '../../../models'),
                         help='Directory to save model weights')
     parser.add_argument('--model_name', type=str, default='modernbert_medonc_teacher.model',
@@ -73,6 +91,7 @@ def parse_args():
 
     # Resolve paths
     args.data_path = os.path.abspath(args.data_path)
+    args.notes_path = os.path.abspath(args.notes_path)
     args.model_dir = os.path.abspath(args.model_dir)
     args.output_dir = os.path.abspath(args.output_dir)
 
@@ -92,7 +111,7 @@ class MedOncDataset(Dataset):
         row = self.data.iloc[index]
 
         encoded = self.tokenizer(
-            row['RPT_TEXT'],
+            row['text'],
             padding='max_length',
             truncation=True,
             max_length=self.max_seq_length,
@@ -132,19 +151,70 @@ class MedOncTeacherModel(nn.Module):
         return [self.heads[name](pooled) for name in OUTCOME_COLUMNS]
 
 
-def load_data(data_path):
+def has_synthetic_labels(df):
+    return 'labels_json' in df.columns
+
+
+def flatten_synthetic_labels(df, notes_path):
+    df = merge_labels_with_notes(df, notes_path)
+    rows = []
+    for _, row in df.iterrows():
+        labels = parse_labels_json(row.get('labels_json'))
+        flattened = {name: float('nan') for name in OUTCOME_COLUMNS}
+        if labels and labels_are_usable(labels):
+            any_cancer = cancer_presence_label(field_code(labels, 'md_ca'))
+            status = field_code(labels, 'md_ca_status')
+            flattened['any_cancer'] = any_cancer
+            flattened['response'] = response_label(any_cancer, status)
+            flattened['progression'] = progression_label(any_cancer, status)
+        rows.append(flattened)
+
+    label_df = pd.DataFrame(rows)
+    df = pd.concat([df.reset_index(drop=True), label_df], axis=1)
+    df['text'] = df['synthetic_note'].fillna('').astype(str).str.lower()
+    return df
+
+
+def prepare_legacy_labels(df):
+    if 'text' not in df.columns:
+        if 'RPT_TEXT' in df.columns:
+            df['text'] = df['RPT_TEXT']
+        elif 'synthetic_note' in df.columns:
+            df['text'] = df['synthetic_note']
+        elif 'note_text' in df.columns:
+            df['text'] = df['note_text']
+        else:
+            raise SystemExit("Legacy medical oncology data must contain text, RPT_TEXT, synthetic_note, or note_text.")
+    return df
+
+
+def load_data(data_path, notes_path=None):
     print(f'Loading data from {data_path}...')
-    df = pd.read_csv(data_path)
+    df = read_table(data_path)
     print(f'  Total rows: {len(df)}')
 
-    # Lowercase text
-    df['text'] = df['RPT_TEXT'].str.lower()
+    if has_synthetic_labels(df):
+        if not notes_path:
+            raise SystemExit("--notes_path is required when --data_path contains nested VLLM labels.")
+        df = flatten_synthetic_labels(df, notes_path)
+    else:
+        df = prepare_legacy_labels(df)
 
-    train_df = df[df['split'] == 'train'].copy()
-    val_df = df[df['split'] == 'validation'].copy()
-    test_df = df[df['split'] == 'test'].copy()
+    missing = [name for name in OUTCOME_COLUMNS if name not in df.columns]
+    if missing:
+        raise SystemExit(f"Training data is missing outcome column(s): {', '.join(missing)}")
+
+    for name in OUTCOME_COLUMNS:
+        df[name] = pd.to_numeric(df[name], errors='coerce')
+    df['text'] = df['text'].fillna('').astype(str).str.lower()
+
+    train_df, val_df, test_df = split_train_val_test(df)
 
     print(f'  Train: {len(train_df)}, Validation: {len(val_df)}, Test: {len(test_df)}')
+    for name in OUTCOME_COLUMNS:
+        valid = df[name].notna().sum()
+        positives = int((df[name] == 1).sum())
+        print(f'  {name}: valid={valid}, positive={positives}')
     return train_df, val_df, test_df
 
 
@@ -442,7 +512,7 @@ def main():
     print(f'  eval_only={args.eval_only}, run_test={args.run_test}')
 
     # Load data
-    train_df, val_df, test_df = load_data(args.data_path)
+    train_df, val_df, test_df = load_data(args.data_path, args.notes_path)
 
     # Initialize model
     print(f'\nInitializing model ({MODEL_NAME})...')

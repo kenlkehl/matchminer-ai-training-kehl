@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import asyncio
 import csv
 import json
 import os
@@ -142,11 +143,82 @@ def add_common_args(
         ),
     )
 
+    remote_group = parser.add_argument_group("Remote vLLM pool (GCP orchestrator)")
+    remote_group.add_argument(
+        "--server_urls",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated URLs of existing vLLM servers, e.g. "
+            "'http://10.0.0.5:8000/v1,http://10.0.0.6:8000/v1'. "
+            "Use this or --server_urls_file for the remote pool workflow."
+        ),
+    )
+    remote_group.add_argument(
+        "--server_urls_file",
+        type=str,
+        default=None,
+        help="Path to a JSON file maintained by gcp_vllm_orchestrator.py with healthy server URLs.",
+    )
+    remote_group.add_argument(
+        "--server_urls_refresh",
+        type=float,
+        default=15.0,
+        help="Seconds between re-reads of --server_urls_file.",
+    )
+    remote_group.add_argument(
+        "--max_concurrent_per_server",
+        type=int,
+        default=50,
+        help="Remote-pool per-server adaptive concurrency ceiling.",
+    )
+    remote_group.add_argument(
+        "--concurrency_success_threshold",
+        type=int,
+        default=3,
+        help="Successful remote requests needed before increasing a server concurrency limit.",
+    )
+    remote_group.add_argument(
+        "--concurrency_increase_step",
+        type=int,
+        default=2,
+        help="Adaptive remote concurrency slots to add after a clean success streak.",
+    )
+    remote_group.add_argument(
+        "--concurrency_backoff_factor",
+        type=float,
+        default=0.5,
+        help="Multiplier applied to a remote server's concurrency limit after request errors.",
+    )
+    remote_group.add_argument(
+        "--results_per_shard",
+        type=int,
+        default=200,
+        help="Completed remote labeling records per JSONL shard.",
+    )
+    remote_group.add_argument(
+        "--remote-shard-dir",
+        default=None,
+        help="Directory for remote labeling JSONL shards. Defaults to <output stem>_remote_shards.",
+    )
+    remote_group.add_argument(
+        "--max_attempts",
+        type=int,
+        default=200,
+        help="Remote-pool max attempts per record before writing an error placeholder.",
+    )
+    remote_group.add_argument(
+        "--status-interval",
+        type=float,
+        default=30.0,
+        help="Remote-pool status logging interval in seconds.",
+    )
+
     request_group = parser.add_argument_group("request")
     request_group.add_argument("--workers", type=int, default=4, help="Concurrent labeling requests.")
     request_group.add_argument("--temperature", type=float, default=0.0)
     request_group.add_argument("--max-tokens", type=int, default=10000)
-    request_group.add_argument("--request-timeout", type=float, default=240.0)
+    request_group.add_argument("--request-timeout", "--request_timeout", type=float, default=240.0)
     request_group.add_argument("--retries", type=int, default=2, help="Retries per record after the first attempt.")
     request_group.add_argument("--retry-sleep", type=float, default=2.0, help="Base seconds to sleep between retries.")
     request_group.add_argument(
@@ -194,6 +266,23 @@ def flatten_server_urls(values: list[str]) -> list[str]:
     for value in values:
         urls.extend(part.strip() for part in value.split(",") if part.strip())
     return urls
+
+
+def parse_remote_urls(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [normalize_base_url(url) for url in value.split(",") if url.strip()]
+
+
+def remote_mode(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "server_urls", None) or getattr(args, "server_urls_file", None))
+
+
+def validate_server_mode_args(args: argparse.Namespace) -> None:
+    if getattr(args, "server_urls", None) and getattr(args, "server_urls_file", None):
+        raise SystemExit("Specify only one of --server_urls / --server_urls_file.")
+    if remote_mode(args) and (args.start_vllm or args.server_url):
+        raise SystemExit("Remote mode uses --server_urls or --server_urls_file; do not combine it with --start-vllm or --server-url.")
 
 
 def parse_gpu_ids(gpus: str) -> list[str]:
@@ -645,6 +734,52 @@ def completed_record_ids(output_path: Path, encoding: str) -> set[str]:
     return done
 
 
+def iter_jsonl_rows(path: Path, encoding: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    with path.open("r", encoding=encoding) as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
+def build_label_row(
+    *,
+    record: Record,
+    args: argparse.Namespace,
+    server_url: str | None,
+    content: str,
+    reasoning_content: str | None,
+    usage: dict[str, Any],
+    error: str | None,
+) -> dict[str, Any]:
+    parsed, parse_error = parse_json_object(content) if content else (None, None)
+    row: dict[str, Any] = {
+        "record_id": record.record_id,
+        "input_index": record.input_index,
+        "model": request_model_name(args),
+        "server_url": server_url,
+        "labels": parsed,
+        "raw_response": content,
+        "reasoning_content": reasoning_content,
+        "request_error": error,
+        "parse_error": parse_error,
+        "usage": usage,
+    }
+    if args.include_input:
+        text_keys = {args.text_field, *DEFAULT_TEXT_FIELDS}
+        row["input"] = {key: value for key, value in record.data.items() if key not in text_keys}
+    return row
+
+
 def label_one_record(
     *,
     record: Record,
@@ -678,23 +813,236 @@ def label_one_record(
                 break
             time.sleep(args.retry_sleep * (attempt + 1))
 
-    parsed, parse_error = parse_json_object(content) if content else (None, None)
-    row: dict[str, Any] = {
-        "record_id": record.record_id,
-        "input_index": record.input_index,
-        "model": request_model_name(args),
-        "server_url": base_url,
-        "labels": parsed,
-        "raw_response": content,
-        "reasoning_content": reasoning_content,
-        "request_error": error,
-        "parse_error": parse_error,
-        "usage": usage,
-    }
-    if args.include_input:
-        text_keys = {args.text_field, *DEFAULT_TEXT_FIELDS}
-        row["input"] = {key: value for key, value in record.data.items() if key not in text_keys}
-    return row
+    return build_label_row(
+        record=record,
+        args=args,
+        server_url=base_url,
+        content=content,
+        reasoning_content=reasoning_content,
+        usage=usage,
+        error=error,
+    )
+
+
+def remote_shard_dir_for(args: argparse.Namespace, output_path: Path) -> Path:
+    if args.remote_shard_dir:
+        return Path(args.remote_shard_dir)
+    return output_path.with_name(f"{output_path.stem}_remote_shards")
+
+
+def remote_shard_paths(shard_dir: Path) -> list[Path]:
+    if not shard_dir.exists():
+        return []
+    return sorted(shard_dir.glob("label_shard_*.jsonl"))
+
+
+def clear_remote_shards(shard_dir: Path) -> None:
+    if not shard_dir.exists():
+        return
+    for path in remote_shard_paths(shard_dir):
+        path.unlink()
+
+
+def completed_record_ids_in_shards(shard_dir: Path, encoding: str) -> set[str]:
+    done: set[str] = set()
+    for path in remote_shard_paths(shard_dir):
+        for row in iter_jsonl_rows(path, encoding):
+            record_id = row.get("record_id")
+            if record_id is not None:
+                done.add(str(record_id))
+    return done
+
+
+def merge_remote_jsonl(
+    *,
+    output_path: Path,
+    shard_dir: Path,
+    encoding: str,
+    include_existing_output: bool,
+) -> int:
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    sources: list[Path] = []
+    if include_existing_output and output_path.exists():
+        sources.append(output_path)
+    sources.extend(remote_shard_paths(shard_dir))
+
+    for source in sources:
+        for row in iter_jsonl_rows(source, encoding):
+            record_id = row.get("record_id")
+            if record_id is not None:
+                rows_by_id[str(record_id)] = row
+
+    def sort_key(row: dict[str, Any]) -> tuple[int, int | str]:
+        value = row.get("input_index")
+        try:
+            return (0, int(value))
+        except (TypeError, ValueError):
+            return (1, str(row.get("record_id") or ""))
+
+    rows = sorted(rows_by_id.values(), key=sort_key)
+    tmp_path = output_path.with_suffix(output_path.suffix + ".part")
+    with tmp_path.open("w", encoding=encoding, newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    os.replace(tmp_path, output_path)
+    return len(rows)
+
+
+def _usage_to_dict(usage: Any) -> dict[str, Any]:
+    if usage is None:
+        return {}
+    if isinstance(usage, dict):
+        return usage
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump(mode="json")
+    return json.loads(json.dumps(usage, default=str))
+
+
+async def run_remote_labeling_pool(
+    *,
+    args: argparse.Namespace,
+    records: list[Record],
+    build_messages: Callable[[Record, argparse.Namespace], list[dict[str, str]]],
+    shard_dir: Path,
+    starting_shard_idx: int,
+) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from remote_vllm_pool import build_registry_from_args, run_pool  # type: ignore[import-not-found]
+
+    if args.server_urls:
+        args.server_urls = ",".join(parse_remote_urls(args.server_urls))
+
+    async def work_fn(client: Any, record: Record) -> dict[str, Any]:
+        request_payload: dict[str, Any] = {
+            "model": request_model_name(args),
+            "messages": build_messages(record, args),
+            "temperature": args.temperature,
+            "max_tokens": args.max_tokens,
+        }
+        if not args.no_json_mode:
+            request_payload["response_format"] = {"type": "json_object"}
+
+        response = await asyncio.wait_for(
+            client.chat.completions.create(**request_payload),
+            timeout=float(args.request_timeout),
+        )
+        message = response.choices[0].message
+        content = message.content or ""
+        reasoning_content = getattr(message, "reasoning_content", None)
+        if reasoning_content is None:
+            reasoning_content = (getattr(message, "model_extra", None) or {}).get("reasoning_content")
+        if reasoning_content is not None and not isinstance(reasoning_content, str):
+            reasoning_content = json.dumps(reasoning_content, ensure_ascii=False)
+
+        return build_label_row(
+            record=record,
+            args=args,
+            server_url=str(getattr(client, "base_url", "")).rstrip("/") or None,
+            content=content,
+            reasoning_content=reasoning_content,
+            usage=_usage_to_dict(getattr(response, "usage", None)),
+            error=None,
+        )
+
+    def error_placeholder(record: Record, err: Exception) -> dict[str, Any]:
+        return build_label_row(
+            record=record,
+            args=args,
+            server_url=None,
+            content="",
+            reasoning_content=None,
+            usage={},
+            error=str(err),
+        )
+
+    def shard_writer(payload: list[tuple[Any, Any]], shard_idx: int) -> None:
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        out_path = shard_dir / f"label_shard_{shard_idx:06d}.jsonl"
+        tmp_path = out_path.with_suffix(".jsonl.part")
+        with tmp_path.open("w", encoding=args.encoding, newline="\n") as handle:
+            for _record_id, row in payload:
+                handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        os.replace(tmp_path, out_path)
+        print(f"[remote] wrote {out_path.name} ({len(payload)} rows)", file=sys.stderr)
+
+    registry = build_registry_from_args(args)
+    try:
+        await run_pool(
+            work_items=[(record.record_id, record) for record in records],
+            work_fn=work_fn,
+            registry=registry,
+            shard_writer=shard_writer,
+            results_per_shard=int(args.results_per_shard),
+            starting_shard_idx=starting_shard_idx,
+            max_attempts=int(args.max_attempts),
+            status_interval=float(args.status_interval),
+            error_placeholder=error_placeholder,
+        )
+    finally:
+        await registry.stop()
+
+
+def run_labeling_remote(
+    *,
+    args: argparse.Namespace,
+    records: list[Record],
+    output_path: Path,
+    build_messages: Callable[[Record, argparse.Namespace], list[dict[str, str]]],
+) -> None:
+    shard_dir = remote_shard_dir_for(args, output_path)
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    if not args.resume:
+        clear_remote_shards(shard_dir)
+
+    done: set[str] = set()
+    if args.resume:
+        done.update(completed_record_ids(output_path, args.encoding))
+        done.update(completed_record_ids_in_shards(shard_dir, args.encoding))
+        records = [record for record in records if record.record_id not in done]
+        print(f"Skipping {len(done)} completed record_id(s); {len(records)} remain.", file=sys.stderr)
+
+    existing_indices = []
+    for path in remote_shard_paths(shard_dir):
+        stem = path.stem
+        try:
+            existing_indices.append(int(stem.rsplit("_", 1)[1]))
+        except (IndexError, ValueError):
+            pass
+    starting_shard_idx = max(existing_indices, default=-1) + 1
+
+    if records:
+        print(
+            f"Remote-labeling {len(records)} record(s); shards={shard_dir}, "
+            f"results_per_shard={args.results_per_shard}.",
+            file=sys.stderr,
+        )
+        asyncio.run(
+            run_remote_labeling_pool(
+                args=args,
+                records=records,
+                build_messages=build_messages,
+                shard_dir=shard_dir,
+                starting_shard_idx=starting_shard_idx,
+            )
+        )
+    else:
+        print("No new records to label in remote mode.", file=sys.stderr)
+
+    merged = merge_remote_jsonl(
+        output_path=output_path,
+        shard_dir=shard_dir,
+        encoding=args.encoding,
+        include_existing_output=bool(args.resume),
+    )
+    print(f"Merged {merged} labeled record(s) to {output_path}", file=sys.stderr)
+
+    if not args.no_parquet:
+        parquet_path = resolve_parquet_path(args)
+        write_parquet_from_jsonl(output_path, parquet_path, encoding=args.encoding)
+        print(f"Wrote parquet copy to {parquet_path}", file=sys.stderr)
 
 
 def run_labeling(
@@ -704,8 +1052,18 @@ def run_labeling(
 ) -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    validate_server_mode_args(args)
 
     records = read_records(args)
+    if remote_mode(args):
+        run_labeling_remote(
+            args=args,
+            records=records,
+            output_path=output_path,
+            build_messages=build_messages,
+        )
+        return
+
     if args.resume:
         done = completed_record_ids(output_path, args.encoding)
         records = [record for record in records if record.record_id not in done]
@@ -808,4 +1166,3 @@ def write_parquet_from_jsonl(jsonl_path: Path, parquet_path: Path, *, encoding: 
             "or rerun with --no-parquet to skip this step."
         ) from exc
     pd.DataFrame(rows).to_parquet(parquet_path)
-
