@@ -375,12 +375,23 @@ class ResultBuffer:
         self._writer = shard_writer
         self._next_idx = int(starting_shard_idx)
         self.total_written = 0
+        # Unique item IDs that have been successfully added (i.e. work_fn
+        # returned a result or a poison-pill placeholder was recorded). Used
+        # by run_pool to identify items that never finished so it can write
+        # placeholders for them rather than wait forever.
+        self.completed_ids: set = set()
+
+    @property
+    def buf_size(self) -> int:
+        """Items added but not yet flushed to disk."""
+        return len(self._buf)
 
     async def add(self, item_id: Any, result: Any) -> None:
         flush_payload: Optional[List[Tuple[Any, Any]]] = None
         flush_idx = 0
         async with self._lock:
             self._buf.append((item_id, result))
+            self.completed_ids.add(item_id)
             if len(self._buf) >= self._results_per_shard:
                 flush_payload = self._buf
                 self._buf = []
@@ -401,7 +412,18 @@ class ResultBuffer:
 
     async def _call_writer(self, payload: List[Tuple[Any, Any]], idx: int) -> None:
         # Run sync writer in a thread so disk I/O doesn't block the loop.
-        await asyncio.to_thread(self._writer, payload, idx)
+        # Note: on failure the items in `payload` are DROPPED (the buffer
+        # was already cleared in add()), so log loudly — the caller's
+        # `except Exception` will otherwise swallow the cause and only
+        # requeue the one item that triggered the flush.
+        try:
+            await asyncio.to_thread(self._writer, payload, idx)
+        except Exception as e:
+            print(
+                f"[remote_vllm_pool] CRITICAL: shard writer failed for "
+                f"shard_idx={idx}, dropping {len(payload)} buffered item(s): {e!r}"
+            )
+            raise
         self.total_written += len(payload)
 
 
@@ -574,6 +596,9 @@ async def _status_logger(
             entries = await registry.active_entries()
             pending = work_queue.qsize()
             done = results.total_written
+            buf = results.buf_size
+            in_flight_sum = sum(e.semaphore.in_flight for e in entries)
+            completed = len(results.completed_ids)
             elapsed = time.monotonic() - start
             rate = done / elapsed if elapsed > 0 else 0.0
             per_server = ", ".join(
@@ -582,10 +607,13 @@ async def _status_logger(
                 f" ok={e.ok_count} err={e.err_count}]"
                 for e in entries
             ) or "(no active servers)"
-            remaining = max(0, total_items - done)
+            # "missing" = items not in any tracked state. If non-zero with
+            # an empty queue, the pool can never make progress without help.
+            missing = max(0, total_items - done - pending - in_flight_sum - buf)
             print(
                 f"[pool] done={done}/{total_items} pending={pending} "
-                f"in_progress={remaining - pending} rate={rate:.1f}/s "
+                f"in_flight={in_flight_sum} buf={buf} missing={missing} "
+                f"completed={completed} rate={rate:.1f}/s "
                 f"servers: {per_server}"
             )
         except Exception as e:
@@ -612,6 +640,7 @@ async def run_pool(
     status_interval: float = 30.0,
     error_placeholder: Callable[[Any, Exception], Any] = _default_error_placeholder,
     min_servers_warn_secs: float = 300.0,
+    stale_giveup_secs: float = 1800.0,
 ) -> int:
     """
     Drive `work_fn` over `work_items` using a fault-tolerant, dynamic pool
@@ -629,13 +658,16 @@ async def run_pool(
     await registry.start()
 
     work_queue: asyncio.Queue = asyncio.Queue()
+    payload_by_id: dict = {}
     total = 0
     for item_id, payload in work_items:
         work_queue.put_nowait((item_id, payload, 0))
+        payload_by_id[item_id] = payload
         total += 1
     if total == 0:
         print("[pool] no work items to process.")
         return 0
+    all_ids = set(payload_by_id.keys())
 
     results = ResultBuffer(
         results_per_shard=results_per_shard,
@@ -665,24 +697,76 @@ async def run_pool(
     )
 
     # Wait until everything has been written. We check periodically.
+    # `last_progress` measures the last time results.total_written advanced.
+    # If it stays put for `stale_giveup_secs` AND the queue is empty, we
+    # force-flush any buffered shard and (if needed) write error placeholders
+    # for items the pool never recorded — otherwise the loop would hang
+    # forever on a tiny number of lost items.
     last_progress = time.monotonic()
+    last_warned_at = last_progress
     last_done = 0
+    gave_up = False
     try:
-        while results.total_written < total:
+        while results.total_written < total and not gave_up:
             await asyncio.sleep(2.0)
             if results.total_written != last_done:
                 last_done = results.total_written
                 last_progress = time.monotonic()
-            else:
-                stale = time.monotonic() - last_progress
-                if stale > min_servers_warn_secs:
-                    active = await registry.active_entries()
+                last_warned_at = last_progress
+                continue
+            now = time.monotonic()
+            stale = now - last_progress
+            if stale > 0 and now - last_warned_at >= min_servers_warn_secs:
+                active = await registry.active_entries()
+                pending = work_queue.qsize()
+                in_flight_sum = sum(e.semaphore.in_flight for e in active)
+                completed = len(results.completed_ids)
+                print(
+                    f"[pool] no progress for {stale:.0f}s; "
+                    f"{len(active)} active server(s), "
+                    f"{pending} items pending in queue, "
+                    f"{in_flight_sum} slots in flight, "
+                    f"{completed}/{total} items completed."
+                )
+                last_warned_at = now
+            if stale >= stale_giveup_secs and work_queue.qsize() == 0:
+                # Flush whatever is in the buffer — these are real completions
+                # that just haven't reached the per-shard threshold.
+                print(f"[pool] giving up after {stale:.0f}s without progress; "
+                      f"flushing buffered shard ({results.buf_size} items).")
+                try:
+                    await results.flush()
+                except Exception as e:
+                    print(f"[pool] final flush failed: {e!r}")
+                # Any item that never reached results.add is truly lost
+                # (e.g. swallowed shard-writer exception earlier in the run).
+                # Write error placeholders so the pipeline can advance.
+                missing = all_ids - results.completed_ids
+                if missing:
+                    sample = list(missing)[:5]
                     print(
-                        f"[pool] no progress for {stale:.0f}s; "
-                        f"{len(active)} active server(s), "
-                        f"{work_queue.qsize()} items pending in queue."
+                        f"[pool] writing error placeholders for "
+                        f"{len(missing)} items the pool never recorded "
+                        f"(sample ids: {sample!r})."
                     )
-                    last_progress = time.monotonic()
+                    for item_id in missing:
+                        payload = payload_by_id.get(item_id)
+                        ph = error_placeholder(
+                            payload,
+                            RuntimeError(
+                                f"pool gave up after {stale:.0f}s without progress"
+                            ),
+                        )
+                        try:
+                            await results.add(item_id, ph)
+                        except Exception as e:
+                            print(f"[pool] failed to record placeholder for "
+                                  f"{item_id!r}: {e!r}")
+                    try:
+                        await results.flush()
+                    except Exception as e:
+                        print(f"[pool] flush after placeholders failed: {e!r}")
+                gave_up = True
     finally:
         stop_event.set()
         await results.flush()
