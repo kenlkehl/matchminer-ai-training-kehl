@@ -65,7 +65,7 @@ def add_remote_cli_args(parser: argparse.ArgumentParser) -> None:
         help="Seconds between re-reads of --server_urls_file.",
     )
     g.add_argument(
-        "--max_concurrent_per_server", type=int, default=50,
+        "--max_concurrent_per_server", type=int, default=100,
         help="Per-server concurrency ceiling (adaptive; backs off on errors).",
     )
     g.add_argument(
