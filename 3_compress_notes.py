@@ -41,11 +41,11 @@ python 3_compress_notes.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/compressed_notes.parquet \
   --shard_dir ../data/no_phi/compressed_note_shards \
-  --model openai/gpt-oss-120b \
+  --model nvidia/Gemma-4-26B-A4B-NVFP4  \
   --download_dir ~/models \
   --server_urls http://localhost:8000/v1,http://localhost:8001/v1 \
-  --max_model_len 25000 \
-  --max_tokens 1024
+  --max_model_len 50000 \
+  --max_tokens 10000
 """
 
 import argparse
