@@ -26,15 +26,15 @@ python 3_compress_notes.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/compressed_notes.parquet \
   --shard_dir ../data/no_phi/compressed_note_shards \
-  --model openai/gpt-oss-120b \
+  --model nvidia/Gemma-4-26B-A4B-NVFP4 \
   --download_dir ~/models \
   --gpu_ids 0,1,2,3,4,5,6,7 \
   --gpus_per_server 1 \
-  --max_model_len 25000 \
-  --max_tokens 1024 \
+  --max_model_len 50000 \
+  --max_tokens 10000 \
   --patient_id_col pseudo_mrn \
   --text_col synthetic_note \
-  --max_concurrent_requests 25
+  --max_concurrent_requests 100
 
 # Use existing external servers:
 python 3_compress_notes.py \
