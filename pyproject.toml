@@ -13,6 +13,7 @@ dependencies = [
     "openai>=2.8",
     "pandas>=2.3",
     "peft>=0.18",
+    "pillow>=11.0",
     "pyarrow>=23.0",
     "requests>=2.32",
     "scikit-learn>=1.8",
