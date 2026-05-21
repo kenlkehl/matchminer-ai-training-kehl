@@ -100,6 +100,16 @@ def add_common_args(
         help="Path to write a parquet copy of the JSONL output. Defaults to the --output path with .parquet extension.",
     )
     input_group.add_argument("--no-parquet", action="store_true", help="Skip writing the parquet copy of the output JSONL.")
+    input_group.add_argument(
+        "--flush-every",
+        type=int,
+        default=50,
+        help=(
+            "Buffer this many completed labeling rows before writing+flushing to the output JSONL. "
+            "Larger values reduce NFS write load; smaller values lose less work on crash. "
+            "Set to 1 to flush after every record."
+        ),
+    )
 
     model_group = parser.add_argument_group("model/server")
     model_group.add_argument("--model", required=True, help="Model name/path. For existing servers, this must match the served model name.")
@@ -1083,6 +1093,7 @@ def run_labeling(
         f"Labeling {len(records)} record(s) with {len(server_urls)} server(s), workers={max_workers}.",
         file=sys.stderr,
     )
+    flush_every = max(1, int(getattr(args, "flush_every", 1) or 1))
     with output_path.open(mode, encoding=args.encoding, newline="\n") as handle:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
@@ -1097,12 +1108,24 @@ def run_labeling(
                     )
                 )
 
+            pending_lines: list[str] = []
+
+            def flush_pending() -> None:
+                if not pending_lines:
+                    return
+                handle.write("".join(pending_lines))
+                handle.flush()
+                pending_lines.clear()
+
             for completed, future in enumerate(as_completed(futures), start=1):
                 row = future.result()
-                handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-                handle.flush()
+                pending_lines.append(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+                if len(pending_lines) >= flush_every or completed == len(records):
+                    flush_pending()
                 status = "ok" if row.get("labels") and not row.get("request_error") else "failed"
                 print(f"[{completed}/{len(records)}] {status} {row['record_id']}", file=sys.stderr)
+
+            flush_pending()
 
     if not args.no_parquet:
         parquet_path = resolve_parquet_path(args)

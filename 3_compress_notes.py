@@ -36,13 +36,11 @@ python 3_compress_notes.py \
   --text_col synthetic_note \
   --max_concurrent_requests 100
 
-# Use existing external servers:
+# Use existing external servers (model name is auto-discovered from the server):
 python 3_compress_notes.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/compressed_notes.parquet \
   --shard_dir ../data/no_phi/compressed_note_shards \
-  --model nvidia/Gemma-4-26B-A4B-NVFP4  \
-  --download_dir ~/models \
   --server_urls http://localhost:8000/v1,http://localhost:8001/v1 \
   --max_model_len 50000 \
   --max_tokens 10000
@@ -377,6 +375,56 @@ def wait_for_server_ready(port: int, timeout: int = 600, poll_interval: float = 
         print(f"  Still waiting... ({elapsed:.0f}s / {timeout}s)")
     print(f"Timeout waiting for vLLM server after {timeout}s")
     return False
+
+
+def _read_remote_server_urls(args) -> List[str]:
+    """Return the current list of remote server URLs (static or dynamic file)."""
+    import json as _json
+    if args.server_urls:
+        return [u.strip() for u in args.server_urls.split(",") if u.strip()]
+    if args.server_urls_file:
+        try:
+            with open(args.server_urls_file) as fh:
+                data = _json.load(fh)
+        except (FileNotFoundError, _json.JSONDecodeError, OSError):
+            return []
+        return [
+            s["url"] for s in (data.get("servers") or [])
+            if isinstance(s, dict) and s.get("url")
+        ]
+    return []
+
+
+def discover_remote_model_name(args, timeout: float = 30.0, max_wait: float = 300.0) -> str:
+    """Query a running vLLM server for the loaded model name via /v1/models.
+
+    Tries each URL listed by --server_urls or --server_urls_file. For dynamic
+    files that may not exist yet, keeps polling until max_wait elapses.
+    """
+    import time
+    deadline = time.time() + max_wait
+    last_err: Optional[Exception] = None
+    while True:
+        urls = _read_remote_server_urls(args)
+        for url in urls:
+            try:
+                base = url.rstrip("/")
+                if not base.endswith("/v1"):
+                    base = base + "/v1"
+                resp = requests.get(f"{base}/models", timeout=timeout)
+                resp.raise_for_status()
+                models = (resp.json() or {}).get("data") or []
+                if models:
+                    return models[0]["id"]
+                last_err = RuntimeError(f"server at {url} reported no models")
+            except Exception as e:
+                last_err = e
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"Could not discover model name from any remote vLLM server "
+                f"after waiting up to {max_wait:.0f}s. Last error: {last_err}"
+            )
+        time.sleep(5.0)
 
 
 def check_server_health(port: int) -> bool:
@@ -794,8 +842,14 @@ def main():
     ap.add_argument("--document_id_col", default=None, help="Optional column name for document ID. Defaults to row index.")
     ap.add_argument("--text_col", default="synthetic_note", help="Column name for note text.")
 
-    ap.add_argument("--model", default="gpt-oss-120b")
-    ap.add_argument("--download_dir", required=True)
+    ap.add_argument("--model", default=None,
+                    help="Model name. Required when launching own servers; "
+                         "auto-discovered from running server when --server_urls / "
+                         "--server_urls_file is set.")
+    ap.add_argument("--download_dir", default=None,
+                    help="Model/tokenizer cache directory. Required when launching "
+                         "own servers; optional in remote mode (defaults to the "
+                         "Hugging Face cache).")
     ap.add_argument("--gpu_ids", default=None,
                     help="Comma-separated GPU IDs (e.g., 0,1,2,3). Required unless --server_urls is set.")
     ap.add_argument("--gpus_per_server", type=int, default=None,
@@ -864,15 +918,26 @@ def main():
     if args.server_urls and args.server_urls_file:
         ap.error("Specify only one of --server_urls / --server_urls_file.")
     remote_mode = bool(args.server_urls or args.server_urls_file)
-    if not remote_mode and (not args.gpu_ids or args.gpus_per_server is None):
-        ap.error("--gpu_ids and --gpus_per_server are required unless --server_urls / --server_urls_file is set.")
+    if not remote_mode:
+        if not args.gpu_ids or args.gpus_per_server is None:
+            ap.error("--gpu_ids and --gpus_per_server are required unless --server_urls / --server_urls_file is set.")
+        if not args.model:
+            ap.error("--model is required unless --server_urls / --server_urls_file is set.")
+        if not args.download_dir:
+            ap.error("--download_dir is required unless --server_urls / --server_urls_file is set.")
+    else:
+        if not args.model:
+            print("Remote mode: discovering model name from running vLLM server...")
+            args.model = discover_remote_model_name(args)
+            print(f"  Discovered model: {args.model}")
 
     # Resolve reasoning parser from --model + --reasoning-parser (default auto)
     from vllm_reasoning_utils import resolve_parser_name
     reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
     print(f"Using vLLM reasoning parser: {reasoning_parser}")
 
-    # Load tokenizer (used for parsing reasoning output)
+    # Load tokenizer (used for parsing reasoning output). cache_dir may be
+    # None in remote mode, in which case the default Hugging Face cache is used.
     print("Loading tokenizer...")
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(
