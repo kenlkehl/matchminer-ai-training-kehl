@@ -7,6 +7,18 @@
 MODEL="${MODEL:-nvidia/Gemma-4-31B-IT-NVFP4}"  # made change 4/28/26 at point of first trialchecks, after patient summarization on synth data.
 REASONING_PARSER="${REASONING_PARSER:-auto}"
 
+# Skip a training step when its output model directory already exists and is
+# non-empty. Returns 0 (skip) → the `|| <cmd>` form leaves <cmd> unrun.
+skip_if_done() {
+    local out="$1"
+    local label="${2:-step}"
+    if [[ -d "$out" && -n "$(ls -A "$out" 2>/dev/null)" ]]; then
+        echo "[skip] $label: $out already exists and is non-empty"
+        return 0
+    fi
+    return 1
+}
+
 # pull a JSON file from ctgov
 # clinicaltrials.gov API can be challenging to work with, so we just did it manually by going to this link:
 # https://clinicaltrials.gov/search?cond=cancer%20OR%20lymphoma%20OR%20carcinoma%20OR%20leukemia%20OR%20sarcoma%20OR%20melanoma%20OR%20myeloma%20OR%20myelodysplastic%20OR%20myeloproliferative&aggFilters=phase:0%201%202%203%204,status:not%20rec,studyType:int
@@ -218,6 +230,7 @@ echo 7 done
 
 mv ../data/no_phi/initial_trialcheck_outputs/space_specific_eligibility_checks.parquet ../data/no_phi/space_specific_eligibility_checks.parquet
 
+skip_if_done ../models/pt_trial_summary_perspace_finetuned.model "step 8 embedder" || \
 accelerate launch finetune_embedder.py -i ../data/no_phi/space_specific_eligibility_checks.parquet \
 -c ~/models/initial_embedder_training -m Qwen/Qwen3-Embedding-0.6B -o ../models/pt_trial_summary_perspace_finetuned.model
 
@@ -269,6 +282,7 @@ python llm_check_trials.py \
 
 echo 9c done
 
+skip_if_done ../models/reranker_round1.model "step 10 reranker_round1" || \
 accelerate launch finetune_embedder.py \
    -i ../data/no_phi/round1_trialcentric_checks/top_patients_checked_round1.parquet \
    -i ../data/no_phi/round1_patientcentric_checks/top_cohorts_checked_round1.parquet \
@@ -324,6 +338,7 @@ python llm_check_trials.py \
 
 echo 11c done
 
+skip_if_done ../models/reranker_round2.model "step 12 reranker_round2" || \
 accelerate launch finetune_embedder.py \
    -i ../data/no_phi/round2_trialcentric_checks/top_patients_checked_round2.parquet \
    -i ../data/no_phi/round2_patientcentric_checks/top_cohorts_checked_round2.parquet \
@@ -394,10 +409,12 @@ python 14_check_boilerplate.py \
 
 echo 14 done
 
+skip_if_done ../models/modernbert-trial-checker-regression "step 15 trial checker" || \
 accelerate launch --num_processes 8 15_train_modernbert_trial_checker.py
 
 echo 15 done
 
+skip_if_done ../models/boilerplatechecker "step 16 boilerplate checker" || \
 accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 
 echo 16 done

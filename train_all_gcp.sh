@@ -47,6 +47,18 @@ PYTHON_ENV="${PYTHON_ENV:-/home/kenneth_kehl/thisenv}"
 SERVERS_FILE="${SERVERS_FILE:-/tmp/mmai_gcp_servers.json}"
 INCLUDE_SELF="${INCLUDE_SELF:-0,1,2,3,4,5,6,7}"
 
+# Skip a training step when its output model directory already exists and is
+# non-empty. Returns 0 (skip) → the `|| <cmd>` form leaves <cmd> unrun.
+skip_if_done() {
+    local out="$1"
+    local label="${2:-step}"
+    if [[ -d "$out" && -n "$(ls -A "$out" 2>/dev/null)" ]]; then
+        echo "[skip] $label: $out already exists and is non-empty"
+        return 0
+    fi
+    return 1
+}
+
 ORCH_PID=""
 
 cleanup() {
@@ -298,6 +310,7 @@ mv ../data/no_phi/initial_trialcheck_outputs/space_specific_eligibility_checks.p
 # Step 8 — finetune_embedder (no vLLM) → stop workers
 # ---------------------------------------------------------------------------
 stop_workers_fully
+skip_if_done ../models/pt_trial_summary_perspace_finetuned.model "step 8 embedder" || \
 accelerate launch finetune_embedder.py \
   -i ../data/no_phi/space_specific_eligibility_checks.parquet \
   -c ~/models/initial_embedder_training \
@@ -352,6 +365,7 @@ stop_vllm_cluster
 # Step 10 — finetune_embedder (no vLLM) → stop workers
 # ---------------------------------------------------------------------------
 stop_workers_fully
+skip_if_done ../models/reranker_round1.model "step 10 reranker_round1" || \
 accelerate launch finetune_embedder.py \
    -i ../data/no_phi/round1_trialcentric_checks/top_patients_checked_round1.parquet \
    -i ../data/no_phi/round1_patientcentric_checks/top_cohorts_checked_round1.parquet \
@@ -407,6 +421,7 @@ stop_vllm_cluster
 # Step 12 — finetune_embedder (no vLLM) → stop workers
 # ---------------------------------------------------------------------------
 stop_workers_fully
+skip_if_done ../models/reranker_round2.model "step 12 reranker_round2" || \
 accelerate launch finetune_embedder.py \
    -i ../data/no_phi/round2_trialcentric_checks/top_patients_checked_round2.parquet \
    -i ../data/no_phi/round2_patientcentric_checks/top_cohorts_checked_round2.parquet \
@@ -476,9 +491,11 @@ stop_vllm_cluster
 # Steps 15 / 16 — modernbert training (no vLLM) → stop workers
 # ---------------------------------------------------------------------------
 stop_workers_fully
+skip_if_done ../models/modernbert-trial-checker-regression "step 15 trial checker" || \
 accelerate launch --num_processes 8 15_train_modernbert_trial_checker.py
 echo 15 done
 
+skip_if_done ../models/boilerplatechecker "step 16 boilerplate checker" || \
 accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 echo 16 done
 

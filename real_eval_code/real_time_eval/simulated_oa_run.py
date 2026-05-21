@@ -80,6 +80,60 @@ QUERY_PROMPT = (
 )
 
 
+def _read_llm_check_server_urls(server_urls, server_urls_file):
+    """Resolve URLs from --llm-check-server-urls / --llm-check-server-urls-file."""
+    import json
+    if server_urls:
+        return [u.strip() for u in server_urls.split(",") if u.strip()]
+    if server_urls_file:
+        try:
+            with open(server_urls_file) as fh:
+                data = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+        return [
+            s["url"] for s in (data.get("servers") or [])
+            if isinstance(s, dict) and s.get("url")
+        ]
+    return []
+
+
+def discover_llm_check_remote_model(server_urls, server_urls_file,
+                                    timeout: float = 30.0,
+                                    max_wait: float = 300.0) -> str:
+    """Query a remote vLLM pool's /v1/models and return the served model id.
+
+    Polls each URL listed by --llm-check-server-urls /
+    --llm-check-server-urls-file until one responds, retrying for up to
+    max_wait seconds so dynamic server-list files have time to populate.
+    """
+    import requests
+    deadline = time.time() + max_wait
+    last_err = None
+    while True:
+        urls = _read_llm_check_server_urls(server_urls, server_urls_file)
+        for url in urls:
+            try:
+                base = url.rstrip("/")
+                if not base.endswith("/v1"):
+                    base = base + "/v1"
+                resp = requests.get(f"{base}/models", timeout=timeout)
+                resp.raise_for_status()
+                models = (resp.json() or {}).get("data") or []
+                if models:
+                    return models[0]["id"]
+                last_err = RuntimeError(f"server at {url} reported no models")
+            except Exception as exc:
+                last_err = exc
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"Could not discover model name from any remote LLM-check "
+                f"vLLM server after waiting up to {max_wait:.0f}s. "
+                f"Last error: {last_err}"
+            )
+        time.sleep(5.0)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -122,7 +176,9 @@ def parse_args():
     )
     parser.add_argument(
         "--llm-check-model", type=str, default="google/gemma-4-31b-it",
-        help="Model passed to both LLM check scripts",
+        help="Model passed to both LLM check scripts. Ignored (and "
+             "auto-discovered from /v1/models on the remote server) when "
+             "--llm-check-server-urls / --llm-check-server-urls-file is set.",
     )
     parser.add_argument(
         "--llm-check-download-dir", type=str, default="/data1/ken/models",
@@ -130,11 +186,25 @@ def parse_args():
     )
     parser.add_argument(
         "--llm-check-gpus", type=str, default=None,
-        help="Comma-separated GPU IDs for LLM checks. Defaults to --gpu.",
+        help="Comma-separated GPU IDs for LLM checks. Defaults to --gpu. "
+             "Ignored when --llm-check-server-urls / "
+             "--llm-check-server-urls-file is set.",
     )
     parser.add_argument(
         "--llm-check-gpus-per-kernel", type=int, default=1,
         help="tensor_parallel_size for each LLM-check vLLM kernel",
+    )
+    parser.add_argument(
+        "--llm-check-server-urls", type=str, default=None,
+        help="Comma-separated existing vLLM server URLs to dispatch LLM "
+             "checks to (forwarded as --server_urls). If set, the LLM-check "
+             "scripts skip in-process vLLM init.",
+    )
+    parser.add_argument(
+        "--llm-check-server-urls-file", type=str, default=None,
+        help="Path to a file listing vLLM server URLs (forwarded as "
+             "--server_urls_file). Mutually exclusive with "
+             "--llm-check-server-urls.",
     )
     parser.add_argument("--llm-check-max-model-len", type=int, default=30000)
     parser.add_argument("--llm-check-max-num-seqs", type=int, default=900)
@@ -813,17 +883,48 @@ def run_or_resume_llm_checks(pair_rows, args):
     else:
         print(f"Reusing staged pairs at {staging_path}")
 
-    llm_gpus = args.llm_check_gpus or args.gpu
+    server_urls = getattr(args, "llm_check_server_urls", None)
+    server_urls_file = getattr(args, "llm_check_server_urls_file", None)
+    if server_urls and server_urls_file:
+        raise ValueError(
+            "Specify only one of --llm-check-server-urls / "
+            "--llm-check-server-urls-file."
+        )
+    remote_mode = bool(server_urls or server_urls_file)
+
+    if remote_mode:
+        discovered_model = discover_llm_check_remote_model(
+            server_urls, server_urls_file,
+        )
+        if discovered_model != args.llm_check_model:
+            print(
+                f"Auto-discovered model on remote vLLM server(s): "
+                f"{discovered_model!r} (overrides "
+                f"--llm-check-model={args.llm_check_model!r})"
+            )
+        else:
+            print(f"Confirmed remote vLLM server(s) serve {discovered_model!r}")
+        args.llm_check_model = discovered_model
+
     common_args = [
-        "--gpus", llm_gpus,
-        "--gpus_per_kernel", str(args.llm_check_gpus_per_kernel),
         "--model", args.llm_check_model,
         "--download_dir", args.llm_check_download_dir,
         "--max_model_len", str(args.llm_check_max_model_len),
         "--max_num_seqs", str(args.llm_check_max_num_seqs),
-        "--gpu_memory_utilization", str(args.llm_check_gpu_memory_utilization),
         "--prompt_batch_size", str(args.llm_check_prompt_batch_size),
     ]
+    if remote_mode:
+        if server_urls:
+            common_args.extend(["--server_urls", server_urls])
+        if server_urls_file:
+            common_args.extend(["--server_urls_file", server_urls_file])
+    else:
+        llm_gpus = args.llm_check_gpus or args.gpu
+        common_args.extend([
+            "--gpus", llm_gpus,
+            "--gpus_per_kernel", str(args.llm_check_gpus_per_kernel),
+            "--gpu_memory_utilization", str(args.llm_check_gpu_memory_utilization),
+        ])
 
     results = {row["pair_id"]: {} for row in pair_rows}
 
