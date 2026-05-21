@@ -780,6 +780,66 @@ def wait_for_server_ready(port: int, timeout: int = 600, poll_interval: float = 
     return False
 
 
+def discover_model_from_server(args, file_wait_seconds: float = 120.0) -> str:
+    """
+    Auto-discover the model name being served by a remote vLLM endpoint.
+
+    Pulls candidate URLs from --server_urls (static) or --server_urls_file
+    (dynamic JSON written by gcp_vllm_orchestrator.py), queries each
+    {base_url}/models endpoint, and returns the first model id reported.
+    """
+    import json as _json
+
+    candidate_urls: List[str] = []
+    if args.server_urls:
+        candidate_urls = [u.strip() for u in args.server_urls.split(",") if u.strip()]
+    elif args.server_urls_file:
+        deadline = time.time() + file_wait_seconds
+        while time.time() < deadline:
+            try:
+                with open(args.server_urls_file, "r") as fh:
+                    data = _json.load(fh)
+                servers = data.get("servers", []) if isinstance(data, dict) else []
+                candidate_urls = [
+                    s["url"] for s in servers
+                    if isinstance(s, dict) and s.get("url")
+                ]
+                if candidate_urls:
+                    break
+            except (FileNotFoundError, _json.JSONDecodeError, OSError):
+                pass
+            print(f"Waiting for servers to appear in {args.server_urls_file}...")
+            time.sleep(5)
+
+    if not candidate_urls:
+        raise RuntimeError(
+            "Cannot auto-discover model: no server URLs available "
+            f"(server_urls={args.server_urls}, server_urls_file={args.server_urls_file})."
+        )
+
+    last_err: Optional[str] = None
+    for url in candidate_urls:
+        models_url = url.rstrip("/") + "/models"
+        try:
+            response = requests.get(models_url, timeout=10)
+            if response.status_code == 200:
+                payload = response.json()
+                models = payload.get("data", []) if isinstance(payload, dict) else []
+                if models and models[0].get("id"):
+                    return models[0]["id"]
+                last_err = f"{models_url} returned no models"
+            else:
+                last_err = f"{models_url} returned HTTP {response.status_code}"
+        except requests.exceptions.RequestException as e:
+            last_err = f"{models_url} request failed: {e}"
+        print(f"  Model discovery: {last_err}")
+
+    raise RuntimeError(
+        f"Could not auto-discover model from any candidate server "
+        f"({candidate_urls}). Last error: {last_err}"
+    )
+
+
 def check_server_health(port: int) -> bool:
     """Check if vLLM server is still responding."""
     try:
@@ -1240,8 +1300,12 @@ def main():
                     help="Maximum tokens per chunk when concatenating patient notes (default: 10000)")
     ap.add_argument("--chunk_overlap", type=int, default=500,
                     help="Token overlap between consecutive chunks (default: 500)")
-    ap.add_argument("--model", default="gpt-oss-120b")
-    ap.add_argument("--download_dir", required=True)
+    ap.add_argument("--model", default=None,
+                    help="Model name. Required for local mode. In remote mode "
+                         "(--server_urls / --server_urls_file), auto-discovered from the server.")
+    ap.add_argument("--download_dir", default=None,
+                    help="HuggingFace cache directory. Required for local mode. "
+                         "Optional in remote mode (defaults to standard HF cache).")
     ap.add_argument("--gpu_ids", default=None,
                     help="Comma-separated list of GPU IDs (e.g., 0,1,2,3). Used with --gpus_per_server to determine number of servers. Required for local mode (omit when using --server_urls / --server_urls_file).")
     ap.add_argument("--gpus_per_server", type=int, default=None,
@@ -1305,8 +1369,18 @@ def main():
     if args.server_urls and args.server_urls_file:
         ap.error("Specify only one of --server_urls / --server_urls_file.")
     remote_mode = bool(args.server_urls or args.server_urls_file)
-    if not remote_mode and (not args.gpu_ids or args.gpus_per_server is None):
-        ap.error("--gpu_ids and --gpus_per_server are required unless --server_urls / --server_urls_file is set.")
+    if not remote_mode:
+        if not args.gpu_ids or args.gpus_per_server is None:
+            ap.error("--gpu_ids and --gpus_per_server are required unless --server_urls / --server_urls_file is set.")
+        if not args.model:
+            ap.error("--model is required in local mode.")
+        if not args.download_dir:
+            ap.error("--download_dir is required in local mode.")
+
+    # In remote mode, auto-discover model from the server if not explicitly set
+    if remote_mode and not args.model:
+        args.model = discover_model_from_server(args)
+        print(f"Auto-discovered model from server: {args.model}")
 
     # Resolve reasoning parser from --model + --reasoning-parser (default auto)
     from vllm_reasoning_utils import resolve_parser_name
