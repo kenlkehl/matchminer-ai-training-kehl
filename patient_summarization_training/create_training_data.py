@@ -37,7 +37,7 @@ from transformers import AutoTokenizer
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = "LiquidAI/LFM2.5-1.2B-Thinking"
 DEFAULT_INPUT = "../data/no_phi/patient_serial_summaries.parquet"
-DEFAULT_CHUNKS = "../data/no_phi/summary_shards_compressed/prepared_chunks.parquet"
+DEFAULT_CHUNKS = "../data/no_phi/summary_shards/prepared_chunks.parquet"
 DEFAULT_OUTPUT_DIR = "../data/no_phi/patient_summarization_training_data"
 DEFAULT_NUM_WORKERS = min(os.cpu_count() or 1, 32)
 

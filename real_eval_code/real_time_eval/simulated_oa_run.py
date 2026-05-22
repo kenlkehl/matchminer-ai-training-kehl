@@ -329,77 +329,6 @@ def parse_args():
              "Otherwise the summarizer is rerun against that directory's "
              "input/shards.",
     )
-    # Optional per-note compression (../../3_compress_notes.py) before
-    # summarization. Mirrors the temp_train_gcp.sh step 3 that compresses each
-    # raw note to a one-paragraph summary and feeds those into
-    # 6_summarize_patients.py with --text_col summary.
-    parser.add_argument(
-        "--compress-notes", action="store_true",
-        help="Run ../../3_compress_notes.py over the staged input notes "
-             "before summarization, and feed the per-note summaries into "
-             "6_summarize_patients.py instead of raw notes.",
-    )
-    parser.add_argument(
-        "--compress-script", type=str,
-        default=str(Path(__file__).resolve().parents[2] / "3_compress_notes.py"),
-        help="Path to ../../3_compress_notes.py",
-    )
-    parser.add_argument(
-        "--compress-model", type=str, default=None,
-        help="Model passed to 3_compress_notes.py. Defaults to "
-             "--summarization-model.",
-    )
-    parser.add_argument(
-        "--compress-download-dir", type=str, default=None,
-        help="Download cache dir for compression. Defaults to "
-             "--summarization-download-dir.",
-    )
-    parser.add_argument(
-        "--compress-gpu-ids", type=str, default=None,
-        help="Comma-separated GPU IDs for compression. Defaults to --gpu.",
-    )
-    parser.add_argument(
-        "--compress-gpus-per-server", type=int, default=1,
-        help="GPUs per vLLM server for compression (default: 1)",
-    )
-    parser.add_argument(
-        "--compress-server-urls", type=str, default=None,
-        help="Comma-separated existing vLLM server URLs for compression",
-    )
-    parser.add_argument(
-        "--compress-max-model-len", type=int, default=50000,
-        help="max_model_len passed to 3_compress_notes.py (default: 50000)",
-    )
-    parser.add_argument(
-        "--compress-max-tokens", type=int, default=10000,
-        help="max_tokens passed to 3_compress_notes.py (default: 10000)",
-    )
-    parser.add_argument(
-        "--compress-max-concurrent-requests", type=int, default=25,
-        help="Max concurrent compression requests per server (default: 25)",
-    )
-    parser.add_argument(
-        "--compress-base-port", type=int, default=8100,
-        help="Base port for compression vLLM servers (default: 8100; "
-             "picked away from --summarization-base-port to avoid clashes).",
-    )
-    parser.add_argument(
-        "--compress-gpu-memory-utilization", type=float, default=0.90,
-        help="GPU memory utilization for compression vLLM servers (default: 0.90)",
-    )
-    parser.add_argument(
-        "--compress-request-timeout", type=float, default=600.0,
-        help="Per-request timeout for compression (default: 600)",
-    )
-    parser.add_argument(
-        "--compress-server-timeout", type=int, default=600,
-        help="Server startup timeout for compression (default: 600)",
-    )
-    parser.add_argument(
-        "--compress-additional-vllm-args", type=str, default="",
-        help="Extra arguments forwarded to 3_compress_notes.py via "
-             "--additional_vllm_args (a single shell-quoted string).",
-    )
     parser.add_argument(
         "--execution-timestamp", type=str, default=None,
         help="If provided, only consider outbound email drafts from "
@@ -640,93 +569,7 @@ def summarization_artifact_paths(run_dir: Path):
         "input_parquet": run_dir / "input_notes.parquet",
         "full_output": run_dir / "patient_summaries_full.parquet",
         "patient_output": run_dir / "patient_summaries.parquet",
-        "compressed_parquet": run_dir / "compressed_notes.parquet",
-        "compressed_for_summary": run_dir / "compressed_notes_for_summary.parquet",
-        "compressed_shard_dir": run_dir / "compressed_note_shards",
     }
-
-
-def filter_compressed_for_summary(in_path: Path, out_path: Path) -> int:
-    """Drop empty/ERROR rows from a 3_compress_notes.py output parquet.
-
-    Mirrors the inline aggregator in temp_train_gcp.sh. Returns rows kept.
-    """
-    df = pd.read_parquet(in_path)
-    summary = df["summary"].astype(str)
-    mask = (summary.str.strip() != "") & (~summary.str.startswith("ERROR:"))
-    df_keep = df[mask].reset_index(drop=True)
-    df_keep.to_parquet(out_path, index=False)
-    return len(df_keep)
-
-
-def run_or_resume_compression(args, paths):
-    """Stage, reuse, or resume ../../3_compress_notes.py artifacts.
-
-    Assumes paths["input_parquet"] (the staged raw notes) already exists.
-    Returns the path of the filtered compressed parquet ready to feed into
-    6_summarize_patients.py with --text_col summary.
-    """
-    compress_script = Path(args.compress_script).resolve()
-    if not compress_script.exists():
-        raise FileNotFoundError(f"Compression script not found: {compress_script}")
-
-    input_parquet = paths["input_parquet"]
-    compressed_parquet = paths["compressed_parquet"]
-    compressed_for_summary = paths["compressed_for_summary"]
-    compressed_shard_dir = paths["compressed_shard_dir"]
-
-    if compressed_for_summary.exists():
-        print(f"Reusing filtered compressed notes from {compressed_for_summary}")
-        return compressed_for_summary
-
-    if not input_parquet.exists():
-        raise FileNotFoundError(
-            f"{input_parquet} does not exist; cannot run compression."
-        )
-
-    compress_gpu_ids = args.compress_gpu_ids or args.gpu
-    compress_model = args.compress_model or args.summarization_model
-    compress_download_dir = args.compress_download_dir or args.summarization_download_dir
-
-    cmd = [
-        sys.executable,
-        str(compress_script),
-        "--input_parquet", str(input_parquet),
-        "--output_parquet", str(compressed_parquet),
-        "--shard_dir", str(compressed_shard_dir),
-        "--model", compress_model,
-        "--download_dir", compress_download_dir,
-        "--gpu_ids", compress_gpu_ids,
-        "--gpus_per_server", str(args.compress_gpus_per_server),
-        "--max_model_len", str(args.compress_max_model_len),
-        "--max_tokens", str(args.compress_max_tokens),
-        "--max_concurrent_requests", str(args.compress_max_concurrent_requests),
-        "--gpu_memory_utilization", str(args.compress_gpu_memory_utilization),
-        "--base_port", str(args.compress_base_port),
-        "--request_timeout", str(args.compress_request_timeout),
-        "--server_timeout", str(args.compress_server_timeout),
-        "--patient_id_col", "mrn",
-        "--date_col", "date",
-        "--text_col", "text",
-    ]
-    if args.compress_server_urls:
-        cmd.extend(["--server_urls", args.compress_server_urls])
-    if args.compress_additional_vllm_args:
-        cmd.extend(["--additional_vllm_args", args.compress_additional_vllm_args])
-
-    print("Running per-note compression pipeline:")
-    print(f"  {shlex.join(cmd)}")
-    subprocess.run(cmd, check=True)
-
-    if not compressed_parquet.exists():
-        raise FileNotFoundError(
-            f"Compression completed but {compressed_parquet} was not created."
-        )
-
-    kept = filter_compressed_for_summary(compressed_parquet, compressed_for_summary)
-    print(f"Filtered compressed notes: {kept} rows kept "
-          f"(written to {compressed_for_summary})")
-    return compressed_for_summary
 
 
 def load_summarization_output(patient_output: Path):
@@ -786,13 +629,8 @@ def run_or_resume_summarization(notes_df, args):
         notes_df.to_parquet(input_parquet, index=False)
         print(f"Staged {len(notes_df)} notes for summarization at {input_parquet}")
 
-    if args.compress_notes:
-        summarize_input = run_or_resume_compression(args, paths)
-        summarize_text_col = "summary"
-        print(f"Using compressed notes as summarization input: {summarize_input}")
-    else:
-        summarize_input = input_parquet
-        summarize_text_col = "text"
+    summarize_input = input_parquet
+    summarize_text_col = "text"
 
     summarization_gpu_ids = args.summarization_gpu_ids or args.gpu
     cmd = [

@@ -8,7 +8,7 @@ the iterative patient summarization task from `6_summarize_patients.py`.
 ```bash
 python patient_summarization_training/create_training_data.py \
   --input-parquet ../data/no_phi/patient_serial_summaries.parquet \
-  --chunks-parquet ../data/no_phi/summary_shards_compressed/prepared_chunks.parquet \
+  --chunks-parquet ../data/no_phi/summary_shards/prepared_chunks.parquet \
   --output-dir ../data/no_phi/patient_summarization_training_data \
   --model-name LiquidAI/LFM2.5-1.2B-Thinking \
   --max-seq-length 50000

@@ -7,7 +7,8 @@ Serial patient summarization with chunk-based updates using vLLM server(s).
 For each patient, all clinical notes are sorted by date and concatenated into
 a single text, then chunked into token-length segments. A running summary is
 maintained across chunks. Work is scheduled in rounds (Round N = Nth chunk from
-each patient) to maximize GPU utilization.
+each patient) to maximize GPU utilization. The serial output row for each chunk
+includes the parsed reasoning trace used to produce that step's updated summary.
 
 Multiple vLLM servers can be launched in parallel to increase throughput.
 The number of servers is determined by: n_servers = len(gpu_ids) // gpus_per_server.
@@ -27,10 +28,6 @@ python 6_summarize_patients.py \
   --max_model_len 120000 \
   --chunk_size 50000 \
   --chunk_overlap 500 \
-  --generate_dates \
-  --synthetic_start_date 2017-01-01 \
-  --synthetic_min_days 7 \
-  --synthetic_max_days 90 \
   --max_patients 10
 
 
@@ -46,10 +43,6 @@ python 6_summarize_patients.py \
   --max_model_len 50000 \
   --chunk_size 20000 \
   --chunk_overlap 500 \
-  --generate_dates \
-  --synthetic_start_date 2017-01-01 \
-  --synthetic_min_days 7 \
-  --synthetic_max_days 90 \
 
 
 # Two servers, 2 GPUs each (4 GPUs total, tensor_parallel_size=2 per server)
@@ -86,7 +79,6 @@ import argparse
 import asyncio
 import glob
 import os
-import random
 import re
 import shlex
 import signal
@@ -94,73 +86,12 @@ import subprocess
 import sys
 import time
 import warnings
-from datetime import datetime, timedelta
 from multiprocessing import Pool
 from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 import requests
 from openai import AsyncOpenAI
-
-
-# -------------------------
-# Utilities
-# -------------------------
-
-def generate_synthetic_dates(
-    df: pd.DataFrame,
-    patient_id_col: str,
-    date_col: str,
-    start_date_str: str,
-    min_days: int,
-    max_days: int
-) -> pd.DataFrame:
-    """
-    Generate synthetic dates for notes when no date column exists.
-
-    For each patient, assigns dates starting from start_date, with random
-    intervals between min_days and max_days for each subsequent note.
-    Notes are assumed to be in their original order within each patient group.
-
-    Args:
-        df: Input DataFrame
-        patient_id_col: Column name for patient ID
-        date_col: Column name to create for dates
-        start_date_str: Start date for first note (YYYY-MM-DD format)
-        min_days: Minimum days between consecutive notes
-        max_days: Maximum days between consecutive notes
-
-    Returns:
-        DataFrame with new date column added
-    """
-    df = df.copy()
-    start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
-
-    # Generate dates for each patient
-    dates = []
-    for idx in range(len(df)):
-        dates.append(None)  # Placeholder
-
-    # Group by patient and assign dates
-    current_patient = None
-    current_date = start_date
-
-    for idx, row in df.iterrows():
-        pid = row[patient_id_col]
-
-        if pid != current_patient:
-            # New patient - reset to start date
-            current_patient = pid
-            current_date = start_date
-        else:
-            # Same patient - add random interval
-            days_to_add = random.randint(min_days, max_days)
-            current_date = current_date + timedelta(days=days_to_add)
-
-        dates[idx] = current_date
-
-    df[date_col] = dates
-    return df
 
 
 def concatenate_and_chunk_notes(
@@ -1286,16 +1217,8 @@ def main():
                     help="Output parquet with just the last row per patient (default: ../data/no_phi/patient_summaries.parquet)")
     ap.add_argument("--shard_dir", required=True, help="Directory for checkpoint shards")
     ap.add_argument("--patient_id_col", default="pseudo_mrn", help="Column name for patient ID")
-    ap.add_argument("--date_col", default="date", help="Column name for note date (will be created if missing and --generate_dates is set)")
+    ap.add_argument("--date_col", default="date", help="Column name for note date")
     ap.add_argument("--text_col", default="synthetic_note", help="Column name for note text")
-    ap.add_argument("--generate_dates", action="store_true",
-                    help="Generate synthetic dates if date column is missing")
-    ap.add_argument("--synthetic_start_date", default="2020-01-01",
-                    help="Start date for first note of each patient (format: YYYY-MM-DD)")
-    ap.add_argument("--synthetic_min_days", type=int, default=7,
-                    help="Minimum days between consecutive notes")
-    ap.add_argument("--synthetic_max_days", type=int, default=90,
-                    help="Maximum days between consecutive notes")
     ap.add_argument("--chunk_size", type=int, default=20000,
                     help="Maximum tokens per chunk when concatenating patient notes (default: 10000)")
     ap.add_argument("--chunk_overlap", type=int, default=500,
@@ -1423,24 +1346,12 @@ def main():
         if args.text_col not in df.columns:
             raise ValueError(f"Column '{args.text_col}' (--text_col) not found in input. Available: {df.columns.tolist()}")
 
-        # Handle date column - generate synthetic dates if missing and --generate_dates is set
         if args.date_col not in df.columns:
-            if args.generate_dates:
-                print(f"Date column '{args.date_col}' not found. Generating synthetic dates...")
-                df = generate_synthetic_dates(
-                    df,
-                    patient_id_col=args.patient_id_col,
-                    date_col=args.date_col,
-                    start_date_str=args.synthetic_start_date,
-                    min_days=args.synthetic_min_days,
-                    max_days=args.synthetic_max_days
-                )
-                print(f"Generated synthetic dates in column '{args.date_col}'")
-            else:
-                raise ValueError(
-                    f"Column '{args.date_col}' (--date_col) not found in input. "
-                    f"Use --generate_dates to create synthetic dates. Available columns: {df.columns.tolist()}"
-                )
+            raise ValueError(
+                f"Column '{args.date_col}' (--date_col) not found in input. "
+                f"Generate dates upstream before running patient summarization. "
+                f"Available columns: {df.columns.tolist()}"
+            )
 
         # Filter to max_patients if specified
         if args.max_patients is not None:
@@ -1672,6 +1583,7 @@ def main():
                 "first_date": first_date,
                 "last_date": last_date,
                 "prior_summary": prior_summary,
+                "reasoning_trace": reasoning,
                 "new_summary_reasoning": reasoning,
                 "new_summary": summary,
                 "patient_summary": ps,

@@ -203,7 +203,47 @@ stop_vllm_cluster
 
 # Step 2c — local merge (no vLLM)
 aggregator=$(cat << 'EOF'
+import hashlib
 import pandas as pd
+from datetime import date, timedelta
+
+
+def stable_u64(*parts):
+    h = hashlib.blake2b(digest_size=8)
+    for part in parts:
+        h.update(str(part).encode("utf-8", errors="replace"))
+        h.update(b"\0")
+    return int.from_bytes(h.digest(), "big", signed=False)
+
+
+def add_synthetic_dates(df, patient_id_col="pseudo_mrn", date_col="date"):
+    seed = 20260519
+    min_start = date.fromisoformat("2014-01-01")
+    max_start = date.fromisoformat("2020-12-31")
+    max_increment_days = 180
+    span_days = (max_start - min_start).days
+    states = {}
+    dates = []
+
+    for _, row in df.iterrows():
+        key = str(row[patient_id_col])
+        state = states.get(key)
+        if state is None:
+            offset = stable_u64(seed, key, "start_date") % (span_days + 1)
+            current_date = min_start + timedelta(days=offset)
+            states[key] = {"note_count": 1, "current_date": current_date}
+        else:
+            increment = stable_u64(seed, key, state["note_count"], "increment") % (
+                max_increment_days + 1
+            )
+            current_date = state["current_date"] + timedelta(days=increment)
+            state["current_date"] = current_date
+            state["note_count"] += 1
+        dates.append(current_date)
+
+    output = df.copy()
+    output[date_col] = dates
+    return output
 
 positive_notes = pd.read_parquet("../data/no_phi/synthetic_notes/synthetic_notes.parquet")
 print(positive_notes.info())
@@ -217,61 +257,28 @@ negative_notes['pseudo_mrn'] = negative_notes.pseudo_mrn * 1000000
 
 output = pd.concat([positive_notes, negative_notes], ignore_index=True)
 output = pd.merge(output, spaces, on='space_index')
+output = add_synthetic_dates(output)
 output.to_parquet("../data/no_phi/all_synthetic_notes.parquet")
+output.to_parquet("../data/no_phi/all_synthetic_notes_with_dates.parquet")
 EOF
 )
 python -c "$aggregator"
 
 # ---------------------------------------------------------------------------
-# Step 3 — vLLM (max_model_len=50000)
-# ---------------------------------------------------------------------------
-start_vllm_cluster 50000 900 0.90 1
-python 3_compress_notes.py \
-  --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
-  --output_parquet ../data/no_phi/compressed_synthetic_notes.parquet \
-  --shard_dir ../data/no_phi/compressed_note_shards \
-  --server_urls_file "$SERVERS_FILE" \
-  --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
-  --download_dir ~/models \
-  --max_model_len 50000 --max_tokens 10000 \
-  --max_concurrent_requests 50 \
-  --patient_id_col pseudo_mrn --text_col synthetic_note
-echo 3 done
-stop_vllm_cluster
-
-# Local rename / dedup (no vLLM)
-aggregator=$(cat << 'EOF'
-import pandas as pd
-compressed = pd.read_parquet('../data/no_phi/compressed_synthetic_notes.parquet')
-if 'pseudo_mrn' not in compressed.columns and 'patient_id' in compressed.columns:
-    compressed = compressed.rename(columns={'patient_id': 'pseudo_mrn'})
-summary_str = compressed['summary'].astype(str)
-mask = (summary_str.str.strip() != '') & (~summary_str.str.startswith('ERROR:'))
-compressed = compressed[mask].reset_index(drop=True)
-compressed.to_parquet('../data/no_phi/compressed_synthetic_notes_for_patient_summary.parquet')
-print(f"Kept {len(compressed)} compressed notes for patient summarization")
-EOF
-)
-python -c "$aggregator"
-
-# ---------------------------------------------------------------------------
-# Step 6 — vLLM (max_model_len=100000)
+# Step 6 — patient summarization over raw notes (max_model_len=100000)
 # ---------------------------------------------------------------------------
 start_vllm_cluster 100000 900 0.90 1
 python 6_summarize_patients.py \
-  --input_parquet ../data/no_phi/compressed_synthetic_notes_for_patient_summary.parquet \
-  --patient_id_col pseudo_mrn --text_col summary \
+  --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
+  --patient_id_col pseudo_mrn --text_col synthetic_note \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
-  --shard_dir ../data/no_phi/summary_shards_compressed \
+  --shard_dir ../data/no_phi/summary_shards \
   --server_urls_file "$SERVERS_FILE" \
   --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
   --download_dir ~/models \
   --max_model_len 100000 --max_tokens 20000 \
   --chunk_size 50000 --chunk_overlap 500 \
-  --max_concurrent_requests 25 \
-  --generate_dates \
-  --synthetic_start_date 2017-01-01 \
-  --synthetic_min_days 0 --synthetic_max_days 180
+  --max_concurrent_requests 25
 echo 6 done
 stop_vllm_cluster
 
