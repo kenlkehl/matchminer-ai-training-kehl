@@ -780,7 +780,7 @@ def parse_args() -> argparse.Namespace:
             "Default auto resolves Gemma models to the vLLM gemma4 parser format."
         ),
     )
-    parser.add_argument("--max-seq-length", type=int, default=50000)
+    parser.add_argument("--max-seq-length", type=int, default=30000)
     parser.add_argument("--patient-id-col", default="pseudo_mrn")
     parser.add_argument("--chunk-index-col", default="chunk_index")
     parser.add_argument("--first-date-col", default="first_date")
