@@ -6,10 +6,10 @@ That file contains the prior summary, model reasoning, and updated summary for
 each patient chunk. The clinical chunk text is recovered from the matching
 ``prepared_chunks.parquet`` cache created by the same summarization run.
 
-Each training row is rendered with the Liquid chat template and contains:
+Each training row is rendered with the Gemma 4 chat format and contains:
 
   user prior summary + next clinical record segment
-  assistant <think>reasoning trace</think> final updated summary
+  assistant <|channel>thought reasoning trace <channel|> final updated summary
 
 The output parquet has one column, ``text``. The script can also tokenize that
 parquet into a Hugging Face dataset with prompt-masked labels for SFT.
@@ -35,11 +35,16 @@ from transformers import AutoTokenizer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = "LiquidAI/LFM2.5-1.2B-Thinking"
+DEFAULT_MODEL = "google/gemma-4-E2B-it"
+DEFAULT_TOKENIZER = "google/gemma-4-E2B-it"
+DEFAULT_REASONING_PARSER = "gemma4"
 DEFAULT_INPUT = "../data/no_phi/patient_serial_summaries.parquet"
 DEFAULT_CHUNKS = "../data/no_phi/summary_shards/prepared_chunks.parquet"
 DEFAULT_OUTPUT_DIR = "../data/no_phi/patient_summarization_training_data"
 DEFAULT_NUM_WORKERS = min(os.cpu_count() or 1, 32)
+GEMMA4_THINKING_START = "<|channel>thought\n"
+GEMMA4_THINKING_END = "<channel|>"
+GEMMA4_TURN_END = "<turn|>\n"
 
 
 def clean_scalar(value: Any) -> Any | None:
@@ -224,13 +229,11 @@ You may sometimes encounter contradictory information across notes (eg different
 Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
 
-def build_messages(
+def build_prompt_messages(
     prior_summary: str | None,
     first_date: str,
     last_date: str,
     chunk_text: str,
-    reasoning: str,
-    summary: str,
     system_content: str,
 ) -> list[dict[str, str]]:
     user_content = build_user_content(
@@ -239,12 +242,91 @@ def build_messages(
         last_date=last_date,
         chunk_text=chunk_text,
     )
-    assistant_content = f"<think>\n{reasoning.strip()}\n</think>\n{summary.strip()}"
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
-        {"role": "assistant", "content": assistant_content},
     ]
+
+
+def format_assistant_content(reasoning: str, summary: str, reasoning_parser: str) -> str:
+    """Format the supervised assistant turn for the selected reasoning parser."""
+    reasoning = reasoning.strip()
+    summary = summary.strip()
+    if reasoning_parser == "gemma4":
+        thinking = f"{reasoning}\n" if reasoning else ""
+        return (
+            f"{GEMMA4_THINKING_START}{thinking}"
+            f"{GEMMA4_THINKING_END}{summary}{GEMMA4_TURN_END}"
+        )
+    return f"<think>\n{reasoning}\n</think>\n{summary}"
+
+
+def render_gemma4_prompt(messages: list[dict[str, str]], enable_thinking: bool) -> str:
+    """Render the simple text-only Gemma 4 prompt when no HF chat template exists."""
+    pieces = ["<bos>"]
+    start_idx = 0
+    system_content = ""
+    if messages and messages[0]["role"] in {"system", "developer"}:
+        system_content = messages[0].get("content", "").strip()
+        start_idx = 1
+
+    if enable_thinking or system_content:
+        pieces.append("<|turn>system\n")
+        if enable_thinking:
+            pieces.append("<|think|>\n")
+        if system_content:
+            pieces.append(system_content)
+        pieces.append(GEMMA4_TURN_END)
+
+    for message in messages[start_idx:]:
+        role = "model" if message["role"] == "assistant" else message["role"]
+        pieces.append(
+            f"<|turn>{role}\n"
+            f"{message.get('content', '').strip()}{GEMMA4_TURN_END}"
+        )
+
+    pieces.append("<|turn>model\n")
+    return "".join(pieces)
+
+
+def render_prompt_text(
+    tokenizer,
+    messages: list[dict[str, str]],
+    reasoning_parser: str,
+) -> str:
+    if reasoning_parser == "gemma4" and not getattr(tokenizer, "chat_template", None):
+        return render_gemma4_prompt(messages, enable_thinking=True)
+    return tokenizer.apply_chat_template(
+        conversation=messages,
+        add_generation_prompt=True,
+        tokenize=False,
+        enable_thinking=True,
+    )
+
+
+def render_full_training_text(
+    tokenizer,
+    messages: list[dict[str, str]],
+    reasoning: str,
+    summary: str,
+    reasoning_parser: str,
+) -> str:
+    assistant_content = format_assistant_content(
+        reasoning=reasoning,
+        summary=summary,
+        reasoning_parser=reasoning_parser,
+    )
+    if reasoning_parser == "gemma4":
+        return (
+            render_prompt_text(tokenizer, messages, reasoning_parser)
+            + assistant_content
+        )
+
+    return tokenizer.apply_chat_template(
+        conversation=messages + [{"role": "assistant", "content": assistant_content}],
+        tokenize=False,
+        enable_thinking=True,
+    )
 
 
 def render_training_text(
@@ -257,6 +339,7 @@ def render_training_text(
     summary: str,
     system_content: str,
     max_seq_length: int,
+    reasoning_parser: str,
 ) -> tuple[str | None, bool]:
     """Render one example, truncating only the source chunk if needed."""
     original_chunk = chunk_text
@@ -264,19 +347,19 @@ def render_training_text(
     was_truncated = False
 
     for _ in range(4):
-        messages = build_messages(
+        messages = build_prompt_messages(
             prior_summary=prior_summary,
             first_date=first_date,
             last_date=last_date,
             chunk_text=working_chunk,
-            reasoning=reasoning,
-            summary=summary,
             system_content=system_content,
         )
-        text = tokenizer.apply_chat_template(
-            conversation=messages,
-            tokenize=False,
-            enable_thinking=True,
+        text = render_full_training_text(
+            tokenizer=tokenizer,
+            messages=messages,
+            reasoning=reasoning,
+            summary=summary,
+            reasoning_parser=reasoning_parser,
         )
         total = token_len(text, tokenizer)
         if total <= max_seq_length:
@@ -434,6 +517,7 @@ def build_text_parquet(args: argparse.Namespace, tokenizer) -> tuple[int, int, i
                 summary=str(summary),
                 system_content=args.system_content,
                 max_seq_length=args.max_seq_length,
+                reasoning_parser=args.resolved_reasoning_parser,
             )
             if text is None:
                 dropped += 1
@@ -470,6 +554,7 @@ def find_last_subsequence(seq: list[int], subseq: list[int]) -> int:
 
 def assistant_header_ids(tokenizer) -> list[list[int]]:
     headers = [
+        "<|turn>model\n",
         "<|im_start|>assistant\n",
         "<|start_header_id|>assistant<|end_header_id|>\n\n",
     ]
@@ -501,7 +586,7 @@ def tokenize_worker(args_tuple):
     (
         source_parquet,
         row_group_indices,
-        model_name,
+        tokenizer_name,
         max_seq_length,
         arrow_path,
         header_options,
@@ -510,7 +595,7 @@ def tokenize_worker(args_tuple):
         num_workers,
     ) = args_tuple
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
     pf = pq.ParquetFile(source_parquet)
     writer = ArrowWriter(path=arrow_path)
     total = sum(pf.metadata.row_group(i).num_rows for i in row_group_indices)
@@ -650,9 +735,28 @@ def streaming_tokenize(
     return num_examples
 
 
+def default_tokenizer_for_model(model_name: str) -> str:
+    if model_name == DEFAULT_MODEL:
+        return DEFAULT_TOKENIZER
+    return model_name
+
+
+def resolve_reasoning_parser(model_name: str, reasoning_parser: str) -> str:
+    if reasoning_parser != "auto":
+        return reasoning_parser
+    try:
+        from vllm_reasoning_utils import resolve_parser_name
+
+        return resolve_parser_name(model_name, reasoning_parser)
+    except (ImportError, ValueError):
+        if "gemma" in model_name.lower():
+            return DEFAULT_REASONING_PARSER
+        return "think_tags"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create Liquid SFT data for the patient summarization task."
+        description="Create Gemma 4 SFT data for the patient summarization task."
     )
     parser.add_argument("--input-parquet", default=DEFAULT_INPUT)
     parser.add_argument("--chunks-parquet", default=DEFAULT_CHUNKS)
@@ -660,6 +764,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-parquet", default=None)
     parser.add_argument("--tokenized-dir", default=None)
     parser.add_argument("--model-name", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--tokenizer-name",
+        default=None,
+        help=(
+            "Tokenizer/chat-template source. Defaults to google/gemma-4-E2B-it "
+            "when using the default Gemma 4 E2B-IT model, otherwise --model-name."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-parser",
+        default="auto",
+        help=(
+            "Reasoning format to use in assistant turns. "
+            "Default auto resolves Gemma models to the vLLM gemma4 parser format."
+        ),
+    )
     parser.add_argument("--max-seq-length", type=int, default=50000)
     parser.add_argument("--patient-id-col", default="pseudo_mrn")
     parser.add_argument("--chunk-index-col", default="chunk_index")
@@ -686,11 +806,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
-    args.output_parquet = args.output_parquet or str(output_dir / "all_training_data.parquet")
-    args.tokenized_dir = args.tokenized_dir or str(output_dir / "tokenized_training_data.dataset")
+    args.output_parquet = args.output_parquet or str(
+        output_dir / "all_training_data.parquet"
+    )
+    args.tokenized_dir = args.tokenized_dir or str(
+        output_dir / "tokenized_training_data.dataset"
+    )
+    args.tokenizer_name = args.tokenizer_name or default_tokenizer_for_model(
+        args.model_name
+    )
+    args.resolved_reasoning_parser = resolve_reasoning_parser(
+        args.model_name,
+        args.reasoning_parser,
+    )
 
-    print(f"Loading tokenizer: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    print(f"Model target: {args.model_name}")
+    print(f"Loading tokenizer: {args.tokenizer_name}")
+    print(f"Reasoning parser format: {args.resolved_reasoning_parser}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer_name,
+        trust_remote_code=True,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

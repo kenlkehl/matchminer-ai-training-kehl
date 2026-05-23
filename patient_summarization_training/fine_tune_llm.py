@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune LiquidAI/LFM2.5-1.2B-Thinking on patient summarization SFT data."""
+"""Fine-tune google/gemma-4-E2B-it on patient summarization SFT data."""
 
 from __future__ import annotations
 
@@ -9,23 +9,37 @@ import os
 
 import torch
 from datasets import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoTokenizer,
+    DataCollatorForSeq2Seq,
+)
 from trl import SFTConfig, SFTTrainer
 
 
-DEFAULT_MODEL = "LiquidAI/LFM2.5-1.2B-Thinking"
+DEFAULT_MODEL = "google/gemma-4-E2B-it"
+DEFAULT_TOKENIZER = "google/gemma-4-E2B-it"
 DEFAULT_DATASET = "../data/no_phi/patient_summarization_training_data/tokenized_training_data.dataset"
-DEFAULT_OUTPUT = "../models/patient_summarization_lfm"
+DEFAULT_OUTPUT = "../models/patient_summarization_gemma4_e2b_it"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run SFT for the patient summarization Liquid thinking model."
+        description="Run SFT for the patient summarization Gemma 4 E2B-IT model."
     )
     parser.add_argument("--dataset-dir", default=DEFAULT_DATASET)
     parser.add_argument("--model-name", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--tokenizer-name",
+        default=DEFAULT_TOKENIZER,
+        help="Tokenizer to save with the fine-tuned model and use for padding.",
+    )
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT)
-    parser.add_argument("--logging-dir", default="./logs/patient_summarization_lfm")
+    parser.add_argument(
+        "--logging-dir",
+        default="./logs/patient_summarization_gemma4_e2b_it",
+    )
     parser.add_argument("--max-length", type=int, default=50000)
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
     parser.add_argument("--max-steps", type=int, default=-1)
@@ -64,6 +78,20 @@ def checkpoint_arg(output_dir: str, resume_from_checkpoint: str):
     ):
         return True
     return False
+
+
+def load_model(args: argparse.Namespace, dtype):
+    loader = (
+        AutoModelForImageTextToText
+        if "gemma-4" in args.model_name.lower()
+        else AutoModelForCausalLM
+    )
+    return loader.from_pretrained(
+        args.model_name,
+        attn_implementation=args.attn_implementation,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    )
 
 
 def build_lora_config(args: argparse.Namespace):
@@ -118,6 +146,7 @@ def build_sft_config(args: argparse.Namespace, dtype) -> SFTConfig:
         "model_init_kwargs": {
             "torch_dtype": dtype,
             "attn_implementation": args.attn_implementation,
+            "trust_remote_code": True,
         },
         "lr_scheduler_kwargs": {"num_cycles": args.num_cycles},
         "logging_steps": args.logging_steps,
@@ -146,12 +175,12 @@ def main() -> None:
 
     dtype = torch.bfloat16 if bf16 else torch.float16
     print(f"Loading model: {args.model_name}")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        attn_implementation=args.attn_implementation,
-        torch_dtype=dtype,
+    model = load_model(args, dtype)
+    print(f"Loading tokenizer: {args.tokenizer_name}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.tokenizer_name,
+        trust_remote_code=True,
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

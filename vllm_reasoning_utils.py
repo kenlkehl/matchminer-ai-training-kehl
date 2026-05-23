@@ -12,6 +12,8 @@ import argparse
 from typing import Optional, Tuple
 
 MODEL_TO_PARSER: dict[str, str] = {
+    "google/gemma-4-E2B":     "gemma4",
+    "google/gemma-4-E2B-it":  "gemma4",
     "google/gemma-4-31b-it":  "gemma4",
     "Qwen/Qwen3.6-27B":       "qwen3",
     "Qwen/Qwen3.6-27B-FP8":   "qwen3",
