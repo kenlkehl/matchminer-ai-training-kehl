@@ -22,6 +22,19 @@ DEFAULT_MODEL = "google/gemma-4-E2B-it"
 DEFAULT_TOKENIZER = "google/gemma-4-E2B-it"
 DEFAULT_DATASET = "../data/no_phi/patient_summarization_training_data/tokenized_training_data.dataset"
 DEFAULT_OUTPUT = "../models/patient_summarization_gemma4_e2b_it"
+DEFAULT_LORA_TARGET_MODULES = [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+]
+GEMMA4_LORA_TARGET_MODULES = (
+    r".*language_model\.layers\.\d+\.(?:self_attn|mlp)\."
+    r"(?:q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-ratio", type=float, default=0.10)
     parser.add_argument("--lr-scheduler-type", default="cosine_with_restarts")
     parser.add_argument("--num-cycles", type=int, default=3)
-    parser.add_argument("--per-device-train-batch-size", type=int, default=2)
+    parser.add_argument("--per-device-train-batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--save-steps", type=int, default=2000)
     parser.add_argument("--save-total-limit", type=int, default=2)
@@ -60,6 +73,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-gradient-checkpointing", action="store_true")
     parser.add_argument("--no-liger-kernel", action="store_true")
     parser.add_argument("--no-activation-offloading", action="store_true")
+    parser.add_argument(
+        "--train-multimodal-towers",
+        action="store_true",
+        help="Keep Gemma 4 vision/audio towers trainable. Leave off for text-only SFT.",
+    )
+    parser.add_argument(
+        "--no-tail-logits-only",
+        action="store_true",
+        help="Disable Gemma 4 loss-only logits slicing for pre-tokenized SFT batches.",
+    )
+    parser.add_argument(
+        "--train-per-layer-embeddings",
+        action="store_true",
+        help="Keep Gemma 4 per-layer embedding parameters trainable.",
+    )
 
     parser.add_argument("--use-lora", action="store_true")
     parser.add_argument("--lora-r", type=int, default=64)
@@ -94,35 +122,140 @@ def load_model(args: argparse.Namespace, dtype):
     )
 
 
+def freeze_gemma4_text_only_modules(model: torch.nn.Module, args: argparse.Namespace) -> None:
+    if "gemma-4" not in args.model_name.lower():
+        return
+
+    frozen_params = 0
+    module_names = []
+    if not args.train_multimodal_towers:
+        module_names.extend(
+            [
+                "model.vision_tower",
+                "model.audio_tower",
+                "model.embed_vision",
+                "model.embed_audio",
+            ]
+        )
+    if not args.train_per_layer_embeddings:
+        module_names.extend(
+            [
+                "model.language_model.embed_tokens_per_layer",
+                "model.language_model.per_layer_model_projection",
+                "model.language_model.per_layer_projection_norm",
+            ]
+        )
+
+    for module_name in module_names:
+        try:
+            module = model.get_submodule(module_name)
+        except AttributeError:
+            continue
+        for param in module.parameters():
+            if param.requires_grad:
+                frozen_params += param.numel()
+                param.requires_grad_(False)
+
+    if frozen_params:
+        print(f"Froze {frozen_params:,} Gemma 4 parameters for text-only SFT")
+
+
 def build_lora_config(args: argparse.Namespace):
     if not args.use_lora:
         return None
     from peft import LoraConfig, TaskType
 
-    return LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-        use_rslora=True,
-        init_lora_weights="gaussian",
-        modules_to_save=["lm_head"],
+    target_modules = (
+        GEMMA4_LORA_TARGET_MODULES
+        if "gemma-4" in args.model_name.lower()
+        else DEFAULT_LORA_TARGET_MODULES
     )
+    config_kwargs = {
+        "r": args.lora_r,
+        "lora_alpha": args.lora_alpha,
+        "target_modules": target_modules,
+        "lora_dropout": args.lora_dropout,
+        "bias": "none",
+        "task_type": TaskType.CAUSAL_LM,
+        "use_rslora": True,
+        "init_lora_weights": "gaussian",
+        "modules_to_save": ["lm_head"],
+        "ensure_weight_tying": True,
+    }
+    return LoraConfig(**filter_kwargs(LoraConfig, config_kwargs))
 
 
 def filter_kwargs(callable_obj, kwargs: dict) -> dict:
     params = set(inspect.signature(callable_obj).parameters)
     return {key: value for key, value in kwargs.items() if key in params}
+
+
+class DataCollatorForCausalLMWithTailLogits:
+    def __init__(
+        self,
+        tokenizer,
+        max_length: int | None,
+        pad_to_multiple_of: int | None = None,
+        tail_logits_only: bool = False,
+    ) -> None:
+        self.max_length = max_length
+        self.tail_logits_only = tail_logits_only
+        self.base_collator = DataCollatorForSeq2Seq(
+            tokenizer,
+            padding=True,
+            pad_to_multiple_of=pad_to_multiple_of,
+        )
+
+    def __call__(self, features: list[dict]) -> dict:
+        features = [self.truncate_feature(feature) for feature in features]
+        batch = self.base_collator(features)
+        if self.tail_logits_only:
+            self.keep_only_supervised_tail_logits(batch)
+        return batch
+
+    def truncate_feature(self, feature: dict) -> dict:
+        if not self.max_length:
+            return feature
+
+        truncated = dict(feature)
+        seq_len = len(truncated["input_ids"])
+        if seq_len <= self.max_length:
+            return truncated
+
+        for key in ("input_ids", "attention_mask", "labels"):
+            if key in truncated:
+                truncated[key] = truncated[key][-self.max_length :]
+        return truncated
+
+    @staticmethod
+    def keep_only_supervised_tail_logits(batch: dict) -> None:
+        labels = batch.get("labels")
+        if labels is None:
+            return
+
+        supervised = labels.ne(-100)
+        if not supervised.any():
+            batch["logits_to_keep"] = 1
+            batch["labels"] = labels[:, -1:].contiguous()
+            return
+
+        seq_len = labels.shape[1]
+        positions = (
+            torch.arange(seq_len, device=labels.device)
+            .unsqueeze(0)
+            .expand_as(labels)
+        )
+        first_supervised = (
+            torch.where(supervised, positions, seq_len)
+            .min(dim=1)
+            .values.min()
+            .item()
+        )
+        first_logit = max(first_supervised - 1, 0)
+        logits_to_keep = seq_len - first_logit
+        if logits_to_keep < seq_len:
+            batch["labels"] = labels[:, -logits_to_keep:].contiguous()
+        batch["logits_to_keep"] = logits_to_keep
 
 
 def build_sft_config(args: argparse.Namespace, dtype) -> SFTConfig:
@@ -176,6 +309,7 @@ def main() -> None:
     dtype = torch.bfloat16 if bf16 else torch.float16
     print(f"Loading model: {args.model_name}")
     model = load_model(args, dtype)
+    freeze_gemma4_text_only_modules(model, args)
     print(f"Loading tokenizer: {args.tokenizer_name}")
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer_name,
@@ -186,10 +320,14 @@ def main() -> None:
 
     sft_config = build_sft_config(args, dtype)
 
-    data_collator = DataCollatorForSeq2Seq(
+    data_collator = DataCollatorForCausalLMWithTailLogits(
         tokenizer,
-        padding=True,
+        max_length=args.max_length,
         pad_to_multiple_of=8,
+        tail_logits_only=(
+            "gemma-4" in args.model_name.lower()
+            and not args.no_tail_logits_only
+        ),
     )
 
     trainer_kwargs = {
