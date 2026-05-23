@@ -8,12 +8,12 @@ import inspect
 import os
 
 import torch
+import torch.nn.functional as F
 from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoTokenizer,
-    DataCollatorForSeq2Seq,
 )
 from trl import SFTConfig, SFTTrainer
 
@@ -72,7 +72,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-bf16", action="store_true")
     parser.add_argument("--no-gradient-checkpointing", action="store_true")
     parser.add_argument("--no-liger-kernel", action="store_true")
-    parser.add_argument("--no-activation-offloading", action="store_true")
+    parser.add_argument(
+        "--activation-offloading",
+        action="store_true",
+        help="Enable TRL activation offloading. It is disabled by default for Gemma 4 DDP stability.",
+    )
+    parser.add_argument(
+        "--no-activation-offloading",
+        dest="activation_offloading",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--train-multimodal-towers",
         action="store_true",
@@ -87,6 +97,12 @@ def parse_args() -> argparse.Namespace:
         "--train-per-layer-embeddings",
         action="store_true",
         help="Keep Gemma 4 per-layer embedding parameters trainable.",
+    )
+    parser.add_argument(
+        "--invalid-label-action",
+        choices=("mask", "error"),
+        default="mask",
+        help="How to handle labels outside the model output vocabulary.",
     )
 
     parser.add_argument("--use-lora", action="store_true")
@@ -197,18 +213,27 @@ class DataCollatorForCausalLMWithTailLogits:
         max_length: int | None,
         pad_to_multiple_of: int | None = None,
         tail_logits_only: bool = False,
+        input_vocab_size: int | None = None,
+        label_vocab_size: int | None = None,
+        invalid_label_action: str = "mask",
     ) -> None:
+        self.pad_token_id = tokenizer.pad_token_id
+        if self.pad_token_id is None:
+            raise ValueError(
+                "Tokenizer must define a pad_token_id before building batches."
+            )
         self.max_length = max_length
+        self.pad_to_multiple_of = pad_to_multiple_of
         self.tail_logits_only = tail_logits_only
-        self.base_collator = DataCollatorForSeq2Seq(
-            tokenizer,
-            padding=True,
-            pad_to_multiple_of=pad_to_multiple_of,
-        )
+        self.input_vocab_size = input_vocab_size
+        self.label_vocab_size = label_vocab_size
+        self.invalid_label_action = invalid_label_action
 
     def __call__(self, features: list[dict]) -> dict:
         features = [self.truncate_feature(feature) for feature in features]
-        batch = self.base_collator(features)
+        batch = self.pad_features(features)
+        self.validate_input_ids(batch)
+        self.validate_labels(batch)
         if self.tail_logits_only:
             self.keep_only_supervised_tail_logits(batch)
         return batch
@@ -226,6 +251,90 @@ class DataCollatorForCausalLMWithTailLogits:
             if key in truncated:
                 truncated[key] = truncated[key][-self.max_length :]
         return truncated
+
+    def pad_features(self, features: list[dict]) -> dict:
+        max_len = 0
+        normalized = []
+        for feature in features:
+            input_ids = list(feature["input_ids"])
+            attention_mask = list(feature.get("attention_mask", [1] * len(input_ids)))
+            labels = list(feature["labels"])
+            lengths = {
+                "input_ids": len(input_ids),
+                "attention_mask": len(attention_mask),
+                "labels": len(labels),
+            }
+            if len(set(lengths.values())) != 1:
+                raise ValueError(f"Feature has misaligned sequence lengths: {lengths}")
+            max_len = max(max_len, len(input_ids))
+            normalized.append(
+                {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "labels": labels,
+                }
+            )
+
+        if self.pad_to_multiple_of:
+            max_len = (
+                (max_len + self.pad_to_multiple_of - 1)
+                // self.pad_to_multiple_of
+                * self.pad_to_multiple_of
+            )
+
+        batch = {"input_ids": [], "attention_mask": [], "labels": []}
+        for feature in normalized:
+            pad_len = max_len - len(feature["input_ids"])
+            batch["input_ids"].append(
+                feature["input_ids"] + [self.pad_token_id] * pad_len
+            )
+            batch["attention_mask"].append(feature["attention_mask"] + [0] * pad_len)
+            batch["labels"].append(feature["labels"] + [-100] * pad_len)
+
+        return {
+            key: torch.tensor(value, dtype=torch.long)
+            for key, value in batch.items()
+        }
+
+    def validate_input_ids(self, batch: dict) -> None:
+        if self.input_vocab_size is None or "input_ids" not in batch:
+            return
+
+        input_ids = batch["input_ids"]
+        invalid = input_ids.ge(self.input_vocab_size) | input_ids.lt(0)
+        if not invalid.any():
+            return
+
+        bad_ids = input_ids[invalid]
+        raise ValueError(
+            "Batch contains input_ids outside the model input vocabulary: "
+            f"min={bad_ids.min().item()}, max={bad_ids.max().item()}, "
+            f"input_vocab_size={self.input_vocab_size}"
+        )
+
+    def validate_labels(self, batch: dict) -> None:
+        if self.label_vocab_size is None or "labels" not in batch:
+            return
+
+        labels = batch["labels"]
+        valid_label_positions = labels.ne(-100)
+        invalid = valid_label_positions & (
+            labels.ge(self.label_vocab_size) | labels.lt(0)
+        )
+        if not invalid.any():
+            return
+
+        bad_ids = labels[invalid]
+        message = (
+            "Batch contains labels outside the model output vocabulary: "
+            f"min={bad_ids.min().item()}, max={bad_ids.max().item()}, "
+            f"label_vocab_size={self.label_vocab_size}, count={bad_ids.numel()}"
+        )
+        if self.invalid_label_action == "error":
+            raise ValueError(message)
+
+        print(f"{message}. Masking them to -100.")
+        batch["labels"] = labels.masked_fill(invalid, -100)
 
     @staticmethod
     def keep_only_supervised_tail_logits(batch: dict) -> None:
@@ -258,6 +367,69 @@ class DataCollatorForCausalLMWithTailLogits:
         batch["logits_to_keep"] = logits_to_keep
 
 
+def causal_lm_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    num_items_in_batch: torch.Tensor | int | None = None,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    logits = logits.float()
+    labels = F.pad(labels, (0, 1), value=ignore_index)
+    shift_labels = labels[..., 1:].contiguous()
+
+    if logits.shape[:-1] != shift_labels.shape:
+        raise ValueError(
+            "Logits and shifted labels are misaligned: "
+            f"logits={tuple(logits.shape)}, shifted_labels={tuple(shift_labels.shape)}"
+        )
+
+    supervised = shift_labels.ne(ignore_index)
+    if not supervised.any():
+        return logits.sum() * 0.0
+
+    vocab_size = logits.shape[-1]
+    invalid = supervised & (shift_labels.lt(0) | shift_labels.ge(vocab_size))
+    if invalid.any():
+        bad_ids = shift_labels[invalid]
+        raise ValueError(
+            "Shifted labels contain ids outside the logits vocabulary: "
+            f"min={bad_ids.min().item()}, max={bad_ids.max().item()}, "
+            f"logits_vocab_size={vocab_size}, count={bad_ids.numel()}"
+        )
+
+    reduction = "sum" if num_items_in_batch is not None else "mean"
+    loss = F.cross_entropy(
+        logits.reshape(-1, vocab_size),
+        shift_labels.reshape(-1).to(logits.device),
+        ignore_index=ignore_index,
+        reduction=reduction,
+    )
+    if num_items_in_batch is not None:
+        if torch.is_tensor(num_items_in_batch):
+            num_items_in_batch = num_items_in_batch.to(loss.device)
+        loss = loss / num_items_in_batch
+    return loss
+
+
+class CausalLMSFTTrainer(SFTTrainer):
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs: bool = False,
+        num_items_in_batch=None,
+    ):
+        labels = inputs.pop("labels")
+        inputs["use_cache"] = False
+        outputs = model(**inputs)
+        loss = causal_lm_loss(
+            outputs.logits,
+            labels,
+            num_items_in_batch=num_items_in_batch,
+        )
+        return (loss, outputs) if return_outputs else loss
+
+
 def build_sft_config(args: argparse.Namespace, dtype) -> SFTConfig:
     config_kwargs = {
         "gradient_checkpointing": not args.no_gradient_checkpointing,
@@ -283,7 +455,7 @@ def build_sft_config(args: argparse.Namespace, dtype) -> SFTConfig:
         },
         "lr_scheduler_kwargs": {"num_cycles": args.num_cycles},
         "logging_steps": args.logging_steps,
-        "activation_offloading": not args.no_activation_offloading,
+        "activation_offloading": args.activation_offloading,
         "use_liger_kernel": not args.no_liger_kernel,
         "use_liger": not args.no_liger_kernel,
         "logging_dir": args.logging_dir,
@@ -293,6 +465,21 @@ def build_sft_config(args: argparse.Namespace, dtype) -> SFTConfig:
         "max_seq_length": args.max_length,
     }
     return SFTConfig(**filter_kwargs(SFTConfig.__init__, config_kwargs))
+
+
+def embedding_vocab_size(model: torch.nn.Module, output: bool = False) -> int | None:
+    if output:
+        embedding = model.get_output_embeddings()
+    else:
+        embedding = model.get_input_embeddings()
+
+    if embedding is None:
+        return None
+    if hasattr(embedding, "weight"):
+        return embedding.weight.shape[0]
+    if hasattr(embedding, "out_features"):
+        return embedding.out_features
+    return None
 
 
 def main() -> None:
@@ -328,6 +515,9 @@ def main() -> None:
             "gemma-4" in args.model_name.lower()
             and not args.no_tail_logits_only
         ),
+        input_vocab_size=embedding_vocab_size(model),
+        label_vocab_size=embedding_vocab_size(model, output=True),
+        invalid_label_action=args.invalid_label_action,
     )
 
     trainer_kwargs = {
@@ -339,7 +529,9 @@ def main() -> None:
         "train_dataset": dataset,
         "data_collator": data_collator,
     }
-    trainer = SFTTrainer(**filter_kwargs(SFTTrainer.__init__, trainer_kwargs))
+    trainer = CausalLMSFTTrainer(
+        **filter_kwargs(CausalLMSFTTrainer.__init__, trainer_kwargs)
+    )
 
     trainer.train(
         resume_from_checkpoint=checkpoint_arg(
