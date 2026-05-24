@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
         "--logging-dir",
         default="./logs/patient_summarization_gemma4_e2b_it",
     )
-    parser.add_argument("--max-length", type=int, default=30000)
+    parser.add_argument("--max-length", type=int, default=20000)
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--learning-rate", type=float, default=5e-6)
