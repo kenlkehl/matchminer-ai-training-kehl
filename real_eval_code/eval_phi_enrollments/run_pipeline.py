@@ -50,7 +50,7 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[2]  # matchminer-ai-training
 SCRIPTS_DIR = Path(__file__).resolve().parent  # eval_phi_enrollments
 DATA_DIR = REPO_ROOT.parent / "data/phi/enrollments"
-GOLD_LLM = "nvidia/Gemma-4-31B-IT-NVFP4"
+GOLD_LLM = "RedHatAI/Gemma-4-31B-it-FP8-Dynamic" #"nvidia/Gemma-4-31B-IT-NVFP4"
 BASELINE_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 ONCOREASONING_MODEL = "../../../models/onco_reasoning_lfm/checkpoint-121000"
 
@@ -98,7 +98,7 @@ Examples:
     parser.add_argument("--download-dir", type=str,
                         default="/data1/ken/models",
                         help="Download directory for model weights")
-    parser.add_argument("--chunk-size", type=int, default=50000,
+    parser.add_argument("--chunk-size", type=int, default=10000,
                         help="Max tokens per chunk for patient summarization (default: 10000)")
     parser.add_argument("--chunk-overlap", type=int, default=500,
                         help="Token overlap between chunks for patient summarization (default: 500)")

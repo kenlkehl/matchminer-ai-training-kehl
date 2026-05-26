@@ -1001,7 +1001,10 @@ def run_labeling_remote(
     records: list[Record],
     output_path: Path,
     build_messages: Callable[[Record, argparse.Namespace], list[dict[str, str]]],
+    all_records: list[Record] | None = None,
 ) -> None:
+    if all_records is None:
+        all_records = list(records)
     shard_dir = remote_shard_dir_for(args, output_path)
     shard_dir.mkdir(parents=True, exist_ok=True)
     if not args.resume:
@@ -1051,7 +1054,12 @@ def run_labeling_remote(
 
     if not args.no_parquet:
         parquet_path = resolve_parquet_path(args)
-        write_parquet_from_jsonl(output_path, parquet_path, encoding=args.encoding)
+        write_parquet_from_jsonl(
+            output_path,
+            parquet_path,
+            encoding=args.encoding,
+            input_records=all_records,
+        )
         print(f"Wrote parquet copy to {parquet_path}", file=sys.stderr)
 
 
@@ -1065,12 +1073,14 @@ def run_labeling(
     validate_server_mode_args(args)
 
     records = read_records(args)
+    all_records = list(records)
     if remote_mode(args):
         run_labeling_remote(
             args=args,
             records=records,
             output_path=output_path,
             build_messages=build_messages,
+            all_records=all_records,
         )
         return
 
@@ -1129,7 +1139,12 @@ def run_labeling(
 
     if not args.no_parquet:
         parquet_path = resolve_parquet_path(args)
-        write_parquet_from_jsonl(output_path, parquet_path, encoding=args.encoding)
+        write_parquet_from_jsonl(
+            output_path,
+            parquet_path,
+            encoding=args.encoding,
+            input_records=all_records,
+        )
         print(f"Wrote parquet copy to {parquet_path}", file=sys.stderr)
 
 
@@ -1142,8 +1157,239 @@ def resolve_parquet_path(args: argparse.Namespace) -> Path:
     return output_path.with_name(output_path.name + ".parquet")
 
 
-def write_parquet_from_jsonl(jsonl_path: Path, parquet_path: Path, *, encoding: str) -> None:
-    rows: list[dict[str, Any]] = []
+LABEL_OUTPUT_COLUMNS = (
+    "record_id",
+    "input_index",
+    "model",
+    "server_url",
+    "labels_json",
+    "raw_response",
+    "reasoning_content",
+    "request_error",
+    "parse_error",
+    "usage_json",
+    "input_json",
+)
+
+
+def _flatten_label_value(key: str, value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for subkey, subvalue in value.items():
+            col_name = f"{key}_{subkey}"
+            if isinstance(subvalue, (dict, list)):
+                result[col_name] = json.dumps(subvalue, ensure_ascii=False, default=str)
+            else:
+                result[col_name] = subvalue
+        return result
+    if isinstance(value, list):
+        if all(not isinstance(item, (dict, list)) for item in value):
+            return {key: value}
+        return {f"{key}_json": json.dumps(value, ensure_ascii=False, default=str)}
+    return {key: value}
+
+
+def flatten_labels(labels: dict[str, Any] | None) -> dict[str, Any]:
+    if not labels:
+        return {}
+    flat: dict[str, Any] = {}
+    for key, value in labels.items():
+        if key == "record_id":
+            continue
+        flat.update(_flatten_label_value(key, value))
+    return flat
+
+
+def classify_label_schema(label_dicts: Any) -> dict[str, tuple[str, ...]]:
+    """Decide a single column shape per top-level label key from a sample of rows.
+
+    Resolution priority: any row seen as dict wins over list-of-dicts over
+    list-of-primitives over scalar. Subkey set for dict-typed fields is the
+    union across rows.
+    """
+    seen_dict_subkeys: dict[str, set[str]] = {}
+    seen_list_dict: set[str] = set()
+    seen_list_prim: set[str] = set()
+    seen_scalar: set[str] = set()
+    for labels in label_dicts:
+        if not isinstance(labels, dict):
+            continue
+        for key, value in labels.items():
+            if key == "record_id":
+                continue
+            if isinstance(value, dict):
+                seen_dict_subkeys.setdefault(key, set()).update(value.keys())
+            elif isinstance(value, list):
+                if any(isinstance(item, (dict, list)) for item in value):
+                    seen_list_dict.add(key)
+                else:
+                    seen_list_prim.add(key)
+            else:
+                seen_scalar.add(key)
+
+    schema: dict[str, tuple[str, ...]] = {}
+    all_keys = set(seen_dict_subkeys) | seen_list_dict | seen_list_prim | seen_scalar
+    for key in all_keys:
+        if key in seen_dict_subkeys:
+            subkeys = tuple(sorted(seen_dict_subkeys[key]))
+            schema[key] = ("dict",) + subkeys
+        elif key in seen_list_dict:
+            schema[key] = ("list_dict",)
+        elif key in seen_list_prim:
+            schema[key] = ("list_prim",)
+        else:
+            schema[key] = ("scalar",)
+    return schema
+
+
+# ICD-O-3 topography prefixes used to derive organ-specific metastatic-site
+# columns for imaging reports. Keys match the trailing token used in the
+# manual-label columns (e.g. "brain" -> derived_brain_met) so the input and
+# derived columns line up for comparison.
+SITE_CODE_PREFIXES: dict[str, tuple[str, ...]] = {
+    "brain":      ("C70.", "C71."),      # meninges + brain parenchyma
+    "bone":       ("C40.", "C41."),      # limb + axial bones (incl. spine, ribs, pelvis)
+    "adrenal":    ("C74.",),
+    "liver":      ("C22.",),
+    "lung":       ("C34.",),
+    "node":       ("C77.",),
+    "peritoneal": ("C48.",),             # peritoneum + retroperitoneum
+}
+
+
+def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _field_code(labels: dict[str, Any], key: str) -> int | None:
+    field = labels.get(key)
+    if isinstance(field, dict):
+        return _safe_int(field.get("code"))
+    return _safe_int(field)
+
+
+def detect_label_kind(label_schema: dict[str, tuple[str, ...]]) -> str | None:
+    keys = set(label_schema.keys())
+    if keys & {"image_ca", "image_overall", "image_cancer_sites"}:
+        return "imaging"
+    if keys & {"md_ca", "md_ca_status"}:
+        return "medonc"
+    return None
+
+
+def derive_manual_label_columns(
+    labels: dict[str, Any] | None,
+    kind: str | None,
+) -> dict[str, Any]:
+    """Compute manual-label-style derived columns from a labels dict.
+
+    Always emits the same column set for a given `kind`. When `labels` is
+    not a dict (e.g. labeling failed) every derived column is null.
+    Otherwise: "1 if the model labeled cancer ..., else 0" per the user's
+    spec; downstream organ-met flags additionally require the cancer flag.
+    """
+    if kind == "imaging":
+        cols = [
+            "derived_any_cancer",
+            "derived_response",
+            "derived_progression",
+        ] + [f"derived_{site}_met" for site in SITE_CODE_PREFIXES]
+        out: dict[str, Any] = {col: None for col in cols}
+        if not isinstance(labels, dict):
+            return out
+        ca = _field_code(labels, "image_ca")
+        overall = _field_code(labels, "image_overall")
+        has_cancer = ca == 1
+        out["derived_any_cancer"] = int(has_cancer)
+        out["derived_response"] = int(has_cancer and overall == 1)
+        out["derived_progression"] = int(has_cancer and overall in (3, 4))
+        codes: list[str] = []
+        sites = labels.get("image_cancer_sites")
+        if isinstance(sites, list):
+            for entry in sites:
+                if isinstance(entry, dict):
+                    code = entry.get("icdo_topography_code")
+                    if isinstance(code, str):
+                        codes.append(code.strip().upper())
+        for site_name, prefixes in SITE_CODE_PREFIXES.items():
+            present = any(any(code.startswith(p) for p in prefixes) for code in codes)
+            out[f"derived_{site_name}_met"] = int(has_cancer and present)
+        return out
+    if kind == "medonc":
+        cols = ["derived_any_cancer", "derived_response", "derived_progression"]
+        out = {col: None for col in cols}
+        if not isinstance(labels, dict):
+            return out
+        ca = _field_code(labels, "md_ca")
+        status = _field_code(labels, "md_ca_status")
+        has_cancer = ca == 1
+        out["derived_any_cancer"] = int(has_cancer)
+        out["derived_response"] = int(has_cancer and status == 1)
+        out["derived_progression"] = int(has_cancer and status in (3, 4))
+        return out
+    return {}
+
+
+def flatten_labels_with_schema(
+    labels: dict[str, Any] | None,
+    schema: dict[str, tuple[str, ...]],
+) -> dict[str, Any]:
+    flat: dict[str, Any] = {}
+    src = labels if isinstance(labels, dict) else {}
+    for key, info in schema.items():
+        kind = info[0]
+        value = src.get(key)
+        if kind == "dict":
+            subkeys = info[1:]
+            d = value if isinstance(value, dict) else {}
+            for subkey in subkeys:
+                col = f"{key}_{subkey}"
+                subvalue = d.get(subkey)
+                if isinstance(subvalue, (dict, list)):
+                    flat[col] = json.dumps(subvalue, ensure_ascii=False, default=str)
+                else:
+                    flat[col] = subvalue
+        elif kind == "list_dict":
+            col = f"{key}_json"
+            flat[col] = json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, list) else None
+        elif kind == "list_prim":
+            flat[key] = value if isinstance(value, list) else None
+        else:
+            if isinstance(value, (dict, list)):
+                flat[key] = json.dumps(value, ensure_ascii=False, default=str)
+            else:
+                flat[key] = value
+    return flat
+
+
+def write_parquet_from_jsonl(
+    jsonl_path: Path,
+    parquet_path: Path,
+    *,
+    encoding: str,
+    input_records: list[Record] | None = None,
+) -> None:
+    input_lookup: dict[str, dict[str, Any]] = {}
+    if input_records:
+        for record in input_records:
+            input_lookup[str(record.record_id)] = record.data
+
+    all_input_keys: list[str] = []
+    seen_keys: set[str] = set()
+    if input_records:
+        for record in input_records:
+            for key in record.data.keys():
+                if key in seen_keys or key in LABEL_OUTPUT_COLUMNS:
+                    continue
+                seen_keys.add(key)
+                all_input_keys.append(key)
+
+    raw_rows: list[dict[str, Any]] = []
     with jsonl_path.open("r", encoding=encoding) as handle:
         for line in handle:
             if not line.strip():
@@ -1152,7 +1398,19 @@ def write_parquet_from_jsonl(jsonl_path: Path, parquet_path: Path, *, encoding: 
                 raw = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            flat: dict[str, Any] = {
+            raw_rows.append(raw)
+
+    label_schema = classify_label_schema(raw.get("labels") for raw in raw_rows)
+    label_kind = detect_label_kind(label_schema)
+
+    rows: list[dict[str, Any]] = []
+    for raw in raw_rows:
+        flat: dict[str, Any] = {}
+        input_data = input_lookup.get(str(raw.get("record_id"))) if input_lookup else None
+        for key in all_input_keys:
+            flat[key] = input_data.get(key) if input_data else None
+        flat.update(
+            {
                 "record_id": raw.get("record_id"),
                 "input_index": raw.get("input_index"),
                 "model": raw.get("model"),
@@ -1164,9 +1422,12 @@ def write_parquet_from_jsonl(jsonl_path: Path, parquet_path: Path, *, encoding: 
                 "parse_error": raw.get("parse_error"),
                 "usage_json": json.dumps(raw["usage"], ensure_ascii=False) if raw.get("usage") else None,
             }
-            if "input" in raw:
-                flat["input_json"] = json.dumps(raw["input"], ensure_ascii=False, default=str)
-            rows.append(flat)
+        )
+        if "input" in raw:
+            flat["input_json"] = json.dumps(raw["input"], ensure_ascii=False, default=str)
+        flat.update(flatten_labels_with_schema(raw.get("labels"), label_schema))
+        flat.update(derive_manual_label_columns(raw.get("labels"), label_kind))
+        rows.append(flat)
 
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
 
