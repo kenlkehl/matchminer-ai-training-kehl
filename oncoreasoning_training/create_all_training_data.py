@@ -20,6 +20,7 @@ import multiprocessing as mp
 import os
 import re
 import struct
+from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -27,15 +28,21 @@ from datasets.arrow_writer import ArrowWriter
 from transformers import AutoTokenizer
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
+DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_training_data"
+
+
 # ---------------------------------------------------------------------------
 # Constants: prompt templates copied verbatim from the original scripts
 # ---------------------------------------------------------------------------
 
 TRIALSPACE_PROMPT_HEADER = (
-    "You are an expert clinical oncologist with an encyclopedic knowledge of cancer and its treatments.\n"
+    "You are an expert clinical oncologist with a broad and deep knowledge of cancer and its treatments.\n"
     "Your job is to review a clinical trial document and extract a list of structured clinical spaces that are eligible for that trial.\n"
     "A clinical space is defined as a unique combination of patient age range, sex (if any sex criteria), cancer primary site, histology, which treatments a patient must have received, "
-    "which treatments a patient must not have received, cancer burden (eg presence of metastatic disease; this also includes cancer type-specific prognostic scores, risk indices, or categories), tumor biomarkers (such as "
+    "which treatments a patient must not have received, cancer burden (eg presence of metastatic disease; this also includes cancer type-specific prognostic scores, risk indices, or categories; it does NOT include ECOG performance status, measurable disease, or concepts like 'life expectancy at least 6 months'), tumor biomarkers (such as "
     "germline or somatic gene mutations or alterations, or protein expression on tumor), that a patient must have or must not have to "
     "be eligible for the trial. \n"
     "With respect to sex criteria: For cancers originating in organs only present in one sex, you must assume the sex criteria even if not stated explicitly.\n"
@@ -55,16 +62,18 @@ TRIALSPACE_PROMPT_HEADER = (
     "Structure your output like this, as a list of spaces, with spaces separated by newlines, as below. STRICTLY adhere to the formatting.\n"
     "1. Age range allowed: <age_range_allowed>. Sex allowed: <sex_allowed>. Cancer type allowed: <cancer_type_allowed>. Histology allowed: <histology_allowed>. Cancer burden allowed: <cancer_burden_allowed>. Prior treatment required: <prior_treatments_requred>. Prior treatment excluded: <prior_treatments_excluded>. Biomarkers required: <biomarkers_required>. Biomarkers excluded: <biomarkers_excluded>. \n"
     "2. Cancer type allowed: <cancer_type_allowed>, etc.\n"
-    "If a concept is not relevant, such as if there are no prior treatents required, simply output NA for that concept.\n"
+    "If a concept is not relevant, such as if there are no prior treatments required, simply output NA for that concept.\n"
     "CRITICAL: Anytime you provide a list for a particular concept, you must be completely clear on whether \"or\" versus \"and\" logic applies "
     "to the list. For example, do not output \"EGFR L858R mutant, TP53 mutant\"; if both are required, output \"EGFR L858R mutant and TP53 mutant\". "
     "As another example, do not output \"ER+, PR+\"; if the patient can have either an ER or a PR positive tumor, output \"ER+ or PR+\".\n"
+    "If you find that a trial space might otherwise include lists of different prior treatments allowed, or biomarker paradigms, etc, that should be separated into multiple spaces. For example, if a trial allows patients with either (1) EGFR-mutant non-small cell lung cancer or (2) ALK-rearranged non-small cell lung cancer, that should be output as two separate spaces, one for the EGFR-mutant NSCLC and one for the ALK-rearranged NSCLC, even if all other criteria are the same for both spaces.\n"
     "NEVER put a newline within a single trial space.\n"
     "After you output the trial spaces, output a newline, then the text \"Boilerplate exclusions:\" VERBATIM, then another newline.\n"
     "Then, list exclusion criteria described in the trial text that are unrelated to the trial space definitions. Such exclusions tend to be common "
     "to clinical trials in general.\n"
     "Common boilerplate exclusion criteria include a history of pneumonitis, heart failure, renal dysfunction, liver dysfunction, uncontrolled brain "
     "metastases, HIV or hepatitis, and poor performance status.\n"
+    "Make sure your boilerplate exclusions are clearly phrased as exclusion criteria, not as requirements for exclusion. For example, if a trial requires ECOG 0 or 1 for eligibility, do NOT write \"ECOG 0 or 1\" in the boilerplate exclusions. Instead, write \"Poor performance status (eg ECOG >1)\" or similar language that clearly indicates this is an exclusion criterion.\n"
     "ALWAYS output plain text only. NEVER output unicode, Markdown, or tables.\n"
 )
 
@@ -108,6 +117,25 @@ def apply_think_tags(text: str) -> str:
     return text
 
 
+def get_optional_text(row, column: str) -> str:
+    """Return a string column value, treating missing/NA as empty."""
+    if column not in row:
+        return ""
+    value = row[column]
+    if pd.isna(value):
+        return ""
+    return str(value)
+
+
+def build_reasoning_response(row, reasoning_col: str, response_col: str) -> str:
+    """Build the assistant target from optional reasoning and final response."""
+    response = get_optional_text(row, response_col)
+    reasoning = get_optional_text(row, reasoning_col)
+    if reasoning:
+        return reasoning + "assistantfinal" + response
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Per-task prompt builders (return messages list + truncatable field info)
 # ---------------------------------------------------------------------------
@@ -116,7 +144,11 @@ def build_boilerplate_messages(row):
     """Build chat messages for a boilerplate check example."""
     patient_bp = row['patient_boilerplate_text']
     trial_bp = row['trial_boilerplate_text']
-    answer = row['boilerplate_check_llm_response']
+    answer = build_reasoning_response(
+        row,
+        'boilerplate_check_llm_reasoning',
+        'boilerplate_check_llm_response',
+    )
 
     user_content = (
         "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment.\n"
@@ -155,15 +187,15 @@ def build_summarization_messages(row):
     last_date = str(row['last_date']) if pd.notna(row['last_date']) else "unknown date"
     chunk_text = str(row['chunk_text']) if pd.notna(row['chunk_text']) else ""
 
-    reasoning = row['new_summary_reasoning']
-    summary = row['new_summary']
-    full_response = reasoning + "assistantfinal" + summary
+    reasoning = get_optional_text(row, 'new_summary_reasoning')
+    summary = get_optional_text(row, 'new_summary')
+    full_response = reasoning + "assistantfinal" + summary if reasoning else summary
 
     prior_summary_text = prior_summary if prior_summary else "None - this is the first segment for this patient"
 
     user_content = f"""You are an experienced clinical oncology history summarization bot.
 
-You are maintaining a running summary of a patient's cancer history based on their electronic health record.
+You are maintaining a running summary of the history of a patient's active cancer(s) in their electronic health record.
 You will be given:
 1. A PRIOR SUMMARY of the patient's history (may be empty for the first segment)
 2. THE NEXT SEGMENT of the patient's clinical record (may contain multiple notes with dates)
@@ -179,16 +211,19 @@ Age: (patient's most recent age)
 Sex: (patient's sex)
 Cancer type: (patient's cancer type/primary site (eg breast cancer, lung cancer, etc))
 Histology: (patient's histology (eg adenocarcinoma, squamous carcinoma, etc))
-Current extent: (patient's current extent (localized, advanced, metastatic, etc); this is also where tumor markers for following disease status over time, such as CEA or PSA, should be documented if relevant)
-Biomarkers: (genomic results, protein expression, etc, relevant or potentially relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings)
-Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically.)
-Boilerplate: (any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, etc)
-Clearly separate the "boilerplate" section by labeling it "Boilerplate: " before describing any such conditions.
+Current extent: (patient's current extent (localized, advanced, metastatic, etc); this is also where tumor markers for following disease status, such as CEA or PSA, should be documented if relevant. Don't list every such marker the patient has had checked over time, though, because these can get lengthy; just list the most recent value and trend if relevant to disease status.)
+Biomarkers: (genomic results, protein expression, etc, relevant for informing treatment selection. Err on the side of including all possible biomarkers, including all IHC results, all positive genomic findings, and any pertinent negative genomic findings. However, critically, standard lab values (eg CBC, CMP, LFTs, etc) MUST NOT be included in this section - only tumor biomarkers relevant to cancer treatment selection should be included. Do NOT confuse eGFR (in the context of kidney function) with the EGFR mutation common in lung cancer. Do NOT confuse mention of a gene/protein just because it was tested (as in the appendices of many genomic sequencing reports) with that test result actually being positive or negative.)
+Treatment history: (surgery, radiation, chemotherapy/targeted therapy/immunotherapy, etc, including start and stop dates, and best response if noted. Treatment history should be provided chronologically. For cancer drug names, use generic names whenever you know them. Expand abbreviations where possible ,(eg "carbo" -> "carboplatin", "pembro" -> "pembrolizumab", "AC/T" -> "doxorubicin + cyclophosphamide followed by paclitaxel", etc)
+
+Boilerplate conditions:
+(any history of conditions that might meet common "boilerplate" exclusion criteria for clinical trials, such as uncontrolled brain metastases, poor performance status, lack of measurable disease, congestive heart failure, pneumonitis, renal dysfunction, liver dysfunction, HIV or hepatitis infection, prior unrelated cancer diagnoses, etc.)
+
+Clearly separate the "boilerplate" section by adding a newline after the patient history; then the "Boilerplate conditions:' text VERBATIM; then another newline; and then the boilerplate condition output text.
 --(end of sections)
 
 Do not consider localized basal cell or squamous carcinomas of the skin, or colon polyps, to be cancers for your purposes.
 Do not include the patient's name, but do include relevant dates whenever documented.
-If a patient has a history of more than one cancer, document the cancers one at a time. List the currently or most recently active cancer first, followed by any prior cancers. Within each cancer, events should be in chronological order.
+If a patient has more than one active cancer, document the active cancers one at a time. List the most active cancer first, followed by any other active cancers. Within each active cancer, events should be in chronological order. Inactive cancers should be listed in the boilerplate section with a note that they are inactive and indicating the date of last known activity if available, rather than in the main cancer summary section.
 CRITICAL: Format your response as free text ONLY. Do NOT output markdown, Unicode, or tables.
 
 Here is an example of the desired output format:
@@ -203,8 +238,80 @@ Treatment history:
 # 1/5/2020-2/5/2021: carboplatin/pemetrexed/pembrolizumab; best response stable disease
 # 1/2021: Palliative radiation for progressive spinal metastases
 # 3/2021-present: docetaxel; achieved partial response, ongoing as of last note
-Boilerplate:
-No evidence of common boilerplate exclusion criteria
+
+Boilerplate conditions:
+ECOG 1. Remote history of prostate cancer (inactive).
+
+Reference: common systemic therapy regimen abbreviations (use this list to expand abbreviations into generic drug names whenever they appear in the clinical record):
+- AC: doxorubicin + cyclophosphamide
+- AC-T / AC followed by T: doxorubicin + cyclophosphamide followed by paclitaxel
+- ddAC-T: dose-dense doxorubicin + cyclophosphamide followed by paclitaxel
+- TC: docetaxel + cyclophosphamide
+- TCH: docetaxel + carboplatin + trastuzumab
+- TCHP: docetaxel + carboplatin + trastuzumab + pertuzumab
+- THP: paclitaxel + trastuzumab + pertuzumab
+- HP: trastuzumab + pertuzumab
+- T-DM1: ado-trastuzumab emtansine
+- T-DXd: trastuzumab deruxtecan
+- CMF: cyclophosphamide + methotrexate + 5-fluorouracil
+- CAF / FAC: cyclophosphamide + doxorubicin + 5-fluorouracil
+- FEC: 5-fluorouracil + epirubicin + cyclophosphamide
+- CDK4/6i: CDK4/6 inhibitor (e.g., palbociclib, ribociclib, abemaciclib)
+- AI: aromatase inhibitor (e.g., anastrozole, letrozole, exemestane); note this abbreviation can also mean doxorubicin + ifosfamide in sarcoma contexts — disambiguate by cancer type
+- FOLFOX: 5-fluorouracil + leucovorin + oxaliplatin
+- FOLFIRI: 5-fluorouracil + leucovorin + irinotecan
+- FOLFOXIRI / FOLFIRINOX: 5-fluorouracil + leucovorin + oxaliplatin + irinotecan
+- mFOLFIRINOX: modified FOLFIRINOX (reduced doses of 5-fluorouracil + leucovorin + oxaliplatin + irinotecan)
+- CAPOX / XELOX: capecitabine + oxaliplatin
+- CAPIRI / XELIRI: capecitabine + irinotecan
+- DCF: docetaxel + cisplatin + 5-fluorouracil
+- FLOT: 5-fluorouracil + leucovorin + oxaliplatin + docetaxel
+- ECF: epirubicin + cisplatin + 5-fluorouracil
+- ECX: epirubicin + cisplatin + capecitabine
+- Gem/Cis: gemcitabine + cisplatin
+- Gem/Carbo: gemcitabine + carboplatin
+- Gem/Abraxane / Gem/nab-pac: gemcitabine + nab-paclitaxel
+- GemOx: gemcitabine + oxaliplatin
+- Carbo/Tax: carboplatin + paclitaxel
+- EP / PE: cisplatin + etoposide
+- CE: carboplatin + etoposide
+- BEP / PEB: bleomycin + etoposide + cisplatin
+- VIP: etoposide + ifosfamide + cisplatin
+- TIP: paclitaxel + ifosfamide + cisplatin
+- MVAC / ddMVAC: methotrexate + vinblastine + doxorubicin + cisplatin (dose-dense variant)
+- GC: gemcitabine + cisplatin (or gemcitabine + carboplatin in bladder cancer)
+- EV: enfortumab vedotin
+- EV+P: enfortumab vedotin + pembrolizumab
+- CHOP: cyclophosphamide + doxorubicin + vincristine + prednisone
+- R-CHOP: rituximab + cyclophosphamide + doxorubicin + vincristine + prednisone
+- EPOCH / R-EPOCH: etoposide + prednisone + vincristine + cyclophosphamide + doxorubicin (+/- rituximab)
+- DA-EPOCH-R: dose-adjusted EPOCH + rituximab
+- ABVD: doxorubicin + bleomycin + vinblastine + dacarbazine
+- BEACOPP: bleomycin + etoposide + doxorubicin + cyclophosphamide + vincristine + procarbazine + prednisone
+- BV-AVD: brentuximab vedotin + doxorubicin + vinblastine + dacarbazine
+- ICE / R-ICE: ifosfamide + carboplatin + etoposide (+/- rituximab)
+- DHAP / R-DHAP: dexamethasone + high-dose cytarabine + cisplatin (+/- rituximab)
+- ESHAP: etoposide + methylprednisolone + cytarabine + cisplatin
+- GDP: gemcitabine + dexamethasone + cisplatin
+- BR: bendamustine + rituximab
+- HyperCVAD: cyclophosphamide + vincristine + doxorubicin + dexamethasone, alternating with high-dose methotrexate + cytarabine
+- 7+3: cytarabine (7 days) + daunorubicin or idarubicin (3 days), induction for AML
+- HiDAC: high-dose cytarabine
+- VRd / RVd: bortezomib + lenalidomide + dexamethasone
+- KRd: carfilzomib + lenalidomide + dexamethasone
+- DRd: daratumumab + lenalidomide + dexamethasone
+- DVd: daratumumab + bortezomib + dexamethasone
+- D-VRd: daratumumab + bortezomib + lenalidomide + dexamethasone
+- VAD: vincristine + doxorubicin + dexamethasone
+- MAP: methotrexate + doxorubicin + cisplatin (osteosarcoma)
+- VAC: vincristine + actinomycin-D + cyclophosphamide
+- VDC/IE: vincristine + doxorubicin + cyclophosphamide alternating with ifosfamide + etoposide (Ewing sarcoma)
+- AI: doxorubicin + ifosfamide (sarcoma)
+- Common single-agent abbreviations: pembro = pembrolizumab; nivo = nivolumab; ipi = ipilimumab; atezo = atezolizumab; durva = durvalumab; cemi = cemiplimab; dostarlimab; cetux = cetuximab; pani = panitumumab; bev = bevacizumab; ram = ramucirumab; trastuzumab = Herceptin; pertuzumab = Perjeta; carbo = carboplatin; cis = cisplatin; tax / pac = paclitaxel; doce = docetaxel; gem = gemcitabine; cape = capecitabine; 5-FU = fluorouracil; oxali = oxaliplatin; iri = irinotecan; etop = etoposide; doxo / adria = doxorubicin; cyclo / CTX = cyclophosphamide; ifos = ifosfamide; vinc / VCR = vincristine; len = lenalidomide; pom = pomalidomide; bort / Velcade = bortezomib; carfilzomib = Kyprolis; dara = daratumumab; ven = venetoclax.
+- Ipi/Nivo: ipilimumab + nivolumab
+- Chemo-IO: chemotherapy combined with immune checkpoint inhibitor (specify the agents based on context)
+
+If an abbreviation in the record is not on this list and you are not confident of its expansion, write the abbreviation as-is rather than guessing.
 
 The following are the patient's data.
 ---
@@ -214,8 +321,10 @@ PRIOR SUMMARY:
 NEXT CLINICAL RECORD SEGMENT (covering {first_date} to {last_date}):
 {chunk_text}
 ---
-Now, write your updated summary, or if there is no new relevant information, output the prior summary exactly as it was.
-If any information is still relevant but is unchanged, just restate it in the updated summary, but do NOT state "no change" or similar - just produce the updated summary text as if you were writing it fresh, incorporating any new information but keeping relevant old information, without calling out what changed vs what stayed the same from the prior summary.
+Now, write your updated summary, or if there is no new relevant information, output the prior summary exactly as it was.{" "}
+If any information is still relevant but is unchanged, just restate it in the updated summary, but do NOT state "no change" or similar - just produce the updated summary text as if you were writing it fresh, incorporating any new information but keeping relevant old information, without calling out what changed vs what stayed the same from the prior summary.{" "}
+You may update the old summary content in your output if the new information demonstrates that there was an error in the old output.
+You may sometimes encounter contradictory information across notes (eg different biomarker results, or different cancer stage descriptions) - in that case, use your best judgment to determine which information is most likely to be correct based on the dates and context, and update the summary accordingly to reflect the most likely current state of the patient.
 Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
     messages = [
@@ -230,7 +339,11 @@ def build_trialcheck_messages(row):
     """Build chat messages for a trial check example."""
     patient_summary = row['patient_summary']
     trial_summary = row['this_space']
-    answer = row['trialcheck_llm_response']
+    answer = build_reasoning_response(
+        row,
+        'trialcheck_llm_reasoning',
+        'trialcheck_llm_response',
+    )
 
     user_content = (
         "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
@@ -294,10 +407,17 @@ def build_trialspace_messages(row):
     answer = row['space_reasoning_and_output']
 
     messages = [
-        {'role': 'system', 'content': """
-        Reasoning: high.
-        """},
-        {'role': 'user', 'content': TRIALSPACE_PROMPT_HEADER + "\n" + trial_text + "\n" + TRIALSPACE_PROMPT_SUFFIX},
+        {'role': 'system', 'content': "Reasoning: high."},
+        {
+            'role': 'user',
+            'content': (
+                TRIALSPACE_PROMPT_HEADER
+                + "Here is a clinical trial document:\n"
+                + str(trial_text)
+                + "\n"
+                + TRIALSPACE_PROMPT_SUFFIX
+            ),
+        },
         {'role': 'assistant', 'content': answer},
     ]
     return messages
@@ -642,8 +762,8 @@ def load_boilerplate(data_dir):
 
 
 def load_summarization(data_dir):
-    sum_path = os.path.join(data_dir, 'patient_serial_summaries_20K_chunks.parquet')
-    chunk_path = os.path.join(data_dir, 'summary_shards_20K_chunks', 'prepared_chunks.parquet')
+    sum_path = os.path.join(data_dir, 'patient_serial_summaries.parquet')
+    chunk_path = os.path.join(data_dir, 'summary_shards', 'prepared_chunks.parquet')
     print(f"  Loading {sum_path}...")
     serial_summaries = pd.read_parquet(sum_path)
     print(f"  Loaded {len(serial_summaries)} summary records")
@@ -667,9 +787,15 @@ def load_summarization(data_dir):
 
 
 def load_trialchecks(data_dir):
-    KEEP_COLS = ['patient_summary', 'this_space', 'trialcheck_llm_response',
+    KEEP_COLS = ['patient_summary', 'this_space', 'trialcheck_llm_reasoning',
+                 'trialcheck_llm_response',
                  'eligibility_result', 'eligibility_verdict']
-    rename = {'trialcheck_llama_response': 'trialcheck_llm_response'}
+    rename = {
+        'trialcheck_llama_reasoning': 'trialcheck_llm_reasoning',
+        'trialcheck_llama_response': 'trialcheck_llm_response',
+        'llama_reasoning': 'trialcheck_llm_reasoning',
+        'llama_response': 'trialcheck_llm_response',
+    }
 
     def load_and_select(path, rename_cols=None):
         df = pd.read_parquet(path)
@@ -755,14 +881,14 @@ def parse_args():
     parser.add_argument(
         "--data-dir",
         type=str,
-        default="../../data/no_phi",
-        help="Base data directory (default: ../../data/no_phi)",
+        default=str(DEFAULT_DATA_DIR),
+        help=f"Base data directory (default: {DEFAULT_DATA_DIR})",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="../../data/no_phi/oncoreasoning_training_data",
-        help="Output directory (default: ../../data/no_phi/oncoreasoning_training_data)",
+        default=str(DEFAULT_OUTPUT_DIR),
+        help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})",
     )
     parser.add_argument(
         "--max-seq-length",
