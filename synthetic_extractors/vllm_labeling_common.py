@@ -1374,10 +1374,10 @@ def write_parquet_from_jsonl(
     encoding: str,
     input_records: list[Record] | None = None,
 ) -> None:
-    input_lookup: dict[str, dict[str, Any]] = {}
+    input_lookup: dict[int, dict[str, Any]] = {}
     if input_records:
         for record in input_records:
-            input_lookup[str(record.record_id)] = record.data
+            input_lookup[int(record.input_index)] = record.data
 
     all_input_keys: list[str] = []
     seen_keys: set[str] = set()
@@ -1406,7 +1406,13 @@ def write_parquet_from_jsonl(
     rows: list[dict[str, Any]] = []
     for raw in raw_rows:
         flat: dict[str, Any] = {}
-        input_data = input_lookup.get(str(raw.get("record_id"))) if input_lookup else None
+        input_data = None
+        if input_lookup:
+            raw_index = raw.get("input_index")
+            try:
+                input_data = input_lookup.get(int(raw_index)) if raw_index is not None else None
+            except (TypeError, ValueError):
+                input_data = None
         for key in all_input_keys:
             flat[key] = input_data.get(key) if input_data else None
         flat.update(
