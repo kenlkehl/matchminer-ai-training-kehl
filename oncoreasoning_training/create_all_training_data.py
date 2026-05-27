@@ -106,17 +106,6 @@ def token_len(text: str, tokenizer) -> int:
     return len(tokenizer(text, add_special_tokens=False).input_ids)
 
 
-def apply_think_tags(text: str) -> str:
-    """Replace gpt-oss-120b reasoning markers with <think>/<​/think> tags.
-
-    Replaces 'assistantfinal' -> '</think>' first, then
-    'assistant' (not inside chat template headers) -> '<think>'.
-    """
-    text = text.replace('assistantfinal', '</think>')
-    text = re.sub(r'(?<!\|start_header_id\|>)assistant(?!final)', '<think>', text)
-    return text
-
-
 def get_optional_text(row, column: str) -> str:
     """Return a string column value, treating missing/NA as empty."""
     if column not in row:
@@ -127,13 +116,100 @@ def get_optional_text(row, column: str) -> str:
     return str(value)
 
 
+def normalize_source_text(text: str) -> str:
+    """Normalize source-model text before target-tokenizer chat templating."""
+    return str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def clean_reasoning_text(reasoning: str) -> str:
+    """Remove source-model channel wrappers from a reasoning trace."""
+    text = normalize_source_text(reasoning)
+    if not text:
+        return ""
+
+    text = re.sub(r'^\s*<\|channel\>(thought|analysis|thinking)\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*<channel\|>\s*$', '', text)
+    text = re.sub(r'^\s*<think>\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*</think>\s*$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*assistantfinal\s*$', '', text)
+    return text.strip()
+
+
+def clean_final_text(final_response: str) -> str:
+    """Remove source-model final-channel prefixes from a final answer."""
+    text = normalize_source_text(final_response)
+    if not text:
+        return ""
+
+    text = re.sub(r'^\s*assistantfinal\s*', '', text)
+    text = re.sub(r'^\s*<\|channel\>final\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\s*<channel\|>\s*', '', text)
+    return text.strip()
+
+
+def build_assistant_target(reasoning: str, final_response: str) -> str:
+    """Build target-model assistant content from separate reasoning/final text."""
+    reasoning = clean_reasoning_text(reasoning)
+    final_response = clean_final_text(final_response)
+
+    if reasoning and final_response:
+        return f"<think>\n{reasoning}\n</think>\n{final_response}"
+    if reasoning:
+        return f"<think>\n{reasoning}\n</think>"
+    return final_response
+
+
 def build_reasoning_response(row, reasoning_col: str, response_col: str) -> str:
     """Build the assistant target from optional reasoning and final response."""
-    response = get_optional_text(row, response_col)
-    reasoning = get_optional_text(row, reasoning_col)
-    if reasoning:
-        return reasoning + "assistantfinal" + response
-    return response
+    return build_assistant_target(
+        reasoning=get_optional_text(row, reasoning_col),
+        final_response=get_optional_text(row, response_col),
+    )
+
+
+def split_combined_reasoning_and_final(combined: str, final_response: str = ""):
+    """Split source traces where final output is appended to reasoning.
+
+    Trial-space traces currently store a Gemma-style combined field ending in
+    the separate ``space_output_no_reasoning`` value, usually after a
+    ``<channel|>`` marker.  Prefer the explicit final column when present, and
+    fall back to known source-model separators for older data.
+    """
+    combined = normalize_source_text(combined)
+    final_response = clean_final_text(final_response)
+
+    if not combined:
+        return "", final_response
+
+    if final_response:
+        combined_rstripped = combined.rstrip()
+        final_rstripped = final_response.rstrip()
+        if combined_rstripped.endswith(final_rstripped):
+            reasoning = combined_rstripped[:-len(final_rstripped)]
+            return clean_reasoning_text(reasoning), final_response
+
+        idx = combined.rfind(final_response)
+        if idx >= 0:
+            return clean_reasoning_text(combined[:idx]), final_response
+
+    for marker in ("assistantfinal", "<|channel>final", "<channel|>"):
+        if marker in combined:
+            reasoning, parsed_final = combined.rsplit(marker, 1)
+            return clean_reasoning_text(reasoning), clean_final_text(parsed_final)
+
+    return clean_reasoning_text(combined), final_response
+
+
+def build_combined_reasoning_response(row, combined_col: str, final_col: str, fallback_final_col: str = "") -> str:
+    """Build assistant target from a combined reasoning+final source column."""
+    final_response = get_optional_text(row, final_col)
+    if not final_response and fallback_final_col:
+        final_response = get_optional_text(row, fallback_final_col)
+    reasoning, final_response = split_combined_reasoning_and_final(
+        combined=get_optional_text(row, combined_col),
+        final_response=final_response,
+    )
+    return build_assistant_target(reasoning, final_response)
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +263,11 @@ def build_summarization_messages(row):
     last_date = str(row['last_date']) if pd.notna(row['last_date']) else "unknown date"
     chunk_text = str(row['chunk_text']) if pd.notna(row['chunk_text']) else ""
 
-    reasoning = get_optional_text(row, 'new_summary_reasoning')
-    summary = get_optional_text(row, 'new_summary')
-    full_response = reasoning + "assistantfinal" + summary if reasoning else summary
+    full_response = build_reasoning_response(
+        row,
+        'new_summary_reasoning',
+        'new_summary',
+    )
 
     prior_summary_text = prior_summary if prior_summary else "None - this is the first segment for this patient"
 
@@ -404,7 +482,12 @@ def build_trialcheck_messages(row):
 def build_trialspace_messages(row):
     """Build chat messages for a trial space extraction example."""
     trial_text = row['trial_text']
-    answer = row['space_reasoning_and_output']
+    answer = build_combined_reasoning_response(
+        row,
+        combined_col='space_reasoning_and_output',
+        final_col='space_output_no_reasoning',
+        fallback_final_col='space_text',
+    )
 
     messages = [
         {'role': 'system', 'content': "Reasoning: high."},
@@ -566,6 +649,55 @@ def _find_last_subsequence(seq, subseq):
     return pos // 4
 
 
+def get_assistant_header_ids(tokenizer):
+    """Return token ids for the assistant-response header in this tokenizer.
+
+    The exact chat-template marker is model-specific.  Derive it from
+    ``add_generation_prompt`` instead of hard-coding a Llama-style header.
+    """
+    probe_prefix = [
+        {"role": "system", "content": "__mask_probe_system__"},
+        {"role": "user", "content": "__mask_probe_user__"},
+    ]
+    probe_full = probe_prefix + [
+        {"role": "assistant", "content": "__mask_probe_assistant__"},
+    ]
+
+    def render(messages, **kwargs):
+        return tokenizer.apply_chat_template(
+            conversation=messages,
+            tokenize=False,
+            enable_thinking=True,
+            **kwargs,
+        )
+
+    without_header = render(probe_prefix, add_generation_prompt=False)
+    with_header = render(probe_prefix, add_generation_prompt=True)
+
+    candidates = []
+    if with_header.startswith(without_header):
+        candidates.append(with_header[len(without_header):])
+
+    # Fallbacks for common chat templates, in case a tokenizer's generation
+    # prompt is not a strict text suffix of the non-generation rendering.
+    candidates.extend([
+        "<|im_start|>assistant\n",
+        "<|start_header_id|>assistant<|end_header_id|>\n\n",
+    ])
+
+    full_ids = tokenizer(render(probe_full), add_special_tokens=False).input_ids
+    for header_text in candidates:
+        if not header_text:
+            continue
+        header_ids = tokenizer(header_text, add_special_tokens=False).input_ids
+        if header_ids and _find_last_subsequence(full_ids, header_ids) >= 0:
+            return header_ids, header_text
+
+    raise ValueError(
+        "Could not derive assistant header token ids from tokenizer chat template"
+    )
+
+
 def _tokenize_range_worker(args):
     """Multiprocessing worker: tokenize row groups from a parquet file.
 
@@ -635,10 +767,16 @@ def streaming_tokenize(source_parquet, tokenizer, max_seq_length, output_path,
     """
     os.makedirs(output_path, exist_ok=True)
 
+    # Mark the dataset incomplete until all shards and metadata are rewritten.
+    for metadata_name in ("state.json", "dataset_info.json"):
+        metadata_path = os.path.join(output_path, metadata_name)
+        if os.path.exists(metadata_path):
+            os.remove(metadata_path)
+
     # Token sequence that marks the start of the assistant's response.
     # Everything up to and including this header is masked in labels.
-    assistant_header = "<|start_header_id|>assistant<|end_header_id|>\n\n"
-    header_ids = tokenizer.encode(assistant_header, add_special_tokens=False)
+    header_ids, assistant_header = get_assistant_header_ids(tokenizer)
+    print(f"  Assistant header for masking: {assistant_header!r}")
 
     pf = pq.ParquetFile(source_parquet)
     total_rows = pf.metadata.num_rows
@@ -937,7 +1075,13 @@ def parse_args():
         "--change-to-think",
         action="store_true",
         default=False,
-        help="Replace reasoning markers (assistant/assistantfinal) with <think>/</think> tags",
+        help="Deprecated no-op; reasoning/final outputs are normalized before chat templating",
+    )
+    parser.add_argument(
+        "--retokenize",
+        action="store_true",
+        default=False,
+        help="Reuse existing all_training_data.parquet and regenerate only the tokenized dataset",
     )
     return parser.parse_args()
 
@@ -945,6 +1089,8 @@ def parse_args():
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    if args.change_to_think:
+        print("Note: --change-to-think is deprecated and no longer changes output.")
 
     print(f"Loading tokenizer: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -953,9 +1099,12 @@ def main():
     combined_path = os.path.join(args.output_dir, 'all_training_data.parquet')
     tokenized_path = os.path.join(args.output_dir, 'tokenized_training_data.dataset')
 
-    # If the final parquet exists but the tokenized dataset doesn't, skip to tokenization
-    if os.path.exists(combined_path) and not os.path.exists(tokenized_path):
-        print(f"\nFound existing {combined_path} but no tokenized dataset.")
+    # Retokenization is explicit-only so stale prompt parquet files are not
+    # silently reused after prompt-construction changes.
+    if args.retokenize:
+        if not os.path.exists(combined_path):
+            raise FileNotFoundError(f"Cannot retokenize; missing {combined_path}")
+        print(f"\nRetokenizing from existing {combined_path}.")
         print("Skipping data loading/building — jumping straight to tokenization.")
         row_count = pq.ParquetFile(combined_path).metadata.num_rows
         print(f"Source parquet has {row_count} rows")
@@ -1004,8 +1153,6 @@ def main():
             else:
                 if was_truncated:
                     truncated_count += 1
-                if args.change_to_think:
-                    prompt = apply_think_tags(prompt)
                 prompts.append(prompt)
 
         print(f"  Built {len(prompts)} prompts")
