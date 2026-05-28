@@ -1,17 +1,10 @@
-
-
-import pandas as pd
-import numpy as np
-import torch
-
-
 import os
+
 import torch
-from datasets import Dataset, load_dataset
-#from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, DataCollatorForSeq2Seq
-from trl import SFTConfig, SFTTrainer
+from datasets import Dataset
 from peft import LoraConfig, TaskType
+from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq
+from trl import SFTConfig, SFTTrainer
 
 dataset = Dataset.load_from_disk('../../data/no_phi/oncoreasoning_training_data/tokenized_training_data.dataset/')
 
@@ -40,7 +33,7 @@ torch.backends.cuda.enable_flash_sdp(True)
 print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")
 
 model = AutoModelForCausalLM.from_pretrained(
-   repo_id, attn_implementation="sdpa", torch_dtype=torch.bfloat16
+   repo_id, attn_implementation="sdpa", dtype=torch.bfloat16
 )
 tokenizer = AutoTokenizer.from_pretrained(repo_id)
 tokenizer.pad_token = tokenizer.eos_token
@@ -64,7 +57,7 @@ sft_config = SFTConfig(
     #save_safetensors=False,
 
     ## GROUP 2: Dataset-related
-    max_seq_length=tokenizer.max_len_single_sentence,
+    max_length=tokenizer.max_len_single_sentence,
     # Dataset
     # packing a dataset means no padding is needed
     packing=False,
@@ -81,7 +74,6 @@ sft_config = SFTConfig(
     # 8-bit Adam optimizer - doesn't help much if you're using LoRA!
     optim='adamw_torch_fused',       
     dataset_kwargs = {'skip_prepare_dataset':True},
-    model_init_kwargs={"torch_dtype": torch.bfloat16, "attn_implementation": "sdpa"},
     lr_scheduler_kwargs={'num_cycles':3},
     ## GROUP 4: Logging parameters
     logging_steps=20,
@@ -115,6 +107,3 @@ if any(
     trainer.train(resume_from_checkpoint=True)
 else:
     trainer.train()
-
-
-
