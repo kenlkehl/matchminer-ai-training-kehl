@@ -744,11 +744,14 @@ def _tokenize_range_worker(args):
 
             rows_done += len(batch_texts)
             if rows_done % (batch_size * 10) < batch_size:
-                print(f"  {log_prefix}Tokenized {rows_done}/{total} examples...")
+                print(f"  {log_prefix}Tokenized {rows_done}/{total} examples...", flush=True)
 
     num_examples, num_bytes = writer.finalize()
-    print(f"  {log_prefix}Wrote {num_examples} examples ({num_bytes / 1e6:.1f} MB)")
-    return num_examples, num_bytes, masked_count, unmasked_count
+    print(
+        f"  {log_prefix}Wrote {num_examples} examples ({num_bytes / 1e6:.1f} MB)",
+        flush=True,
+    )
+    return worker_idx, num_examples, num_bytes, masked_count, unmasked_count
 
 
 def streaming_tokenize(source_parquet, tokenizer, max_seq_length, output_path,
@@ -851,15 +854,36 @@ def streaming_tokenize(source_parquet, tokenizer, max_seq_length, output_path,
             ))
 
         actual_workers = len(worker_args)
-        print(f"  Launching {actual_workers} tokenization workers "
-              f"({num_row_groups} row groups)...")
-        with mp.Pool(actual_workers) as pool:
-            results = pool.map(_tokenize_range_worker, worker_args)
+        print(
+            f"  Launching {actual_workers} tokenization workers "
+            f"({num_row_groups} row groups, start_method=spawn)...",
+            flush=True,
+        )
 
-        num_examples = sum(r[0] for r in results)
-        num_bytes = sum(r[1] for r in results)
-        masked_count = sum(r[2] for r in results)
-        unmasked_count = sum(r[3] for r in results)
+        # Spawn avoids inheriting tokenizer/native-thread state from the parent.
+        ctx = mp.get_context("spawn")
+        results = []
+        num_examples = 0
+        num_bytes = 0
+        masked_count = 0
+        unmasked_count = 0
+
+        with ctx.Pool(actual_workers) as pool:
+            for result in pool.imap_unordered(
+                _tokenize_range_worker, worker_args, chunksize=1,
+            ):
+                worker_idx, worker_examples, worker_bytes, worker_masked, worker_unmasked = result
+                results.append(result)
+                num_examples += worker_examples
+                num_bytes += worker_bytes
+                masked_count += worker_masked
+                unmasked_count += worker_unmasked
+                print(
+                    f"  Collected worker {worker_idx + 1}/{num_workers} "
+                    f"({len(results)}/{actual_workers}); "
+                    f"aggregate {num_examples} examples ({num_bytes / 1e6:.1f} MB)",
+                    flush=True,
+                )
 
         data_files = [
             {"filename": f"data-{i:05d}-of-{num_workers:05d}.arrow"}
