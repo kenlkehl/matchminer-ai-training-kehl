@@ -64,7 +64,7 @@ sft_config = SFTConfig(
     #save_safetensors=False,
 
     ## GROUP 2: Dataset-related
-    max_length=tokenizer.max_len_single_sentence,
+    max_seq_length=tokenizer.max_len_single_sentence,
     # Dataset
     # packing a dataset means no padding is needed
     packing=False,
