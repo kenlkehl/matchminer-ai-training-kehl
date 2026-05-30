@@ -25,7 +25,7 @@
     "validate:onnx": "python scripts/validate_onnx_exports.py"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.7.5",
+    "@huggingface/transformers": "^4.2.0",
     "date-fns": "^4.1.0",
     "dexie": "^4.2.1",
     "lucide-react": "^0.511.0",
