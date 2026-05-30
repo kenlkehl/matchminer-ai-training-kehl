@@ -1,0 +1,43 @@
+{
+  "name": "matchminer-browser-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:trial-index": "tsx scripts/build_trial_index.ts",
+    "convert:models": "python scripts/convert_matchminer_models.py",
+    "validate:onnx": "python scripts/validate_onnx_exports.py"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.7.5",
+    "date-fns": "^4.1.0",
+    "dexie": "^4.2.1",
+    "lucide-react": "^0.511.0",
+    "onnxruntime-web": "^1.22.0",
+    "papaparse": "^5.5.3",
+    "pdfjs-dist": "^5.3.31",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tesseract.js": "^6.0.1"
+  },
+  "overrides": {
+    "onnxruntime-node": "file:./stubs/onnxruntime-node"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "@types/node": "^22.15.29",
+    "@types/papaparse": "^5.3.16",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.5",
+    "@vitejs/plugin-react": "^4.5.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.4"
+  }
+}

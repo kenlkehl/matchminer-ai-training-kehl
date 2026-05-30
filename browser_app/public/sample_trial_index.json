@@ -1,0 +1,35 @@
+[
+  {
+    "spaceId": "sample-nsclc-kras-1",
+    "nctId": "NCT00000001",
+    "title": "Sample Trial for KRAS G12C Mutant Non-Small Cell Lung Cancer",
+    "overallStatus": "RECRUITING",
+    "conditions": ["Non-small Cell Lung Cancer"],
+    "locations": ["United States"],
+    "url": "https://clinicaltrials.gov/study/NCT00000001",
+    "trialSpaceText": "Age range allowed: 18 years and older. Sex allowed: Both. Cancer type allowed: non-small cell lung cancer. Histology allowed: adenocarcinoma or squamous carcinoma. Cancer burden allowed: metastatic or unresectable advanced disease. Prior treatment required: prior platinum chemotherapy and prior immune checkpoint inhibitor. Prior treatment excluded: prior KRAS G12C inhibitor. Biomarkers required: KRAS G12C mutation. Biomarkers excluded: NA.",
+    "boilerplateText": "Poor performance status, uncontrolled brain metastases, active pneumonitis, clinically significant heart failure, severe renal dysfunction, severe liver dysfunction, active uncontrolled infection."
+  },
+  {
+    "spaceId": "sample-breast-her2-1",
+    "nctId": "NCT00000002",
+    "title": "Sample Trial for HER2-Positive Metastatic Breast Cancer",
+    "overallStatus": "RECRUITING",
+    "conditions": ["Breast Cancer"],
+    "locations": ["United States"],
+    "url": "https://clinicaltrials.gov/study/NCT00000002",
+    "trialSpaceText": "Age range allowed: 18 years and older. Sex allowed: Both. Cancer type allowed: breast cancer. Histology allowed: invasive breast carcinoma. Cancer burden allowed: metastatic disease. Prior treatment required: prior trastuzumab and taxane. Prior treatment excluded: NA. Biomarkers required: HER2-positive disease. Biomarkers excluded: NA.",
+    "boilerplateText": "Uncontrolled central nervous system metastases, significant cardiac dysfunction, active interstitial lung disease, uncontrolled infection, pregnancy."
+  },
+  {
+    "spaceId": "sample-solid-tumor-phase1-1",
+    "nctId": "NCT00000003",
+    "title": "Sample Phase 1 Trial for Advanced Solid Tumors",
+    "overallStatus": "RECRUITING",
+    "conditions": ["Advanced Solid Tumor"],
+    "locations": ["United States"],
+    "url": "https://clinicaltrials.gov/study/NCT00000003",
+    "trialSpaceText": "Age range allowed: 18 years and older. Sex allowed: Both. Cancer type allowed: any advanced solid tumor. Histology allowed: solid tumor. Cancer burden allowed: metastatic or unresectable disease. Prior treatment required: standard therapies exhausted or unavailable. Prior treatment excluded: NA. Biomarkers required: NA. Biomarkers excluded: NA.",
+    "boilerplateText": "Poor performance status, uncontrolled brain metastases, clinically significant cardiovascular disease, active autoimmune disease requiring systemic therapy, severe renal dysfunction, severe liver dysfunction."
+  }
+]

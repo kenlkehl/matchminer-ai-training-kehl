@@ -1,0 +1,10 @@
+{
+  "createdAt": "2026-05-30T00:00:00Z",
+  "source": "sample",
+  "ctgovApiVersion": "2.0.5",
+  "ctgovDataTimestamp": "2026-05-29T09:00:06",
+  "embeddingModel": "ksg-dfci/TrialSpace-0526-ONNX",
+  "embeddingDim": 0,
+  "trialSpaces": 3,
+  "indexUrl": "/sample_trial_index.json"
+}

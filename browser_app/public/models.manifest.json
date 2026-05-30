@@ -1,0 +1,34 @@
+{
+  "createdAt": "2026-05-30T00:00:00Z",
+  "runtime": "browser-webgpu",
+  "llmDefault": {
+    "modelId": "onnx-community/gemma-4-E2B-it-ONNX",
+    "task": "text-generation",
+    "dtype": "q4",
+    "source": "Hugging Face onnx-community"
+  },
+  "matchminerModels": [
+    {
+      "name": "TrialSpace",
+      "sourceModelId": "ksg-dfci/TrialSpace-0526",
+      "defaultBrowserModelId": "ksg-dfci/TrialSpace-0526-ONNX",
+      "task": "feature-extraction",
+      "pooling": "mean",
+      "normalize": true
+    },
+    {
+      "name": "TrialChecker",
+      "sourceModelId": "ksg-dfci/TrialChecker-0526",
+      "defaultBrowserModelId": "ksg-dfci/TrialChecker-0526-ONNX",
+      "task": "text-classification",
+      "outputTransform": "sigmoid"
+    },
+    {
+      "name": "BoilerplateChecker",
+      "sourceModelId": "ksg-dfci/BoilerplateChecker-0526",
+      "defaultBrowserModelId": "ksg-dfci/BoilerplateChecker-0526-ONNX",
+      "task": "text-classification",
+      "outputTransform": "softmax_positive"
+    }
+  ]
+}
