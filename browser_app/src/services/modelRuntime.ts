@@ -65,7 +65,7 @@ async function getPipeline(task: string, modelId: string, dtype: string): Promis
       import("@huggingface/transformers").then(async (module) => {
         const env = (module as any).env;
         if (env?.backends?.onnx?.wasm) {
-          env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1));
+          env.backends.onnx.wasm.numThreads = crossOriginIsolated ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)) : 1;
         }
         return (module as any).pipeline(task, modelId, {
           device: "webgpu",
@@ -83,6 +83,10 @@ async function getClassifier(modelId: string, dtype: string): Promise<{ tokenize
     classifierCache.set(
       key,
       import("@huggingface/transformers").then(async (module) => {
+        const env = (module as any).env;
+        if (env?.backends?.onnx?.wasm) {
+          env.backends.onnx.wasm.numThreads = crossOriginIsolated ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)) : 1;
+        }
         const tokenizer = await getTokenizer(modelId);
         const model = await (module as any).AutoModelForSequenceClassification.from_pretrained(modelId, {
           device: "webgpu",

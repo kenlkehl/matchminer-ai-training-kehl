@@ -1,12 +1,23 @@
 {
   "name": "matchminer-browser-app",
   "version": "0.1.0",
+  "description": "Local desktop app for patient-centric MatchMiner-AI clinical trial matching.",
   "private": true,
   "type": "module",
+  "main": "electron/main.cjs",
+  "author": {
+    "name": "MatchMiner-AI contributors",
+    "email": "matchminer-ai@example.invalid"
+  },
+  "homepage": "https://matchminer.org",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "electron:dev": "concurrently -k -s first -n vite,electron \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "electron:pack": "npm run build && electron-builder --dir",
+    "electron:dist": "npm run build && electron-builder",
+    "electron:dist:linux": "npm run build && electron-builder --linux AppImage deb",
     "test": "vitest run",
     "test:watch": "vitest",
     "build:trial-index": "tsx scripts/build_trial_index.ts",
@@ -28,6 +39,40 @@
   "overrides": {
     "onnxruntime-node": "file:./stubs/onnxruntime-node"
   },
+  "build": {
+    "appId": "org.matchminer.ai.desktop",
+    "productName": "MatchMiner AI",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "asar": true,
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Science",
+      "maintainer": "MatchMiner-AI contributors <matchminer-ai@example.invalid>"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    }
+  },
   "devDependencies": {
     "@playwright/test": "^1.52.0",
     "@types/node": "^22.15.29",
@@ -35,9 +80,13 @@
     "@types/react": "^19.1.6",
     "@types/react-dom": "^19.1.5",
     "@vitejs/plugin-react": "^4.5.0",
+    "concurrently": "^10.0.0",
+    "electron": "^42.3.0",
+    "electron-builder": "^26.8.1",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vite": "^6.3.5",
-    "vitest": "^3.1.4"
+    "vitest": "^3.1.4",
+    "wait-on": "^9.0.10"
   }
 }

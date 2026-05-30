@@ -53,7 +53,7 @@ export default function App() {
       setWebGpu(gpu);
       setSettings(savedSettings);
       setPrompts(savedPrompts);
-      addStatus(gpu ? "success" : "warning", gpu ? "WebGPU is available." : "WebGPU is not available in this browser.");
+      addStatus(gpu ? "success" : "warning", gpu ? "WebGPU is available." : "WebGPU is not available in this runtime.");
     });
   }, []);
 
@@ -280,7 +280,7 @@ export default function App() {
       <section className="notice">
         <Lock size={18} />
         <span>
-          Runs in your browser on local data. Beta software only. It does not replace medical advice, may be wrong, must not make autonomous decisions, does not guarantee eligibility, and does not show whether a trial has slots.
+          Runs locally on this device. Beta software only. It does not replace medical advice, may be wrong, must not make autonomous decisions, does not guarantee eligibility, and does not show whether a trial has slots.
         </span>
       </section>
 

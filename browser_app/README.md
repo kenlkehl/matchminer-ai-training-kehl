@@ -11,6 +11,74 @@ npm install
 npm run dev
 ```
 
+Open `http://localhost:5173` when the browser is on the same machine.
+
+For a browser on another machine, prefer an SSH tunnel so WebGPU still sees a
+local secure origin:
+
+```bash
+ssh -L 5173:localhost:5173 user@kehl-lab.dfci.harvard.edu
+```
+
+Then open `http://localhost:5173` in the local browser. Direct access via
+`http://kehl-lab.dfci.harvard.edu:5173` is allowed for development, but WebGPU
+may still be unavailable because remote HTTP origins are not secure contexts.
+Additional Vite development hosts can be allowed with:
+
+```bash
+VITE_ALLOWED_HOSTS=other-host.example.edu npm run dev
+```
+
+On Linux Chrome/Chromium, also check `chrome://gpu`. Some installations require
+enabling Vulkan/WebGPU flags for local development.
+
+## Desktop App
+
+For normal users, build the Electron desktop app instead of running a browser
+dev server:
+
+```bash
+npm install
+npm run electron:dist:linux
+```
+
+Linux installers are written to `release/`:
+
+- `MatchMiner AI-0.1.0.AppImage`
+- `matchminer-browser-app_0.1.0_amd64.deb`
+
+Run the AppImage directly:
+
+```bash
+chmod +x "release/MatchMiner AI-0.1.0.AppImage"
+"release/MatchMiner AI-0.1.0.AppImage"
+```
+
+Or install the Debian package:
+
+```bash
+sudo apt install ./release/matchminer-browser-app_0.1.0_amd64.deb
+```
+
+For development inside Electron:
+
+```bash
+npm run electron:dev
+```
+
+The desktop app loads the built renderer from a local secure
+`matchminer://app` protocol with Node integration disabled. Patient files are
+still processed locally in the renderer. The app only makes network requests
+when the user downloads public model artifacts or public ClinicalTrials.gov
+trial data.
+
+Electron is launched with WebGPU development flags by default. If those flags
+cause a GPU-driver issue on a particular machine, start it with:
+
+```bash
+MATCHMINER_DISABLE_GPU_FLAGS=1 npm run electron:dev
+```
+
 ## Model Artifacts
 
 The default browser settings expect ONNX versions of:
