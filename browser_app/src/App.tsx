@@ -127,10 +127,16 @@ export default function App() {
   async function refreshCtGov() {
     setBusy("Downloading ClinicalTrials.gov");
     try {
-      const records = await fetchCtGovCancerTrials({ pageSize: 100, maxPages: 3 });
+      const records = await fetchCtGovCancerTrials({
+        pageSize: 1000,
+        onProgress: ({ records: downloaded, totalCount, page }) => {
+          const total = totalCount ? ` of ${totalCount}` : "";
+          addStatus("info", `Downloaded ${downloaded}${total} open phase I-III interventional cancer trial records from ClinicalTrials.gov across ${page} page${page === 1 ? "" : "s"}.`);
+        }
+      });
       await saveTrialIndex(records);
       setTrialIndex(records);
-      addStatus("success", `Downloaded ${records.length} public trial records from ClinicalTrials.gov.`);
+      addStatus("success", `Downloaded ${records.length} public phase I-III interventional cancer trial records from ClinicalTrials.gov.`);
     } catch (error) {
       addStatus("error", errorMessage(error));
     } finally {

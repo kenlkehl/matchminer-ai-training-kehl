@@ -51,6 +51,7 @@ export interface TrialSpaceRecord {
   title: string;
   overallStatus?: string;
   conditions?: string[];
+  phases?: string[];
   locations?: string[];
   url?: string;
   trialSpaceText: string;

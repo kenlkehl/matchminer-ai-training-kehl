@@ -1,6 +1,8 @@
 import type { ClinicalNote, PatientDocument } from "../types";
 import { parseClinicalDate } from "../lib/dateParsing";
 import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
+import tesseractWorkerSrc from "tesseract.js/dist/worker.min.js?url";
+import tesseractCoreSrc from "tesseract.js-core/tesseract-core-lstm.wasm.js?url";
 
 export interface PdfProgress {
   phase: "text" | "ocr";
@@ -60,7 +62,11 @@ export async function parsePdfPatientFile(
 
 async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number) => Promise<any> }, onProgress?: (progress: PdfProgress) => void): Promise<string> {
   const { createWorker } = await import("tesseract.js");
+  const workerPath = createTesseractWorkerUrl();
   const worker = await createWorker("eng", 1, {
+    workerPath,
+    workerBlobURL: false,
+    corePath: tesseractCoreSrc,
     logger: (message) => {
       if (message.status === "recognizing text") {
         onProgress?.({ phase: "ocr", current: Math.round((message.progress ?? 0) * 100), total: 100 });
@@ -85,6 +91,12 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
     }
   } finally {
     await worker.terminate();
+    URL.revokeObjectURL(workerPath);
   }
   return out.join("\n\n").trim();
+}
+
+function createTesseractWorkerUrl(): string {
+  const source = `self.process = undefined;\nimportScripts(${JSON.stringify(tesseractWorkerSrc)});`;
+  return URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
 }

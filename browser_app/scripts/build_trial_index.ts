@@ -8,6 +8,7 @@ interface CtGovStudy {
     statusModule?: { overallStatus?: string };
     descriptionModule?: { briefSummary?: string; detailedDescription?: string };
     conditionsModule?: { conditions?: string[] };
+    designModule?: { phases?: string[]; studyType?: string };
     eligibilityModule?: { eligibilityCriteria?: string; sex?: string; minimumAge?: string; maximumAge?: string };
     contactsLocationsModule?: { locations?: Array<{ city?: string; state?: string; country?: string; status?: string }> };
   };
@@ -19,6 +20,7 @@ interface TrialSpaceRecord {
   title: string;
   overallStatus?: string;
   conditions?: string[];
+  phases?: string[];
   locations?: string[];
   url?: string;
   trialSpaceText: string;
@@ -36,17 +38,20 @@ for (let i = 2; i < process.argv.length; i += 2) {
 }
 
 const output = resolve(args.get("--output") ?? "public/ctgov_trial_index.json");
-const pageSize = Number(args.get("--page-size") ?? 100);
-const maxPages = Number(args.get("--max-pages") ?? 10);
+const pageSize = Number(args.get("--page-size") ?? 1000);
+const maxPages = args.has("--max-pages") ? Number(args.get("--max-pages")) : null;
+const CTGOV_CANCER_QUERY = "cancer OR lymphoma OR carcinoma OR leukemia OR sarcoma OR melanoma OR myeloma OR myelodysplastic OR myeloproliferative";
+const CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS = "phase:0 1 2 3,status:not rec,studyType:int";
 
 async function main() {
   const version = (await fetch("https://clinicaltrials.gov/api/v2/version").then((r) => r.json()).catch(() => ({}))) as VersionPayload;
   const records: TrialSpaceRecord[] = [];
   let pageToken = "";
-  for (let page = 0; page < maxPages; page += 1) {
+  const seenPageTokens = new Set<string>();
+  for (let page = 0; maxPages === null || page < maxPages; page += 1) {
     const params = new URLSearchParams({
-      "query.cond": "cancer",
-      "filter.overallStatus": "RECRUITING",
+      "query.cond": CTGOV_CANCER_QUERY,
+      aggFilters: CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS,
       countTotal: "true",
       pageSize: String(pageSize),
       format: "json"
@@ -61,6 +66,10 @@ async function main() {
     }
     console.log(`Fetched page ${page + 1}, records=${records.length}`);
     if (!payload.nextPageToken) break;
+    if (seenPageTokens.has(payload.nextPageToken)) {
+      throw new Error("ClinicalTrials.gov returned a repeated page token");
+    }
+    seenPageTokens.add(payload.nextPageToken);
     pageToken = payload.nextPageToken;
   }
 
@@ -101,13 +110,15 @@ function toRecord(study: CtGovStudy): TrialSpaceRecord | null {
   const minAge = protocol?.eligibilityModule?.minimumAge ?? "NA";
   const maxAge = protocol?.eligibilityModule?.maximumAge ?? "NA";
   const sex = protocol?.eligibilityModule?.sex ?? "ALL";
-  const trialSpaceText = `Age range allowed: ${minAge} to ${maxAge}. Sex allowed: ${sex}. Cancer type allowed: ${conditions.join(" or ") || "cancer"}. Histology allowed: See trial criteria. Cancer burden allowed: See trial criteria. Prior treatment required: See trial criteria. Prior treatment excluded: See trial criteria. Biomarkers required: See trial criteria. Biomarkers excluded: See trial criteria.\n\nTrial summary:\n${summary}\n\nEligibility criteria:\n${eligibility}`.trim();
+  const phases = protocol?.designModule?.phases ?? [];
+  const trialSpaceText = `Age range allowed: ${minAge} to ${maxAge}. Sex allowed: ${sex}. Cancer type allowed: ${conditions.join(" or ") || "cancer"}. Trial phase: ${phases.join(" or ") || "See trial criteria"}. Histology allowed: See trial criteria. Cancer burden allowed: See trial criteria. Prior treatment required: See trial criteria. Prior treatment excluded: See trial criteria. Biomarkers required: See trial criteria. Biomarkers excluded: See trial criteria.\n\nTrial summary:\n${summary}\n\nEligibility criteria:\n${eligibility}`.trim();
   return {
     spaceId: `${id}-heuristic-1`,
     nctId: id,
     title,
     overallStatus: protocol?.statusModule?.overallStatus,
     conditions,
+    phases,
     locations,
     url: `https://clinicaltrials.gov/study/${id}`,
     trialSpaceText,

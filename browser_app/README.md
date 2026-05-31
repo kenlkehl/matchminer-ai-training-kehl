@@ -112,7 +112,13 @@ Normal use should consume a prebuilt trial-space embedding index. The app also i
 Build a public JSON index from Node:
 
 ```bash
-npm run build:trial-index -- --output public/ctgov_trial_index.json --max-pages 10
+npm run build:trial-index -- --output public/ctgov_trial_index.json
 ```
+
+The ClinicalTrials.gov refresh uses the training search definition: cancer,
+lymphoma, carcinoma, leukemia, sarcoma, melanoma, myeloma, myelodysplastic, or
+myeloproliferative; open interventional trials; Early Phase 1 through Phase 3.
+Pass `--max-pages N` only when you intentionally want a smaller development
+sample.
 
 For production, run trial-space extraction offline using the MatchMiner model/prompt, pre-embed spaces with TrialSpace, and publish the resulting JSON or sharded JSON files.
