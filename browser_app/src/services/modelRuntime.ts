@@ -67,10 +67,9 @@ async function getPipeline(task: string, modelId: string, dtype: string): Promis
         if (env?.backends?.onnx?.wasm) {
           env.backends.onnx.wasm.numThreads = crossOriginIsolated ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)) : 1;
         }
-        return (module as any).pipeline(task, modelId, {
-          device: "webgpu",
-          dtype: dtype === "auto" ? undefined : dtype
-        });
+        return loadWithRootOnnxFallback((subfolder) =>
+          (module as any).pipeline(task, modelId, modelOptions(dtype, subfolder))
+        );
       })
     );
   }
@@ -88,15 +87,37 @@ async function getClassifier(modelId: string, dtype: string): Promise<{ tokenize
           env.backends.onnx.wasm.numThreads = crossOriginIsolated ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)) : 1;
         }
         const tokenizer = await getTokenizer(modelId);
-        const model = await (module as any).AutoModelForSequenceClassification.from_pretrained(modelId, {
-          device: "webgpu",
-          dtype: dtype === "auto" ? undefined : dtype
-        });
+        const model = await loadWithRootOnnxFallback((subfolder) =>
+          (module as any).AutoModelForSequenceClassification.from_pretrained(modelId, modelOptions(dtype, subfolder))
+        );
         return { tokenizer, model };
       })
     );
   }
   return classifierCache.get(key)!;
+}
+
+function modelOptions(dtype: string, subfolder?: string): Record<string, unknown> {
+  const options: Record<string, unknown> = {
+    device: "webgpu"
+  };
+  if (dtype !== "auto") options.dtype = dtype;
+  if (subfolder !== undefined) options.subfolder = subfolder;
+  return options;
+}
+
+async function loadWithRootOnnxFallback<T>(load: (subfolder?: string) => Promise<T>): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    if (!shouldRetryRootOnnx(error)) throw error;
+    return load("");
+  }
+}
+
+function shouldRetryRootOnnx(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Could not locate file") && /\/resolve\/[^/]+\/onnx\//.test(message);
 }
 
 async function getTokenizer(modelId: string): Promise<any> {
