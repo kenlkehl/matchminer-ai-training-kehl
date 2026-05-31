@@ -101,20 +101,23 @@ export async function parsePdfPatientFile(
 }
 
 async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number) => Promise<any> }, onProgress?: (progress: PdfProgress) => void): Promise<string> {
-  const workerPath = createTesseractWorkerUrl();
+  const tesseractWorkerScriptUrl = toAbsoluteAssetUrl(tesseractWorkerSrc);
+  const tesseractCoreUrl = toAbsoluteAssetUrl(tesseractCoreSrc);
+  const workerPath = createTesseractWorkerUrl(tesseractWorkerScriptUrl);
   let worker: Awaited<ReturnType<TesseractBrowserModule["createWorker"]>> | null = null;
   try {
     logPdfDebug("Loading Tesseract browser bundle");
     const { default: tesseract } = (await import("tesseract.js/dist/tesseract.esm.min.js")) as { default: TesseractBrowserModule };
     logPdfDebug("Creating Tesseract worker", {
       workerPath,
-      corePath: tesseractCoreSrc,
+      tesseractWorkerScriptUrl,
+      corePath: tesseractCoreUrl,
       pages: pdf.numPages
     });
     worker = await tesseract.createWorker("eng", 1, {
       workerPath,
       workerBlobURL: false,
-      corePath: tesseractCoreSrc,
+      corePath: tesseractCoreUrl,
       logger: (message) => {
         logPdfDebug("Tesseract progress", message);
         if (message.status === "recognizing text") {
@@ -156,9 +159,13 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
   }
 }
 
-function createTesseractWorkerUrl(): string {
-  const source = `var process = undefined, require = undefined, module = undefined, exports = undefined;\nself.process = undefined;\nself.require = undefined;\nself.module = undefined;\nself.exports = undefined;\nimportScripts(${JSON.stringify(tesseractWorkerSrc)});`;
+function createTesseractWorkerUrl(workerScriptUrl: string): string {
+  const source = `var process = undefined, require = undefined, module = undefined, exports = undefined;\nself.process = undefined;\nself.require = undefined;\nself.module = undefined;\nself.exports = undefined;\nimportScripts(${JSON.stringify(workerScriptUrl)});`;
   return URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
+}
+
+function toAbsoluteAssetUrl(src: string): string {
+  return new URL(src, window.location.href).href;
 }
 
 function logPdfDebug(message: string, details?: unknown): void {
