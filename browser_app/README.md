@@ -129,3 +129,21 @@ The browser app can import a pre-embedded trial index from a local JSON/JSONL/CS
 python ../real_eval_code/real_time_eval/embed_trial_spaces.py /path/to/model \
   --browser-json-output trial_space_embeddings.browser.json
 ```
+
+## PDF OCR
+
+PDF upload first extracts embedded text with PDF.js. For scanned or image-only PDFs, the default OCR setting is `Auto`: in Electron it tries local OCR with Docling, then OCRmyPDF, then falls back to browser Tesseract.js. Use Settings -> PDF OCR to force `Local only` or `Browser only`.
+
+Install one or both local OCR backends on the machine running Electron:
+
+```bash
+python3 -m pip install docling
+# optional alternative/fallback; install system tesseract/ghostscript as required by OCRmyPDF
+python3 -m pip install ocrmypdf
+```
+
+Environment overrides:
+
+- `MATCHMINER_DOCLING_PYTHON=/path/to/python`
+- `MATCHMINER_OCRMYPDF_COMMAND=/path/to/ocrmypdf`
+- `MATCHMINER_LOCAL_OCR_TIMEOUT_MS=900000`

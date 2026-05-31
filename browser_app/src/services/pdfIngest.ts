@@ -1,4 +1,4 @@
-import type { ClinicalNote, PatientDocument } from "../types";
+import type { ClinicalNote, ModelSettings, PatientDocument } from "../types";
 import { parseClinicalDate } from "../lib/dateParsing";
 import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
 import tesseractWorkerSrc from "tesseract.js/dist/worker.min.js?url";
@@ -22,16 +22,21 @@ type TesseractBrowserModule = {
 };
 
 export interface PdfProgress {
-  phase: "text" | "ocr";
+  phase: "text" | "ocr" | "local-ocr";
   current: number;
   total: number;
   detail?: string;
   percent?: number;
 }
 
+export interface PdfParseOptions {
+  ocrMode?: ModelSettings["pdfOcrMode"];
+}
+
 export async function parsePdfPatientFile(
   file: File,
-  onProgress?: (progress: PdfProgress) => void
+  onProgress?: (progress: PdfProgress) => void,
+  options: PdfParseOptions = {}
 ): Promise<PatientDocument> {
   logPdfDebug("Starting PDF ingest", {
     fileName: file.name,
@@ -43,9 +48,10 @@ export async function parsePdfPatientFile(
     const pdfjs = await import("pdfjs-dist");
     pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    logPdfDebug("Read PDF bytes", { byteLength: bytes.byteLength });
-    const pdf = await pdfjs.getDocument({ data: bytes }).promise;
+    const sourceBytes = new Uint8Array(await file.arrayBuffer());
+    const pdfBytes = sourceBytes.slice();
+    logPdfDebug("Read PDF bytes", { byteLength: sourceBytes.byteLength });
+    const pdf = await pdfjs.getDocument({ data: pdfBytes }).promise;
     logPdfDebug("PDF.js document loaded", { pages: pdf.numPages });
     const textPages: string[] = [];
 
@@ -73,7 +79,10 @@ export async function parsePdfPatientFile(
     });
     if (!rawText) {
       logPdfDebug("No embedded PDF text found; starting OCR fallback");
-      rawText = await ocrPdfPages(pdf, onProgress);
+      rawText = await tryLocalPdfOcr(file.name, sourceBytes, options.ocrMode ?? "auto", onProgress);
+      if (!rawText && (options.ocrMode ?? "auto") !== "local") {
+        rawText = await ocrPdfPages(pdf, onProgress);
+      }
     }
 
     if (!rawText.trim()) throw new Error("No text could be extracted from the PDF");
@@ -99,6 +108,36 @@ export async function parsePdfPatientFile(
   } catch (error) {
     logPdfError("PDF ingest failed", error);
     throw error;
+  }
+}
+
+async function tryLocalPdfOcr(
+  fileName: string,
+  pdfBytes: Uint8Array,
+  ocrMode: ModelSettings["pdfOcrMode"],
+  onProgress?: (progress: PdfProgress) => void
+): Promise<string> {
+  if (ocrMode === "browser") return "";
+  const localOcr = window.matchminerElectron?.parsePdfWithLocalOcr;
+  if (!localOcr) {
+    const message = "Local PDF OCR is unavailable because the Electron preload API is not present";
+    logPdfDebug(message);
+    if (ocrMode === "local") throw new Error(message);
+    return "";
+  }
+
+  onProgress?.({ phase: "local-ocr", current: 0, total: 1, detail: "Docling/OCRmyPDF" });
+  try {
+    const result = await localOcr({ fileName, bytes: toArrayBuffer(pdfBytes) });
+    const text = result.text.trim();
+    logPdfDebug("Local OCR complete", { engine: result.engine, textChars: text.length });
+    if (!text) throw new Error(`Local OCR returned no text (${result.engine})`);
+    onProgress?.({ phase: "local-ocr", current: 1, total: 1, detail: result.engine, percent: 100 });
+    return text;
+  } catch (error) {
+    logPdfError("Local OCR failed", error);
+    if (ocrMode === "local") throw error;
+    return "";
   }
 }
 
@@ -182,6 +221,12 @@ function createTesseractWorkerUrl(workerScriptUrl: string): string {
 
 function toAbsoluteAssetUrl(src: string): string {
   return new URL(src, window.location.href).href;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(copy).set(bytes);
+  return copy;
 }
 
 function logPdfDebug(message: string, details?: unknown): void {

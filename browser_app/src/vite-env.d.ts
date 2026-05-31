@@ -9,3 +9,16 @@ declare module "tesseract.js/dist/tesseract.esm.min.js" {
   const tesseract: unknown;
   export default tesseract;
 }
+
+interface MatchMinerLocalOcrResult {
+  text: string;
+  engine: string;
+}
+
+interface MatchMinerElectronApi {
+  parsePdfWithLocalOcr: (request: { fileName: string; bytes: ArrayBuffer }) => Promise<MatchMinerLocalOcrResult>;
+}
+
+interface Window {
+  matchminerElectron?: MatchMinerElectronApi;
+}

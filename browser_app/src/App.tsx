@@ -78,7 +78,7 @@ export default function App() {
     setSummary("");
     try {
       const lower = file.name.toLowerCase();
-      const doc = lower.endsWith(".csv") ? await parseCsvPatientFile(file) : await parsePdfPatientFile(file, setPdfProgress);
+      const doc = lower.endsWith(".csv") ? await parseCsvPatientFile(file) : await parsePdfPatientFile(file, setPdfProgress, { ocrMode: settings.pdfOcrMode });
       setPatientDocument(doc);
       sessionStorage.setItem("matchminer-current-patient", JSON.stringify({ fileName: doc.fileName, createdAt: doc.createdAt }));
       addStatus("success", `Loaded ${doc.source.toUpperCase()} with ${doc.notes.length} record${doc.notes.length === 1 ? "" : "s"}.`);
@@ -642,6 +642,10 @@ function ProgressLine({ label }: { label: string }) {
 }
 
 function formatPdfProgress(progress: PdfProgress): string {
+  if (progress.phase === "local-ocr") {
+    const detail = progress.detail ? ` with ${progress.detail}` : "";
+    return `Processing PDF${detail}`;
+  }
   if (progress.phase === "ocr") {
     const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
     return `Processing PDF page ${progress.current} of ${progress.total}${percent}`;
@@ -754,6 +758,14 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
         <label>
           BoilerplateChecker model
           <input value={settings.boilerplateCheckerModelId} onChange={(event) => onChange({ ...settings, boilerplateCheckerModelId: event.target.value })} />
+        </label>
+        <label>
+          PDF OCR
+          <select value={settings.pdfOcrMode} onChange={(event) => onChange({ ...settings, pdfOcrMode: event.target.value as ModelSettings["pdfOcrMode"] })}>
+            <option value="auto">Auto: local, then browser fallback</option>
+            <option value="local">Local only: Docling/OCRmyPDF</option>
+            <option value="browser">Browser only: Tesseract.js</option>
+          </select>
         </label>
         <div className="settings-grid">
           <label>

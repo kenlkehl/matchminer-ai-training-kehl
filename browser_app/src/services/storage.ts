@@ -54,7 +54,7 @@ export async function resetPrompt(key: PromptKey): Promise<Record<PromptKey, str
 
 export async function loadModelSettings(): Promise<ModelSettings> {
   const row = await db.settings.get("modelSettings");
-  return row?.value ?? DEFAULT_MODEL_SETTINGS;
+  return { ...DEFAULT_MODEL_SETTINGS, ...(row?.value ?? {}) };
 }
 
 export async function saveModelSettings(value: ModelSettings): Promise<void> {

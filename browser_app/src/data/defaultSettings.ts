@@ -8,6 +8,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   trialSpaceModelId: "ksg-dfci/TrialSpace-0526-ONNX",
   trialCheckerModelId: "ksg-dfci/TrialChecker-0526-ONNX",
   boilerplateCheckerModelId: "ksg-dfci/BoilerplateChecker-0526-ONNX",
+  pdfOcrMode: "auto",
   llmDtype: "q4",
   classifierDtype: "auto",
   maxSummaryTokens: 900,

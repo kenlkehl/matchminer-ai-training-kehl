@@ -26,6 +26,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -525,7 +526,8 @@ details p {
   font-size: 13px;
 }
 
-.modal input {
+.modal input,
+.modal select {
   min-height: 36px;
   border: 1px solid var(--line);
   padding: 0 9px;
