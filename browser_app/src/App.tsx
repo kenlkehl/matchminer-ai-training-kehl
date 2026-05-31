@@ -134,14 +134,56 @@ export default function App() {
           addStatus("info", `Downloaded ${downloaded}${total} open phase I-III interventional cancer trial records from ClinicalTrials.gov across ${page} page${page === 1 ? "" : "s"}.`);
         }
       });
-      await saveTrialIndex(records);
-      setTrialIndex(records);
       addStatus("success", `Downloaded ${records.length} public phase I-III interventional cancer trial records from ClinicalTrials.gov.`);
+      setBusy("Extracting trial spaces");
+      const spaces = await extractTrialSpaces(records);
+      await saveTrialIndex(spaces);
+      setTrialIndex(spaces);
+      addStatus("success", `Extracted ${spaces.length} trial spaces from ${records.length} ClinicalTrials.gov trials.`);
     } catch (error) {
       addStatus("error", errorMessage(error));
     } finally {
       setBusy(null);
     }
+  }
+
+  async function extractTrialSpaces(records: TrialSpaceRecord[]): Promise<TrialSpaceRecord[]> {
+    const spaces: TrialSpaceRecord[] = [];
+    let fallbackCount = 0;
+    addStatus("info", "Extracting trial spaces with the local LLM. This can take a long time for a full CT.gov refresh.");
+    await warmModel(settings.llmModelId, "text-generation", settings.llmDtype);
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      try {
+        const prompt = fillPrompt(prompts.trialSpaceExtraction, {
+          trial_text: trialDocumentForExtraction(record)
+        });
+        const response = await generateText(settings.llmModelId, prompt, {
+          dtype: settings.llmDtype,
+          maxNewTokens: 1800
+        });
+        const extracted = parseExtractedTrialSpaces(record, response);
+        if (extracted.length) {
+          spaces.push(...extracted);
+        } else {
+          fallbackCount += 1;
+          spaces.push(record);
+        }
+      } catch (error) {
+        fallbackCount += 1;
+        spaces.push(record);
+        if (fallbackCount <= 3) {
+          addStatus("warning", `Trial-space extraction fell back to one heuristic space for ${record.nctId}. ${errorMessage(error)}`);
+        }
+      }
+      if ((index + 1) % 25 === 0 || index + 1 === records.length) {
+        addStatus("info", `Extracted spaces from ${index + 1} of ${records.length} trials; current spaces=${spaces.length}.`);
+      }
+    }
+    if (fallbackCount) {
+      addStatus("warning", `${fallbackCount} trial${fallbackCount === 1 ? "" : "s"} used one heuristic fallback space.`);
+    }
+    return spaces;
   }
 
   async function cacheModels() {
@@ -586,6 +628,47 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
       </div>
     </div>
   );
+}
+
+function trialDocumentForExtraction(record: TrialSpaceRecord): string {
+  return [
+    record.title,
+    record.overallStatus ? `Status: ${record.overallStatus}` : "",
+    record.phases?.length ? `Phase: ${record.phases.join(", ")}` : "",
+    record.conditions?.length ? `Conditions: ${record.conditions.join(", ")}` : "",
+    record.trialSpaceText
+  ].filter(Boolean).join("\n\n");
+}
+
+function parseExtractedTrialSpaces(record: TrialSpaceRecord, response: string): TrialSpaceRecord[] {
+  const boilerplateText = extractTrialBoilerplate(response) || record.boilerplateText;
+  const spaceText = response.split(/^\s*Boilerplate exclusions\s*:/im)[0] ?? response;
+  const matches = Array.from(spaceText.matchAll(/(?:^|\n)\s*\d+[\.)]\s*(Age range allowed:.*?)(?=\n\s*\d+[\.)]|\n\s*Boilerplate exclusions\s*:|$)/gis));
+  return matches.map((match, index) => ({
+    ...record,
+    spaceId: `${record.nctId}-llm-space-${index + 1}`,
+    trialSpaceText: normalizeExtractedSpace(match[1]),
+    boilerplateText,
+    embedding: undefined
+  }));
+}
+
+function extractTrialBoilerplate(response: string): string {
+  const marker = response.match(/^\s*Boilerplate exclusions\s*:/im);
+  if (!marker || marker.index === undefined) return "";
+  return response
+    .slice(marker.index + marker[0].length)
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function normalizeExtractedSpace(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/^\s*[-*]\s*/, "")
+    .trim();
 }
 
 function parseFinalScore(text: string): number | null {

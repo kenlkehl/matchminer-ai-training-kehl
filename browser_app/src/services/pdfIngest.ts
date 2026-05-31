@@ -34,8 +34,7 @@ export async function parsePdfPatientFile(
   }
 
   let rawText = textPages.join("\n\n").trim();
-  const textDensity = rawText.length / Math.max(1, pdf.numPages);
-  if (textDensity < 300) {
+  if (!rawText) {
     rawText = await ocrPdfPages(pdf, onProgress);
   }
 
@@ -97,6 +96,6 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
 }
 
 function createTesseractWorkerUrl(): string {
-  const source = `self.process = undefined;\nimportScripts(${JSON.stringify(tesseractWorkerSrc)});`;
+  const source = `var process = undefined, require = undefined, module = undefined, exports = undefined;\nself.process = undefined;\nself.require = undefined;\nself.module = undefined;\nself.exports = undefined;\nimportScripts(${JSON.stringify(tesseractWorkerSrc)});`;
   return URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
 }

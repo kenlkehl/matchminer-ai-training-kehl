@@ -107,9 +107,9 @@ The temporary LLM default is `onnx-community/gemma-4-E2B-it-ONNX`; it can be rep
 
 ## Trial Index
 
-Normal use should consume a prebuilt trial-space embedding index. The app also includes a ClinicalTrials.gov v2 refresh path that creates a heuristic index in the browser.
+Normal use should consume a prebuilt trial-space embedding index. The app also includes a ClinicalTrials.gov v2 refresh path that downloads current trials and runs the local LLM trial-space extraction prompt in the browser. This can take a long time for the full CT.gov result set.
 
-Build a public JSON index from Node:
+Build a public heuristic JSON index from Node:
 
 ```bash
 npm run build:trial-index -- --output public/ctgov_trial_index.json
