@@ -4,6 +4,23 @@ import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
 import tesseractWorkerSrc from "tesseract.js/dist/worker.min.js?url";
 import tesseractCoreSrc from "tesseract.js-core/tesseract-core-lstm.wasm.js?url";
 
+type TesseractBrowserModule = {
+  createWorker: (
+    langs?: string | string[],
+    oem?: number,
+    options?: {
+      workerPath?: string;
+      workerBlobURL?: boolean;
+      corePath?: string;
+      logger?: (message: { status?: string; progress?: number; [key: string]: unknown }) => void;
+      errorHandler?: (error: unknown) => void;
+    }
+  ) => Promise<{
+    recognize: (image: HTMLCanvasElement) => Promise<{ data: { text: string } }>;
+    terminate: () => Promise<unknown>;
+  }>;
+};
+
 export interface PdfProgress {
   phase: "text" | "ocr";
   current: number;
@@ -84,16 +101,17 @@ export async function parsePdfPatientFile(
 }
 
 async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number) => Promise<any> }, onProgress?: (progress: PdfProgress) => void): Promise<string> {
-  const { createWorker } = await import("tesseract.js");
   const workerPath = createTesseractWorkerUrl();
-  logPdfDebug("Creating Tesseract worker", {
-    workerPath,
-    corePath: tesseractCoreSrc,
-    pages: pdf.numPages
-  });
-  let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
+  let worker: Awaited<ReturnType<TesseractBrowserModule["createWorker"]>> | null = null;
   try {
-    worker = await createWorker("eng", 1, {
+    logPdfDebug("Loading Tesseract browser bundle");
+    const { default: tesseract } = (await import("tesseract.js/dist/tesseract.esm.min.js")) as { default: TesseractBrowserModule };
+    logPdfDebug("Creating Tesseract worker", {
+      workerPath,
+      corePath: tesseractCoreSrc,
+      pages: pdf.numPages
+    });
+    worker = await tesseract.createWorker("eng", 1, {
       workerPath,
       workerBlobURL: false,
       corePath: tesseractCoreSrc,
