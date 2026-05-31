@@ -39,6 +39,12 @@ button:disabled {
   opacity: 0.55;
 }
 
+.disabled-control {
+  cursor: not-allowed;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
 .app-shell {
   min-height: 100vh;
 }
@@ -206,6 +212,34 @@ button:disabled {
   display: grid;
   grid-template-columns: 1fr;
   gap: 8px;
+}
+
+.trial-import {
+  display: grid;
+  gap: 8px;
+}
+
+.file-loader {
+  position: relative;
+}
+
+.file-loader input {
+  display: none;
+}
+
+.url-load-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.url-load-row input {
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  padding: 0 9px;
+  color: var(--ink);
+  background: #fbfcfd;
 }
 
 .readiness-grid,
@@ -554,6 +588,10 @@ details p {
   .score-row,
   .readiness-grid,
   .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .url-load-row {
     grid-template-columns: 1fr;
   }
 }

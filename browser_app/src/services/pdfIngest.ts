@@ -25,6 +25,8 @@ export interface PdfProgress {
   phase: "text" | "ocr";
   current: number;
   total: number;
+  detail?: string;
+  percent?: number;
 }
 
 export async function parsePdfPatientFile(
@@ -105,6 +107,18 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
   const tesseractCoreUrl = toAbsoluteAssetUrl(tesseractCoreSrc);
   const workerPath = createTesseractWorkerUrl(tesseractWorkerScriptUrl);
   let worker: Awaited<ReturnType<TesseractBrowserModule["createWorker"]>> | null = null;
+  let activeOcrPage = 0;
+  const reportOcrProgress = (pageNumber: number, pagePercent: number) => {
+    const boundedPagePercent = Math.max(0, Math.min(100, pagePercent));
+    const totalPercent = Math.round(((pageNumber - 1 + boundedPagePercent / 100) / pdf.numPages) * 100);
+    onProgress?.({
+      phase: "ocr",
+      current: pageNumber,
+      total: pdf.numPages,
+      detail: `page ${pageNumber} of ${pdf.numPages}`,
+      percent: totalPercent
+    });
+  };
   try {
     logPdfDebug("Loading Tesseract browser bundle");
     const { default: tesseract } = (await import("tesseract.js/dist/tesseract.esm.min.js")) as { default: TesseractBrowserModule };
@@ -120,8 +134,8 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
       corePath: tesseractCoreUrl,
       logger: (message) => {
         logPdfDebug("Tesseract progress", message);
-        if (message.status === "recognizing text") {
-          onProgress?.({ phase: "ocr", current: Math.round((message.progress ?? 0) * 100), total: 100 });
+        if (message.status === "recognizing text" && activeOcrPage > 0) {
+          reportOcrProgress(activeOcrPage, (message.progress ?? 0) * 100);
         }
       },
       errorHandler: (error) => {
@@ -132,7 +146,8 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
 
     const out: string[] = [];
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      onProgress?.({ phase: "ocr", current: pageNumber, total: pdf.numPages });
+      activeOcrPage = pageNumber;
+      reportOcrProgress(pageNumber, 0);
       const page = await pdf.getPage(pageNumber);
       const viewport = page.getViewport({ scale: 2 });
       const canvas = document.createElement("canvas");
@@ -145,6 +160,7 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
       const result = await worker.recognize(canvas);
       const text = result.data.text.trim();
       logPdfDebug("OCR page complete", { pageNumber, textChars: text.length });
+      reportOcrProgress(pageNumber, 100);
       out.push(text);
     }
     const rawText = out.join("\n\n").trim();

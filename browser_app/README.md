@@ -122,3 +122,10 @@ Pass `--max-pages N` only when you intentionally want a smaller development
 sample.
 
 For production, run trial-space extraction offline using the MatchMiner model/prompt, pre-embed spaces with TrialSpace, and publish the resulting JSON or sharded JSON files.
+
+The browser app can import a pre-embedded trial index from a local JSON/JSONL/CSV file or from a URL. The importer accepts the browser-native fields (`spaceId`, `nctId`, `trialSpaceText`, `boilerplateText`, `embedding`) and the real-time eval pre-embed column names (`id`, `nct_id`, `this_cohort`, `boilerplate_text`, `embedding`). Parquet files should be exported to JSON first; `real_eval_code/real_time_eval/embed_trial_spaces.py` supports:
+
+```bash
+python ../real_eval_code/real_time_eval/embed_trial_spaces.py /path/to/model \
+  --browser-json-output trial_space_embeddings.browser.json
+```

@@ -21,6 +21,9 @@ Examples:
 
     # Larger batch size for faster encoding
     python embed_trial_spaces.py /path/to/model --batch-size 24
+
+    # Also write a browser-loadable JSON file for the Electron app
+    python embed_trial_spaces.py /path/to/model --browser-json-output trial_space_embeddings.browser.json
 """
 
 import argparse
@@ -61,6 +64,8 @@ def parse_args():
     parser.add_argument("--max-seq-length", type=int, default=2500)
     parser.add_argument("--batch-size", type=int, default=12,
                         help="Encoding batch size (default: 12)")
+    parser.add_argument("--browser-json-output", type=str, default=None,
+                        help="Optional JSON output path for browser_app embedded trial index import")
     parser.add_argument("--secrets", type=str, default=str(SECRETS_FILE),
                         help="Path to database_secrets.txt")
     return parser.parse_args()
@@ -171,6 +176,44 @@ def main():
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"Saved metadata to {metadata_path}")
+
+    if args.browser_json_output:
+        browser_json_path = Path(args.browser_json_output)
+        browser_json_path.parent.mkdir(parents=True, exist_ok=True)
+        browser_records = [
+            {
+                "spaceId": str(space_id),
+                "nctId": nct_id,
+                "title": nct_id,
+                "url": f"https://clinicaltrials.gov/study/{nct_id}",
+                "trialSpaceText": clean_text(space_text),
+                "boilerplateText": clean_text(boilerplate_text),
+                "embedding": embedding,
+            }
+            for space_id, nct_id, space_text, boilerplate_text, embedding in zip(
+                space_ids, nct_ids, space_texts, boilerplate_texts, embeddings_np.tolist()
+            )
+        ]
+        with open(browser_json_path, "w") as f:
+            json.dump(
+                {
+                    "createdAt": metadata["created_at"],
+                    "embeddingModel": metadata["embedder_model"],
+                    "embeddingDim": metadata["embedding_dim"],
+                    "trialSpaces": len(browser_records),
+                    "records": browser_records,
+                },
+                f,
+            )
+        print(f"Saved browser JSON trial index to {browser_json_path}")
+
+
+def clean_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, float) and np.isnan(value):
+        return ""
+    return str(value)
 
 
 if __name__ == "__main__":

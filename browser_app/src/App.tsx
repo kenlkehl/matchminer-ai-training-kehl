@@ -26,9 +26,18 @@ import { parsePdfPatientFile, type PdfProgress } from "./services/pdfIngest";
 import { clearPatientSideData, loadModelSettings, loadPrompts, resetPrompt, saveModelSettings, savePrompt, saveTrialIndex } from "./services/storage";
 import { embedText, generateText, isWebGpuAvailable, warmModel } from "./services/modelRuntime";
 import { ensureTrialEmbeddings, fetchCtGovCancerTrials, loadOrFetchTrialIndex } from "./services/trialIndex";
+import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services/trialImport";
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
 
 const promptOrder: PromptKey[] = ["patientSummary", "trialSpaceExtraction", "trialDeepScreen", "boilerplateDeepScreen"];
+
+interface TrialProgress {
+  phase: "download" | "extract" | "embed" | "import";
+  current: number;
+  total?: number;
+  detail?: string;
+  percent?: number;
+}
 
 export default function App() {
   const [webGpu, setWebGpu] = useState<boolean | null>(null);
@@ -47,6 +56,8 @@ export default function App() {
   const [status, setStatus] = useState<StatusMessage[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [pdfProgress, setPdfProgress] = useState<PdfProgress | null>(null);
+  const [trialProgress, setTrialProgress] = useState<TrialProgress | null>(null);
+  const [embeddedTrialUrl, setEmbeddedTrialUrl] = useState("");
 
   useEffect(() => {
     void Promise.all([isWebGpuAvailable(), loadModelSettings(), loadPrompts()]).then(([gpu, savedSettings, savedPrompts]) => {
@@ -113,6 +124,7 @@ export default function App() {
 
   async function prepareTrialIndex() {
     setBusy("Preparing trials");
+    setTrialProgress(null);
     try {
       const records = await loadOrFetchTrialIndex();
       setTrialIndex(records);
@@ -126,16 +138,25 @@ export default function App() {
 
   async function refreshCtGov() {
     setBusy("Downloading ClinicalTrials.gov");
+    setTrialProgress({ phase: "download", current: 0, detail: "starting" });
     try {
       const records = await fetchCtGovCancerTrials({
         pageSize: 1000,
         onProgress: ({ records: downloaded, totalCount, page }) => {
           const total = totalCount ? ` of ${totalCount}` : "";
+          setTrialProgress({
+            phase: "download",
+            current: downloaded,
+            total: totalCount,
+            detail: `page ${page}`,
+            percent: percentComplete(downloaded, totalCount)
+          });
           addStatus("info", `Downloaded ${downloaded}${total} open phase I-III interventional cancer trial records from ClinicalTrials.gov across ${page} page${page === 1 ? "" : "s"}.`);
         }
       });
       addStatus("success", `Downloaded ${records.length} public phase I-III interventional cancer trial records from ClinicalTrials.gov.`);
       setBusy("Extracting trial spaces");
+      setTrialProgress({ phase: "extract", current: 0, total: records.length, detail: "warming local LLM", percent: 0 });
       const spaces = await extractTrialSpaces(records);
       await saveTrialIndex(spaces);
       setTrialIndex(spaces);
@@ -144,7 +165,51 @@ export default function App() {
       addStatus("error", errorMessage(error));
     } finally {
       setBusy(null);
+      setTrialProgress(null);
     }
+  }
+
+  async function loadEmbeddedTrialFile(file: File) {
+    setBusy("Loading embedded trial index");
+    setTrialProgress({ phase: "import", current: 0, detail: file.name });
+    try {
+      const records = await parseEmbeddedTrialIndexFile(file);
+      await persistEmbeddedTrialIndex(records, file.name);
+    } catch (error) {
+      addStatus("error", errorMessage(error));
+    } finally {
+      setBusy(null);
+      setTrialProgress(null);
+    }
+  }
+
+  async function loadEmbeddedTrialUrl() {
+    const url = embeddedTrialUrl.trim();
+    if (!url) {
+      addStatus("warning", "Enter a URL for the embedded trial index.");
+      return;
+    }
+    setBusy("Loading embedded trial index");
+    setTrialProgress({ phase: "import", current: 0, detail: "fetching URL" });
+    try {
+      const records = await fetchEmbeddedTrialIndex(url);
+      await persistEmbeddedTrialIndex(records, url);
+    } catch (error) {
+      addStatus("error", errorMessage(error));
+    } finally {
+      setBusy(null);
+      setTrialProgress(null);
+    }
+  }
+
+  async function persistEmbeddedTrialIndex(records: TrialSpaceRecord[], sourceLabel: string) {
+    if (!records.length) throw new Error("Embedded trial index contains no trial spaces");
+    const embeddingDim = records[0].embedding?.length ?? 0;
+    setTrialProgress({ phase: "import", current: records.length, total: records.length, detail: "saving", percent: 100 });
+    await saveTrialIndex(records);
+    setTrialIndex(records);
+    setMatches([]);
+    addStatus("success", `Loaded ${records.length} pre-embedded trial spaces${embeddingDim ? ` (dim=${embeddingDim})` : ""} from ${sourceLabel}.`);
   }
 
   async function extractTrialSpaces(records: TrialSpaceRecord[]): Promise<TrialSpaceRecord[]> {
@@ -154,6 +219,13 @@ export default function App() {
     await warmModel(settings.llmModelId, "text-generation", settings.llmDtype);
     for (let index = 0; index < records.length; index += 1) {
       const record = records[index];
+      setTrialProgress({
+        phase: "extract",
+        current: index + 1,
+        total: records.length,
+        detail: `${spaces.length} trial spaces found`,
+        percent: percentComplete(index, records.length)
+      });
       try {
         const prompt = fillPrompt(prompts.trialSpaceExtraction, {
           trial_text: trialDocumentForExtraction(record)
@@ -180,6 +252,13 @@ export default function App() {
         addStatus("info", `Extracted spaces from ${index + 1} of ${records.length} trials; current spaces=${spaces.length}.`);
       }
     }
+    setTrialProgress({
+      phase: "extract",
+      current: records.length,
+      total: records.length,
+      detail: `${spaces.length} trial spaces found`,
+      percent: 100
+    });
     if (fallbackCount) {
       addStatus("warning", `${fallbackCount} trial${fallbackCount === 1 ? "" : "s"} used one heuristic fallback space.`);
     }
@@ -208,13 +287,22 @@ export default function App() {
       return;
     }
     setBusy("Matching trials");
+    setTrialProgress(null);
     try {
       let records = trialIndex.length ? trialIndex : await loadOrFetchTrialIndex();
       let patientEmbedding: number[];
       try {
+        setTrialProgress({ phase: "embed", current: 0, total: records.length, detail: "preparing embeddings", percent: 0 });
         records = await ensureTrialEmbeddings(records, settings.trialSpaceModelId, (done, total) => {
+          setTrialProgress({
+            phase: "embed",
+            current: done,
+            total,
+            percent: percentComplete(done, total)
+          });
           if (done === total || done % 10 === 0) addStatus("info", `Embedded ${done} of ${total} trial spaces.`);
         });
+        setTrialProgress({ phase: "embed", current: records.length, total: records.length, detail: "embedding patient summary", percent: 100 });
         patientEmbedding = await embedText(settings.trialSpaceModelId, trimmedSummary, settings.classifierDtype);
       } catch (error) {
         addStatus("warning", `TrialSpace model unavailable; using local lexical fallback. ${errorMessage(error)}`);
@@ -242,6 +330,7 @@ export default function App() {
       addStatus("error", errorMessage(error));
     } finally {
       setBusy(null);
+      setTrialProgress(null);
     }
   }
 
@@ -354,7 +443,7 @@ export default function App() {
               </button>
               <span className="muted">{sortedNotes.length ? `${sortedNotes.length} dated record${sortedNotes.length === 1 ? "" : "s"}` : "No records loaded"}</span>
             </div>
-            {pdfProgress && <ProgressLine label={`${pdfProgress.phase.toUpperCase()} ${pdfProgress.current}/${pdfProgress.total}`} />}
+            {pdfProgress && <ProgressLine label={formatPdfProgress(pdfProgress)} />}
             {showInputs && patientDocument && <InputViewer document={patientDocument} />}
           </Panel>
 
@@ -375,6 +464,34 @@ export default function App() {
                 <RefreshCcw size={16} /> CT.gov refresh
               </button>
             </div>
+            <div className="trial-import">
+              <label className={`text-button file-loader ${busyNow ? "disabled-control" : ""}`}>
+                <Upload size={16} /> Load embedded file
+                <input
+                  type="file"
+                  accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv"
+                  disabled={busyNow}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) void loadEmbeddedTrialFile(file);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+              <div className="url-load-row">
+                <input
+                  aria-label="Embedded trial index URL"
+                  disabled={busyNow}
+                  onChange={(event) => setEmbeddedTrialUrl(event.target.value)}
+                  placeholder="https://huggingface.co/.../resolve/main/trials.json"
+                  value={embeddedTrialUrl}
+                />
+                <button className="text-button" disabled={busyNow || !embeddedTrialUrl.trim()} onClick={() => void loadEmbeddedTrialUrl()} type="button">
+                  <Download size={16} /> Load URL
+                </button>
+              </div>
+            </div>
+            {trialProgress && <ProgressLine label={formatTrialProgress(trialProgress)} />}
           </Panel>
         </section>
 
@@ -445,7 +562,7 @@ export default function App() {
           </Panel>
 
           <Panel title="Run log" icon={<AlertTriangle size={18} />}>
-            {busy && <ProgressLine label={busy} />}
+            {trialProgress ? <ProgressLine label={formatTrialProgress(trialProgress)} /> : busy && <ProgressLine label={busy} />}
             <div className="status-list">
               {status.map((item, index) => (
                 <div className={`status ${item.kind}`} key={`${item.text}-${index}`}>
@@ -522,6 +639,37 @@ function ProgressLine({ label }: { label: string }) {
       <span>{label}</span>
     </div>
   );
+}
+
+function formatPdfProgress(progress: PdfProgress): string {
+  if (progress.phase === "ocr") {
+    const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
+    return `Processing PDF page ${progress.current} of ${progress.total}${percent}`;
+  }
+  const phase = progress.phase.toUpperCase();
+  const detail = progress.detail ?? `${progress.current}/${progress.total}`;
+  const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
+  return `${phase} ${detail}${percent}`;
+}
+
+function formatTrialProgress(progress: TrialProgress): string {
+  const current = formatCount(progress.current);
+  const total = typeof progress.total === "number" ? ` of ${formatCount(progress.total)}` : "";
+  const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
+  const detail = progress.detail ? ` - ${progress.detail}` : "";
+  if (progress.phase === "download") return `Downloading trial records ${current}${total}${percent}${detail}`;
+  if (progress.phase === "extract") return `Processing trial ${current}${total}${percent}${detail}`;
+  if (progress.phase === "import") return `Loading embedded trial index${total ? ` ${current}${total}${percent}` : ""}${detail}`;
+  return `Embedding trial space ${current}${total}${percent}${detail}`;
+}
+
+function percentComplete(current: number, total: number | undefined): number | undefined {
+  if (!total || total <= 0) return undefined;
+  return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString();
 }
 
 function ResultCard({ match }: { match: MatchResult }) {
