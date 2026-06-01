@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { chunkClinicalNotesByTokens, chunkTextByTokens, fillPrompt, splitBoilerplate } from "../src/lib/text";
+import { tokenIdsFromTokenizerOutput } from "../src/services/modelRuntime";
 
 describe("text helpers", () => {
   it("splits boilerplate section from patient summary", () => {
@@ -42,6 +43,17 @@ describe("text helpers", () => {
     expect(chunks[0].firstDate).toBe("2024-03-01");
     expect(chunks.at(-1)?.lastDate).toBe("2024-04-01");
     expect(chunks[1].tokenStart).toBe(chunks[0].tokenEnd - 50);
+  });
+
+  it("extracts token ids from Transformers.js tensor-like tokenizer output", () => {
+    const tensorLikeOutput = {
+      input_ids: {
+        dims: [1, 4],
+        data: new BigInt64Array([101n, 102n, 103n, 104n])
+      }
+    };
+
+    expect(tokenIdsFromTokenizerOutput(tensorLikeOutput)).toEqual([101, 102, 103, 104]);
   });
 });
 

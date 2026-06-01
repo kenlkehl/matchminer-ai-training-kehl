@@ -46,7 +46,7 @@ export async function chunkClinicalNotesForSummary(
 ): Promise<SerialSummaryChunk[]> {
   const tokenizer = await getTokenizer(modelId);
   return chunkClinicalNotesByTokens(notes, {
-    encode: async (text) => tokenIdsFromTokenizerOutput(await tokenizer(text, { add_special_tokens: false })),
+    encode: async (text) => encodeTextWithTokenizer(tokenizer, text),
     decode: async (tokenIds) => String(await tokenizer.decode(tokenIds, { skip_special_tokens: true }))
   }, options);
 }
@@ -58,7 +58,7 @@ export async function splitSummaryChunkForModel(
 ): Promise<SerialSummaryChunk[]> {
   const tokenizer = await getTokenizer(modelId);
   return chunkTextByTokens(chunk.text, {
-    encode: async (text) => tokenIdsFromTokenizerOutput(await tokenizer(text, { add_special_tokens: false })),
+    encode: async (text) => encodeTextWithTokenizer(tokenizer, text),
     decode: async (tokenIds) => String(await tokenizer.decode(tokenIds, { skip_special_tokens: true }))
   }, {
     ...options,
@@ -70,7 +70,8 @@ export async function splitSummaryChunkForModel(
 
 export async function countTextTokens(modelId: string, text: string): Promise<number> {
   const tokenizer = await getTokenizer(modelId);
-  return tokenIdsFromTokenizerOutput(await tokenizer(text, { add_special_tokens: false })).length;
+  const tokenIds = await encodeTextWithTokenizer(tokenizer, text);
+  return tokenIds.length;
 }
 
 export async function embedText(modelId: string, text: string, dtype = "q8"): Promise<number[]> {
@@ -194,16 +195,39 @@ function softmaxPositive(values: number[]): number {
   return (exps[1] ?? exps[0] ?? 0) / total;
 }
 
-function flattenNumberArray(value: unknown): number[] {
-  if (Array.isArray(value)) {
-    if (typeof value[0] === "number") return value as number[];
-    return flattenNumberArray(value[0]);
+async function encodeTextWithTokenizer(tokenizer: any, text: string): Promise<number[]> {
+  const tokenIds = tokenIdsFromTokenizerOutput(await tokenizer(text, { add_special_tokens: false }));
+  if (text.trim() && tokenIds.length === 0) {
+    throw new Error("Tokenizer returned no input_ids for non-empty text");
   }
-  if (ArrayBuffer.isView(value)) return Array.from(value as unknown as ArrayLike<number>);
+  return tokenIds;
+}
+
+function flattenNumberArray(value: unknown): number[] {
+  if (typeof value === "number") return Number.isFinite(value) ? [value] : [];
+  if (typeof value === "bigint") return [Number(value)];
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => flattenNumberArray(item));
+  }
+  const viewLength = (value as { length?: unknown } | null)?.length;
+  if (ArrayBuffer.isView(value) && typeof viewLength === "number") {
+    return Array.from(value as unknown as ArrayLike<number | bigint>)
+      .map((item) => Number(item))
+      .filter(Number.isFinite);
+  }
+  if (value && typeof value === "object" && "data" in value) {
+    return flattenNumberArray((value as { data?: unknown }).data);
+  }
+  if (value && typeof (value as { tolist?: unknown }).tolist === "function") {
+    return flattenNumberArray((value as { tolist: () => unknown }).tolist());
+  }
+  if (value && typeof value !== "string" && typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function") {
+    return Array.from(value as Iterable<unknown>).flatMap((item) => flattenNumberArray(item));
+  }
   return [];
 }
 
-function tokenIdsFromTokenizerOutput(output: unknown): number[] {
+export function tokenIdsFromTokenizerOutput(output: unknown): number[] {
   const inputIds = (output as { input_ids?: unknown })?.input_ids ?? output;
   return flattenNumberArray(inputIds).map((value) => Number(value));
 }
