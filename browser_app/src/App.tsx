@@ -19,7 +19,7 @@ import {
 import type { MatchResult, ModelSettings, PatientDocument, PromptKey, StatusMessage, TrialSpaceRecord } from "./types";
 import { DEFAULT_PROMPTS } from "./data/defaultPrompts";
 import { DEFAULT_MODEL_SETTINGS } from "./data/defaultSettings";
-import { buildExtractiveFallbackSummary, fillPrompt, splitBoilerplate } from "./lib/text";
+import { buildExtractiveFallbackSummary, fillPrompt, splitBoilerplate, type SerialSummaryChunk } from "./lib/text";
 import { hashTextEmbedding } from "./lib/hashEmbedding";
 import { parseCsvPatientFile } from "./services/csvIngest";
 import { parsePdfPatientFile, type PdfProgress } from "./services/pdfIngest";
@@ -30,7 +30,9 @@ import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
 
 const promptOrder: PromptKey[] = ["patientSummary", "trialSpaceExtraction", "trialDeepScreen", "boilerplateDeepScreen"];
-const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 512;
+const BROWSER_LLM_CONTEXT_TOKENS = 4096;
+const BROWSER_LLM_CONTEXT_MARGIN_TOKENS = 128;
+const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 16;
 
 interface TrialProgress {
   phase: "download" | "extract" | "embed" | "import";
@@ -123,20 +125,48 @@ export default function App() {
       let splitOversizedSegment = false;
       while (pending.length > 0) {
         const chunk = pending.shift()!;
-        const progressDetail = `${formatCount(chunk.tokenCount)} input tokens, ${chunk.firstDate} to ${chunk.lastDate}`;
+        const progressDetail = `${formatCount(chunk.tokenCount)} source tokens, ${chunk.firstDate} to ${chunk.lastDate}`;
         setSummaryProgress({
           current: completed + 1,
           total: totalWork,
           detail: progressDetail,
           percent: percentComplete(completed, totalWork)
         });
-        const prompt = fillPrompt(prompts.patientSummary, {
-          prior_summary: prior || "None - this is the first segment for this patient",
-          first_date: chunk.firstDate,
-          last_date: chunk.lastDate,
-          record_segment: chunk.text
-        });
+        const prompt = buildSummaryPrompt(prompts.patientSummary, prior, chunk);
         const promptTokens = await countTextTokens(settings.llmModelId, prompt);
+        const promptBudget = summaryPromptTokenBudget(settings.maxSummaryTokens);
+        if (promptTokens > promptBudget) {
+          const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, promptBudget);
+          if (smallerChunkSize >= chunk.tokenCount) {
+            throw new Error(`Serial summary prompt is still too large for the browser LLM (${formatCount(promptTokens)} prompt tokens; budget ${formatCount(promptBudget)}). Reduce the Patient summary prompt text or Summary tokens setting.`);
+          }
+          const smallerChunks = await splitSummaryChunkForModel(settings.llmModelId, chunk, {
+            chunkSizeTokens: smallerChunkSize,
+            overlapTokens: Math.min(settings.summaryChunkOverlapTokens, smallerChunkSize - 1)
+          });
+          if (smallerChunks.length <= 1) {
+            throw new Error(`Serial summary prompt is still too large for the browser LLM (${formatCount(promptTokens)} prompt tokens; budget ${formatCount(promptBudget)}).`);
+          }
+
+          splitOversizedSegment = true;
+          totalWork += smallerChunks.length - 1;
+          pending.unshift(...smallerChunks);
+          const splitDetail = `split segment before LLM call: ${formatCount(promptTokens)} prompt tokens over ${formatCount(promptBudget)} budget`;
+          setSummaryProgress({
+            current: completed + 1,
+            total: totalWork,
+            detail: splitDetail,
+            percent: percentComplete(completed, totalWork)
+          });
+          console.warn("[MatchMiner Summary] Split summary segment before LLM call", {
+            originalChunkTokens: chunk.tokenCount,
+            smallerChunkSize,
+            smallerChunks: smallerChunks.length,
+            promptTokens,
+            promptBudget
+          });
+          continue;
+        }
         console.info("[MatchMiner Summary] Calling local LLM for serial chunk", {
           chunk: completed + 1,
           chunks: totalWork,
@@ -152,7 +182,7 @@ export default function App() {
           });
         } catch (error) {
           if (!isOversizedGenerationError(error)) throw error;
-          const smallerChunkSize = Math.max(MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS, Math.ceil(chunk.tokenCount / 2));
+          const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, Math.max(MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS, promptBudget - 256));
           if (smallerChunkSize >= chunk.tokenCount) throw error;
           const smallerChunks = await splitSummaryChunkForModel(settings.llmModelId, chunk, {
             chunkSizeTokens: smallerChunkSize,
@@ -879,7 +909,7 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
             <input type="number" min={100} max={4000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
           </label>
           <label>
-            Summary chunk tokens
+            Summary target chunk tokens
             <input type="number" min={256} max={20000} value={settings.summaryChunkTokens} onChange={(event) => onChange({ ...settings, summaryChunkTokens: Number(event.target.value) })} />
           </label>
           <label>
@@ -947,6 +977,29 @@ function parseYesNo(text: string): boolean | null {
   if (tail.includes("yes!")) return true;
   if (tail.includes("no!")) return false;
   return null;
+}
+
+function buildSummaryPrompt(template: string, prior: string, chunk: SerialSummaryChunk): string {
+  return fillPrompt(template, {
+    prior_summary: prior || "None - this is the first segment for this patient",
+    first_date: chunk.firstDate,
+    last_date: chunk.lastDate,
+    record_segment: chunk.text
+  });
+}
+
+function summaryPromptTokenBudget(maxSummaryTokens: number): number {
+  return Math.max(
+    MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS,
+    BROWSER_LLM_CONTEXT_TOKENS - Math.max(0, Math.floor(maxSummaryTokens)) - BROWSER_LLM_CONTEXT_MARGIN_TOKENS
+  );
+}
+
+function smallerSummaryChunkSize(chunkTokens: number, promptTokens: number, promptBudget: number): number {
+  const promptOverhead = Math.max(0, promptTokens - chunkTokens);
+  const sourceBudget = promptBudget - promptOverhead - BROWSER_LLM_CONTEXT_MARGIN_TOKENS;
+  const target = sourceBudget > 0 ? Math.min(Math.floor(sourceBudget), Math.ceil(chunkTokens / 2)) : Math.ceil(chunkTokens / 2);
+  return Math.max(MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS, target);
 }
 
 function isOversizedGenerationError(error: unknown): boolean {
