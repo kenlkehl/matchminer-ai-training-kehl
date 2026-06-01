@@ -1,6 +1,6 @@
 import Dexie, { type Table } from "dexie";
 import type { ModelSettings, PromptKey, TrialSpaceRecord } from "../types";
-import { DEFAULT_MODEL_SETTINGS } from "../data/defaultSettings";
+import { DEFAULT_BROWSER_LLM_MODEL_ID, DEFAULT_MODEL_SETTINGS, LEGACY_BROWSER_LLM_MODEL_ID } from "../data/defaultSettings";
 import { getDefaultPromptValues } from "../data/defaultPrompts";
 
 interface PromptRow {
@@ -54,7 +54,15 @@ export async function resetPrompt(key: PromptKey): Promise<Record<PromptKey, str
 
 export async function loadModelSettings(): Promise<ModelSettings> {
   const row = await db.settings.get("modelSettings");
-  return { ...DEFAULT_MODEL_SETTINGS, ...(row?.value ?? {}) };
+  const stored: Partial<ModelSettings> = row?.value ?? {};
+  const settings = { ...DEFAULT_MODEL_SETTINGS, ...stored };
+  if (stored.llmModelId === LEGACY_BROWSER_LLM_MODEL_ID) {
+    settings.llmModelId = DEFAULT_BROWSER_LLM_MODEL_ID;
+    settings.llmContextTokens = DEFAULT_MODEL_SETTINGS.llmContextTokens;
+    settings.maxSummaryTokens = DEFAULT_MODEL_SETTINGS.maxSummaryTokens;
+    settings.summaryChunkTokens = DEFAULT_MODEL_SETTINGS.summaryChunkTokens;
+  }
+  return settings;
 }
 
 export async function saveModelSettings(value: ModelSettings): Promise<void> {

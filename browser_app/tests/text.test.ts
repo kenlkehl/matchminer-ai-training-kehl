@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_PROMPTS } from "../src/data/defaultPrompts";
 import { chunkClinicalNotesByTokens, chunkTextByTokens, fillPrompt, splitBoilerplate } from "../src/lib/text";
-import { tokenIdsFromTokenizerOutput } from "../src/services/modelRuntime";
+import { stripThinkingBlocks, tokenIdsFromTokenizerOutput } from "../src/services/modelRuntime";
 
 describe("text helpers", () => {
   it("splits boilerplate section from patient summary", () => {
@@ -54,6 +55,23 @@ describe("text helpers", () => {
     };
 
     expect(tokenIdsFromTokenizerOutput(tensorLikeOutput)).toEqual([101, 102, 103, 104]);
+  });
+
+  it("keeps the final answer separate from local reasoning model thinking", () => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      expect(stripThinkingBlocks("<think>private reasoning</think>\nFinal summary")).toBe("Final summary");
+      expect(stripThinkingBlocks("<think>unfinished\nFinal summary")).toBe("unfinished\nFinal summary");
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("keeps default prompts aligned with the main repo prompt style", () => {
+    const promptText = Object.values(DEFAULT_PROMPTS).map((prompt) => prompt.defaultValue).join("\n");
+    expect(promptText).not.toMatch(/<think>|chain-of-thought|Do not output reasoning/i);
+    expect(promptText).toContain("Reference: common systemic therapy regimen abbreviations");
+    expect(promptText).toContain("After reasoning step by step, compute a score from 0 to 5");
   });
 });
 

@@ -8,6 +8,7 @@ const pipelineCache = new Map<string, Promise<AnyPipeline>>();
 const tokenizerCache = new Map<string, Promise<any>>();
 const classifierCache = new Map<string, Promise<any>>();
 const patchedLogitSessions = new WeakSet<object>();
+const REASONING_SYSTEM_PROMPT = "Reasoning: high";
 let webGpuDetailsLogged = false;
 
 export async function isWebGpuAvailable(): Promise<boolean> {
@@ -47,7 +48,8 @@ export async function resetTextGenerationPipeline(modelId: string, dtype: string
 export async function generateText(modelId: string, prompt: string, options: { dtype: string; maxNewTokens: number; contextTokens?: number }): Promise<string> {
   const generator = await getPipeline("text-generation", modelId, options.dtype);
   const contextTokens = Number.isFinite(options.contextTokens) ? Math.max(1, Math.floor(options.contextTokens!)) : 16384;
-  const output = await generator(prompt, {
+  const formattedPrompt = formatPromptForModel(generator, modelId, prompt);
+  const output = await generator(formattedPrompt, {
     max_new_tokens: options.maxNewTokens,
     temperature: 0.2,
     do_sample: false,
@@ -58,7 +60,7 @@ export async function generateText(modelId: string, prompt: string, options: { d
     }
   });
   const first = Array.isArray(output) ? output[0] : output;
-  return String(first?.generated_text ?? first?.text ?? first ?? "").trim();
+  return stripThinkingBlocks(String(first?.generated_text ?? first?.text ?? first ?? "")).trim();
 }
 
 export async function chunkClinicalNotesForSummary(
@@ -187,6 +189,46 @@ function patchGenerationLogitSessions(pipe: unknown, transformers: { Tensor?: ne
     };
     patchedLogitSessions.add(session as object);
   }
+}
+
+function formatPromptForModel(generator: AnyPipeline, modelId: string, prompt: string): string {
+  if (!shouldUseChatTemplate(modelId)) return prompt;
+  const tokenizer = (generator as { tokenizer?: { apply_chat_template?: unknown } }).tokenizer;
+  if (typeof tokenizer?.apply_chat_template !== "function") return prompt;
+  try {
+    return String(tokenizer.apply_chat_template([
+      { role: "system", content: REASONING_SYSTEM_PROMPT },
+      { role: "user", content: prompt }
+    ], {
+      tokenize: false,
+      add_generation_prompt: true,
+      enable_thinking: true
+    }));
+  } catch {
+    try {
+      return String(tokenizer.apply_chat_template([{ role: "user", content: prompt }], {
+        tokenize: false,
+        add_generation_prompt: true,
+        enable_thinking: true
+      }));
+    } catch {
+      return prompt;
+    }
+  }
+}
+
+function shouldUseChatTemplate(modelId: string): boolean {
+  return /(^|\/)LFM2(?:\.5)?-/i.test(modelId) || /LiquidAI\/LFM2/i.test(modelId);
+}
+
+export function stripThinkingBlocks(text: string): string {
+  const thinking = text.match(/<think>([\s\S]*?)<\/think>/i)?.[1]?.trim();
+  if (thinking) {
+    console.info("[MatchMiner LLM Thinking]", thinking);
+  }
+  let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  cleaned = cleaned.replace(/<\/?think>/gi, "").trim();
+  return cleaned;
 }
 
 function logWebGpuDetails(adapter: unknown): void {
