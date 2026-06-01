@@ -1,5 +1,5 @@
 import { MODEL_QUERY_PROMPT } from "../data/defaultSettings";
-import { chunkClinicalNotesByTokens, type SerialSummaryChunk } from "../lib/text";
+import { chunkClinicalNotesByTokens, chunkTextByTokens, type SerialSummaryChunk } from "../lib/text";
 import type { ClinicalNote } from "../types";
 
 type AnyPipeline = (...args: any[]) => Promise<any> | any;
@@ -49,6 +49,28 @@ export async function chunkClinicalNotesForSummary(
     encode: async (text) => tokenIdsFromTokenizerOutput(await tokenizer(text, { add_special_tokens: false })),
     decode: async (tokenIds) => String(await tokenizer.decode(tokenIds, { skip_special_tokens: true }))
   }, options);
+}
+
+export async function splitSummaryChunkForModel(
+  modelId: string,
+  chunk: SerialSummaryChunk,
+  options: { chunkSizeTokens: number; overlapTokens: number }
+): Promise<SerialSummaryChunk[]> {
+  const tokenizer = await getTokenizer(modelId);
+  return chunkTextByTokens(chunk.text, {
+    encode: async (text) => tokenIdsFromTokenizerOutput(await tokenizer(text, { add_special_tokens: false })),
+    decode: async (tokenIds) => String(await tokenizer.decode(tokenIds, { skip_special_tokens: true }))
+  }, {
+    ...options,
+    fallbackFirstDate: chunk.firstDate,
+    fallbackLastDate: chunk.lastDate,
+    useFallbackDateRangeWhenNoHeaders: true
+  });
+}
+
+export async function countTextTokens(modelId: string, text: string): Promise<number> {
+  const tokenizer = await getTokenizer(modelId);
+  return tokenIdsFromTokenizerOutput(await tokenizer(text, { add_special_tokens: false })).length;
 }
 
 export async function embedText(modelId: string, text: string, dtype = "q8"): Promise<number[]> {

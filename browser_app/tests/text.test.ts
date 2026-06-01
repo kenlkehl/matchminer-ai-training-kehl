@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkClinicalNotesByTokens, fillPrompt, splitBoilerplate } from "../src/lib/text";
+import { chunkClinicalNotesByTokens, chunkTextByTokens, fillPrompt, splitBoilerplate } from "../src/lib/text";
 
 describe("text helpers", () => {
   it("splits boilerplate section from patient summary", () => {
@@ -27,6 +27,21 @@ describe("text helpers", () => {
     expect(chunks.at(-1)?.lastDate).toBe("2024-02-01");
     expect(chunks[1].tokenStart).toBe(chunks[0].tokenEnd - 10);
     expect(chunks.every((chunk) => chunk.tokenCount <= 256)).toBe(true);
+  });
+
+  it("splits an existing summary chunk without losing fallback dates", async () => {
+    const chunks = await chunkTextByTokens("x".repeat(700), asciiCharacterTokenizer, {
+      chunkSizeTokens: 300,
+      overlapTokens: 50,
+      fallbackFirstDate: "2024-03-01",
+      fallbackLastDate: "2024-04-01",
+      useFallbackDateRangeWhenNoHeaders: true
+    });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks[0].firstDate).toBe("2024-03-01");
+    expect(chunks.at(-1)?.lastDate).toBe("2024-04-01");
+    expect(chunks[1].tokenStart).toBe(chunks[0].tokenEnd - 50);
   });
 });
 

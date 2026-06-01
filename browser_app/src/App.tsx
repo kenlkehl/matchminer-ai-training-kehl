@@ -24,12 +24,13 @@ import { hashTextEmbedding } from "./lib/hashEmbedding";
 import { parseCsvPatientFile } from "./services/csvIngest";
 import { parsePdfPatientFile, type PdfProgress } from "./services/pdfIngest";
 import { clearPatientSideData, loadModelSettings, loadPrompts, resetPrompt, saveModelSettings, savePrompt, saveTrialIndex } from "./services/storage";
-import { chunkClinicalNotesForSummary, embedText, generateText, isWebGpuAvailable, warmModel } from "./services/modelRuntime";
+import { chunkClinicalNotesForSummary, countTextTokens, embedText, generateText, isWebGpuAvailable, splitSummaryChunkForModel, warmModel } from "./services/modelRuntime";
 import { ensureTrialEmbeddings, fetchCtGovCancerTrials, loadOrFetchTrialIndex } from "./services/trialIndex";
 import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services/trialImport";
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
 
 const promptOrder: PromptKey[] = ["patientSummary", "trialSpaceExtraction", "trialDeepScreen", "boilerplateDeepScreen"];
+const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 512;
 
 interface TrialProgress {
   phase: "download" | "extract" | "embed" | "import";
@@ -116,14 +117,18 @@ export default function App() {
         overlapTokens: settings.summaryChunkOverlapTokens,
         recordChars: patientDocument.rawText.length
       });
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index];
+      const pending = [...chunks];
+      let completed = 0;
+      let totalWork = pending.length;
+      let splitOversizedSegment = false;
+      while (pending.length > 0) {
+        const chunk = pending.shift()!;
         const progressDetail = `${formatCount(chunk.tokenCount)} input tokens, ${chunk.firstDate} to ${chunk.lastDate}`;
         setSummaryProgress({
-          current: index + 1,
-          total: chunks.length,
+          current: completed + 1,
+          total: totalWork,
           detail: progressDetail,
-          percent: percentComplete(index, chunks.length)
+          percent: percentComplete(completed, totalWork)
         });
         const prompt = fillPrompt(prompts.patientSummary, {
           prior_summary: prior || "None - this is the first segment for this patient",
@@ -131,27 +136,60 @@ export default function App() {
           last_date: chunk.lastDate,
           record_segment: chunk.text
         });
+        const promptTokens = await countTextTokens(settings.llmModelId, prompt);
         console.info("[MatchMiner Summary] Calling local LLM for serial chunk", {
-          chunk: index + 1,
-          chunks: chunks.length,
+          chunk: completed + 1,
+          chunks: totalWork,
           chunkTokens: chunk.tokenCount,
+          promptTokens,
           promptChars: prompt.length,
           priorSummaryChars: prior.length
         });
-        prior = await generateText(settings.llmModelId, prompt, {
-          dtype: settings.llmDtype,
-          maxNewTokens: settings.maxSummaryTokens
-        });
+        try {
+          prior = await generateText(settings.llmModelId, prompt, {
+            dtype: settings.llmDtype,
+            maxNewTokens: settings.maxSummaryTokens
+          });
+        } catch (error) {
+          if (!isOversizedGenerationError(error)) throw error;
+          const smallerChunkSize = Math.max(MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS, Math.ceil(chunk.tokenCount / 2));
+          if (smallerChunkSize >= chunk.tokenCount) throw error;
+          const smallerChunks = await splitSummaryChunkForModel(settings.llmModelId, chunk, {
+            chunkSizeTokens: smallerChunkSize,
+            overlapTokens: Math.min(settings.summaryChunkOverlapTokens, smallerChunkSize - 1)
+          });
+          if (smallerChunks.length <= 1) throw error;
+
+          splitOversizedSegment = true;
+          totalWork += smallerChunks.length - 1;
+          pending.unshift(...smallerChunks);
+          const splitDetail = `split oversized segment into ${smallerChunks.length} smaller segments after ${formatCount(promptTokens)} prompt tokens`;
+          setSummaryProgress({
+            current: completed + 1,
+            total: totalWork,
+            detail: splitDetail,
+            percent: percentComplete(completed, totalWork)
+          });
+          console.warn("[MatchMiner Summary] Split oversized summary segment and will retry serially", {
+            originalChunkTokens: chunk.tokenCount,
+            smallerChunkSize,
+            smallerChunks: smallerChunks.length,
+            promptTokens,
+            error: errorMessage(error)
+          });
+          continue;
+        }
+        completed += 1;
         setSummaryProgress({
-          current: index + 1,
-          total: chunks.length,
+          current: completed,
+          total: totalWork,
           detail: progressDetail,
-          percent: percentComplete(index + 1, chunks.length)
+          percent: percentComplete(completed, totalWork)
         });
       }
       setSummary(prior);
       setPatientBoilerplate(splitBoilerplate(prior).patientBoilerplate);
-      addStatus("success", "Patient summary generated locally.");
+      addStatus("success", splitOversizedSegment ? "Patient summary generated locally after adaptive serial chunk splitting." : "Patient summary generated locally.");
     } catch (error) {
       const fallback = buildExtractiveFallbackSummary(patientDocument.notes);
       setSummary(fallback);
@@ -909,6 +947,16 @@ function parseYesNo(text: string): boolean | null {
   if (tail.includes("yes!")) return true;
   if (tail.includes("no!")) return false;
   return null;
+}
+
+function isOversizedGenerationError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return (
+    message.includes("tensor shape is too large") ||
+    message.includes("integer overflow") ||
+    message.includes("safeintonoverflow") ||
+    (message.includes("ortrun") && message.includes("invalid_argument"))
+  );
 }
 
 function errorMessage(error: unknown): string {

@@ -46,17 +46,34 @@ export async function chunkClinicalNotesByTokens(
 ): Promise<SerialSummaryChunk[]> {
   if (notes.length === 0) return [];
 
-  const chunkSize = Math.max(256, Math.floor(options.chunkSizeTokens));
-  const overlap = Math.max(0, Math.min(Math.floor(options.overlapTokens), chunkSize - 1));
   const fullText = buildRecordSegment(notes);
   const allDates = notes.map((note) => note.isoDate);
-  const allTokens = await tokenizer.encode(fullText);
+  return chunkTextByTokens(fullText, tokenizer, {
+    ...options,
+    fallbackFirstDate: allDates[0],
+    fallbackLastDate: allDates.at(-1) ?? allDates[0]
+  });
+}
+
+export async function chunkTextByTokens(
+  text: string,
+  tokenizer: TokenTextCodec,
+  options: { chunkSizeTokens: number; overlapTokens: number; fallbackFirstDate?: string; fallbackLastDate?: string; useFallbackDateRangeWhenNoHeaders?: boolean }
+): Promise<SerialSummaryChunk[]> {
+  const cleanText = text.trim();
+  const chunkSize = Math.max(256, Math.floor(options.chunkSizeTokens));
+  const overlap = Math.max(0, Math.min(Math.floor(options.overlapTokens), chunkSize - 1));
+  const fallbackFirstDate = options.fallbackFirstDate ?? "unknown date";
+  const fallbackLastDate = options.fallbackLastDate ?? fallbackFirstDate;
+  const dateHeaderPattern = /=== Clinical Note dated (.+?) ===/g;
+  const datesInText = Array.from(cleanText.matchAll(dateHeaderPattern), (match) => match[1]);
+  const allTokens = await tokenizer.encode(cleanText);
 
   if (allTokens.length <= chunkSize) {
     return [{
-      text: fullText,
-      firstDate: allDates[0],
-      lastDate: allDates.at(-1) ?? allDates[0],
+      text: cleanText,
+      firstDate: datesInText[0] ?? fallbackFirstDate,
+      lastDate: datesInText.at(-1) ?? fallbackLastDate,
       tokenStart: 0,
       tokenEnd: allTokens.length,
       tokenCount: allTokens.length
@@ -65,7 +82,6 @@ export async function chunkClinicalNotesByTokens(
 
   const chunks: SerialSummaryChunk[] = [];
   const stride = chunkSize - overlap;
-  const dateHeaderPattern = /=== Clinical Note dated (.+?) ===/g;
   let start = 0;
 
   while (start < allTokens.length) {
@@ -73,12 +89,14 @@ export async function chunkClinicalNotesByTokens(
     const chunkTokens = allTokens.slice(start, end);
     const chunkText = (await tokenizer.decode(chunkTokens)).trim();
     const foundDates = Array.from(chunkText.matchAll(dateHeaderPattern), (match) => match[1]);
-    const previousLastDate = chunks.at(-1)?.lastDate ?? allDates[0];
+    const previousLastDate = chunks.at(-1)?.lastDate ?? fallbackFirstDate;
+    const noHeaderFirstDate = options.useFallbackDateRangeWhenNoHeaders ? fallbackFirstDate : previousLastDate;
+    const noHeaderLastDate = options.useFallbackDateRangeWhenNoHeaders ? fallbackLastDate : noHeaderFirstDate;
 
     chunks.push({
       text: chunkText,
-      firstDate: foundDates[0] ?? previousLastDate,
-      lastDate: foundDates.at(-1) ?? foundDates[0] ?? previousLastDate,
+      firstDate: foundDates[0] ?? noHeaderFirstDate,
+      lastDate: foundDates.at(-1) ?? foundDates[0] ?? noHeaderLastDate,
       tokenStart: start,
       tokenEnd: end,
       tokenCount: chunkTokens.length
