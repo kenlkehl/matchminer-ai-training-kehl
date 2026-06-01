@@ -1,5 +1,6 @@
 import type { ClinicalNote, ModelSettings, PatientDocument } from "../types";
 import { parseClinicalDate } from "../lib/dateParsing";
+import { ocrPdfWithGraniteDocling } from "./graniteDoclingOcr";
 import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
 import tesseractWorkerSrc from "tesseract.js/dist/worker.min.js?url";
 import tesseractCoreSrc from "tesseract.js-core/tesseract-core-lstm.wasm.js?url";
@@ -22,7 +23,7 @@ type TesseractBrowserModule = {
 };
 
 export interface PdfProgress {
-  phase: "text" | "ocr" | "local-ocr";
+  phase: "text" | "ocr" | "docling" | "local-ocr";
   current: number;
   total: number;
   detail?: string;
@@ -79,8 +80,13 @@ export async function parsePdfPatientFile(
     });
     if (!rawText) {
       logPdfDebug("No embedded PDF text found; starting OCR fallback");
-      rawText = await tryLocalPdfOcr(file.name, sourceBytes, options.ocrMode ?? "auto", onProgress);
-      if (!rawText && (options.ocrMode ?? "auto") !== "local") {
+      const ocrMode = options.ocrMode ?? "auto";
+      if (ocrMode === "auto" || ocrMode === "granite") {
+        rawText = await tryGraniteDoclingOcr(pdf, ocrMode, onProgress);
+      } else if (ocrMode === "local") {
+        rawText = await tryLocalPdfOcr(file.name, sourceBytes, ocrMode, onProgress);
+      }
+      if (!rawText && (ocrMode === "auto" || ocrMode === "browser")) {
         rawText = await ocrPdfPages(pdf, onProgress);
       }
     }
@@ -108,6 +114,22 @@ export async function parsePdfPatientFile(
   } catch (error) {
     logPdfError("PDF ingest failed", error);
     throw error;
+  }
+}
+
+async function tryGraniteDoclingOcr(
+  pdf: { numPages: number; getPage: (pageNumber: number) => Promise<any> },
+  ocrMode: ModelSettings["pdfOcrMode"],
+  onProgress?: (progress: PdfProgress) => void
+): Promise<string> {
+  try {
+    const text = (await ocrPdfWithGraniteDocling(pdf, onProgress)).trim();
+    if (!text) throw new Error("Granite Docling returned no text");
+    return text;
+  } catch (error) {
+    logPdfError("Granite Docling OCR failed", error);
+    if (ocrMode === "granite") throw error;
+    return "";
   }
 }
 

@@ -132,9 +132,9 @@ python ../real_eval_code/real_time_eval/embed_trial_spaces.py /path/to/model \
 
 ## PDF OCR
 
-PDF upload first extracts embedded text with PDF.js. For scanned or image-only PDFs, the default OCR setting is `Auto`: in Electron it tries local OCR with Docling, then OCRmyPDF, then falls back to browser Tesseract.js. Use Settings -> PDF OCR to force `Local only` or `Browser only`.
+PDF upload first extracts embedded text with PDF.js. For scanned or image-only PDFs, the default OCR setting is `Auto`: the renderer tries `onnx-community/granite-docling-258M-ONNX` with Transformers.js/WebGPU, then falls back to browser Tesseract.js. Use Settings -> PDF OCR to force `Granite WebGPU only`, `Browser only`, or the advanced `Local CLI only` mode.
 
-Install one or both local OCR backends on the machine running Electron:
+The local CLI mode is optional and exists for development or workstation-specific installs. Install one or both local OCR backends on the machine running Electron:
 
 ```bash
 python3 -m pip install docling

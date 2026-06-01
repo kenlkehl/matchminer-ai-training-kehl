@@ -37,7 +37,7 @@ export interface ModelSettings {
   trialSpaceModelId: string;
   trialCheckerModelId: string;
   boilerplateCheckerModelId: string;
-  pdfOcrMode: "auto" | "local" | "browser";
+  pdfOcrMode: "auto" | "granite" | "browser" | "local";
   llmDtype: "q4" | "q4f16" | "fp16" | "auto";
   classifierDtype: "q8" | "fp16" | "auto";
   maxSummaryTokens: number;

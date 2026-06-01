@@ -642,6 +642,11 @@ function ProgressLine({ label }: { label: string }) {
 }
 
 function formatPdfProgress(progress: PdfProgress): string {
+  if (progress.phase === "docling") {
+    if (progress.current <= 0) return "Loading Granite Docling WebGPU";
+    const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
+    return `Processing PDF page ${progress.current} of ${progress.total} with Granite Docling${percent}`;
+  }
   if (progress.phase === "local-ocr") {
     const detail = progress.detail ? ` with ${progress.detail}` : "";
     return `Processing PDF${detail}`;
@@ -762,9 +767,10 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
         <label>
           PDF OCR
           <select value={settings.pdfOcrMode} onChange={(event) => onChange({ ...settings, pdfOcrMode: event.target.value as ModelSettings["pdfOcrMode"] })}>
-            <option value="auto">Auto: local, then browser fallback</option>
-            <option value="local">Local only: Docling/OCRmyPDF</option>
+            <option value="auto">Auto: Granite WebGPU, then browser fallback</option>
+            <option value="granite">Granite WebGPU only</option>
             <option value="browser">Browser only: Tesseract.js</option>
+            <option value="local">Local CLI only: Docling/OCRmyPDF</option>
           </select>
         </label>
         <div className="settings-grid">
