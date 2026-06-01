@@ -627,49 +627,6 @@ export default function App() {
             {showInputs && patientDocument && <InputViewer document={patientDocument} />}
           </Panel>
 
-          <Panel title="Models and trials" icon={<Database size={18} />}>
-            <div className="readiness-grid">
-              <Readiness label="WebGPU" value={webGpu === null ? "checking" : webGpu ? "ready" : "unavailable"} />
-              <Readiness label="Trial spaces" value={trialIndex.length ? `${trialIndex.length}` : "not loaded"} />
-              <Readiness label="Deep screen" value={settings.runDeepScreen ? "on" : "off"} />
-            </div>
-            <div className="button-grid">
-              <button className="text-button" disabled={busyNow} onClick={prepareTrialIndex} type="button">
-                <Database size={16} /> Load index
-              </button>
-              <button className="text-button" disabled={busyNow} onClick={refreshCtGov} type="button">
-                <RefreshCcw size={16} /> CT.gov refresh
-              </button>
-            </div>
-            <div className="trial-import">
-              <label className={`text-button file-loader ${busyNow ? "disabled-control" : ""}`}>
-                <Upload size={16} /> Load embedded file
-                <input
-                  type="file"
-                  accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv"
-                  disabled={busyNow}
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) void loadEmbeddedTrialFile(file);
-                    event.currentTarget.value = "";
-                  }}
-                />
-              </label>
-              <div className="url-load-row">
-                <input
-                  aria-label="Embedded trial index URL"
-                  disabled={busyNow}
-                  onChange={(event) => setEmbeddedTrialUrl(event.target.value)}
-                  placeholder="https://huggingface.co/.../resolve/main/trials.json"
-                  value={embeddedTrialUrl}
-                />
-                <button className="text-button" disabled={busyNow || !embeddedTrialUrl.trim()} onClick={() => void loadEmbeddedTrialUrl()} type="button">
-                  <Download size={16} /> Load URL
-                </button>
-              </div>
-            </div>
-            {trialProgress && <ProgressLine label={formatTrialProgress(trialProgress)} />}
-          </Panel>
         </section>
 
         <section className="center-column">
@@ -719,14 +676,22 @@ export default function App() {
           activePrompt={activePrompt}
           status={status}
           busy={busy}
+          webGpu={webGpu}
+          trialIndexCount={trialIndex.length}
           trialProgress={trialProgress}
           summaryProgress={summaryProgress}
+          embeddedTrialUrl={embeddedTrialUrl}
           onClose={() => setShowSettings(false)}
           onChange={(next) => void persistSettings(next)}
           onActivePromptChange={setActivePrompt}
           onPromptChange={(key, value) => void persistPrompt(key, value)}
           onPromptReset={(key) => void restorePrompt(key)}
           onCacheModels={() => void cacheModels()}
+          onPrepareTrialIndex={() => void prepareTrialIndex()}
+          onRefreshCtGov={() => void refreshCtGov()}
+          onLoadEmbeddedTrialFile={(file) => void loadEmbeddedTrialFile(file)}
+          onEmbeddedTrialUrlChange={setEmbeddedTrialUrl}
+          onLoadEmbeddedTrialUrl={() => void loadEmbeddedTrialUrl()}
         />
       )}
     </div>
@@ -914,14 +879,22 @@ interface SettingsDialogProps {
   activePrompt: PromptKey;
   status: StatusMessage[];
   busy: string | null;
+  webGpu: boolean | null;
+  trialIndexCount: number;
   trialProgress: TrialProgress | null;
   summaryProgress: SummaryProgress | null;
+  embeddedTrialUrl: string;
   onChange: (settings: ModelSettings) => void;
   onClose: () => void;
   onActivePromptChange: (key: PromptKey) => void;
   onPromptChange: (key: PromptKey, value: string) => void;
   onPromptReset: (key: PromptKey) => void;
   onCacheModels: () => void;
+  onPrepareTrialIndex: () => void;
+  onRefreshCtGov: () => void;
+  onLoadEmbeddedTrialFile: (file: File) => void;
+  onEmbeddedTrialUrlChange: (value: string) => void;
+  onLoadEmbeddedTrialUrl: () => void;
 }
 
 function SettingsDialog({
@@ -930,14 +903,22 @@ function SettingsDialog({
   activePrompt,
   status,
   busy,
+  webGpu,
+  trialIndexCount,
   trialProgress,
   summaryProgress,
+  embeddedTrialUrl,
   onChange,
   onClose,
   onActivePromptChange,
   onPromptChange,
   onPromptReset,
-  onCacheModels
+  onCacheModels,
+  onPrepareTrialIndex,
+  onRefreshCtGov,
+  onLoadEmbeddedTrialFile,
+  onEmbeddedTrialUrlChange,
+  onLoadEmbeddedTrialUrl
 }: SettingsDialogProps) {
   const [activeTab, setActiveTab] = useState<"general" | "advanced">("general");
   const busyNow = Boolean(busy);
@@ -959,6 +940,50 @@ function SettingsDialog({
         </div>
         {activeTab === "general" ? (
           <div className="settings-section">
+            <div className="settings-subsection">
+              <h3>Models and trials</h3>
+              <div className="readiness-grid">
+                <Readiness label="WebGPU" value={webGpu === null ? "checking" : webGpu ? "ready" : "unavailable"} />
+                <Readiness label="Trial spaces" value={trialIndexCount ? `${trialIndexCount}` : "not loaded"} />
+                <Readiness label="Deep screen" value={settings.runDeepScreen ? "on" : "off"} />
+              </div>
+              <div className="button-grid">
+                <button className="text-button" disabled={busyNow} onClick={onPrepareTrialIndex} type="button">
+                  <Database size={16} /> Load index
+                </button>
+                <button className="text-button" disabled={busyNow} onClick={onRefreshCtGov} type="button">
+                  <RefreshCcw size={16} /> CT.gov refresh
+                </button>
+              </div>
+              <div className="trial-import">
+                <label className={`text-button file-loader ${busyNow ? "disabled-control" : ""}`}>
+                  <Upload size={16} /> Load embedded file
+                  <input
+                    type="file"
+                    accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv"
+                    disabled={busyNow}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) onLoadEmbeddedTrialFile(file);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+                <div className="url-load-row">
+                  <input
+                    aria-label="Embedded trial index URL"
+                    disabled={busyNow}
+                    onChange={(event) => onEmbeddedTrialUrlChange(event.target.value)}
+                    placeholder="https://huggingface.co/.../resolve/main/trials.json"
+                    value={embeddedTrialUrl}
+                  />
+                  <button className="text-button" disabled={busyNow || !embeddedTrialUrl.trim()} onClick={onLoadEmbeddedTrialUrl} type="button">
+                    <Download size={16} /> Load URL
+                  </button>
+                </div>
+              </div>
+              {trialProgress && <ProgressLine label={formatTrialProgress(trialProgress)} />}
+            </div>
             <label>
               PDF OCR
               <select value={settings.pdfOcrMode} onChange={(event) => onChange({ ...settings, pdfOcrMode: event.target.value as ModelSettings["pdfOcrMode"] })}>

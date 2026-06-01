@@ -541,11 +541,23 @@ details p {
 }
 
 .settings-section,
+.settings-subsection,
 .settings-stack,
 .advanced-settings,
 .advanced-block {
   display: grid;
   gap: 12px;
+}
+
+.settings-subsection {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-subsection h3 {
+  margin: 0;
+  color: #2d3b42;
+  font-size: 14px;
 }
 
 .settings-actions {
@@ -576,6 +588,10 @@ details p {
 }
 
 .settings-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.modal .button-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -642,6 +658,10 @@ details p {
   }
 
   .url-load-row {
+    grid-template-columns: 1fr;
+  }
+
+  .modal .button-grid {
     grid-template-columns: 1fr;
   }
 }
