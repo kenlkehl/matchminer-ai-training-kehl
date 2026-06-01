@@ -97,6 +97,11 @@ system `tar`.
 Settings can switch generation or ONNX tasks back to the browser WebGPU
 runtime for comparison/debugging.
 
+If Electron dev mode reports that `onnxruntime-node-native` cannot be found,
+run `npm install` from this `browser_app` directory and restart
+`npm run electron:dev`. Packaged builds need to be rebuilt after dependency
+changes with `npm run electron:pack` or `npm run electron:dist`.
+
 Electron is launched with WebGPU development flags by default. If those flags
 cause a GPU-driver issue on a particular machine, start it with:
 

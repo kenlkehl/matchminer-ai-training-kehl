@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
@@ -70,6 +70,7 @@ export default function App() {
   const [summaryProgress, setSummaryProgress] = useState<SummaryProgress | null>(null);
   const [trialProgress, setTrialProgress] = useState<TrialProgress | null>(null);
   const [embeddedTrialUrl, setEmbeddedTrialUrl] = useState("");
+  const summaryBoxRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     void Promise.all([isWebGpuAvailable(), loadModelSettings(), loadPrompts()]).then(([gpu, savedSettings, savedPrompts]) => {
@@ -98,12 +99,21 @@ export default function App() {
   const sortedNotes = patientDocument?.notes ?? [];
   const summaryParts = useMemo(() => splitBoilerplate(summary), [summary]);
 
+  function commitSummaryText(nextSummary: string) {
+    const summaryText = String(nextSummary ?? "");
+    if (summaryBoxRef.current && summaryBoxRef.current.value !== summaryText) {
+      summaryBoxRef.current.value = summaryText;
+    }
+    setSummary(summaryText);
+    setPatientBoilerplate(splitBoilerplate(summaryText).patientBoilerplate);
+  }
+
   async function handleFile(file: File) {
     setBusy("Reading records");
     setPdfProgress(null);
     setSummaryProgress(null);
     setMatches([]);
-    setSummary("");
+    commitSummaryText("");
     try {
       const lower = file.name.toLowerCase();
       const doc = lower.endsWith(".csv") ? await parseCsvPatientFile(file) : await parsePdfPatientFile(file, setPdfProgress, { ocrMode: settings.pdfOcrMode });
@@ -257,13 +267,11 @@ export default function App() {
           percent: percentComplete(completed, totalWork)
         });
       }
-      setSummary(prior);
-      setPatientBoilerplate(splitBoilerplate(prior).patientBoilerplate);
+      commitSummaryText(prior);
       addStatus("success", splitOversizedSegment ? "Patient summary generated locally after adaptive serial chunk splitting." : "Patient summary generated locally.");
     } catch (error) {
       const fallback = buildExtractiveFallbackSummary(patientDocument.notes);
-      setSummary(fallback);
-      setPatientBoilerplate(splitBoilerplate(fallback).patientBoilerplate);
+      commitSummaryText(fallback);
       addStatus("warning", `LLM summarization failed; local extractive summary was used. ${errorMessage(error)}`);
     } finally {
       setBusy(null);
@@ -533,8 +541,7 @@ export default function App() {
 
   async function deleteLocalPatientData() {
     setPatientDocument(null);
-    setSummary("");
-    setPatientBoilerplate("");
+    commitSummaryText("");
     setMatches([]);
     await clearPatientSideData();
     addStatus("success", "Local patient workspace cleared.");
@@ -660,10 +667,10 @@ export default function App() {
             {summaryProgress && <ProgressLine label={formatSummaryProgress(summaryProgress)} />}
             <textarea
               className="summary-box"
+              ref={summaryBoxRef}
               value={summary}
               onChange={(event) => {
-                setSummary(event.target.value);
-                setPatientBoilerplate(splitBoilerplate(event.target.value).patientBoilerplate);
+                commitSummaryText(event.target.value);
               }}
               placeholder="Patient summary"
             />

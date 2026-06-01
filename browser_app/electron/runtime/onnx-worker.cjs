@@ -1,7 +1,7 @@
+const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { parentPort } = require("node:worker_threads");
-const ort = require("onnxruntime-node-native");
 
 const DEFAULT_TRIALSPACE_MAX_LENGTH = 2500;
 const TRIAL_CHECKER_MAX_LENGTH = 4096;
@@ -11,6 +11,7 @@ const MODEL_QUERY_PROMPT =
 
 const loadedModels = new Map();
 let TokenizerClass = null;
+let ortModule = null;
 
 parentPort.on("message", async (message) => {
   try {
@@ -45,6 +46,7 @@ async function loadModel(modelId, task, modelDir) {
   const key = `${task}:${modelId}:${modelDir}`;
   if (loadedModels.has(key)) return loadedModels.get(key);
 
+  const ort = loadOnnxRuntime();
   const tokenizer = await loadTokenizer(modelDir);
   const modelPath = await findOnnxModel(modelDir);
   const session = await ort.InferenceSession.create(modelPath, {
@@ -149,6 +151,7 @@ function encodeOne(tokenizerBundle, text, maxLength) {
 }
 
 async function runSession(session, encoded) {
+  const ort = loadOnnxRuntime();
   const feeds = {};
   if (session.inputNames.includes("input_ids")) {
     feeds.input_ids = new ort.Tensor("int64", encoded.inputIds, encoded.dims);
@@ -160,6 +163,33 @@ async function runSession(session, encoded) {
     feeds.token_type_ids = new ort.Tensor("int64", new BigInt64Array(encoded.inputIds.length), encoded.dims);
   }
   return session.run(feeds);
+}
+
+function loadOnnxRuntime() {
+  if (ortModule) return ortModule;
+
+  const candidates = [
+    "onnxruntime-node-native",
+    process.resourcesPath ? path.join(process.resourcesPath, "app.asar.unpacked", "node_modules", "onnxruntime-node-native") : null,
+    process.resourcesPath ? path.join(process.resourcesPath, "app", "node_modules", "onnxruntime-node-native") : null,
+    path.join(__dirname, "..", "..", "node_modules", "onnxruntime-node-native")
+  ].filter(Boolean);
+  const errors = [];
+
+  for (const candidate of candidates) {
+    try {
+      if (path.isAbsolute(candidate) && !fsSync.existsSync(path.join(candidate, "package.json"))) continue;
+      ortModule = require(candidate);
+      return ortModule;
+    } catch (error) {
+      errors.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  throw new Error(
+    "Native ONNX Runtime is not installed in this Electron runtime. Run `npm install` from browser_app, then restart `npm run electron:dev`; for packaged builds rerun `npm run electron:pack` or `npm run electron:dist`. " +
+    `Tried ${candidates.join(", ")}. ${errors.join(" | ")}`
+  );
 }
 
 function firstOutput(result) {

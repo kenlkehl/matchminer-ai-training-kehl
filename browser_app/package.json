@@ -57,7 +57,7 @@
       "node_modules/onnxruntime-node-native/**/*"
     ],
     "asarUnpack": [
-      "node_modules/onnxruntime-node-native/**/*",
+      "node_modules/onnxruntime-node-native/bin/**/*",
       "resources/bin/**/*"
     ],
     "extraResources": [
