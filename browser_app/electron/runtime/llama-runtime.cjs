@@ -34,12 +34,12 @@ class LlamaRuntime {
     };
   }
 
-  async generate({ prompt, maxNewTokens, contextTokens, repo, file, llamaModelRepo, llamaModelFile }) {
+  async generate({ prompt, maxNewTokens, contextTokens, repo, file, llamaModelRepo, llamaModelFile, systemPrompt }) {
     await this.ensureStarted({ contextTokens, repo: repo || llamaModelRepo, file: file || llamaModelFile });
     const response = await postJson(this.baseUrl("/v1/chat/completions"), {
       model: "matchminer-local",
       messages: [
-        { role: "system", content: GENERATION_SYSTEM_PROMPT },
+        { role: "system", content: String(systemPrompt || GENERATION_SYSTEM_PROMPT) },
         { role: "user", content: String(prompt ?? "") }
       ],
       max_tokens: Math.max(1, Math.floor(maxNewTokens ?? 512)),

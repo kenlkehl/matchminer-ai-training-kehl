@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
@@ -34,6 +34,10 @@ const DEFAULT_BROWSER_LLM_CONTEXT_TOKENS = 16384;
 const MIN_BROWSER_LLM_CONTEXT_TOKENS = 4096;
 const BROWSER_LLM_CONTEXT_MARGIN_TOKENS = 128;
 const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 16;
+const THINKING_SUMMARY_CONTEXT_TOKENS = 65536;
+const THINKING_SUMMARY_MAX_TOKENS = 6000;
+const LEGACY_SUMMARY_CONTEXT_TOKENS = 32768;
+const LEGACY_SUMMARY_MAX_TOKENS = 1600;
 
 interface TrialProgress {
   phase: "download" | "extract" | "embed" | "import";
@@ -70,11 +74,10 @@ export default function App() {
   const [summaryProgress, setSummaryProgress] = useState<SummaryProgress | null>(null);
   const [trialProgress, setTrialProgress] = useState<TrialProgress | null>(null);
   const [embeddedTrialUrl, setEmbeddedTrialUrl] = useState("");
-  const summaryBoxRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     void Promise.all([isWebGpuAvailable(), loadModelSettings(), loadPrompts()]).then(([gpu, savedSettings, savedPrompts]) => {
-      const effectiveSettings = window.matchminerElectron ? savedSettings : {
+      const effectiveSettings = window.matchminerElectron ? withThinkingSummaryHeadroom(savedSettings) : {
         ...savedSettings,
         llmBackend: "browser-webgpu" as const,
         onnxBackend: "browser-webgpu" as const
@@ -101,9 +104,6 @@ export default function App() {
 
   function commitSummaryText(nextSummary: string) {
     const summaryText = String(nextSummary ?? "");
-    if (summaryBoxRef.current && summaryBoxRef.current.value !== summaryText) {
-      summaryBoxRef.current.value = summaryText;
-    }
     setSummary(summaryText);
     setPatientBoilerplate(splitBoilerplate(summaryText).patientBoilerplate);
   }
@@ -136,6 +136,7 @@ export default function App() {
     let prior = "";
     try {
       let activeLlmContextTokens = normalizeLlmContextTokens(settings.llmContextTokens);
+      const summaryMaxNewTokens = normalizeSummaryMaxNewTokens(settings.maxSummaryTokens);
       const chunks = await chunkClinicalNotesForSummary(settings.llmModelId, patientDocument.notes, {
         chunkSizeTokens: settings.summaryChunkTokens,
         overlapTokens: settings.summaryChunkOverlapTokens
@@ -144,6 +145,8 @@ export default function App() {
         chunks: chunks.length,
         chunkSizeTokens: settings.summaryChunkTokens,
         overlapTokens: settings.summaryChunkOverlapTokens,
+        summaryMaxNewTokens,
+        activeLlmContextTokens,
         recordChars: patientDocument.rawText.length
       });
       const pending = [...chunks];
@@ -161,7 +164,7 @@ export default function App() {
         });
         const prompt = buildSummaryPrompt(prompts.patientSummary, prior, chunk);
         const promptTokens = await countTextTokens(settings.llmModelId, prompt);
-        const promptBudget = summaryPromptTokenBudget(settings.maxSummaryTokens, activeLlmContextTokens);
+        const promptBudget = summaryPromptTokenBudget(summaryMaxNewTokens, activeLlmContextTokens);
         if (promptTokens > promptBudget) {
           const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, promptBudget);
           if (smallerChunkSize >= chunk.tokenCount) {
@@ -204,10 +207,21 @@ export default function App() {
           priorSummaryChars: prior.length
         });
         try {
-          prior = await generateText(settings.llmModelId, prompt, {
+          const nextSummary = await generateText(settings.llmModelId, prompt, {
             dtype: settings.llmDtype,
-            maxNewTokens: settings.maxSummaryTokens,
-            contextTokens: activeLlmContextTokens
+            maxNewTokens: summaryMaxNewTokens,
+            contextTokens: activeLlmContextTokens,
+            enableThinking: true
+          });
+          if (!nextSummary.trim()) {
+            throw new Error("Local LLM returned no visible patient summary text. The response may have contained only hidden thinking text.");
+          }
+          prior = nextSummary;
+          commitSummaryText(prior);
+          console.info("[MatchMiner Summary] Received serial summary chunk response", {
+            chunk: completed + 1,
+            chunks: totalWork,
+            generatedSummaryChars: prior.length
           });
         } catch (error) {
           if (!isOversizedGenerationError(error)) throw error;
@@ -667,7 +681,6 @@ export default function App() {
             {summaryProgress && <ProgressLine label={formatSummaryProgress(summaryProgress)} />}
             <textarea
               className="summary-box"
-              ref={summaryBoxRef}
               value={summary}
               onChange={(event) => {
                 commitSummaryText(event.target.value);
@@ -853,6 +866,14 @@ function formatCount(value: number): string {
   return value.toLocaleString();
 }
 
+function withThinkingSummaryHeadroom(settings: ModelSettings): ModelSettings {
+  return {
+    ...settings,
+    llmContextTokens: settings.llmContextTokens <= LEGACY_SUMMARY_CONTEXT_TOKENS ? THINKING_SUMMARY_CONTEXT_TOKENS : settings.llmContextTokens,
+    maxSummaryTokens: settings.maxSummaryTokens <= LEGACY_SUMMARY_MAX_TOKENS ? THINKING_SUMMARY_MAX_TOKENS : settings.maxSummaryTokens
+  };
+}
+
 function ResultCard({ match }: { match: MatchResult }) {
   const boiler = match.boilerplateScore;
   return (
@@ -982,7 +1003,7 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
           </label>
           <label>
             Summary tokens
-            <input type="number" min={100} max={4000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
+            <input type="number" min={100} max={12000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
           </label>
           <label>
             Summary target chunk tokens
@@ -1074,6 +1095,10 @@ function summaryPromptTokenBudget(maxSummaryTokens: number, llmContextTokens = D
 
 function normalizeLlmContextTokens(value: number): number {
   return Number.isFinite(value) ? Math.max(MIN_BROWSER_LLM_CONTEXT_TOKENS, Math.floor(value)) : DEFAULT_BROWSER_LLM_CONTEXT_TOKENS;
+}
+
+function normalizeSummaryMaxNewTokens(value: number): number {
+  return Number.isFinite(value) ? Math.max(100, Math.floor(value)) : THINKING_SUMMARY_MAX_TOKENS;
 }
 
 function nextLowerLlmContextTokens(value: number): number {

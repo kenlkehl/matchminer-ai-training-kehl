@@ -3,6 +3,13 @@ import { chunkClinicalNotesByTokens, chunkTextByTokens, type SerialSummaryChunk 
 import type { ClinicalNote, ModelSettings } from "../types";
 
 type AnyPipeline = (...args: any[]) => Promise<any> | any;
+interface TextGenerationOptions {
+  dtype: string;
+  maxNewTokens: number;
+  contextTokens?: number;
+  enableThinking?: boolean;
+  systemPrompt?: string;
+}
 
 const pipelineCache = new Map<string, Promise<AnyPipeline>>();
 const tokenizerCache = new Map<string, Promise<any>>();
@@ -65,21 +72,25 @@ export async function resetTextGenerationPipeline(modelId: string, dtype: string
   await delay(250);
 }
 
-export async function generateText(modelId: string, prompt: string, options: { dtype: string; maxNewTokens: number; contextTokens?: number }): Promise<string> {
+export async function generateText(modelId: string, prompt: string, options: TextGenerationOptions): Promise<string> {
   const native = nativeApi();
+  const enableThinking = options.enableThinking !== false;
+  const systemPrompt = options.systemPrompt ?? REASONING_SYSTEM_PROMPT;
   if (native && shouldUseNativeLlm()) {
     const output = await native.generateText({
       prompt,
       maxNewTokens: options.maxNewTokens,
       contextTokens: options.contextTokens,
       llamaModelRepo: runtimePreferences?.llamaModelRepo ?? DEFAULT_LLAMA_GGUF_REPO,
-      llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE
+      llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE,
+      enableThinking,
+      systemPrompt
     });
     return stripThinkingBlocks(output).trim();
   }
   const generator = await getPipeline("text-generation", modelId, options.dtype);
   const contextTokens = Number.isFinite(options.contextTokens) ? Math.max(1, Math.floor(options.contextTokens!)) : 16384;
-  const formattedPrompt = formatPromptForModel(generator, modelId, prompt);
+  const formattedPrompt = formatPromptForModel(generator, modelId, prompt, { enableThinking, systemPrompt });
   const output = await generator(formattedPrompt, {
     max_new_tokens: options.maxNewTokens,
     temperature: 0.2,
@@ -273,25 +284,25 @@ function patchGenerationLogitSessions(pipe: unknown, transformers: { Tensor?: ne
   }
 }
 
-function formatPromptForModel(generator: AnyPipeline, modelId: string, prompt: string): string {
+function formatPromptForModel(generator: AnyPipeline, modelId: string, prompt: string, options: { enableThinking: boolean; systemPrompt: string }): string {
   if (!shouldUseChatTemplate(modelId)) return prompt;
   const tokenizer = (generator as { tokenizer?: { apply_chat_template?: unknown } }).tokenizer;
   if (typeof tokenizer?.apply_chat_template !== "function") return prompt;
   try {
     return String(tokenizer.apply_chat_template([
-      { role: "system", content: REASONING_SYSTEM_PROMPT },
+      { role: "system", content: options.systemPrompt },
       { role: "user", content: prompt }
     ], {
       tokenize: false,
       add_generation_prompt: true,
-      enable_thinking: true
+      enable_thinking: options.enableThinking
     }));
   } catch {
     try {
       return String(tokenizer.apply_chat_template([{ role: "user", content: prompt }], {
         tokenize: false,
         add_generation_prompt: true,
-        enable_thinking: true
+        enable_thinking: options.enableThinking
       }));
     } catch {
       return prompt;

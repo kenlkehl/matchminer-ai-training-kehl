@@ -35,6 +35,8 @@ interface MatchMinerElectronApi {
     contextTokens?: number;
     llamaModelRepo?: string;
     llamaModelFile?: string;
+    enableThinking?: boolean;
+    systemPrompt?: string;
   }) => Promise<string>;
   tokenizeText: (request: { text: string; contextTokens?: number; llamaModelRepo?: string; llamaModelFile?: string }) => Promise<number[]>;
   detokenizeTokens: (request: { tokens: number[]; contextTokens?: number; llamaModelRepo?: string; llamaModelFile?: string }) => Promise<string>;
