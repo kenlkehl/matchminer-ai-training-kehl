@@ -24,7 +24,7 @@ import { hashTextEmbedding } from "./lib/hashEmbedding";
 import { parseCsvPatientFile } from "./services/csvIngest";
 import { parsePdfPatientFile, type PdfProgress } from "./services/pdfIngest";
 import { clearPatientSideData, loadModelSettings, loadPrompts, resetPrompt, saveModelSettings, savePrompt, saveTrialIndex } from "./services/storage";
-import { chunkClinicalNotesForSummary, countTextTokens, embedText, generateText, isWebGpuAvailable, splitSummaryChunkForModel, warmModel } from "./services/modelRuntime";
+import { chunkClinicalNotesForSummary, countTextTokens, embedText, generateText, isWebGpuAvailable, resetTextGenerationPipeline, splitSummaryChunkForModel, warmModel } from "./services/modelRuntime";
 import { ensureTrialEmbeddings, fetchCtGovCancerTrials, loadOrFetchTrialIndex } from "./services/trialIndex";
 import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services/trialImport";
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
@@ -183,6 +183,7 @@ export default function App() {
           });
         } catch (error) {
           if (!isOversizedGenerationError(error)) throw error;
+          await resetTextGenerationPipeline(settings.llmModelId, settings.llmDtype);
           const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, Math.max(MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS, promptBudget - 256));
           if (smallerChunkSize >= chunk.tokenCount) throw error;
           const smallerChunks = await splitSummaryChunkForModel(settings.llmModelId, chunk, {
@@ -1021,6 +1022,11 @@ function isOversizedGenerationError(error: unknown): boolean {
     message.includes("failed to download data from buffer") ||
     message.includes("invalid buffer") ||
     message.includes("mapasync") ||
+    message.includes("webgpu validation failed") ||
+    message.includes("bind group layout") ||
+    message.includes("createbindgroup") ||
+    message.includes("binding index") ||
+    message.includes("attentionprobs") ||
     message.includes("out of memory") ||
     message.includes("oom") ||
     (message.includes("ortrun") && (message.includes("invalid_argument") || message.includes("error_code: 1")))

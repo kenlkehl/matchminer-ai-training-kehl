@@ -28,6 +28,19 @@ export async function warmModel(modelId: string, task: "text-generation" | "feat
   await getPipeline(task, modelId, dtype);
 }
 
+export async function resetTextGenerationPipeline(modelId: string, dtype: string): Promise<void> {
+  const key = `text-generation:${modelId}:${dtype}`;
+  const cached = pipelineCache.get(key);
+  pipelineCache.delete(key);
+  if (!cached) return;
+  try {
+    const pipe = await cached;
+    await (pipe as { dispose?: () => Promise<unknown> }).dispose?.();
+  } catch {
+    // The session is already failed or still failing; deleting the cache is the important part.
+  }
+}
+
 export async function generateText(modelId: string, prompt: string, options: { dtype: string; maxNewTokens: number; contextTokens?: number }): Promise<string> {
   const generator = await getPipeline("text-generation", modelId, options.dtype);
   const contextTokens = Number.isFinite(options.contextTokens) ? Math.max(1, Math.floor(options.contextTokens!)) : 16384;
