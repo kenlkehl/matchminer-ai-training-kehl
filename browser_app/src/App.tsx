@@ -31,6 +31,7 @@ import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
 
 const promptOrder: PromptKey[] = ["patientSummary", "trialSpaceExtraction", "trialDeepScreen", "boilerplateDeepScreen"];
 const DEFAULT_BROWSER_LLM_CONTEXT_TOKENS = 16384;
+const MIN_BROWSER_LLM_CONTEXT_TOKENS = 4096;
 const BROWSER_LLM_CONTEXT_MARGIN_TOKENS = 128;
 const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 16;
 
@@ -109,6 +110,7 @@ export default function App() {
     setMatches([]);
     let prior = "";
     try {
+      let activeLlmContextTokens = normalizeLlmContextTokens(settings.llmContextTokens);
       const chunks = await chunkClinicalNotesForSummary(settings.llmModelId, patientDocument.notes, {
         chunkSizeTokens: settings.summaryChunkTokens,
         overlapTokens: settings.summaryChunkOverlapTokens
@@ -134,7 +136,7 @@ export default function App() {
         });
         const prompt = buildSummaryPrompt(prompts.patientSummary, prior, chunk);
         const promptTokens = await countTextTokens(settings.llmModelId, prompt);
-        const promptBudget = summaryPromptTokenBudget(settings.maxSummaryTokens, settings.llmContextTokens);
+        const promptBudget = summaryPromptTokenBudget(settings.maxSummaryTokens, activeLlmContextTokens);
         if (promptTokens > promptBudget) {
           const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, promptBudget);
           if (smallerChunkSize >= chunk.tokenCount) {
@@ -172,6 +174,7 @@ export default function App() {
           chunks: totalWork,
           chunkTokens: chunk.tokenCount,
           promptTokens,
+          activeLlmContextTokens,
           promptChars: prompt.length,
           priorSummaryChars: prior.length
         });
@@ -179,11 +182,31 @@ export default function App() {
           prior = await generateText(settings.llmModelId, prompt, {
             dtype: settings.llmDtype,
             maxNewTokens: settings.maxSummaryTokens,
-            contextTokens: settings.llmContextTokens
+            contextTokens: activeLlmContextTokens
           });
         } catch (error) {
           if (!isOversizedGenerationError(error)) throw error;
           await resetTextGenerationPipeline(settings.llmModelId, settings.llmDtype);
+          const lowerContextTokens = nextLowerLlmContextTokens(activeLlmContextTokens);
+          if (lowerContextTokens < activeLlmContextTokens) {
+            activeLlmContextTokens = lowerContextTokens;
+            splitOversizedSegment = true;
+            pending.unshift(chunk);
+            const splitDetail = `restarting local LLM at ${formatCount(activeLlmContextTokens)} context tokens after WebGPU allocation failure`;
+            setSummaryProgress({
+              current: completed + 1,
+              total: totalWork,
+              detail: splitDetail,
+              percent: percentComplete(completed, totalWork)
+            });
+            console.warn("[MatchMiner Summary] Lowered local LLM context and will retry", {
+              activeLlmContextTokens,
+              chunkTokens: chunk.tokenCount,
+              promptTokens,
+              error: errorMessage(error)
+            });
+            continue;
+          }
           const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, Math.max(MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS, promptBudget - 256));
           if (smallerChunkSize >= chunk.tokenCount) throw error;
           const smallerChunks = await splitSummaryChunkForModel(settings.llmModelId, chunk, {
@@ -998,11 +1021,22 @@ function buildSummaryPrompt(template: string, prior: string, chunk: SerialSummar
 }
 
 function summaryPromptTokenBudget(maxSummaryTokens: number, llmContextTokens = DEFAULT_BROWSER_LLM_CONTEXT_TOKENS): number {
-  const contextTokens = Number.isFinite(llmContextTokens) ? Math.max(4096, Math.floor(llmContextTokens)) : DEFAULT_BROWSER_LLM_CONTEXT_TOKENS;
+  const contextTokens = normalizeLlmContextTokens(llmContextTokens);
   return Math.max(
     MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS,
     contextTokens - Math.max(0, Math.floor(maxSummaryTokens)) - BROWSER_LLM_CONTEXT_MARGIN_TOKENS
   );
+}
+
+function normalizeLlmContextTokens(value: number): number {
+  return Number.isFinite(value) ? Math.max(MIN_BROWSER_LLM_CONTEXT_TOKENS, Math.floor(value)) : DEFAULT_BROWSER_LLM_CONTEXT_TOKENS;
+}
+
+function nextLowerLlmContextTokens(value: number): number {
+  const current = normalizeLlmContextTokens(value);
+  if (current <= MIN_BROWSER_LLM_CONTEXT_TOKENS) return current;
+  const halved = Math.floor(current / 2 / 1024) * 1024;
+  return Math.max(MIN_BROWSER_LLM_CONTEXT_TOKENS, halved);
 }
 
 function smallerSummaryChunkSize(chunkTokens: number, promptTokens: number, promptBudget: number): number {

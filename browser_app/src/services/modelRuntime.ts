@@ -8,12 +8,14 @@ const pipelineCache = new Map<string, Promise<AnyPipeline>>();
 const tokenizerCache = new Map<string, Promise<any>>();
 const classifierCache = new Map<string, Promise<any>>();
 const patchedLogitSessions = new WeakSet<object>();
+let webGpuDetailsLogged = false;
 
 export async function isWebGpuAvailable(): Promise<boolean> {
   const gpu = (navigator as Navigator & { gpu?: unknown }).gpu;
   if (!gpu) return false;
   try {
-    const adapter = await (gpu as { requestAdapter: () => Promise<unknown> }).requestAdapter();
+    const adapter = await (gpu as { requestAdapter: (options?: unknown) => Promise<unknown> }).requestAdapter({ powerPreference: "high-performance" });
+    logWebGpuDetails(adapter);
     return Boolean(adapter);
   } catch {
     return false;
@@ -39,6 +41,7 @@ export async function resetTextGenerationPipeline(modelId: string, dtype: string
   } catch {
     // The session is already failed or still failing; deleting the cache is the important part.
   }
+  await delay(250);
 }
 
 export async function generateText(modelId: string, prompt: string, options: { dtype: string; maxNewTokens: number; contextTokens?: number }): Promise<string> {
@@ -184,6 +187,28 @@ function patchGenerationLogitSessions(pipe: unknown, transformers: { Tensor?: ne
     };
     patchedLogitSessions.add(session as object);
   }
+}
+
+function logWebGpuDetails(adapter: unknown): void {
+  if (webGpuDetailsLogged || !adapter) return;
+  webGpuDetailsLogged = true;
+
+  const raw = adapter as { info?: unknown; limits?: Record<string, unknown>; features?: Set<string> };
+  const limits = raw.limits ?? {};
+  console.info("[MatchMiner WebGPU] Adapter", {
+    info: raw.info ?? null,
+    limits: {
+      maxBufferSize: limits.maxBufferSize,
+      maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
+      maxComputeWorkgroupStorageSize: limits.maxComputeWorkgroupStorageSize,
+      maxComputeInvocationsPerWorkgroup: limits.maxComputeInvocationsPerWorkgroup
+    },
+    features: raw.features ? Array.from(raw.features).sort() : []
+  });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function loadWithRootOnnxFallback<T>(load: (subfolder?: string) => Promise<T>): Promise<T> {
