@@ -1,7 +1,17 @@
 import Dexie, { type Table } from "dexie";
 import type { ModelSettings, PromptKey, TrialSpaceRecord } from "../types";
-import { DEFAULT_BROWSER_LLM_MODEL_ID, DEFAULT_MODEL_SETTINGS, LEGACY_BROWSER_LLM_MODEL_ID } from "../data/defaultSettings";
+import {
+  DEFAULT_BROWSER_LLM_MODEL_ID,
+  DEFAULT_LFM_CONTEXT_TOKENS,
+  DEFAULT_LLAMA_GGUF_FILE,
+  DEFAULT_LLAMA_GGUF_REPO,
+  DEFAULT_MODEL_SETTINGS,
+  LEGACY_BROWSER_LLM_MODEL_ID
+} from "../data/defaultSettings";
 import { getDefaultPromptValues } from "../data/defaultPrompts";
+
+const LEGACY_LFM_CONTEXT_TOKENS = 32768;
+const LEGACY_ELECTRON_LFM_CONTEXT_TOKENS = 65536;
 
 interface PromptRow {
   key: PromptKey;
@@ -56,13 +66,35 @@ export async function loadModelSettings(): Promise<ModelSettings> {
   const row = await db.settings.get("modelSettings");
   const stored: Partial<ModelSettings> = row?.value ?? {};
   const settings = { ...DEFAULT_MODEL_SETTINGS, ...stored };
+  let changed = false;
   if (stored.llmModelId === LEGACY_BROWSER_LLM_MODEL_ID) {
     settings.llmModelId = DEFAULT_BROWSER_LLM_MODEL_ID;
     settings.llmContextTokens = DEFAULT_MODEL_SETTINGS.llmContextTokens;
     settings.maxSummaryTokens = DEFAULT_MODEL_SETTINGS.maxSummaryTokens;
     settings.summaryChunkTokens = DEFAULT_MODEL_SETTINGS.summaryChunkTokens;
+    changed = true;
+  }
+  if (shouldMigrateOldLfmContextDefault(stored, settings)) {
+    settings.llmContextTokens = DEFAULT_LFM_CONTEXT_TOKENS;
+    changed = true;
+  }
+  if (row && changed) {
+    await db.settings.put({ key: "modelSettings", value: settings, updatedAt: new Date().toISOString() });
   }
   return settings;
+}
+
+function shouldMigrateOldLfmContextDefault(stored: Partial<ModelSettings>, settings: ModelSettings): boolean {
+  if (stored.llmContextTokens === LEGACY_LFM_CONTEXT_TOKENS) return true;
+  return stored.llmContextTokens === LEGACY_ELECTRON_LFM_CONTEXT_TOKENS && usesDefaultLfmConfig(settings);
+}
+
+function usesDefaultLfmConfig(settings: ModelSettings): boolean {
+  return (
+    settings.llmModelId === DEFAULT_BROWSER_LLM_MODEL_ID &&
+    settings.llamaModelRepo === DEFAULT_LLAMA_GGUF_REPO &&
+    settings.llamaModelFile === DEFAULT_LLAMA_GGUF_FILE
+  );
 }
 
 export async function saveModelSettings(value: ModelSettings): Promise<void> {

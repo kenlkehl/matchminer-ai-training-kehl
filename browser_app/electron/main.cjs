@@ -64,8 +64,8 @@ async function createWindow() {
   await registerAppProtocol();
 
   const mainWindow = new BrowserWindow({
-    width: 1500,
-    height: 980,
+    width: 1600,
+    height: 900,
     minWidth: 1180,
     minHeight: 760,
     backgroundColor: "#f5f7fb",

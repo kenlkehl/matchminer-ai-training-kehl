@@ -7,6 +7,7 @@ export const LEGACY_BROWSER_LLM_MODEL_ID = "onnx-community/gemma-4-E2B-it-ONNX";
 export const DEFAULT_BROWSER_LLM_MODEL_ID = "LiquidAI/LFM2.5-1.2B-Thinking-ONNX";
 export const DEFAULT_LLAMA_GGUF_REPO = "LiquidAI/LFM2.5-1.2B-Thinking-GGUF";
 export const DEFAULT_LLAMA_GGUF_FILE = "LFM2.5-1.2B-Thinking-Q4_K_M.gguf";
+export const DEFAULT_LFM_CONTEXT_TOKENS = 30000;
 
 export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   llmBackend: "llama.cpp",
@@ -20,7 +21,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   pdfOcrMode: "auto",
   llmDtype: "q4",
   classifierDtype: "auto",
-  llmContextTokens: 32768,
+  llmContextTokens: DEFAULT_LFM_CONTEXT_TOKENS,
   maxSummaryTokens: 1600,
   summaryChunkTokens: 24000,
   summaryChunkOverlapTokens: 250,

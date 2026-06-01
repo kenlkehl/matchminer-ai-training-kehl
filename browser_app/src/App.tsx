@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import type { MatchResult, ModelSettings, PatientDocument, PromptKey, StatusMessage, TrialSpaceRecord } from "./types";
 import { DEFAULT_PROMPTS } from "./data/defaultPrompts";
-import { DEFAULT_MODEL_SETTINGS } from "./data/defaultSettings";
+import { DEFAULT_LFM_CONTEXT_TOKENS, DEFAULT_MODEL_SETTINGS } from "./data/defaultSettings";
 import { buildExtractiveFallbackSummary, fillPrompt, splitBoilerplate, type SerialSummaryChunk } from "./lib/text";
 import { hashTextEmbedding } from "./lib/hashEmbedding";
 import { parseCsvPatientFile } from "./services/csvIngest";
@@ -30,13 +30,11 @@ import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
 
 const promptOrder: PromptKey[] = ["patientSummary", "trialSpaceExtraction", "trialDeepScreen", "boilerplateDeepScreen"];
-const DEFAULT_BROWSER_LLM_CONTEXT_TOKENS = 16384;
+const DEFAULT_BROWSER_LLM_CONTEXT_TOKENS = DEFAULT_LFM_CONTEXT_TOKENS;
 const MIN_BROWSER_LLM_CONTEXT_TOKENS = 4096;
 const BROWSER_LLM_CONTEXT_MARGIN_TOKENS = 128;
 const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 16;
-const THINKING_SUMMARY_CONTEXT_TOKENS = 65536;
 const THINKING_SUMMARY_MAX_TOKENS = 6000;
-const LEGACY_SUMMARY_CONTEXT_TOKENS = 32768;
 const LEGACY_SUMMARY_MAX_TOKENS = 1600;
 
 interface TrialProgress {
@@ -539,7 +537,7 @@ export default function App() {
         screened.push({ ...match, warnings: [...match.warnings, `Deep screen unavailable: ${errorMessage(error)}`] });
       }
     }
-    return screened.sort((a, b) => (b.llmTrialCheckScore ?? b.trialCheckerScore ?? 0) - (a.llmTrialCheckScore ?? a.trialCheckerScore ?? 0));
+    return screened;
   }
 
   async function persistPrompt(key: PromptKey, value: string) {
@@ -869,7 +867,6 @@ function formatCount(value: number): string {
 function withThinkingSummaryHeadroom(settings: ModelSettings): ModelSettings {
   return {
     ...settings,
-    llmContextTokens: settings.llmContextTokens <= LEGACY_SUMMARY_CONTEXT_TOKENS ? THINKING_SUMMARY_CONTEXT_TOKENS : settings.llmContextTokens,
     maxSummaryTokens: settings.maxSummaryTokens <= LEGACY_SUMMARY_MAX_TOKENS ? THINKING_SUMMARY_MAX_TOKENS : settings.maxSummaryTokens
   };
 }
@@ -999,7 +996,7 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
           </label>
           <label>
             LLM context tokens
-            <input type="number" min={4096} max={131072} step={1024} value={settings.llmContextTokens} onChange={(event) => onChange({ ...settings, llmContextTokens: Number(event.target.value) })} />
+            <input type="number" min={4096} max={131072} step={1000} value={settings.llmContextTokens} onChange={(event) => onChange({ ...settings, llmContextTokens: Number(event.target.value) })} />
           </label>
           <label>
             Summary tokens
