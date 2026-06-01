@@ -41,6 +41,8 @@ export interface ModelSettings {
   llmDtype: "q4" | "q4f16" | "fp16" | "auto";
   classifierDtype: "q8" | "fp16" | "auto";
   maxSummaryTokens: number;
+  summaryChunkTokens: number;
+  summaryChunkOverlapTokens: number;
   retrievalCount: number;
   displayCount: number;
   runDeepScreen: boolean;

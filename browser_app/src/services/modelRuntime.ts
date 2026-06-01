@@ -1,4 +1,6 @@
 import { MODEL_QUERY_PROMPT } from "../data/defaultSettings";
+import { chunkClinicalNotesByTokens, type SerialSummaryChunk } from "../lib/text";
+import type { ClinicalNote } from "../types";
 
 type AnyPipeline = (...args: any[]) => Promise<any> | any;
 
@@ -35,6 +37,18 @@ export async function generateText(modelId: string, prompt: string, options: { d
   });
   const first = Array.isArray(output) ? output[0] : output;
   return String(first?.generated_text ?? first?.text ?? first ?? "").trim();
+}
+
+export async function chunkClinicalNotesForSummary(
+  modelId: string,
+  notes: ClinicalNote[],
+  options: { chunkSizeTokens: number; overlapTokens: number }
+): Promise<SerialSummaryChunk[]> {
+  const tokenizer = await getTokenizer(modelId);
+  return chunkClinicalNotesByTokens(notes, {
+    encode: async (text) => tokenIdsFromTokenizerOutput(await tokenizer(text, { add_special_tokens: false })),
+    decode: async (tokenIds) => String(await tokenizer.decode(tokenIds, { skip_special_tokens: true }))
+  }, options);
 }
 
 export async function embedText(modelId: string, text: string, dtype = "q8"): Promise<number[]> {
@@ -165,4 +179,9 @@ function flattenNumberArray(value: unknown): number[] {
   }
   if (ArrayBuffer.isView(value)) return Array.from(value as unknown as ArrayLike<number>);
   return [];
+}
+
+function tokenIdsFromTokenizerOutput(output: unknown): number[] {
+  const inputIds = (output as { input_ids?: unknown })?.input_ids ?? output;
+  return flattenNumberArray(inputIds).map((value) => Number(value));
 }

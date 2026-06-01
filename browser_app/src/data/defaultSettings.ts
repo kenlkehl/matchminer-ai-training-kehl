@@ -12,6 +12,8 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   llmDtype: "q4",
   classifierDtype: "auto",
   maxSummaryTokens: 900,
+  summaryChunkTokens: 10000,
+  summaryChunkOverlapTokens: 250,
   retrievalCount: 30,
   displayCount: 10,
   runDeepScreen: false

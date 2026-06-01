@@ -19,12 +19,12 @@ import {
 import type { MatchResult, ModelSettings, PatientDocument, PromptKey, StatusMessage, TrialSpaceRecord } from "./types";
 import { DEFAULT_PROMPTS } from "./data/defaultPrompts";
 import { DEFAULT_MODEL_SETTINGS } from "./data/defaultSettings";
-import { buildExtractiveFallbackSummary, buildRecordSegment, chunkTextByCharacters, fillPrompt, splitBoilerplate } from "./lib/text";
+import { buildExtractiveFallbackSummary, fillPrompt, splitBoilerplate } from "./lib/text";
 import { hashTextEmbedding } from "./lib/hashEmbedding";
 import { parseCsvPatientFile } from "./services/csvIngest";
 import { parsePdfPatientFile, type PdfProgress } from "./services/pdfIngest";
 import { clearPatientSideData, loadModelSettings, loadPrompts, resetPrompt, saveModelSettings, savePrompt, saveTrialIndex } from "./services/storage";
-import { embedText, generateText, isWebGpuAvailable, warmModel } from "./services/modelRuntime";
+import { chunkClinicalNotesForSummary, embedText, generateText, isWebGpuAvailable, warmModel } from "./services/modelRuntime";
 import { ensureTrialEmbeddings, fetchCtGovCancerTrials, loadOrFetchTrialIndex } from "./services/trialIndex";
 import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services/trialImport";
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
@@ -33,6 +33,13 @@ const promptOrder: PromptKey[] = ["patientSummary", "trialSpaceExtraction", "tri
 
 interface TrialProgress {
   phase: "download" | "extract" | "embed" | "import";
+  current: number;
+  total?: number;
+  detail?: string;
+  percent?: number;
+}
+
+interface SummaryProgress {
   current: number;
   total?: number;
   detail?: string;
@@ -56,6 +63,7 @@ export default function App() {
   const [status, setStatus] = useState<StatusMessage[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [pdfProgress, setPdfProgress] = useState<PdfProgress | null>(null);
+  const [summaryProgress, setSummaryProgress] = useState<SummaryProgress | null>(null);
   const [trialProgress, setTrialProgress] = useState<TrialProgress | null>(null);
   const [embeddedTrialUrl, setEmbeddedTrialUrl] = useState("");
 
@@ -74,6 +82,7 @@ export default function App() {
   async function handleFile(file: File) {
     setBusy("Reading records");
     setPdfProgress(null);
+    setSummaryProgress(null);
     setMatches([]);
     setSummary("");
     try {
@@ -93,20 +102,51 @@ export default function App() {
   async function summarize() {
     if (!patientDocument) return;
     setBusy("Summarizing");
+    setSummaryProgress({ current: 0, detail: "tokenizing clinical record" });
     setMatches([]);
-    const chunks = chunkTextByCharacters(buildRecordSegment(patientDocument.notes));
     let prior = "";
     try {
+      const chunks = await chunkClinicalNotesForSummary(settings.llmModelId, patientDocument.notes, {
+        chunkSizeTokens: settings.summaryChunkTokens,
+        overlapTokens: settings.summaryChunkOverlapTokens
+      });
+      console.info("[MatchMiner Summary] Prepared serial summary chunks", {
+        chunks: chunks.length,
+        chunkSizeTokens: settings.summaryChunkTokens,
+        overlapTokens: settings.summaryChunkOverlapTokens,
+        recordChars: patientDocument.rawText.length
+      });
       for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index];
+        const progressDetail = `${formatCount(chunk.tokenCount)} input tokens, ${chunk.firstDate} to ${chunk.lastDate}`;
+        setSummaryProgress({
+          current: index + 1,
+          total: chunks.length,
+          detail: progressDetail,
+          percent: percentComplete(index, chunks.length)
+        });
         const prompt = fillPrompt(prompts.patientSummary, {
           prior_summary: prior || "None - this is the first segment for this patient",
-          first_date: patientDocument.notes[0]?.isoDate ?? "unknown date",
-          last_date: patientDocument.notes.at(-1)?.isoDate ?? "unknown date",
-          record_segment: chunks[index]
+          first_date: chunk.firstDate,
+          last_date: chunk.lastDate,
+          record_segment: chunk.text
+        });
+        console.info("[MatchMiner Summary] Calling local LLM for serial chunk", {
+          chunk: index + 1,
+          chunks: chunks.length,
+          chunkTokens: chunk.tokenCount,
+          promptChars: prompt.length,
+          priorSummaryChars: prior.length
         });
         prior = await generateText(settings.llmModelId, prompt, {
           dtype: settings.llmDtype,
           maxNewTokens: settings.maxSummaryTokens
+        });
+        setSummaryProgress({
+          current: index + 1,
+          total: chunks.length,
+          detail: progressDetail,
+          percent: percentComplete(index + 1, chunks.length)
         });
       }
       setSummary(prior);
@@ -119,6 +159,7 @@ export default function App() {
       addStatus("warning", `LLM summarization failed; local extractive summary was used. ${errorMessage(error)}`);
     } finally {
       setBusy(null);
+      setSummaryProgress(null);
     }
   }
 
@@ -505,6 +546,7 @@ export default function App() {
                 {busy === "Matching trials" ? <Loader2 className="spin" size={17} /> : <Play size={17} />} Match trials
               </button>
             </div>
+            {summaryProgress && <ProgressLine label={formatSummaryProgress(summaryProgress)} />}
             <textarea
               className="summary-box"
               value={summary}
@@ -562,7 +604,7 @@ export default function App() {
           </Panel>
 
           <Panel title="Run log" icon={<AlertTriangle size={18} />}>
-            {trialProgress ? <ProgressLine label={formatTrialProgress(trialProgress)} /> : busy && <ProgressLine label={busy} />}
+            {trialProgress ? <ProgressLine label={formatTrialProgress(trialProgress)} /> : summaryProgress ? <ProgressLine label={formatSummaryProgress(summaryProgress)} /> : busy && <ProgressLine label={busy} />}
             <div className="status-list">
               {status.map((item, index) => (
                 <div className={`status ${item.kind}`} key={`${item.text}-${index}`}>
@@ -659,6 +701,18 @@ function formatPdfProgress(progress: PdfProgress): string {
   const detail = progress.detail ?? `${progress.current}/${progress.total}`;
   const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
   return `${phase} ${detail}${percent}`;
+}
+
+function formatSummaryProgress(progress: SummaryProgress): string {
+  if (progress.current <= 0) {
+    const detail = progress.detail ? ` - ${progress.detail}` : "";
+    return `Preparing serial summary chunks${detail}`;
+  }
+  const current = formatCount(progress.current);
+  const total = typeof progress.total === "number" ? ` of ${formatCount(progress.total)}` : "";
+  const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
+  const detail = progress.detail ? ` - ${progress.detail}` : "";
+  return `Summarizing record segment ${current}${total}${percent}${detail}`;
 }
 
 function formatTrialProgress(progress: TrialProgress): string {
@@ -785,6 +839,14 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
           <label>
             Summary tokens
             <input type="number" min={100} max={4000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
+          </label>
+          <label>
+            Summary chunk tokens
+            <input type="number" min={256} max={20000} value={settings.summaryChunkTokens} onChange={(event) => onChange({ ...settings, summaryChunkTokens: Number(event.target.value) })} />
+          </label>
+          <label>
+            Summary overlap tokens
+            <input type="number" min={0} max={5000} value={settings.summaryChunkOverlapTokens} onChange={(event) => onChange({ ...settings, summaryChunkOverlapTokens: Number(event.target.value) })} />
           </label>
           <label className="checkbox-label">
             <input type="checkbox" checked={settings.runDeepScreen} onChange={(event) => onChange({ ...settings, runDeepScreen: event.target.checked })} />

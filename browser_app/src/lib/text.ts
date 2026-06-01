@@ -1,9 +1,24 @@
 import type { ClinicalNote } from "../types";
 
+export interface SerialSummaryChunk {
+  text: string;
+  firstDate: string;
+  lastDate: string;
+  tokenStart: number;
+  tokenEnd: number;
+  tokenCount: number;
+}
+
+export interface TokenTextCodec {
+  encode(text: string): number[] | Promise<number[]>;
+  decode(tokenIds: number[]): string | Promise<string>;
+}
+
 export function buildRecordSegment(notes: ClinicalNote[]): string {
   return notes
-    .map((note) => `=== Clinical Note dated ${note.isoDate} ===\n${note.text.trim()}`)
-    .join("\n\n");
+    .map((note) => `=== Clinical Note dated ${note.isoDate} ===\n${note.text.trim()}\n`)
+    .join("\n")
+    .trim();
 }
 
 export function splitBoilerplate(summary: string): { patientSummary: string; patientBoilerplate: string } {
@@ -24,20 +39,55 @@ export function fillPrompt(template: string, values: Record<string, string>): st
   );
 }
 
-export function chunkTextByCharacters(text: string, maxChars = 18000, overlapChars = 1200): string[] {
-  const clean = text.trim();
-  if (clean.length <= maxChars) return [clean];
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < clean.length) {
-    const hardEnd = Math.min(clean.length, start + maxChars);
-    let end = hardEnd;
-    const nextBreak = clean.lastIndexOf("\n\n", hardEnd);
-    if (nextBreak > start + maxChars * 0.55) end = nextBreak;
-    chunks.push(clean.slice(start, end).trim());
-    if (end >= clean.length) break;
-    start = Math.max(0, end - overlapChars);
+export async function chunkClinicalNotesByTokens(
+  notes: ClinicalNote[],
+  tokenizer: TokenTextCodec,
+  options: { chunkSizeTokens: number; overlapTokens: number }
+): Promise<SerialSummaryChunk[]> {
+  if (notes.length === 0) return [];
+
+  const chunkSize = Math.max(256, Math.floor(options.chunkSizeTokens));
+  const overlap = Math.max(0, Math.min(Math.floor(options.overlapTokens), chunkSize - 1));
+  const fullText = buildRecordSegment(notes);
+  const allDates = notes.map((note) => note.isoDate);
+  const allTokens = await tokenizer.encode(fullText);
+
+  if (allTokens.length <= chunkSize) {
+    return [{
+      text: fullText,
+      firstDate: allDates[0],
+      lastDate: allDates.at(-1) ?? allDates[0],
+      tokenStart: 0,
+      tokenEnd: allTokens.length,
+      tokenCount: allTokens.length
+    }];
   }
+
+  const chunks: SerialSummaryChunk[] = [];
+  const stride = chunkSize - overlap;
+  const dateHeaderPattern = /=== Clinical Note dated (.+?) ===/g;
+  let start = 0;
+
+  while (start < allTokens.length) {
+    const end = Math.min(start + chunkSize, allTokens.length);
+    const chunkTokens = allTokens.slice(start, end);
+    const chunkText = (await tokenizer.decode(chunkTokens)).trim();
+    const foundDates = Array.from(chunkText.matchAll(dateHeaderPattern), (match) => match[1]);
+    const previousLastDate = chunks.at(-1)?.lastDate ?? allDates[0];
+
+    chunks.push({
+      text: chunkText,
+      firstDate: foundDates[0] ?? previousLastDate,
+      lastDate: foundDates.at(-1) ?? foundDates[0] ?? previousLastDate,
+      tokenStart: start,
+      tokenEnd: end,
+      tokenCount: chunkTokens.length
+    });
+
+    if (end >= allTokens.length) break;
+    start += stride;
+  }
+
   return chunks;
 }
 

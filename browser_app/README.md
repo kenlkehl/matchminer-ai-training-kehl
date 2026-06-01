@@ -130,6 +130,10 @@ python ../real_eval_code/real_time_eval/embed_trial_spaces.py /path/to/model \
   --browser-json-output trial_space_embeddings.browser.json
 ```
 
+## Patient Summarization
+
+The Summarize button follows the training pipeline's serial summarization pattern: dated notes are concatenated, tokenized with the selected LLM tokenizer, split into overlapping token chunks, and fed through a running summary one chunk at a time. Settings expose the per-chunk input token target and overlap. Smaller chunks are slower but reduce browser ONNX/WebGPU context failures without truncating the source record.
+
 ## PDF OCR
 
 PDF upload first extracts embedded text with PDF.js. For scanned or image-only PDFs, the default OCR setting is `Auto`: the renderer tries `onnx-community/granite-docling-258M-ONNX` with Transformers.js/WebGPU, then falls back to browser Tesseract.js. Use Settings -> PDF OCR to force `Granite WebGPU only`, `Browser only`, or the advanced `Local CLI only` mode.
