@@ -40,6 +40,7 @@ export interface ModelSettings {
   pdfOcrMode: "auto" | "granite" | "browser" | "local";
   llmDtype: "q4" | "q4f16" | "fp16" | "auto";
   classifierDtype: "q8" | "fp16" | "auto";
+  llmContextTokens: number;
   maxSummaryTokens: number;
   summaryChunkTokens: number;
   summaryChunkOverlapTokens: number;

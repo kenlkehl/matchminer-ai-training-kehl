@@ -7,6 +7,7 @@ type AnyPipeline = (...args: any[]) => Promise<any> | any;
 const pipelineCache = new Map<string, Promise<AnyPipeline>>();
 const tokenizerCache = new Map<string, Promise<any>>();
 const classifierCache = new Map<string, Promise<any>>();
+const patchedLogitSessions = new WeakSet<object>();
 
 export async function isWebGpuAvailable(): Promise<boolean> {
   const gpu = (navigator as Navigator & { gpu?: unknown }).gpu;
@@ -27,13 +28,18 @@ export async function warmModel(modelId: string, task: "text-generation" | "feat
   await getPipeline(task, modelId, dtype);
 }
 
-export async function generateText(modelId: string, prompt: string, options: { dtype: string; maxNewTokens: number }): Promise<string> {
+export async function generateText(modelId: string, prompt: string, options: { dtype: string; maxNewTokens: number; contextTokens?: number }): Promise<string> {
   const generator = await getPipeline("text-generation", modelId, options.dtype);
+  const contextTokens = Number.isFinite(options.contextTokens) ? Math.max(1, Math.floor(options.contextTokens!)) : 16384;
   const output = await generator(prompt, {
     max_new_tokens: options.maxNewTokens,
     temperature: 0.2,
     do_sample: false,
-    return_full_text: false
+    return_full_text: false,
+    tokenizer_encode_kwargs: {
+      max_length: contextTokens,
+      truncation: true
+    }
   });
   const first = Array.isArray(output) ? output[0] : output;
   return String(first?.generated_text ?? first?.text ?? first ?? "").trim();
@@ -104,9 +110,11 @@ async function getPipeline(task: string, modelId: string, dtype: string): Promis
         if (env?.backends?.onnx?.wasm) {
           env.backends.onnx.wasm.numThreads = crossOriginIsolated ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)) : 1;
         }
-        return loadWithRootOnnxFallback((subfolder) =>
-          (module as any).pipeline(task, modelId, modelOptions(dtype, subfolder))
+        const pipe = await loadWithRootOnnxFallback<AnyPipeline>((subfolder) =>
+          (module as any).pipeline(task, modelId, modelOptions(dtype, subfolder)) as Promise<AnyPipeline>
         );
+        if (task === "text-generation") patchGenerationLogitSessions(pipe, module as any);
+        return pipe;
       })
     );
   }
@@ -141,6 +149,28 @@ function modelOptions(dtype: string, subfolder?: string): Record<string, unknown
   if (dtype !== "auto") options.dtype = dtype;
   if (subfolder !== undefined) options.subfolder = subfolder;
   return options;
+}
+
+function patchGenerationLogitSessions(pipe: unknown, transformers: { Tensor?: new (...args: any[]) => { ort_tensor?: unknown } }): void {
+  const Tensor = transformers.Tensor;
+  const sessions = (pipe as { model?: { sessions?: Record<string, unknown> } } | null)?.model?.sessions;
+  if (!Tensor || !sessions) return;
+
+  for (const session of Object.values(sessions)) {
+    const run = (session as { run?: unknown }).run;
+    const inputNames = (session as { inputNames?: unknown }).inputNames;
+    if (typeof run !== "function" || !Array.isArray(inputNames) || !inputNames.includes("num_logits_to_keep")) continue;
+    if (patchedLogitSessions.has(session as object)) continue;
+
+    const originalRun = run.bind(session);
+    (session as { run: typeof originalRun }).run = (feeds: Record<string, unknown>, ...args: unknown[]) => {
+      if (feeds?.num_logits_to_keep) {
+        return originalRun({ ...feeds, num_logits_to_keep: new Tensor("int64", [1n], []).ort_tensor }, ...args);
+      }
+      return originalRun(feeds, ...args);
+    };
+    patchedLogitSessions.add(session as object);
+  }
 }
 
 async function loadWithRootOnnxFallback<T>(load: (subfolder?: string) => Promise<T>): Promise<T> {

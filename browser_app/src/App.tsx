@@ -30,7 +30,7 @@ import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
 
 const promptOrder: PromptKey[] = ["patientSummary", "trialSpaceExtraction", "trialDeepScreen", "boilerplateDeepScreen"];
-const BROWSER_LLM_CONTEXT_TOKENS = 4096;
+const DEFAULT_BROWSER_LLM_CONTEXT_TOKENS = 16384;
 const BROWSER_LLM_CONTEXT_MARGIN_TOKENS = 128;
 const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 16;
 
@@ -134,7 +134,7 @@ export default function App() {
         });
         const prompt = buildSummaryPrompt(prompts.patientSummary, prior, chunk);
         const promptTokens = await countTextTokens(settings.llmModelId, prompt);
-        const promptBudget = summaryPromptTokenBudget(settings.maxSummaryTokens);
+        const promptBudget = summaryPromptTokenBudget(settings.maxSummaryTokens, settings.llmContextTokens);
         if (promptTokens > promptBudget) {
           const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, promptBudget);
           if (smallerChunkSize >= chunk.tokenCount) {
@@ -178,7 +178,8 @@ export default function App() {
         try {
           prior = await generateText(settings.llmModelId, prompt, {
             dtype: settings.llmDtype,
-            maxNewTokens: settings.maxSummaryTokens
+            maxNewTokens: settings.maxSummaryTokens,
+            contextTokens: settings.llmContextTokens
           });
         } catch (error) {
           if (!isOversizedGenerationError(error)) throw error;
@@ -341,7 +342,8 @@ export default function App() {
         });
         const response = await generateText(settings.llmModelId, prompt, {
           dtype: settings.llmDtype,
-          maxNewTokens: 1800
+          maxNewTokens: 1800,
+          contextTokens: settings.llmContextTokens
         });
         const extracted = parseExtractedTrialSpaces(record, response);
         if (extracted.length) {
@@ -453,7 +455,8 @@ export default function App() {
         });
         const trialResponse = await generateText(settings.llmModelId, trialPrompt, {
           dtype: settings.llmDtype,
-          maxNewTokens: 700
+          maxNewTokens: 700,
+          contextTokens: settings.llmContextTokens
         });
         const boilerplatePrompt = fillPrompt(prompts.boilerplateDeepScreen, {
           patient_boilerplate: patientBoilerplate || summaryParts.patientBoilerplate,
@@ -461,7 +464,8 @@ export default function App() {
         });
         const boilerplateResponse = await generateText(settings.llmModelId, boilerplatePrompt, {
           dtype: settings.llmDtype,
-          maxNewTokens: 600
+          maxNewTokens: 600,
+          contextTokens: settings.llmContextTokens
         });
         screened.push({
           ...match,
@@ -905,12 +909,16 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
             <input type="number" min={1} max={50} value={settings.displayCount} onChange={(event) => onChange({ ...settings, displayCount: Number(event.target.value) })} />
           </label>
           <label>
+            LLM context tokens
+            <input type="number" min={4096} max={131072} step={1024} value={settings.llmContextTokens} onChange={(event) => onChange({ ...settings, llmContextTokens: Number(event.target.value) })} />
+          </label>
+          <label>
             Summary tokens
             <input type="number" min={100} max={4000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
           </label>
           <label>
             Summary target chunk tokens
-            <input type="number" min={256} max={20000} value={settings.summaryChunkTokens} onChange={(event) => onChange({ ...settings, summaryChunkTokens: Number(event.target.value) })} />
+            <input type="number" min={256} max={120000} step={1024} value={settings.summaryChunkTokens} onChange={(event) => onChange({ ...settings, summaryChunkTokens: Number(event.target.value) })} />
           </label>
           <label>
             Summary overlap tokens
@@ -988,10 +996,11 @@ function buildSummaryPrompt(template: string, prior: string, chunk: SerialSummar
   });
 }
 
-function summaryPromptTokenBudget(maxSummaryTokens: number): number {
+function summaryPromptTokenBudget(maxSummaryTokens: number, llmContextTokens = DEFAULT_BROWSER_LLM_CONTEXT_TOKENS): number {
+  const contextTokens = Number.isFinite(llmContextTokens) ? Math.max(4096, Math.floor(llmContextTokens)) : DEFAULT_BROWSER_LLM_CONTEXT_TOKENS;
   return Math.max(
     MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS,
-    BROWSER_LLM_CONTEXT_TOKENS - Math.max(0, Math.floor(maxSummaryTokens)) - BROWSER_LLM_CONTEXT_MARGIN_TOKENS
+    contextTokens - Math.max(0, Math.floor(maxSummaryTokens)) - BROWSER_LLM_CONTEXT_MARGIN_TOKENS
   );
 }
 
@@ -1008,7 +1017,13 @@ function isOversizedGenerationError(error: unknown): boolean {
     message.includes("tensor shape is too large") ||
     message.includes("integer overflow") ||
     message.includes("safeintonoverflow") ||
-    (message.includes("ortrun") && message.includes("invalid_argument"))
+    message.includes("failed to allocate memory") ||
+    message.includes("failed to download data from buffer") ||
+    message.includes("invalid buffer") ||
+    message.includes("mapasync") ||
+    message.includes("out of memory") ||
+    message.includes("oom") ||
+    (message.includes("ortrun") && (message.includes("invalid_argument") || message.includes("error_code: 1")))
   );
 }
 

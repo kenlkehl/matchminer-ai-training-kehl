@@ -11,6 +11,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   pdfOcrMode: "auto",
   llmDtype: "q4",
   classifierDtype: "auto",
+  llmContextTokens: 16384,
   maxSummaryTokens: 900,
   summaryChunkTokens: 10000,
   summaryChunkOverlapTokens: 250,
