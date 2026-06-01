@@ -19,6 +19,7 @@ import {
 import type { MatchResult, ModelSettings, PatientDocument, PromptKey, StatusMessage, TrialSpaceRecord } from "./types";
 import { DEFAULT_PROMPTS } from "./data/defaultPrompts";
 import { DEFAULT_LFM_CONTEXT_TOKENS, DEFAULT_MODEL_SETTINGS } from "./data/defaultSettings";
+import { ctGovStudyUrl } from "./lib/ctGov";
 import { buildExtractiveFallbackSummary, fillPrompt, splitBoilerplate, type SerialSummaryChunk } from "./lib/text";
 import { hashTextEmbedding } from "./lib/hashEmbedding";
 import { parseCsvPatientFile } from "./services/csvIngest";
@@ -546,6 +547,11 @@ export default function App() {
     await savePrompt(key, value);
   }
 
+  async function restorePrompt(key: PromptKey) {
+    const next = await resetPrompt(key);
+    setPrompts(next);
+  }
+
   async function persistSettings(next: ModelSettings) {
     setSettings(next);
     await saveModelSettings(next);
@@ -606,7 +612,10 @@ export default function App() {
                 }}
               />
               <FileText size={34} />
-              <span>{patientDocument ? patientDocument.fileName : "PDF or CSV"}</span>
+              <div className="dropzone-copy">
+                <strong>{patientDocument ? patientDocument.fileName : "Upload medical records"}</strong>
+                <span>PDF with all medical records, or CSV with one row per document and columns date and text.</span>
+              </div>
             </label>
             <div className="compact-row">
               <button className="text-button" disabled={!patientDocument} onClick={() => setShowInputs((value) => !value)} type="button">
@@ -625,9 +634,6 @@ export default function App() {
               <Readiness label="Deep screen" value={settings.runDeepScreen ? "on" : "off"} />
             </div>
             <div className="button-grid">
-              <button className="text-button" disabled={busyNow} onClick={cacheModels} type="button">
-                <Download size={16} /> Cache models
-              </button>
               <button className="text-button" disabled={busyNow} onClick={prepareTrialIndex} type="button">
                 <Database size={16} /> Load index
               </button>
@@ -686,34 +692,6 @@ export default function App() {
               placeholder="Patient summary"
             />
           </Panel>
-
-          <Panel title="Prompt controls" icon={<Settings size={18} />}>
-            <div className="tabs">
-              {promptOrder.map((key) => (
-                <button key={key} className={activePrompt === key ? "tab active" : "tab"} onClick={() => setActivePrompt(key)} type="button">
-                  {DEFAULT_PROMPTS[key].label}
-                </button>
-              ))}
-            </div>
-            <textarea
-              className="prompt-box"
-              value={prompts[activePrompt]}
-              onChange={(event) => void persistPrompt(activePrompt, event.target.value)}
-            />
-            <div className="compact-row end">
-              <span className="muted">{DEFAULT_PROMPTS[activePrompt].variables.map((v) => `{${v}}`).join(" ")}</span>
-              <button
-                className="text-button"
-                onClick={async () => {
-                  const next = await resetPrompt(activePrompt);
-                  setPrompts(next);
-                }}
-                type="button"
-              >
-                <RefreshCcw size={15} /> Reset
-              </button>
-            </div>
-          </Panel>
         </section>
 
         <section className="right-column">
@@ -731,25 +709,24 @@ export default function App() {
               </div>
             )}
           </Panel>
-
-          <Panel title="Run log" icon={<AlertTriangle size={18} />}>
-            {trialProgress ? <ProgressLine label={formatTrialProgress(trialProgress)} /> : summaryProgress ? <ProgressLine label={formatSummaryProgress(summaryProgress)} /> : busy && <ProgressLine label={busy} />}
-            <div className="status-list">
-              {status.map((item, index) => (
-                <div className={`status ${item.kind}`} key={`${item.text}-${index}`}>
-                  {item.text}
-                </div>
-              ))}
-            </div>
-          </Panel>
         </section>
       </main>
 
       {showSettings && (
         <SettingsDialog
           settings={settings}
+          prompts={prompts}
+          activePrompt={activePrompt}
+          status={status}
+          busy={busy}
+          trialProgress={trialProgress}
+          summaryProgress={summaryProgress}
           onClose={() => setShowSettings(false)}
           onChange={(next) => void persistSettings(next)}
+          onActivePromptChange={setActivePrompt}
+          onPromptChange={(key, value) => void persistPrompt(key, value)}
+          onPromptReset={(key) => void restorePrompt(key)}
+          onCacheModels={() => void cacheModels()}
         />
       )}
     </div>
@@ -873,6 +850,7 @@ function withThinkingSummaryHeadroom(settings: ModelSettings): ModelSettings {
 
 function ResultCard({ match }: { match: MatchResult }) {
   const boiler = match.boilerplateScore;
+  const ctGovUrl = match.trial.url || ctGovStudyUrl(match.trial.nctId);
   return (
     <article className="result-card">
       <div className="result-head">
@@ -905,8 +883,8 @@ function ResultCard({ match }: { match: MatchResult }) {
       )}
       <div className="result-foot">
         <span>{match.trial.locations?.slice(0, 3).join(" | ")}</span>
-        {match.trial.url && (
-          <a href={match.trial.url} rel="noreferrer" target="_blank">
+        {ctGovUrl && (
+          <a href={ctGovUrl} rel="noreferrer" target="_blank">
             CT.gov <ExternalLink size={14} />
           </a>
         )}
@@ -930,7 +908,40 @@ function Score({ label, value, invert = false }: { label: string; value: number 
   );
 }
 
-function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettings; onChange: (settings: ModelSettings) => void; onClose: () => void }) {
+interface SettingsDialogProps {
+  settings: ModelSettings;
+  prompts: Record<PromptKey, string>;
+  activePrompt: PromptKey;
+  status: StatusMessage[];
+  busy: string | null;
+  trialProgress: TrialProgress | null;
+  summaryProgress: SummaryProgress | null;
+  onChange: (settings: ModelSettings) => void;
+  onClose: () => void;
+  onActivePromptChange: (key: PromptKey) => void;
+  onPromptChange: (key: PromptKey, value: string) => void;
+  onPromptReset: (key: PromptKey) => void;
+  onCacheModels: () => void;
+}
+
+function SettingsDialog({
+  settings,
+  prompts,
+  activePrompt,
+  status,
+  busy,
+  trialProgress,
+  summaryProgress,
+  onChange,
+  onClose,
+  onActivePromptChange,
+  onPromptChange,
+  onPromptReset,
+  onCacheModels
+}: SettingsDialogProps) {
+  const [activeTab, setActiveTab] = useState<"general" | "advanced">("general");
+  const busyNow = Boolean(busy);
+  const progressLabel = trialProgress ? formatTrialProgress(trialProgress) : summaryProgress ? formatSummaryProgress(summaryProgress) : busy;
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal">
@@ -938,83 +949,154 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
           <h2>Settings</h2>
           <button className="icon-button" onClick={onClose} type="button">x</button>
         </div>
-        <label>
-          LLM backend
-          <select value={settings.llmBackend} onChange={(event) => onChange({ ...settings, llmBackend: event.target.value as ModelSettings["llmBackend"] })}>
-            <option value="llama.cpp">Native llama.cpp</option>
-            <option value="browser-webgpu">Browser WebGPU</option>
-          </select>
-        </label>
-        <label>
-          Browser LLM model
-          <input value={settings.llmModelId} onChange={(event) => onChange({ ...settings, llmModelId: event.target.value })} />
-        </label>
-        <label>
-          llama.cpp GGUF repo
-          <input value={settings.llamaModelRepo} onChange={(event) => onChange({ ...settings, llamaModelRepo: event.target.value })} />
-        </label>
-        <label>
-          llama.cpp GGUF file
-          <input value={settings.llamaModelFile} onChange={(event) => onChange({ ...settings, llamaModelFile: event.target.value })} />
-        </label>
-        <label>
-          ONNX backend
-          <select value={settings.onnxBackend} onChange={(event) => onChange({ ...settings, onnxBackend: event.target.value as ModelSettings["onnxBackend"] })}>
-            <option value="native-onnx">Native ONNX Runtime</option>
-            <option value="browser-webgpu">Browser WebGPU</option>
-          </select>
-        </label>
-        <label>
-          TrialSpace model
-          <input value={settings.trialSpaceModelId} onChange={(event) => onChange({ ...settings, trialSpaceModelId: event.target.value })} />
-        </label>
-        <label>
-          TrialChecker model
-          <input value={settings.trialCheckerModelId} onChange={(event) => onChange({ ...settings, trialCheckerModelId: event.target.value })} />
-        </label>
-        <label>
-          BoilerplateChecker model
-          <input value={settings.boilerplateCheckerModelId} onChange={(event) => onChange({ ...settings, boilerplateCheckerModelId: event.target.value })} />
-        </label>
-        <label>
-          PDF OCR
-          <select value={settings.pdfOcrMode} onChange={(event) => onChange({ ...settings, pdfOcrMode: event.target.value as ModelSettings["pdfOcrMode"] })}>
-            <option value="auto">Auto: Granite WebGPU, then browser fallback</option>
-            <option value="granite">Granite WebGPU only</option>
-            <option value="browser">Browser only: Tesseract.js</option>
-            <option value="local">Local CLI only: Docling/OCRmyPDF</option>
-          </select>
-        </label>
-        <div className="settings-grid">
-          <label>
-            Retrieval count
-            <input type="number" min={1} max={200} value={settings.retrievalCount} onChange={(event) => onChange({ ...settings, retrievalCount: Number(event.target.value) })} />
-          </label>
-          <label>
-            Display count
-            <input type="number" min={1} max={50} value={settings.displayCount} onChange={(event) => onChange({ ...settings, displayCount: Number(event.target.value) })} />
-          </label>
-          <label>
-            LLM context tokens
-            <input type="number" min={4096} max={131072} step={1000} value={settings.llmContextTokens} onChange={(event) => onChange({ ...settings, llmContextTokens: Number(event.target.value) })} />
-          </label>
-          <label>
-            Summary tokens
-            <input type="number" min={100} max={12000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
-          </label>
-          <label>
-            Summary target chunk tokens
-            <input type="number" min={256} max={120000} step={1024} value={settings.summaryChunkTokens} onChange={(event) => onChange({ ...settings, summaryChunkTokens: Number(event.target.value) })} />
-          </label>
-          <label>
-            Summary overlap tokens
-            <input type="number" min={0} max={5000} value={settings.summaryChunkOverlapTokens} onChange={(event) => onChange({ ...settings, summaryChunkOverlapTokens: Number(event.target.value) })} />
-          </label>
-          <label className="checkbox-label">
-            <input type="checkbox" checked={settings.runDeepScreen} onChange={(event) => onChange({ ...settings, runDeepScreen: event.target.checked })} />
-            Deep screen
-          </label>
+        <div className="tabs modal-tabs" role="tablist">
+          <button className={activeTab === "general" ? "tab active" : "tab"} onClick={() => setActiveTab("general")} type="button">
+            General
+          </button>
+          <button className={activeTab === "advanced" ? "tab active" : "tab"} onClick={() => setActiveTab("advanced")} type="button">
+            Advanced
+          </button>
         </div>
+        {activeTab === "general" ? (
+          <div className="settings-section">
+            <label>
+              PDF OCR
+              <select value={settings.pdfOcrMode} onChange={(event) => onChange({ ...settings, pdfOcrMode: event.target.value as ModelSettings["pdfOcrMode"] })}>
+                <option value="auto">Auto: Granite WebGPU, then browser fallback</option>
+                <option value="granite">Granite WebGPU only</option>
+                <option value="browser">Browser only: Tesseract.js</option>
+                <option value="local">Local CLI only: Docling/OCRmyPDF</option>
+              </select>
+            </label>
+            <div className="settings-grid">
+              <label>
+                Retrieval count
+                <input type="number" min={1} max={200} value={settings.retrievalCount} onChange={(event) => onChange({ ...settings, retrievalCount: Number(event.target.value) })} />
+              </label>
+              <label>
+                Display count
+                <input type="number" min={1} max={50} value={settings.displayCount} onChange={(event) => onChange({ ...settings, displayCount: Number(event.target.value) })} />
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={settings.runDeepScreen} onChange={(event) => onChange({ ...settings, runDeepScreen: event.target.checked })} />
+                Deep screen
+              </label>
+            </div>
+          </div>
+        ) : (
+          <div className="settings-section advanced-settings">
+            <div className="settings-actions">
+              <button className="text-button" disabled={busyNow} onClick={onCacheModels} type="button">
+                <Download size={16} /> Cache models
+              </button>
+              {progressLabel && <ProgressLine label={progressLabel} />}
+            </div>
+            <div className="settings-grid">
+              <label>
+                LLM backend
+                <select value={settings.llmBackend} onChange={(event) => onChange({ ...settings, llmBackend: event.target.value as ModelSettings["llmBackend"] })}>
+                  <option value="llama.cpp">Native llama.cpp</option>
+                  <option value="browser-webgpu">Browser WebGPU</option>
+                </select>
+              </label>
+              <label>
+                ONNX backend
+                <select value={settings.onnxBackend} onChange={(event) => onChange({ ...settings, onnxBackend: event.target.value as ModelSettings["onnxBackend"] })}>
+                  <option value="native-onnx">Native ONNX Runtime</option>
+                  <option value="browser-webgpu">Browser WebGPU</option>
+                </select>
+              </label>
+              <label>
+                LLM dtype
+                <select value={settings.llmDtype} onChange={(event) => onChange({ ...settings, llmDtype: event.target.value as ModelSettings["llmDtype"] })}>
+                  <option value="q4">q4</option>
+                  <option value="q4f16">q4f16</option>
+                  <option value="fp16">fp16</option>
+                  <option value="auto">auto</option>
+                </select>
+              </label>
+              <label>
+                Classifier dtype
+                <select value={settings.classifierDtype} onChange={(event) => onChange({ ...settings, classifierDtype: event.target.value as ModelSettings["classifierDtype"] })}>
+                  <option value="auto">auto</option>
+                  <option value="q8">q8</option>
+                  <option value="fp16">fp16</option>
+                </select>
+              </label>
+              <label>
+                LLM context tokens
+                <input type="number" min={4096} max={131072} step={1000} value={settings.llmContextTokens} onChange={(event) => onChange({ ...settings, llmContextTokens: Number(event.target.value) })} />
+              </label>
+              <label>
+                Summary tokens
+                <input type="number" min={100} max={12000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
+              </label>
+              <label>
+                Summary target chunk tokens
+                <input type="number" min={256} max={120000} step={1024} value={settings.summaryChunkTokens} onChange={(event) => onChange({ ...settings, summaryChunkTokens: Number(event.target.value) })} />
+              </label>
+              <label>
+                Summary overlap tokens
+                <input type="number" min={0} max={5000} value={settings.summaryChunkOverlapTokens} onChange={(event) => onChange({ ...settings, summaryChunkOverlapTokens: Number(event.target.value) })} />
+              </label>
+            </div>
+            <div className="settings-stack">
+              <label>
+                Browser LLM model
+                <input value={settings.llmModelId} onChange={(event) => onChange({ ...settings, llmModelId: event.target.value })} />
+              </label>
+              <label>
+                llama.cpp GGUF repo
+                <input value={settings.llamaModelRepo} onChange={(event) => onChange({ ...settings, llamaModelRepo: event.target.value })} />
+              </label>
+              <label>
+                llama.cpp GGUF file
+                <input value={settings.llamaModelFile} onChange={(event) => onChange({ ...settings, llamaModelFile: event.target.value })} />
+              </label>
+              <label>
+                TrialSpace model
+                <input value={settings.trialSpaceModelId} onChange={(event) => onChange({ ...settings, trialSpaceModelId: event.target.value })} />
+              </label>
+              <label>
+                TrialChecker model
+                <input value={settings.trialCheckerModelId} onChange={(event) => onChange({ ...settings, trialCheckerModelId: event.target.value })} />
+              </label>
+              <label>
+                BoilerplateChecker model
+                <input value={settings.boilerplateCheckerModelId} onChange={(event) => onChange({ ...settings, boilerplateCheckerModelId: event.target.value })} />
+              </label>
+            </div>
+            <div className="advanced-block">
+              <div className="tabs">
+                {promptOrder.map((key) => (
+                  <button key={key} className={activePrompt === key ? "tab active" : "tab"} onClick={() => onActivePromptChange(key)} type="button">
+                    {DEFAULT_PROMPTS[key].label}
+                  </button>
+                ))}
+              </div>
+              <textarea
+                className="prompt-box"
+                value={prompts[activePrompt]}
+                onChange={(event) => onPromptChange(activePrompt, event.target.value)}
+              />
+              <div className="compact-row end">
+                <span className="muted">{DEFAULT_PROMPTS[activePrompt].variables.map((v) => `{${v}}`).join(" ")}</span>
+                <button className="text-button" onClick={() => onPromptReset(activePrompt)} type="button">
+                  <RefreshCcw size={15} /> Reset
+                </button>
+              </div>
+            </div>
+            <div className="advanced-block">
+              <div className="status-list compact-status-list">
+                {status.length ? status.map((item, index) => (
+                  <div className={`status ${item.kind}`} key={`${item.text}-${index}`}>
+                    {item.text}
+                  </div>
+                )) : <div className="status">No run log entries.</div>}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -12,6 +12,7 @@ import { getDefaultPromptValues } from "../data/defaultPrompts";
 
 const LEGACY_LFM_CONTEXT_TOKENS = 32768;
 const LEGACY_ELECTRON_LFM_CONTEXT_TOKENS = 65536;
+const LEGACY_SUMMARY_CHUNK_TOKENS = 24000;
 
 interface PromptRow {
   key: PromptKey;
@@ -76,6 +77,10 @@ export async function loadModelSettings(): Promise<ModelSettings> {
   }
   if (shouldMigrateOldLfmContextDefault(stored, settings)) {
     settings.llmContextTokens = DEFAULT_LFM_CONTEXT_TOKENS;
+    changed = true;
+  }
+  if (stored.summaryChunkTokens === LEGACY_SUMMARY_CHUNK_TOKENS) {
+    settings.summaryChunkTokens = DEFAULT_MODEL_SETTINGS.summaryChunkTokens;
     changed = true;
   }
   if (row && changed) {

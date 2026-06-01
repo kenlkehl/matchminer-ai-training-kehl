@@ -171,6 +171,22 @@ button:disabled {
   display: none;
 }
 
+.dropzone-copy {
+  display: grid;
+  gap: 5px;
+  max-width: 240px;
+}
+
+.dropzone-copy strong {
+  font-size: 14px;
+}
+
+.dropzone-copy span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .text-button,
 .primary-button,
 .icon-button {
@@ -499,7 +515,7 @@ details p {
 }
 
 .modal {
-  width: min(720px, 100%);
+  width: min(820px, 100%);
   max-height: 90vh;
   overflow: auto;
   background: var(--surface);
@@ -519,6 +535,26 @@ details p {
   margin: 0;
 }
 
+.modal-tabs {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+
+.settings-section,
+.settings-stack,
+.advanced-settings,
+.advanced-block {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .modal label {
   display: grid;
   gap: 5px;
@@ -527,15 +563,25 @@ details p {
 }
 
 .modal input,
-.modal select {
+.modal select,
+.modal textarea {
   min-height: 36px;
   border: 1px solid var(--line);
   padding: 0 9px;
   color: var(--ink);
 }
 
+.modal textarea {
+  padding: 12px;
+}
+
 .settings-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.compact-status-list {
+  max-height: 220px;
+  overflow: auto;
 }
 
 .checkbox-label {
@@ -546,6 +592,8 @@ details p {
 
 .checkbox-label input {
   min-height: auto;
+  padding: 0;
+  border: 0;
 }
 
 @keyframes spin {
