@@ -25,10 +25,12 @@
     "validate:onnx": "python scripts/validate_onnx_exports.py"
   },
   "dependencies": {
+    "@huggingface/tokenizers": "^0.1.3",
     "@huggingface/transformers": "^4.2.0",
     "date-fns": "^4.1.0",
     "dexie": "^4.2.1",
     "lucide-react": "^0.511.0",
+    "onnxruntime-node-native": "npm:onnxruntime-node@^1.22.0",
     "onnxruntime-web": "^1.22.0",
     "papaparse": "^5.5.3",
     "pdfjs-dist": "^5.3.31",
@@ -49,7 +51,23 @@
       "dist/**/*",
       "electron/**/*",
       "package.json",
-      "!node_modules/**/*"
+      "!node_modules/**/*",
+      "node_modules/@huggingface/tokenizers/**/*",
+      "node_modules/onnxruntime-common/**/*",
+      "node_modules/onnxruntime-node-native/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/onnxruntime-node-native/**/*",
+      "resources/bin/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "asar": true,
     "linux": {

@@ -1,6 +1,6 @@
-import { MODEL_QUERY_PROMPT } from "../data/defaultSettings";
+import { DEFAULT_LLAMA_GGUF_FILE, DEFAULT_LLAMA_GGUF_REPO, MODEL_QUERY_PROMPT } from "../data/defaultSettings";
 import { chunkClinicalNotesByTokens, chunkTextByTokens, type SerialSummaryChunk } from "../lib/text";
-import type { ClinicalNote } from "../types";
+import type { ClinicalNote, ModelSettings } from "../types";
 
 type AnyPipeline = (...args: any[]) => Promise<any> | any;
 
@@ -10,6 +10,11 @@ const classifierCache = new Map<string, Promise<any>>();
 const patchedLogitSessions = new WeakSet<object>();
 const REASONING_SYSTEM_PROMPT = "Reasoning: high";
 let webGpuDetailsLogged = false;
+let runtimePreferences: Pick<ModelSettings, "llmBackend" | "onnxBackend" | "llmContextTokens" | "llamaModelRepo" | "llamaModelFile"> | null = null;
+
+export function setRuntimePreferences(settings: Pick<ModelSettings, "llmBackend" | "onnxBackend" | "llmContextTokens" | "llamaModelRepo" | "llamaModelFile">): void {
+  runtimePreferences = settings;
+}
 
 export async function isWebGpuAvailable(): Promise<boolean> {
   const gpu = (navigator as Navigator & { gpu?: unknown }).gpu;
@@ -24,6 +29,20 @@ export async function isWebGpuAvailable(): Promise<boolean> {
 }
 
 export async function warmModel(modelId: string, task: "text-generation" | "feature-extraction" | "text-classification", dtype: string): Promise<void> {
+  const native = nativeApi();
+  if (native && task === "text-generation" && shouldUseNativeLlm()) {
+    await native.warmRuntime({
+      task,
+      contextTokens: runtimePreferences?.llmContextTokens,
+      llamaModelRepo: runtimePreferences?.llamaModelRepo ?? DEFAULT_LLAMA_GGUF_REPO,
+      llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE
+    });
+    return;
+  }
+  if (native && task !== "text-generation" && shouldUseNativeOnnx()) {
+    await native.warmRuntime({ task, modelId });
+    return;
+  }
   if (task === "text-classification") {
     await getClassifier(modelId, dtype);
     return;
@@ -32,6 +51,7 @@ export async function warmModel(modelId: string, task: "text-generation" | "feat
 }
 
 export async function resetTextGenerationPipeline(modelId: string, dtype: string): Promise<void> {
+  if (shouldUseNativeLlm()) return;
   const key = `text-generation:${modelId}:${dtype}`;
   const cached = pipelineCache.get(key);
   pipelineCache.delete(key);
@@ -46,6 +66,17 @@ export async function resetTextGenerationPipeline(modelId: string, dtype: string
 }
 
 export async function generateText(modelId: string, prompt: string, options: { dtype: string; maxNewTokens: number; contextTokens?: number }): Promise<string> {
+  const native = nativeApi();
+  if (native && shouldUseNativeLlm()) {
+    const output = await native.generateText({
+      prompt,
+      maxNewTokens: options.maxNewTokens,
+      contextTokens: options.contextTokens,
+      llamaModelRepo: runtimePreferences?.llamaModelRepo ?? DEFAULT_LLAMA_GGUF_REPO,
+      llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE
+    });
+    return stripThinkingBlocks(output).trim();
+  }
   const generator = await getPipeline("text-generation", modelId, options.dtype);
   const contextTokens = Number.isFinite(options.contextTokens) ? Math.max(1, Math.floor(options.contextTokens!)) : 16384;
   const formattedPrompt = formatPromptForModel(generator, modelId, prompt);
@@ -68,6 +99,9 @@ export async function chunkClinicalNotesForSummary(
   notes: ClinicalNote[],
   options: { chunkSizeTokens: number; overlapTokens: number }
 ): Promise<SerialSummaryChunk[]> {
+  if (shouldUseNativeLlm()) {
+    return chunkClinicalNotesByTokens(notes, nativeTokenCodec(), options);
+  }
   const tokenizer = await getTokenizer(modelId);
   return chunkClinicalNotesByTokens(notes, {
     encode: async (text) => encodeTextWithTokenizer(tokenizer, text),
@@ -80,6 +114,14 @@ export async function splitSummaryChunkForModel(
   chunk: SerialSummaryChunk,
   options: { chunkSizeTokens: number; overlapTokens: number }
 ): Promise<SerialSummaryChunk[]> {
+  if (shouldUseNativeLlm()) {
+    return chunkTextByTokens(chunk.text, nativeTokenCodec(), {
+      ...options,
+      fallbackFirstDate: chunk.firstDate,
+      fallbackLastDate: chunk.lastDate,
+      useFallbackDateRangeWhenNoHeaders: true
+    });
+  }
   const tokenizer = await getTokenizer(modelId);
   return chunkTextByTokens(chunk.text, {
     encode: async (text) => encodeTextWithTokenizer(tokenizer, text),
@@ -93,12 +135,22 @@ export async function splitSummaryChunkForModel(
 }
 
 export async function countTextTokens(modelId: string, text: string): Promise<number> {
+  if (shouldUseNativeLlm()) {
+    return (await nativeTokenCodec().encode(text)).length;
+  }
   const tokenizer = await getTokenizer(modelId);
   const tokenIds = await encodeTextWithTokenizer(tokenizer, text);
   return tokenIds.length;
 }
 
 export async function embedText(modelId: string, text: string, dtype = "q8"): Promise<number[]> {
+  const native = nativeApi();
+  if (native && shouldUseNativeOnnx()) {
+    const embeddings = await native.embedTrialSpaceTexts({ modelId, texts: [text] });
+    const embedding = embeddings[0];
+    if (!embedding?.length) throw new Error("Native TrialSpace model returned no embedding");
+    return embedding;
+  }
   const extractor = await getPipeline("feature-extraction", modelId, dtype);
   const output = await extractor(MODEL_QUERY_PROMPT + text, {
     pooling: "mean",
@@ -111,11 +163,41 @@ export async function embedText(modelId: string, text: string, dtype = "q8"): Pr
 }
 
 export async function scoreTrialChecker(modelId: string, texts: string[], dtype = "q8"): Promise<number[]> {
+  const native = nativeApi();
+  if (native && shouldUseNativeOnnx()) return native.scoreTrialCheckerTexts({ modelId, texts });
   return scoreClassifier(modelId, texts, dtype, "sigmoid");
 }
 
 export async function scoreBoilerplateChecker(modelId: string, texts: string[], dtype = "q8"): Promise<number[]> {
+  const native = nativeApi();
+  if (native && shouldUseNativeOnnx()) return native.scoreBoilerplateCheckerTexts({ modelId, texts });
   return scoreClassifier(modelId, texts, dtype, "softmax_positive");
+}
+
+function nativeApi(): MatchMinerElectronApi | null {
+  return typeof window !== "undefined" ? window.matchminerElectron ?? null : null;
+}
+
+function shouldUseNativeLlm(): boolean {
+  return Boolean(nativeApi()) && runtimePreferences?.llmBackend !== "browser-webgpu";
+}
+
+function shouldUseNativeOnnx(): boolean {
+  return Boolean(nativeApi()) && runtimePreferences?.onnxBackend !== "browser-webgpu";
+}
+
+function nativeTokenCodec() {
+  const native = nativeApi();
+  if (!native) throw new Error("Native runtime is unavailable");
+  const requestModel = {
+    contextTokens: runtimePreferences?.llmContextTokens,
+    llamaModelRepo: runtimePreferences?.llamaModelRepo ?? DEFAULT_LLAMA_GGUF_REPO,
+    llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE
+  };
+  return {
+    encode: async (text: string) => native.tokenizeText({ text, ...requestModel }),
+    decode: async (tokenIds: number[]) => native.detokenizeTokens({ tokens: tokenIds, ...requestModel })
+  };
 }
 
 async function getPipeline(task: string, modelId: string, dtype: string): Promise<AnyPipeline> {

@@ -33,7 +33,11 @@ export interface PromptTemplate {
 }
 
 export interface ModelSettings {
+  llmBackend: "llama.cpp" | "browser-webgpu";
+  onnxBackend: "native-onnx" | "browser-webgpu";
   llmModelId: string;
+  llamaModelRepo: string;
+  llamaModelFile: string;
   trialSpaceModelId: string;
   trialCheckerModelId: string;
   boilerplateCheckerModelId: string;

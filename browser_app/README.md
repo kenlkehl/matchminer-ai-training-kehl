@@ -72,6 +72,31 @@ still processed locally in the renderer. The app only makes network requests
 when the user downloads public model artifacts or public ClinicalTrials.gov
 trial data.
 
+## Native Local Runtime
+
+Electron builds default to native local inference:
+
+- text generation runs through `llama.cpp` `llama-server`;
+- TrialSpace, TrialChecker, and BoilerplateChecker run through native ONNX Runtime
+  in an Electron worker.
+
+Model artifacts are downloaded on first warmup into the app user-data directory.
+The default LLM artifact is:
+
+- `LiquidAI/LFM2.5-1.2B-Thinking-GGUF`
+- `LFM2.5-1.2B-Thinking-Q4_K_M.gguf`
+
+For development, install `llama-server` on `PATH`, set
+`MATCHMINER_LLAMA_SERVER_COMMAND=/path/to/llama-server`, or place a platform
+binary under `resources/bin/llama-server` (`llama-server.exe` on Windows). The
+packaged app copies `resources/bin` into the app resources directory. On Linux
+x64/arm64, if no bundled or PATH binary is found, the app attempts a first-run
+download of the official CPU `llama.cpp` release archive and extracts it with
+system `tar`.
+
+Settings can switch generation or ONNX tasks back to the browser WebGPU
+runtime for comparison/debugging.
+
 Electron is launched with WebGPU development flags by default. If those flags
 cause a GPU-driver issue on a particular machine, start it with:
 

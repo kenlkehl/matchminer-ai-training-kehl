@@ -24,7 +24,7 @@ import { hashTextEmbedding } from "./lib/hashEmbedding";
 import { parseCsvPatientFile } from "./services/csvIngest";
 import { parsePdfPatientFile, type PdfProgress } from "./services/pdfIngest";
 import { clearPatientSideData, loadModelSettings, loadPrompts, resetPrompt, saveModelSettings, savePrompt, saveTrialIndex } from "./services/storage";
-import { chunkClinicalNotesForSummary, countTextTokens, embedText, generateText, isWebGpuAvailable, resetTextGenerationPipeline, splitSummaryChunkForModel, warmModel } from "./services/modelRuntime";
+import { chunkClinicalNotesForSummary, countTextTokens, embedText, generateText, isWebGpuAvailable, resetTextGenerationPipeline, setRuntimePreferences, splitSummaryChunkForModel, warmModel } from "./services/modelRuntime";
 import { ensureTrialEmbeddings, fetchCtGovCancerTrials, loadOrFetchTrialIndex } from "./services/trialIndex";
 import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services/trialImport";
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
@@ -73,12 +73,27 @@ export default function App() {
 
   useEffect(() => {
     void Promise.all([isWebGpuAvailable(), loadModelSettings(), loadPrompts()]).then(([gpu, savedSettings, savedPrompts]) => {
+      const effectiveSettings = window.matchminerElectron ? savedSettings : {
+        ...savedSettings,
+        llmBackend: "browser-webgpu" as const,
+        onnxBackend: "browser-webgpu" as const
+      };
       setWebGpu(gpu);
-      setSettings(savedSettings);
+      setSettings(effectiveSettings);
       setPrompts(savedPrompts);
-      addStatus(gpu ? "success" : "warning", gpu ? "WebGPU is available." : "WebGPU is not available in this runtime.");
+      const usingNativeRuntime =
+        Boolean(window.matchminerElectron) &&
+        (effectiveSettings.llmBackend !== "browser-webgpu" || effectiveSettings.onnxBackend !== "browser-webgpu");
+      addStatus(
+        gpu ? "success" : usingNativeRuntime ? "info" : "warning",
+        gpu ? "WebGPU is available." : usingNativeRuntime ? "WebGPU is not available; native runtimes will be used." : "WebGPU is not available in this runtime."
+      );
     });
   }, []);
+
+  useEffect(() => {
+    setRuntimePreferences(settings);
+  }, [settings]);
 
   const sortedNotes = patientDocument?.notes ?? [];
   const summaryParts = useMemo(() => splitBoilerplate(summary), [summary]);
@@ -140,14 +155,14 @@ export default function App() {
         if (promptTokens > promptBudget) {
           const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, promptBudget);
           if (smallerChunkSize >= chunk.tokenCount) {
-            throw new Error(`Serial summary prompt is still too large for the browser LLM (${formatCount(promptTokens)} prompt tokens; budget ${formatCount(promptBudget)}). Reduce the Patient summary prompt text or Summary tokens setting.`);
+            throw new Error(`Serial summary prompt is still too large for the local LLM (${formatCount(promptTokens)} prompt tokens; budget ${formatCount(promptBudget)}). Reduce the Patient summary prompt text or Summary tokens setting.`);
           }
           const smallerChunks = await splitSummaryChunkForModel(settings.llmModelId, chunk, {
             chunkSizeTokens: smallerChunkSize,
             overlapTokens: Math.min(settings.summaryChunkOverlapTokens, smallerChunkSize - 1)
           });
           if (smallerChunks.length <= 1) {
-            throw new Error(`Serial summary prompt is still too large for the browser LLM (${formatCount(promptTokens)} prompt tokens; budget ${formatCount(promptBudget)}).`);
+            throw new Error(`Serial summary prompt is still too large for the local LLM (${formatCount(promptTokens)} prompt tokens; budget ${formatCount(promptBudget)}).`);
           }
 
           splitOversizedSegment = true;
@@ -192,7 +207,7 @@ export default function App() {
             activeLlmContextTokens = lowerContextTokens;
             splitOversizedSegment = true;
             pending.unshift(chunk);
-            const splitDetail = `restarting local LLM at ${formatCount(activeLlmContextTokens)} context tokens after WebGPU allocation failure`;
+            const splitDetail = `restarting local LLM at ${formatCount(activeLlmContextTokens)} context tokens after allocation failure`;
             setSummaryProgress({
               current: completed + 1,
               total: totalWork,
@@ -899,8 +914,30 @@ function SettingsDialog({ settings, onChange, onClose }: { settings: ModelSettin
           <button className="icon-button" onClick={onClose} type="button">x</button>
         </div>
         <label>
-          LLM model
+          LLM backend
+          <select value={settings.llmBackend} onChange={(event) => onChange({ ...settings, llmBackend: event.target.value as ModelSettings["llmBackend"] })}>
+            <option value="llama.cpp">Native llama.cpp</option>
+            <option value="browser-webgpu">Browser WebGPU</option>
+          </select>
+        </label>
+        <label>
+          Browser LLM model
           <input value={settings.llmModelId} onChange={(event) => onChange({ ...settings, llmModelId: event.target.value })} />
+        </label>
+        <label>
+          llama.cpp GGUF repo
+          <input value={settings.llamaModelRepo} onChange={(event) => onChange({ ...settings, llamaModelRepo: event.target.value })} />
+        </label>
+        <label>
+          llama.cpp GGUF file
+          <input value={settings.llamaModelFile} onChange={(event) => onChange({ ...settings, llamaModelFile: event.target.value })} />
+        </label>
+        <label>
+          ONNX backend
+          <select value={settings.onnxBackend} onChange={(event) => onChange({ ...settings, onnxBackend: event.target.value as ModelSettings["onnxBackend"] })}>
+            <option value="native-onnx">Native ONNX Runtime</option>
+            <option value="browser-webgpu">Browser WebGPU</option>
+          </select>
         </label>
         <label>
           TrialSpace model

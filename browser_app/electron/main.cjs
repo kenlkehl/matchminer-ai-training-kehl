@@ -5,12 +5,17 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { ensureDefaultArtifacts } = require("./runtime/artifacts.cjs");
+const { LlamaRuntime } = require("./runtime/llama-runtime.cjs");
+const { OnnxRuntime } = require("./runtime/onnx-runtime.cjs");
 
 const APP_SCHEME = "matchminer";
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173";
 const LOCAL_OCR_TIMEOUT_MS = Number(process.env.MATCHMINER_LOCAL_OCR_TIMEOUT_MS ?? 10 * 60 * 1000);
 const isDev = !app.isPackaged;
 let appProtocolRegistered = false;
+const llamaRuntime = new LlamaRuntime(app);
+const onnxRuntime = new OnnxRuntime(app);
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -36,6 +41,24 @@ if (process.env.MATCHMINER_DISABLE_GPU_FLAGS !== "1") {
 app.setName("MatchMiner AI");
 
 ipcMain.handle("matchminer:local-pdf-ocr", async (_event, request) => runLocalPdfOcr(request));
+ipcMain.handle("matchminer:runtime-status", async () => ({
+  llama: llamaRuntime.status(),
+  onnx: onnxRuntime.status()
+}));
+ipcMain.handle("matchminer:prepare-runtime-artifacts", async () => ensureDefaultArtifacts(app));
+ipcMain.handle("matchminer:warm-runtime", async (_event, request) => warmRuntime(request));
+ipcMain.handle("matchminer:generate-text", async (_event, request) => llamaRuntime.generate(request));
+ipcMain.handle("matchminer:tokenize-text", async (_event, request) => llamaRuntime.tokenize(request));
+ipcMain.handle("matchminer:detokenize-tokens", async (_event, request) => llamaRuntime.detokenize(request));
+ipcMain.handle("matchminer:embed-trial-space-texts", async (_event, request) =>
+  onnxRuntime.embedTexts(request?.modelId, request?.texts ?? [])
+);
+ipcMain.handle("matchminer:score-trial-checker-texts", async (_event, request) =>
+  onnxRuntime.scoreTrialChecker(request?.modelId, request?.texts ?? [])
+);
+ipcMain.handle("matchminer:score-boilerplate-checker-texts", async (_event, request) =>
+  onnxRuntime.scoreBoilerplateChecker(request?.modelId, request?.texts ?? [])
+);
 
 async function createWindow() {
   await registerAppProtocol();
@@ -144,6 +167,21 @@ function withSecurityHeaders(response) {
     statusText: response.statusText,
     headers
   });
+}
+
+async function warmRuntime(request) {
+  const task = request?.task;
+  if (task === "text-generation") {
+    return llamaRuntime.warm({
+      contextTokens: request?.contextTokens,
+      repo: request?.llamaModelRepo,
+      file: request?.llamaModelFile
+    });
+  }
+  if (task === "feature-extraction" || task === "text-classification") {
+    return onnxRuntime.warm(request?.modelId, task);
+  }
+  throw new Error(`Unsupported runtime warmup task: ${task}`);
 }
 
 async function runLocalPdfOcr(request) {
@@ -290,6 +328,11 @@ if (!gotLock) {
     if (BrowserWindow.getAllWindows().length === 0) {
       void createWindow();
     }
+  });
+
+  app.on("before-quit", () => {
+    void llamaRuntime.stop();
+    void onnxRuntime.stop();
   });
 }
 

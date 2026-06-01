@@ -5,9 +5,15 @@ export const MODEL_QUERY_PROMPT =
 
 export const LEGACY_BROWSER_LLM_MODEL_ID = "onnx-community/gemma-4-E2B-it-ONNX";
 export const DEFAULT_BROWSER_LLM_MODEL_ID = "LiquidAI/LFM2.5-1.2B-Thinking-ONNX";
+export const DEFAULT_LLAMA_GGUF_REPO = "LiquidAI/LFM2.5-1.2B-Thinking-GGUF";
+export const DEFAULT_LLAMA_GGUF_FILE = "LFM2.5-1.2B-Thinking-Q4_K_M.gguf";
 
 export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
+  llmBackend: "llama.cpp",
+  onnxBackend: "native-onnx",
   llmModelId: DEFAULT_BROWSER_LLM_MODEL_ID,
+  llamaModelRepo: DEFAULT_LLAMA_GGUF_REPO,
+  llamaModelFile: DEFAULT_LLAMA_GGUF_FILE,
   trialSpaceModelId: "ksg-dfci/TrialSpace-0526-ONNX",
   trialCheckerModelId: "ksg-dfci/TrialChecker-0526-ONNX",
   boilerplateCheckerModelId: "ksg-dfci/BoilerplateChecker-0526-ONNX",
