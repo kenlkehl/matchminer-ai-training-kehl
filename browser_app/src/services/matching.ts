@@ -1,4 +1,5 @@
 import type { MatchResult, TrialSpaceRecord } from "../types";
+import { assertNotAborted, isAbortError } from "../lib/abort";
 import { scoreBoilerplateChecker, scoreTrialChecker } from "./modelRuntime";
 
 export function cosineSimilarity(a: number[], b: number[]): number {
@@ -35,19 +36,25 @@ export async function scoreAndRankMatches(input: {
   boilerplateCheckerModelId: string;
   dtype: string;
   displayCount: number;
+  signal?: AbortSignal;
 }): Promise<MatchResult[]> {
+  assertNotAborted(input.signal);
   const warnings: string[] = [];
   let trialScores: number[] = [];
   try {
     trialScores = await scoreTrialChecker(
       input.trialCheckerModelId,
       input.candidates.map((candidate) => formatTrialCheckerPair(input.patientSummary, candidate.trial.trialSpaceText)),
-      input.dtype
+      input.dtype,
+      input.signal
     );
   } catch (error) {
+    assertNotAborted(input.signal);
+    if (isAbortError(error)) throw error;
     warnings.push(`TrialChecker unavailable: ${error instanceof Error ? error.message : String(error)}`);
     trialScores = input.candidates.map((candidate) => candidate.cosineSimilarity);
   }
+  assertNotAborted(input.signal);
 
   const ordered = input.candidates
     .map((candidate, index) => ({
@@ -70,12 +77,16 @@ export async function scoreAndRankMatches(input: {
     boilerplateScores = await scoreBoilerplateChecker(
       input.boilerplateCheckerModelId,
       deduped.map((candidate) => formatBoilerplatePair(input.patientBoilerplate, candidate.trial.boilerplateText)),
-      input.dtype
+      input.dtype,
+      input.signal
     );
   } catch (error) {
+    assertNotAborted(input.signal);
+    if (isAbortError(error)) throw error;
     warnings.push(`BoilerplateChecker unavailable: ${error instanceof Error ? error.message : String(error)}`);
     boilerplateScores = deduped.map(() => Number.NaN);
   }
+  assertNotAborted(input.signal);
 
   return deduped.map((candidate, index) => ({
     id: `${candidate.trial.spaceId}-${index}`,

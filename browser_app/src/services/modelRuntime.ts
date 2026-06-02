@@ -1,4 +1,5 @@
 import { DEFAULT_LLAMA_GGUF_FILE, DEFAULT_LLAMA_GGUF_REPO, MODEL_QUERY_PROMPT } from "../data/defaultSettings";
+import { abortError, assertNotAborted } from "../lib/abort";
 import { chunkClinicalNotesByTokens, chunkTextByTokens, type SerialSummaryChunk } from "../lib/text";
 import type { ClinicalNote, ModelSettings } from "../types";
 
@@ -21,6 +22,7 @@ interface TextGenerationOptions {
   contextTokens?: number;
   enableThinking?: boolean;
   systemPrompt?: string;
+  signal?: AbortSignal;
 }
 
 const pipelineCache = new Map<string, Promise<AnyPipeline>>();
@@ -51,8 +53,10 @@ export async function warmModel(
   modelId: string,
   task: "text-generation" | "feature-extraction" | "text-classification",
   dtype: string,
-  onProgress?: WarmModelProgressCallback
+  onProgress?: WarmModelProgressCallback,
+  signal?: AbortSignal
 ): Promise<void> {
+  assertNotAborted(signal);
   const native = nativeApi();
   if (native && task === "text-generation" && shouldUseNativeLlm()) {
     await native.warmRuntime({
@@ -60,18 +64,22 @@ export async function warmModel(
       contextTokens: runtimePreferences?.llmContextTokens,
       llamaModelRepo: runtimePreferences?.llamaModelRepo ?? DEFAULT_LLAMA_GGUF_REPO,
       llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE
-    }, onProgress);
+    }, onProgress).catch((error) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
     return;
   }
   if (native && task !== "text-generation" && shouldUseNativeOnnx()) {
-    await native.warmRuntime({ task, modelId }, onProgress);
+    await native.warmRuntime({ task, modelId }, onProgress).catch((error) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
     return;
   }
   if (task === "text-classification") {
-    await getClassifier(modelId, dtype, onProgress);
+    await getClassifier(modelId, dtype, onProgress).catch((error) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
     return;
   }
-  await getPipeline(task, modelId, dtype, onProgress);
+  await getPipeline(task, modelId, dtype, onProgress).catch((error) => rethrowIfSignalAborted(error, signal));
+  assertNotAborted(signal);
 }
 
 export async function resetTextGenerationPipeline(modelId: string, dtype: string): Promise<void> {
@@ -90,6 +98,7 @@ export async function resetTextGenerationPipeline(modelId: string, dtype: string
 }
 
 export async function generateText(modelId: string, prompt: string, options: TextGenerationOptions): Promise<string> {
+  assertNotAborted(options.signal);
   const native = nativeApi();
   const enableThinking = options.enableThinking !== false;
   const systemPrompt = options.systemPrompt ?? REASONING_SYSTEM_PROMPT;
@@ -102,10 +111,12 @@ export async function generateText(modelId: string, prompt: string, options: Tex
       llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE,
       enableThinking,
       systemPrompt
-    });
+    }).catch((error) => rethrowIfSignalAborted(error, options.signal));
+    assertNotAborted(options.signal);
     return stripThinkingBlocks(output).trim();
   }
-  const generator = await getPipeline("text-generation", modelId, options.dtype);
+  const generator = await getPipeline("text-generation", modelId, options.dtype).catch((error) => rethrowIfSignalAborted(error, options.signal));
+  assertNotAborted(options.signal);
   const contextTokens = Number.isFinite(options.contextTokens) ? Math.max(1, Math.floor(options.contextTokens!)) : 16384;
   const formattedPrompt = formatPromptForModel(generator, modelId, prompt, { enableThinking, systemPrompt });
   const output = await generator(formattedPrompt, {
@@ -117,7 +128,8 @@ export async function generateText(modelId: string, prompt: string, options: Tex
       max_length: contextTokens,
       truncation: true
     }
-  });
+  }).catch((error: unknown) => rethrowIfSignalAborted(error, options.signal));
+  assertNotAborted(options.signal);
   const first = Array.isArray(output) ? output[0] : output;
   return stripThinkingBlocks(String(first?.generated_text ?? first?.text ?? first ?? "")).trim();
 }
@@ -125,12 +137,14 @@ export async function generateText(modelId: string, prompt: string, options: Tex
 export async function chunkClinicalNotesForSummary(
   modelId: string,
   notes: ClinicalNote[],
-  options: { chunkSizeTokens: number; overlapTokens: number }
+  options: { chunkSizeTokens: number; overlapTokens: number; signal?: AbortSignal }
 ): Promise<SerialSummaryChunk[]> {
+  assertNotAborted(options.signal);
   if (shouldUseNativeLlm()) {
     return chunkClinicalNotesByTokens(notes, nativeTokenCodec(), options);
   }
-  const tokenizer = await getTokenizer(modelId);
+  const tokenizer = await getTokenizer(modelId).catch((error) => rethrowIfSignalAborted(error, options.signal));
+  assertNotAborted(options.signal);
   return chunkClinicalNotesByTokens(notes, {
     encode: async (text) => encodeTextWithTokenizer(tokenizer, text),
     decode: async (tokenIds) => String(await tokenizer.decode(tokenIds, { skip_special_tokens: true }))
@@ -140,8 +154,9 @@ export async function chunkClinicalNotesForSummary(
 export async function splitSummaryChunkForModel(
   modelId: string,
   chunk: SerialSummaryChunk,
-  options: { chunkSizeTokens: number; overlapTokens: number }
+  options: { chunkSizeTokens: number; overlapTokens: number; signal?: AbortSignal }
 ): Promise<SerialSummaryChunk[]> {
+  assertNotAborted(options.signal);
   if (shouldUseNativeLlm()) {
     return chunkTextByTokens(chunk.text, nativeTokenCodec(), {
       ...options,
@@ -150,7 +165,8 @@ export async function splitSummaryChunkForModel(
       useFallbackDateRangeWhenNoHeaders: true
     });
   }
-  const tokenizer = await getTokenizer(modelId);
+  const tokenizer = await getTokenizer(modelId).catch((error) => rethrowIfSignalAborted(error, options.signal));
+  assertNotAborted(options.signal);
   return chunkTextByTokens(chunk.text, {
     encode: async (text) => encodeTextWithTokenizer(tokenizer, text),
     decode: async (tokenIds) => String(await tokenizer.decode(tokenIds, { skip_special_tokens: true }))
@@ -162,48 +178,72 @@ export async function splitSummaryChunkForModel(
   });
 }
 
-export async function countTextTokens(modelId: string, text: string): Promise<number> {
+export async function countTextTokens(modelId: string, text: string, signal?: AbortSignal): Promise<number> {
+  assertNotAborted(signal);
   if (shouldUseNativeLlm()) {
-    return (await nativeTokenCodec().encode(text)).length;
+    const tokenIds = await nativeTokenCodec().encode(text).catch((error) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
+    return tokenIds.length;
   }
-  const tokenizer = await getTokenizer(modelId);
-  const tokenIds = await encodeTextWithTokenizer(tokenizer, text);
+  const tokenizer = await getTokenizer(modelId).catch((error) => rethrowIfSignalAborted(error, signal));
+  assertNotAborted(signal);
+  const tokenIds = await encodeTextWithTokenizer(tokenizer, text).catch((error) => rethrowIfSignalAborted(error, signal));
+  assertNotAborted(signal);
   return tokenIds.length;
 }
 
-export async function embedText(modelId: string, text: string, dtype = "q8"): Promise<number[]> {
+export async function embedText(modelId: string, text: string, dtype = "q8", signal?: AbortSignal): Promise<number[]> {
+  assertNotAborted(signal);
   const native = nativeApi();
   if (native && shouldUseNativeOnnx()) {
-    const embeddings = await native.embedTrialSpaceTexts({ modelId, texts: [text] });
+    const embeddings = await native.embedTrialSpaceTexts({ modelId, texts: [text] }).catch((error) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
     const embedding = embeddings[0];
     if (!embedding?.length) throw new Error("Native TrialSpace model returned no embedding");
     return embedding;
   }
-  const extractor = await getPipeline("feature-extraction", modelId, dtype);
+  const extractor = await getPipeline("feature-extraction", modelId, dtype).catch((error) => rethrowIfSignalAborted(error, signal));
+  assertNotAborted(signal);
   const output = await extractor(MODEL_QUERY_PROMPT + text, {
     pooling: "mean",
     normalize: true
-  });
+  }).catch((error: unknown) => rethrowIfSignalAborted(error, signal));
+  assertNotAborted(signal);
   if (Array.isArray(output)) return flattenNumberArray(output);
   if (typeof output?.tolist === "function") return flattenNumberArray(output.tolist());
   if (output?.data) return Array.from(output.data as Iterable<number>);
   throw new Error("Embedding model returned an unsupported output shape");
 }
 
-export async function scoreTrialChecker(modelId: string, texts: string[], dtype = "q8"): Promise<number[]> {
+export async function scoreTrialChecker(modelId: string, texts: string[], dtype = "q8", signal?: AbortSignal): Promise<number[]> {
+  assertNotAborted(signal);
   const native = nativeApi();
-  if (native && shouldUseNativeOnnx()) return native.scoreTrialCheckerTexts({ modelId, texts });
-  return scoreClassifier(modelId, texts, dtype, "sigmoid");
+  if (native && shouldUseNativeOnnx()) {
+    const scores = await native.scoreTrialCheckerTexts({ modelId, texts }).catch((error) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
+    return scores;
+  }
+  return scoreClassifier(modelId, texts, dtype, "sigmoid", signal);
 }
 
-export async function scoreBoilerplateChecker(modelId: string, texts: string[], dtype = "q8"): Promise<number[]> {
+export async function scoreBoilerplateChecker(modelId: string, texts: string[], dtype = "q8", signal?: AbortSignal): Promise<number[]> {
+  assertNotAborted(signal);
   const native = nativeApi();
-  if (native && shouldUseNativeOnnx()) return native.scoreBoilerplateCheckerTexts({ modelId, texts });
-  return scoreClassifier(modelId, texts, dtype, "softmax_positive");
+  if (native && shouldUseNativeOnnx()) {
+    const scores = await native.scoreBoilerplateCheckerTexts({ modelId, texts }).catch((error) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
+    return scores;
+  }
+  return scoreClassifier(modelId, texts, dtype, "softmax_positive", signal);
 }
 
 function nativeApi(): MatchMinerElectronApi | null {
   return typeof window !== "undefined" ? window.matchminerElectron ?? null : null;
+}
+
+function rethrowIfSignalAborted(error: unknown, signal?: AbortSignal): never {
+  if (signal?.aborted) throw abortError();
+  throw error;
 }
 
 function shouldUseNativeLlm(): boolean {
@@ -390,16 +430,19 @@ async function getTokenizer(modelId: string, onProgress?: WarmModelProgressCallb
   return tokenizerCache.get(modelId)!;
 }
 
-async function scoreClassifier(modelId: string, texts: string[], dtype: string, transform: "sigmoid" | "softmax_positive"): Promise<number[]> {
-  const { tokenizer, model } = await getClassifier(modelId, dtype);
+async function scoreClassifier(modelId: string, texts: string[], dtype: string, transform: "sigmoid" | "softmax_positive", signal?: AbortSignal): Promise<number[]> {
+  const { tokenizer, model } = await getClassifier(modelId, dtype).catch((error) => rethrowIfSignalAborted(error, signal));
   const out: number[] = [];
   for (const text of texts) {
+    assertNotAborted(signal);
     const inputs = await tokenizer(text, {
       truncation: true,
       padding: true,
       max_length: transform === "sigmoid" ? 4096 : 3192
-    });
-    const result = await model(inputs);
+    }).catch((error: unknown) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
+    const result = await model(inputs).catch((error: unknown) => rethrowIfSignalAborted(error, signal));
+    assertNotAborted(signal);
     const logits = Array.from(result.logits?.data ?? []) as number[];
     out.push(transform === "sigmoid" ? sigmoid(logits[0] ?? 0) : softmaxPositive(logits));
   }

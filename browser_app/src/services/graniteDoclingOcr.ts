@@ -1,4 +1,5 @@
 import type { PdfProgress } from "./pdfIngest";
+import { abortError, assertNotAborted } from "../lib/abort";
 
 const GRANITE_DOCLING_MODEL_ID = "onnx-community/granite-docling-258M-ONNX";
 const DOCLING_PROMPT = "Convert this page to docling.";
@@ -21,8 +22,10 @@ let doclingRuntime: Promise<{ processor: any; model: any; RawImage: Transformers
 
 export async function ocrPdfWithGraniteDocling(
   pdf: PdfLike,
-  onProgress?: (progress: PdfProgress) => void
+  onProgress?: (progress: PdfProgress) => void,
+  signal?: AbortSignal
 ): Promise<string> {
+  assertNotAborted(signal);
   if (!("gpu" in navigator)) {
     throw new Error("Granite Docling OCR requires WebGPU");
   }
@@ -35,14 +38,18 @@ export async function ocrPdfWithGraniteDocling(
     percent: 0
   });
   const { processor, model, RawImage } = await getDoclingRuntime();
+  assertNotAborted(signal);
   const textPages: string[] = [];
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    assertNotAborted(signal);
     reportDoclingProgress(pdf.numPages, pageNumber, 0, onProgress);
     const page = await pdf.getPage(pageNumber);
-    const canvas = await renderCanvasForPage(page);
+    const canvas = await renderCanvasForPage(page, signal);
     try {
+      assertNotAborted(signal);
       const rawImage = RawImage.fromCanvas(canvas);
       const docTags = await generateDocTags(processor, model, rawImage);
+      assertNotAborted(signal);
       const text = docTagsToPlainText(docTags);
       console.info("[MatchMiner PDF]", "Granite Docling page complete", {
         pageNumber,
@@ -117,7 +124,8 @@ async function generateDocTags(processor: any, model: any, rawImage: any): Promi
   return String(decoded?.[0] ?? "").trim();
 }
 
-async function renderCanvasForPage(page: any): Promise<HTMLCanvasElement> {
+async function renderCanvasForPage(page: any, signal?: AbortSignal): Promise<HTMLCanvasElement> {
+  assertNotAborted(signal);
   const viewport = page.getViewport({ scale: DOCLING_RENDER_SCALE });
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d", { alpha: false });
@@ -126,7 +134,18 @@ async function renderCanvasForPage(page: any): Promise<HTMLCanvasElement> {
   canvas.height = Math.floor(viewport.height);
   context.fillStyle = "white";
   context.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvasContext: context, viewport }).promise;
+  const renderTask = page.render({ canvasContext: context, viewport });
+  const abortRender = () => renderTask.cancel?.();
+  signal?.addEventListener("abort", abortRender, { once: true });
+  try {
+    await renderTask.promise;
+  } catch (error) {
+    if (signal?.aborted) throw abortError();
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", abortRender);
+  }
+  assertNotAborted(signal);
   return canvas;
 }
 

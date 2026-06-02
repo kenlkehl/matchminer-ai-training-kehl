@@ -16,6 +16,7 @@ const isDev = !app.isPackaged;
 let appProtocolRegistered = false;
 const llamaRuntime = new LlamaRuntime(app);
 const onnxRuntime = new OnnxRuntime(app);
+const activeLocalOcrChildren = new Set();
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -41,6 +42,7 @@ if (process.env.MATCHMINER_DISABLE_GPU_FLAGS !== "1") {
 app.setName("MatchMiner AI");
 
 ipcMain.handle("matchminer:local-pdf-ocr", async (_event, request) => runLocalPdfOcr(request));
+ipcMain.handle("matchminer:stop-current-job", async () => stopCurrentJob());
 ipcMain.handle("matchminer:runtime-status", async () => ({
   llama: llamaRuntime.status(),
   onnx: onnxRuntime.status()
@@ -227,6 +229,17 @@ async function runLocalPdfOcr(request) {
   }
 }
 
+async function stopCurrentJob() {
+  for (const child of activeLocalOcrChildren) {
+    if (!child.killed) child.kill("SIGKILL");
+  }
+  await Promise.allSettled([
+    llamaRuntime.stop(),
+    onnxRuntime.stop()
+  ]);
+  return { stopped: true };
+}
+
 async function runDoclingOcr(inputPath) {
   const pythonScript = `
 import sys
@@ -275,6 +288,7 @@ function runCommand(command, args) {
     const stdout = [];
     const stderr = [];
     let settled = false;
+    activeLocalOcrChildren.add(child);
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       finish(new Error(`${command} timed out after ${Math.round(LOCAL_OCR_TIMEOUT_MS / 1000)}s`));
@@ -298,6 +312,7 @@ function runCommand(command, args) {
     function finish(error, result) {
       if (settled) return;
       settled = true;
+      activeLocalOcrChildren.delete(child);
       clearTimeout(timer);
       if (error) reject(error);
       else resolve(result);

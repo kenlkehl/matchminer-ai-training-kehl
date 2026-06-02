@@ -16,6 +16,7 @@ function invokeWithProgress(channel, request, onProgress) {
 
 contextBridge.exposeInMainWorld("matchminerElectron", {
   parsePdfWithLocalOcr: (request) => ipcRenderer.invoke("matchminer:local-pdf-ocr", request),
+  stopCurrentJob: () => ipcRenderer.invoke("matchminer:stop-current-job"),
   runtimeStatus: () => ipcRenderer.invoke("matchminer:runtime-status"),
   prepareRuntimeArtifacts: (onProgress) => invokeWithProgress("matchminer:prepare-runtime-artifacts", {}, onProgress),
   warmRuntime: (request, onProgress) => invokeWithProgress("matchminer:warm-runtime", request, onProgress),

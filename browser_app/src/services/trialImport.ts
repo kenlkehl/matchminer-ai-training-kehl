@@ -1,26 +1,33 @@
 import Papa from "papaparse";
 import type { TrialSpaceRecord } from "../types";
+import { assertNotAborted } from "../lib/abort";
 
 type RawRecord = Record<string, unknown>;
 
 const RECORD_ARRAY_KEYS = ["records", "trialSpaces", "trial_spaces", "data"];
 
-export async function parseEmbeddedTrialIndexFile(file: File): Promise<TrialSpaceRecord[]> {
+export async function parseEmbeddedTrialIndexFile(file: File, signal?: AbortSignal): Promise<TrialSpaceRecord[]> {
+  assertNotAborted(signal);
   if (/\.parquet$/i.test(file.name)) {
     throw new Error("Parquet files cannot be imported directly in the browser. Export JSON, JSONL, or CSV from the pre-embed script.");
   }
-  return parseEmbeddedTrialIndexText(await file.text(), file.name);
+  const text = await file.text();
+  assertNotAborted(signal);
+  return parseEmbeddedTrialIndexText(text, file.name);
 }
 
-export async function fetchEmbeddedTrialIndex(url: string): Promise<TrialSpaceRecord[]> {
+export async function fetchEmbeddedTrialIndex(url: string, signal?: AbortSignal): Promise<TrialSpaceRecord[]> {
   const trimmed = url.trim();
   if (!trimmed) throw new Error("Enter a URL for the embedded trial index");
   if (/\.parquet(?:$|[?#])/i.test(trimmed)) {
     throw new Error("Parquet URLs cannot be imported directly in the browser. Publish JSON, JSONL, or CSV instead.");
   }
-  const response = await fetch(trimmed);
+  assertNotAborted(signal);
+  const response = await fetch(trimmed, { signal });
   if (!response.ok) throw new Error(`Could not load embedded trial index: ${response.status} ${response.statusText}`);
-  return parseEmbeddedTrialIndexText(await response.text(), trimmed);
+  const text = await response.text();
+  assertNotAborted(signal);
+  return parseEmbeddedTrialIndexText(text, trimmed);
 }
 
 export function parseEmbeddedTrialIndexText(text: string, sourceName = "embedded trial index"): TrialSpaceRecord[] {

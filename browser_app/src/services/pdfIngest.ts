@@ -1,4 +1,5 @@
 import type { ClinicalNote, ModelSettings, PatientDocument } from "../types";
+import { abortError, assertNotAborted } from "../lib/abort";
 import { parseClinicalDate } from "../lib/dateParsing";
 import { ocrPdfWithGraniteDocling } from "./graniteDoclingOcr";
 import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
@@ -32,6 +33,7 @@ export interface PdfProgress {
 
 export interface PdfParseOptions {
   ocrMode?: ModelSettings["pdfOcrMode"];
+  signal?: AbortSignal;
 }
 
 export async function parsePdfPatientFile(
@@ -39,6 +41,8 @@ export async function parsePdfPatientFile(
   onProgress?: (progress: PdfProgress) => void,
   options: PdfParseOptions = {}
 ): Promise<PatientDocument> {
+  const signal = options.signal;
+  assertNotAborted(signal);
   logPdfDebug("Starting PDF ingest", {
     fileName: file.name,
     fileSize: file.size,
@@ -50,6 +54,7 @@ export async function parsePdfPatientFile(
     pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
     const sourceBytes = new Uint8Array(await file.arrayBuffer());
+    assertNotAborted(signal);
     const pdfBytes = sourceBytes.slice();
     logPdfDebug("Read PDF bytes", { byteLength: sourceBytes.byteLength });
     const pdf = await pdfjs.getDocument({ data: pdfBytes }).promise;
@@ -57,9 +62,11 @@ export async function parsePdfPatientFile(
     const textPages: string[] = [];
 
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      assertNotAborted(signal);
       onProgress?.({ phase: "text", current: pageNumber, total: pdf.numPages });
       const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
+      assertNotAborted(signal);
       const text = content.items
         .map((item: unknown) => (typeof item === "object" && item && "str" in item ? String((item as { str: string }).str) : ""))
         .join(" ")
@@ -82,15 +89,17 @@ export async function parsePdfPatientFile(
       logPdfDebug("No embedded PDF text found; starting OCR fallback");
       const ocrMode = options.ocrMode ?? "auto";
       if (ocrMode === "auto" || ocrMode === "granite") {
-        rawText = await tryGraniteDoclingOcr(pdf, ocrMode, onProgress);
+        rawText = await tryGraniteDoclingOcr(pdf, ocrMode, onProgress, signal);
       } else if (ocrMode === "local") {
-        rawText = await tryLocalPdfOcr(file.name, sourceBytes, ocrMode, onProgress);
+        rawText = await tryLocalPdfOcr(file.name, sourceBytes, ocrMode, onProgress, signal);
       }
+      assertNotAborted(signal);
       if (!rawText && (ocrMode === "auto" || ocrMode === "browser")) {
-        rawText = await ocrPdfPages(pdf, onProgress);
+        rawText = await ocrPdfPages(pdf, onProgress, signal);
       }
     }
 
+    assertNotAborted(signal);
     if (!rawText.trim()) throw new Error("No text could be extracted from the PDF");
 
     const today = parseClinicalDate(new Date());
@@ -120,13 +129,15 @@ export async function parsePdfPatientFile(
 async function tryGraniteDoclingOcr(
   pdf: { numPages: number; getPage: (pageNumber: number) => Promise<any> },
   ocrMode: ModelSettings["pdfOcrMode"],
-  onProgress?: (progress: PdfProgress) => void
+  onProgress?: (progress: PdfProgress) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   try {
-    const text = (await ocrPdfWithGraniteDocling(pdf, onProgress)).trim();
+    const text = (await ocrPdfWithGraniteDocling(pdf, onProgress, signal)).trim();
     if (!text) throw new Error("Granite Docling returned no text");
     return text;
   } catch (error) {
+    if (signal?.aborted) throw abortError();
     logPdfError("Granite Docling OCR failed", error);
     if (ocrMode === "granite") throw error;
     return "";
@@ -137,9 +148,11 @@ async function tryLocalPdfOcr(
   fileName: string,
   pdfBytes: Uint8Array,
   ocrMode: ModelSettings["pdfOcrMode"],
-  onProgress?: (progress: PdfProgress) => void
+  onProgress?: (progress: PdfProgress) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   if (ocrMode === "browser") return "";
+  assertNotAborted(signal);
   const localOcr = window.matchminerElectron?.parsePdfWithLocalOcr;
   if (!localOcr) {
     const message = "Local PDF OCR is unavailable because the Electron preload API is not present";
@@ -151,24 +164,29 @@ async function tryLocalPdfOcr(
   onProgress?.({ phase: "local-ocr", current: 0, total: 1, detail: "Docling/OCRmyPDF" });
   try {
     const result = await localOcr({ fileName, bytes: toArrayBuffer(pdfBytes) });
+    assertNotAborted(signal);
     const text = result.text.trim();
     logPdfDebug("Local OCR complete", { engine: result.engine, textChars: text.length });
     if (!text) throw new Error(`Local OCR returned no text (${result.engine})`);
     onProgress?.({ phase: "local-ocr", current: 1, total: 1, detail: result.engine, percent: 100 });
     return text;
   } catch (error) {
+    if (signal?.aborted) throw abortError();
     logPdfError("Local OCR failed", error);
     if (ocrMode === "local") throw error;
     return "";
   }
 }
 
-async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number) => Promise<any> }, onProgress?: (progress: PdfProgress) => void): Promise<string> {
+async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number) => Promise<any> }, onProgress?: (progress: PdfProgress) => void, signal?: AbortSignal): Promise<string> {
   const tesseractWorkerScriptUrl = toAbsoluteAssetUrl(tesseractWorkerSrc);
   const tesseractCoreUrl = toAbsoluteAssetUrl(tesseractCoreSrc);
   const workerPath = createTesseractWorkerUrl(tesseractWorkerScriptUrl);
   let worker: Awaited<ReturnType<TesseractBrowserModule["createWorker"]>> | null = null;
   let activeOcrPage = 0;
+  const terminateWorker = () => {
+    void worker?.terminate().catch((error) => logPdfError("Tesseract worker abort termination failed", error));
+  };
   const reportOcrProgress = (pageNumber: number, pagePercent: number) => {
     const boundedPagePercent = Math.max(0, Math.min(100, pagePercent));
     const totalPercent = Math.round(((pageNumber - 1 + boundedPagePercent / 100) / pdf.numPages) * 100);
@@ -181,8 +199,10 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
     });
   };
   try {
+    assertNotAborted(signal);
     logPdfDebug("Loading Tesseract browser bundle");
     const { default: tesseract } = (await import("tesseract.js/dist/tesseract.esm.min.js")) as { default: TesseractBrowserModule };
+    assertNotAborted(signal);
     logPdfDebug("Creating Tesseract worker", {
       workerPath,
       tesseractWorkerScriptUrl,
@@ -204,9 +224,11 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
       }
     });
     logPdfDebug("Tesseract worker ready");
+    signal?.addEventListener("abort", terminateWorker, { once: true });
 
     const out: string[] = [];
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      assertNotAborted(signal);
       activeOcrPage = pageNumber;
       reportOcrProgress(pageNumber, 0);
       const page = await pdf.getPage(pageNumber);
@@ -217,8 +239,20 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
       logPdfDebug("Rendering PDF page for OCR", { pageNumber, width: canvas.width, height: canvas.height });
-      await page.render({ canvasContext: context, viewport }).promise;
+      const renderTask = page.render({ canvasContext: context, viewport });
+      const cancelRender = () => renderTask.cancel?.();
+      signal?.addEventListener("abort", cancelRender, { once: true });
+      try {
+        await renderTask.promise;
+      } catch (error) {
+        if (signal?.aborted) throw abortError();
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", cancelRender);
+      }
+      assertNotAborted(signal);
       const result = await worker.recognize(canvas);
+      assertNotAborted(signal);
       const text = result.data.text.trim();
       logPdfDebug("OCR page complete", { pageNumber, textChars: text.length });
       reportOcrProgress(pageNumber, 100);
@@ -228,9 +262,11 @@ async function ocrPdfPages(pdf: { numPages: number; getPage: (pageNumber: number
     logPdfDebug("OCR complete", { totalChars: rawText.length });
     return rawText;
   } catch (error) {
+    if (signal?.aborted) throw abortError();
     logPdfError("OCR failed", error);
     throw error;
   } finally {
+    signal?.removeEventListener("abort", terminateWorker);
     if (worker) await worker.terminate().catch((error) => logPdfError("Tesseract worker termination failed", error));
     URL.revokeObjectURL(workerPath);
   }

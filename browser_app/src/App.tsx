@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import {
   AlertTriangle,
   Brain,
+  CircleStop,
   Database,
   Download,
   ExternalLink,
@@ -19,6 +20,7 @@ import {
 import type { MatchResult, ModelSettings, PatientDocument, PromptKey, StatusMessage, TrialSpaceRecord } from "./types";
 import { DEFAULT_PROMPTS } from "./data/defaultPrompts";
 import { DEFAULT_LFM_CONTEXT_TOKENS, DEFAULT_MODEL_SETTINGS } from "./data/defaultSettings";
+import { assertNotAborted, isAbortError } from "./lib/abort";
 import { ctGovStudyUrl } from "./lib/ctGov";
 import { buildExtractiveFallbackSummary, fillPrompt, splitBoilerplate, type SerialSummaryChunk } from "./lib/text";
 import { hashTextEmbedding } from "./lib/hashEmbedding";
@@ -89,12 +91,14 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [status, setStatus] = useState<StatusMessage[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [stopRequested, setStopRequested] = useState(false);
   const [pdfProgress, setPdfProgress] = useState<PdfProgress | null>(null);
   const [summaryProgress, setSummaryProgress] = useState<SummaryProgress | null>(null);
   const [trialProgress, setTrialProgress] = useState<TrialProgress | null>(null);
   const [modelCacheProgress, setModelCacheProgress] = useState<ModelCacheProgress | null>(null);
   const [embeddedTrialUrl, setEmbeddedTrialUrl] = useState("");
   const autoCacheStarted = useRef(false);
+  const activeJobController = useRef<AbortController | null>(null);
 
   useEffect(() => {
     void Promise.all([isWebGpuAvailable(), loadModelSettings(), loadPrompts()]).then(([gpu, savedSettings, savedPrompts]) => {
@@ -140,22 +144,65 @@ export default function App() {
     setPatientBoilerplate(splitBoilerplate(summaryText).patientBoilerplate);
   }
 
+  function startJob(label: string, options: { automatic?: boolean } = {}): AbortSignal | null {
+    if (activeJobController.current) {
+      if (!options.automatic) {
+        addStatus("warning", `${busy ?? "Another job"} is already running. Use Stop before starting ${label.toLowerCase()}.`);
+      }
+      return null;
+    }
+    const controller = new AbortController();
+    activeJobController.current = controller;
+    setStopRequested(false);
+    setBusy(label);
+    return controller.signal;
+  }
+
+  function updateJobLabel(signal: AbortSignal, label: string) {
+    if (activeJobController.current?.signal === signal) setBusy(label);
+  }
+
+  function finishJob(signal: AbortSignal) {
+    if (activeJobController.current?.signal !== signal) return;
+    activeJobController.current = null;
+    setStopRequested(false);
+    setBusy(null);
+  }
+
+  function stopActiveJob() {
+    const controller = activeJobController.current;
+    if (!controller || controller.signal.aborted) return;
+    controller.abort();
+    setStopRequested(true);
+    addStatus("warning", `Stop requested for ${busy ?? "current job"}.`);
+    void window.matchminerElectron?.stopCurrentJob().catch((error) => {
+      console.warn("[MatchMiner] Native stop request failed", error);
+    });
+  }
+
+  function addStoppedStatus(label: string) {
+    addStatus("warning", `${label} stopped.`);
+  }
+
   async function handleFile(file: File) {
-    setBusy("Reading records");
+    const signal = startJob(file.name.toLowerCase().endsWith(".pdf") ? "Reading PDF" : "Reading records");
+    if (!signal) return;
     setPdfProgress(null);
     setSummaryProgress(null);
     setMatches([]);
     commitSummaryText("");
     try {
       const lower = file.name.toLowerCase();
-      const doc = lower.endsWith(".csv") ? await parseCsvPatientFile(file) : await parsePdfPatientFile(file, setPdfProgress, { ocrMode: settings.pdfOcrMode });
+      const doc = lower.endsWith(".csv") ? await parseCsvPatientFile(file) : await parsePdfPatientFile(file, setPdfProgress, { ocrMode: settings.pdfOcrMode, signal });
+      assertNotAborted(signal);
       setPatientDocument(doc);
       sessionStorage.setItem("matchminer-current-patient", JSON.stringify({ fileName: doc.fileName, createdAt: doc.createdAt }));
       addStatus("success", `Loaded ${doc.source.toUpperCase()} with ${doc.notes.length} record${doc.notes.length === 1 ? "" : "s"}.`);
     } catch (error) {
-      addStatus("error", errorMessage(error));
+      if (isAbortError(error)) addStoppedStatus("Record loading");
+      else addStatus("error", errorMessage(error));
     } finally {
-      setBusy(null);
+      finishJob(signal);
       setPdfProgress(null);
     }
   }
@@ -163,8 +210,10 @@ export default function App() {
   async function summarize() {
     const loadedPatientDocument = patientDocument;
     if (!loadedPatientDocument) return;
+    const startedSignal = startJob("Summarizing");
+    if (!startedSignal) return;
+    const signal: AbortSignal = startedSignal;
     const activePatientDocument: PatientDocument = loadedPatientDocument;
-    setBusy("Summarizing");
     setSummaryProgress({ current: 0, detail: "tokenizing clinical record" });
     setMatches([]);
     let usedAutomaticChunkRetry = false;
@@ -172,6 +221,7 @@ export default function App() {
       let chunkSizeTokens = normalizeSummaryChunkTokens(settings.summaryChunkTokens);
       let finalResult: { summary: string; splitOversizedSegment: boolean; attempt: number; chunkSizeTokens: number } | null = null;
       for (let attempt = 1; attempt <= MAX_SERIAL_SUMMARY_ATTEMPTS; attempt += 1) {
+        assertNotAborted(signal);
         try {
           if (attempt > 1) {
             commitSummaryText("");
@@ -183,6 +233,7 @@ export default function App() {
           finalResult = await runSerialSummaryAttempt(chunkSizeTokens, attempt);
           break;
         } catch (error) {
+          if (isAbortError(error)) throw error;
           const nextChunkSizeTokens = nextSmallerSummaryRetryChunkSize(chunkSizeTokens);
           if (
             attempt >= MAX_SERIAL_SUMMARY_ATTEMPTS ||
@@ -203,6 +254,7 @@ export default function App() {
           chunkSizeTokens = nextChunkSizeTokens;
         }
       }
+      assertNotAborted(signal);
       if (!finalResult) {
         throw new Error("Patient summary generation did not produce a result.");
       }
@@ -211,12 +263,16 @@ export default function App() {
       const chunkDetail = retried ? ` after retrying with ${formatCount(finalResult.chunkSizeTokens)}-token chunks` : "";
       addStatus("success", finalResult.splitOversizedSegment || retried ? `Patient summary generated locally${chunkDetail}.` : "Patient summary generated locally.");
     } catch (error) {
+      if (isAbortError(error)) {
+        addStoppedStatus("Patient summarization");
+        return;
+      }
       const fallback = buildExtractiveFallbackSummary(activePatientDocument.notes);
       commitSummaryText(fallback);
       const retryText = usedAutomaticChunkRetry ? " after automatic chunk-size retries" : "";
       addStatus("warning", `LLM summarization failed${retryText}; local extractive summary was used. ${errorMessage(error)}`);
     } finally {
-      setBusy(null);
+      finishJob(signal);
       setSummaryProgress(null);
     }
 
@@ -226,8 +282,10 @@ export default function App() {
       const summaryMaxNewTokens = normalizeSummaryMaxNewTokens(settings.maxSummaryTokens);
       const chunks = await chunkClinicalNotesForSummary(settings.llmModelId, activePatientDocument.notes, {
         chunkSizeTokens: effectiveSummaryChunkTokens,
-        overlapTokens: Math.min(settings.summaryChunkOverlapTokens, effectiveSummaryChunkTokens - 1)
+        overlapTokens: Math.min(settings.summaryChunkOverlapTokens, effectiveSummaryChunkTokens - 1),
+        signal
       });
+      assertNotAborted(signal);
       console.info("[MatchMiner Summary] Prepared serial summary chunks", {
         attempt,
         chunks: chunks.length,
@@ -243,6 +301,7 @@ export default function App() {
       let totalWork = pending.length;
       let splitOversizedSegment = false;
       while (pending.length > 0) {
+        assertNotAborted(signal);
         const chunk = pending.shift()!;
         const progressDetail = `${attempt > 1 ? `attempt ${attempt}, ` : ""}${formatCount(chunk.tokenCount)} source tokens, ${chunk.firstDate} to ${chunk.lastDate}`;
         setSummaryProgress({
@@ -252,7 +311,8 @@ export default function App() {
           percent: percentComplete(completed, totalWork)
         });
         const prompt = buildSummaryPrompt(prompts.patientSummary, prior, chunk);
-        const promptTokens = await countTextTokens(settings.llmModelId, prompt);
+        const promptTokens = await countTextTokens(settings.llmModelId, prompt, signal);
+        assertNotAborted(signal);
         const promptBudget = summaryPromptTokenBudget(summaryMaxNewTokens, activeLlmContextTokens);
         if (promptTokens > promptBudget) {
           const smallerChunkSize = smallerSummaryChunkSize(chunk.tokenCount, promptTokens, promptBudget);
@@ -261,8 +321,10 @@ export default function App() {
           }
           const smallerChunks = await splitSummaryChunkForModel(settings.llmModelId, chunk, {
             chunkSizeTokens: smallerChunkSize,
-            overlapTokens: Math.min(settings.summaryChunkOverlapTokens, smallerChunkSize - 1)
+            overlapTokens: Math.min(settings.summaryChunkOverlapTokens, smallerChunkSize - 1),
+            signal
           });
+          assertNotAborted(signal);
           if (smallerChunks.length <= 1) {
             throw new Error(`Serial summary prompt is still too large for the local LLM (${formatCount(promptTokens)} prompt tokens; budget ${formatCount(promptBudget)}).`);
           }
@@ -302,8 +364,10 @@ export default function App() {
             dtype: settings.llmDtype,
             maxNewTokens: summaryMaxNewTokens,
             contextTokens: activeLlmContextTokens,
-            enableThinking: true
+            enableThinking: true,
+            signal
           });
+          assertNotAborted(signal);
           if (!nextSummary.trim()) {
             throw new Error("Local LLM returned no visible patient summary text. The response may have contained only hidden thinking text.");
           }
@@ -316,6 +380,7 @@ export default function App() {
             generatedSummaryChars: prior.length
           });
         } catch (error) {
+          if (isAbortError(error)) throw error;
           if (!isOversizedGenerationError(error)) throw error;
           await resetTextGenerationPipeline(settings.llmModelId, settings.llmDtype);
           const lowerContextTokens = nextLowerLlmContextTokens(activeLlmContextTokens);
@@ -343,8 +408,10 @@ export default function App() {
           if (smallerChunkSize >= chunk.tokenCount) throw error;
           const smallerChunks = await splitSummaryChunkForModel(settings.llmModelId, chunk, {
             chunkSizeTokens: smallerChunkSize,
-            overlapTokens: Math.min(settings.summaryChunkOverlapTokens, smallerChunkSize - 1)
+            overlapTokens: Math.min(settings.summaryChunkOverlapTokens, smallerChunkSize - 1),
+            signal
           });
+          assertNotAborted(signal);
           if (smallerChunks.length <= 1) throw error;
 
           splitOversizedSegment = true;
@@ -380,25 +447,30 @@ export default function App() {
   }
 
   async function prepareTrialIndex() {
-    setBusy("Preparing trials");
+    const signal = startJob("Preparing trials");
+    if (!signal) return;
     setTrialProgress(null);
     try {
-      const records = await loadOrFetchTrialIndex();
+      const records = await loadOrFetchTrialIndex(signal);
+      assertNotAborted(signal);
       setTrialIndex(records);
       addStatus("success", `Loaded ${records.length} trial spaces.`);
     } catch (error) {
-      addStatus("error", errorMessage(error));
+      if (isAbortError(error)) addStoppedStatus("Trial loading");
+      else addStatus("error", errorMessage(error));
     } finally {
-      setBusy(null);
+      finishJob(signal);
     }
   }
 
   async function refreshCtGov() {
-    setBusy("Downloading ClinicalTrials.gov");
+    const signal = startJob("Downloading ClinicalTrials.gov");
+    if (!signal) return;
     setTrialProgress({ phase: "download", current: 0, detail: "starting" });
     try {
       const records = await fetchCtGovCancerTrials({
         pageSize: 1000,
+        signal,
         onProgress: ({ records: downloaded, totalCount, page }) => {
           const total = totalCount ? ` of ${totalCount}` : "";
           setTrialProgress({
@@ -411,31 +483,37 @@ export default function App() {
           addStatus("info", `Downloaded ${downloaded}${total} open phase I-III interventional cancer trial records from ClinicalTrials.gov across ${page} page${page === 1 ? "" : "s"}.`);
         }
       });
+      assertNotAborted(signal);
       addStatus("success", `Downloaded ${records.length} public phase I-III interventional cancer trial records from ClinicalTrials.gov.`);
-      setBusy("Extracting trial spaces");
+      updateJobLabel(signal, "Extracting trial spaces");
       setTrialProgress({ phase: "extract", current: 0, total: records.length, detail: "warming local LLM", percent: 0 });
-      const spaces = await extractTrialSpaces(records);
+      const spaces = await extractTrialSpaces(records, signal);
+      assertNotAborted(signal);
       await saveTrialIndex(spaces);
+      assertNotAborted(signal);
       setTrialIndex(spaces);
       addStatus("success", `Extracted ${spaces.length} trial spaces from ${records.length} ClinicalTrials.gov trials.`);
     } catch (error) {
-      addStatus("error", errorMessage(error));
+      if (isAbortError(error)) addStoppedStatus("ClinicalTrials.gov refresh");
+      else addStatus("error", errorMessage(error));
     } finally {
-      setBusy(null);
+      finishJob(signal);
       setTrialProgress(null);
     }
   }
 
   async function loadEmbeddedTrialFile(file: File) {
-    setBusy("Loading embedded trial index");
+    const signal = startJob("Loading embedded trial index");
+    if (!signal) return;
     setTrialProgress({ phase: "import", current: 0, detail: file.name });
     try {
-      const records = await parseEmbeddedTrialIndexFile(file);
-      await persistEmbeddedTrialIndex(records, file.name);
+      const records = await parseEmbeddedTrialIndexFile(file, signal);
+      await persistEmbeddedTrialIndex(records, file.name, signal);
     } catch (error) {
-      addStatus("error", errorMessage(error));
+      if (isAbortError(error)) addStoppedStatus("Embedded trial import");
+      else addStatus("error", errorMessage(error));
     } finally {
-      setBusy(null);
+      finishJob(signal);
       setTrialProgress(null);
     }
   }
@@ -446,35 +524,40 @@ export default function App() {
       addStatus("warning", "Enter a URL for the embedded trial index.");
       return;
     }
-    setBusy("Loading embedded trial index");
+    const signal = startJob("Loading embedded trial index");
+    if (!signal) return;
     setTrialProgress({ phase: "import", current: 0, detail: "fetching URL" });
     try {
-      const records = await fetchEmbeddedTrialIndex(url);
-      await persistEmbeddedTrialIndex(records, url);
+      const records = await fetchEmbeddedTrialIndex(url, signal);
+      await persistEmbeddedTrialIndex(records, url, signal);
     } catch (error) {
-      addStatus("error", errorMessage(error));
+      if (isAbortError(error)) addStoppedStatus("Embedded trial import");
+      else addStatus("error", errorMessage(error));
     } finally {
-      setBusy(null);
+      finishJob(signal);
       setTrialProgress(null);
     }
   }
 
-  async function persistEmbeddedTrialIndex(records: TrialSpaceRecord[], sourceLabel: string) {
+  async function persistEmbeddedTrialIndex(records: TrialSpaceRecord[], sourceLabel: string, signal?: AbortSignal) {
+    assertNotAborted(signal);
     if (!records.length) throw new Error("Embedded trial index contains no trial spaces");
     const embeddingDim = records[0].embedding?.length ?? 0;
     setTrialProgress({ phase: "import", current: records.length, total: records.length, detail: "saving", percent: 100 });
     await saveTrialIndex(records);
+    assertNotAborted(signal);
     setTrialIndex(records);
     setMatches([]);
     addStatus("success", `Loaded ${records.length} pre-embedded trial spaces${embeddingDim ? ` (dim=${embeddingDim})` : ""} from ${sourceLabel}.`);
   }
 
-  async function extractTrialSpaces(records: TrialSpaceRecord[]): Promise<TrialSpaceRecord[]> {
+  async function extractTrialSpaces(records: TrialSpaceRecord[], signal: AbortSignal): Promise<TrialSpaceRecord[]> {
     const spaces: TrialSpaceRecord[] = [];
     let fallbackCount = 0;
     addStatus("info", "Extracting trial spaces with the local LLM. This can take a long time for a full CT.gov refresh.");
-    await warmModel(settings.llmModelId, "text-generation", settings.llmDtype);
+    await warmModel(settings.llmModelId, "text-generation", settings.llmDtype, undefined, signal);
     for (let index = 0; index < records.length; index += 1) {
+      assertNotAborted(signal);
       const record = records[index];
       setTrialProgress({
         phase: "extract",
@@ -490,8 +573,10 @@ export default function App() {
         const response = await generateText(settings.llmModelId, prompt, {
           dtype: settings.llmDtype,
           maxNewTokens: 1800,
-          contextTokens: settings.llmContextTokens
+          contextTokens: settings.llmContextTokens,
+          signal
         });
+        assertNotAborted(signal);
         const extracted = parseExtractedTrialSpaces(record, response);
         if (extracted.length) {
           spaces.push(...extracted);
@@ -500,6 +585,7 @@ export default function App() {
           spaces.push(record);
         }
       } catch (error) {
+        if (isAbortError(error)) throw error;
         fallbackCount += 1;
         spaces.push(record);
         if (fallbackCount <= 3) {
@@ -524,9 +610,10 @@ export default function App() {
   }
 
   async function cacheModels(options: { automatic?: boolean; cacheKey?: string } = {}) {
+    const signal = startJob("Caching models", { automatic: options.automatic });
+    if (!signal) return;
     const cacheKey = options.cacheKey ?? modelCacheStorageKey(settings);
     const steps = modelWarmupSteps(settings);
-    setBusy("Caching models");
     setModelCacheProgress({
       label: "Preparing model cache",
       detail: "checking required local models",
@@ -536,6 +623,7 @@ export default function App() {
     });
     try {
       for (let index = 0; index < steps.length; index += 1) {
+        assertNotAborted(signal);
         const step = steps[index];
         setModelCacheProgress({
           label: `Caching ${step.label}`,
@@ -546,7 +634,8 @@ export default function App() {
         });
         await warmModel(step.modelId, step.task, step.dtype, (progress) => {
           setModelCacheProgress(modelCacheProgressFromWarmup(step, index, steps.length, progress));
-        });
+        }, signal);
+        assertNotAborted(signal);
         setModelCacheProgress({
           label: `${step.label} ready`,
           detail: "cached locally",
@@ -555,6 +644,7 @@ export default function App() {
           percent: steppedPercent(index, 100, steps.length)
         });
       }
+      assertNotAborted(signal);
       localStorage.setItem(cacheKey, new Date().toISOString());
       setModelCacheProgress({
         label: "Model cache ready",
@@ -565,7 +655,7 @@ export default function App() {
       });
       addStatus("success", options.automatic ? "First-run model cache complete." : "Model cache warmup complete.");
     } catch (error) {
-      addStatus("warning", `Model cache warmup stopped: ${errorMessage(error)}`);
+      addStatus("warning", isAbortError(error) ? "Model cache warmup stopped." : `Model cache warmup stopped: ${errorMessage(error)}`);
       setModelCacheProgress({
         label: "Model cache stopped",
         detail: errorMessage(error),
@@ -573,7 +663,7 @@ export default function App() {
         total: steps.length
       });
     } finally {
-      setBusy(null);
+      finishJob(signal);
       window.setTimeout(() => {
         setModelCacheProgress((progress) => progress?.label === "Model cache ready" || progress?.label === "Model cache stopped" ? null : progress);
       }, 3000);
@@ -586,10 +676,12 @@ export default function App() {
       addStatus("warning", "A patient summary is required before matching.");
       return;
     }
-    setBusy("Matching trials");
+    const signal = startJob("Matching trials");
+    if (!signal) return;
     setTrialProgress(null);
     try {
-      let records = trialIndex.length ? trialIndex : await loadOrFetchTrialIndex();
+      let records = trialIndex.length ? trialIndex : await loadOrFetchTrialIndex(signal);
+      assertNotAborted(signal);
       let patientEmbedding: number[];
       try {
         setTrialProgress({ phase: "embed", current: 0, total: records.length, detail: "preparing embeddings", percent: 0 });
@@ -601,10 +693,12 @@ export default function App() {
             percent: percentComplete(done, total)
           });
           if (done === total || done % 10 === 0) addStatus("info", `Embedded ${done} of ${total} trial spaces.`);
-        });
+        }, signal);
+        assertNotAborted(signal);
         setTrialProgress({ phase: "embed", current: records.length, total: records.length, detail: "embedding patient summary", percent: 100 });
-        patientEmbedding = await embedText(settings.trialSpaceModelId, trimmedSummary, settings.classifierDtype);
+        patientEmbedding = await embedText(settings.trialSpaceModelId, trimmedSummary, settings.classifierDtype, signal);
       } catch (error) {
+        if (isAbortError(error)) throw error;
         addStatus("warning", `TrialSpace model unavailable; using local lexical fallback. ${errorMessage(error)}`);
         records = records.map((record) => ({
           ...record,
@@ -612,6 +706,7 @@ export default function App() {
         }));
         patientEmbedding = hashTextEmbedding(trimmedSummary);
       }
+      assertNotAborted(signal);
       setTrialIndex(records);
       const candidates = retrieveByEmbedding(patientEmbedding, records, settings.retrievalCount);
       const ranked = await scoreAndRankMatches({
@@ -621,22 +716,27 @@ export default function App() {
         trialCheckerModelId: settings.trialCheckerModelId,
         boilerplateCheckerModelId: settings.boilerplateCheckerModelId,
         dtype: settings.classifierDtype,
-        displayCount: settings.displayCount
+        displayCount: settings.displayCount,
+        signal
       });
-      const deepScreened = settings.runDeepScreen ? await runDeepScreen(ranked, trimmedSummary) : ranked;
+      assertNotAborted(signal);
+      const deepScreened = settings.runDeepScreen ? await runDeepScreen(ranked, trimmedSummary, signal) : ranked;
+      assertNotAborted(signal);
       setMatches(deepScreened.map((match, index) => ({ ...match, rank: index + 1 })));
       addStatus("success", `Ranked ${deepScreened.length} trial options.`);
     } catch (error) {
-      addStatus("error", errorMessage(error));
+      if (isAbortError(error)) addStoppedStatus("Trial matching");
+      else addStatus("error", errorMessage(error));
     } finally {
-      setBusy(null);
+      finishJob(signal);
       setTrialProgress(null);
     }
   }
 
-  async function runDeepScreen(ranked: MatchResult[], patientSummary: string): Promise<MatchResult[]> {
+  async function runDeepScreen(ranked: MatchResult[], patientSummary: string, signal: AbortSignal): Promise<MatchResult[]> {
     const screened: MatchResult[] = [];
     for (const match of ranked) {
+      assertNotAborted(signal);
       try {
         const trialPrompt = fillPrompt(prompts.trialDeepScreen, {
           patient_summary: patientSummary,
@@ -645,8 +745,10 @@ export default function App() {
         const trialResponse = await generateText(settings.llmModelId, trialPrompt, {
           dtype: settings.llmDtype,
           maxNewTokens: 700,
-          contextTokens: settings.llmContextTokens
+          contextTokens: settings.llmContextTokens,
+          signal
         });
+        assertNotAborted(signal);
         const boilerplatePrompt = fillPrompt(prompts.boilerplateDeepScreen, {
           patient_boilerplate: patientBoilerplate || summaryParts.patientBoilerplate,
           trial_boilerplate: match.trial.boilerplateText
@@ -654,8 +756,10 @@ export default function App() {
         const boilerplateResponse = await generateText(settings.llmModelId, boilerplatePrompt, {
           dtype: settings.llmDtype,
           maxNewTokens: 600,
-          contextTokens: settings.llmContextTokens
+          contextTokens: settings.llmContextTokens,
+          signal
         });
+        assertNotAborted(signal);
         screened.push({
           ...match,
           llmTrialCheckScore: parseFinalScore(trialResponse),
@@ -664,6 +768,7 @@ export default function App() {
           llmBoilerplateReasoning: boilerplateResponse
         });
       } catch (error) {
+        if (isAbortError(error)) throw error;
         screened.push({ ...match, warnings: [...match.warnings, `Deep screen unavailable: ${errorMessage(error)}`] });
       }
     }
@@ -711,10 +816,15 @@ export default function App() {
           </div>
         </div>
         <div className="top-actions">
+          {busy && (
+            <button className="text-button danger" disabled={stopRequested} onClick={stopActiveJob} type="button">
+              {stopRequested ? <Loader2 className="spin" size={16} /> : <CircleStop size={16} />} {stopRequested ? "Stopping" : "Stop"}
+            </button>
+          )}
           <button className="icon-button" onClick={() => setShowSettings(true)} title="Settings" type="button">
             <Settings size={18} />
           </button>
-          <button className="text-button danger" onClick={deleteLocalPatientData} type="button">
+          <button className="text-button danger" disabled={busyNow} onClick={deleteLocalPatientData} type="button">
             <Trash2 size={16} /> Clear patient
           </button>
         </div>
@@ -756,6 +866,49 @@ export default function App() {
             </div>
             {pdfProgress && <ProgressLine label={formatPdfProgress(pdfProgress)} />}
             {showInputs && patientDocument && <InputViewer document={patientDocument} />}
+          </Panel>
+
+          <Panel title="Trial index" icon={<Database size={18} />}>
+            <div className="readiness-grid trial-readiness">
+              <Readiness label="Trial spaces" value={trialIndex.length ? `${trialIndex.length}` : "not loaded"} />
+              <Readiness label="Deep screen" value={settings.runDeepScreen ? "on" : "off"} />
+            </div>
+            <div className="button-grid">
+              <button className="text-button" disabled={busyNow} onClick={prepareTrialIndex} type="button">
+                {busy === "Preparing trials" ? <Loader2 className="spin" size={16} /> : <Database size={16} />} Load index
+              </button>
+              <button className="text-button" disabled={busyNow} onClick={refreshCtGov} type="button">
+                {busy === "Downloading ClinicalTrials.gov" || busy === "Extracting trial spaces" ? <Loader2 className="spin" size={16} /> : <RefreshCcw size={16} />} CT.gov refresh
+              </button>
+            </div>
+            <div className="trial-import">
+              <label className={`text-button file-loader ${busyNow ? "disabled-control" : ""}`}>
+                <Upload size={16} /> Load embedded file
+                <input
+                  type="file"
+                  accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv"
+                  disabled={busyNow}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) void loadEmbeddedTrialFile(file);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+              <div className="url-load-row">
+                <input
+                  aria-label="Embedded trial index URL"
+                  disabled={busyNow}
+                  onChange={(event) => setEmbeddedTrialUrl(event.target.value)}
+                  placeholder="https://huggingface.co/.../resolve/main/trials.json"
+                  value={embeddedTrialUrl}
+                />
+                <button className="text-button" disabled={busyNow || !embeddedTrialUrl.trim()} onClick={loadEmbeddedTrialUrl} type="button">
+                  <Download size={16} /> Load URL
+                </button>
+              </div>
+            </div>
+            {trialProgress && <ProgressLine label={formatTrialProgress(trialProgress)} />}
           </Panel>
 
         </section>
@@ -808,22 +961,14 @@ export default function App() {
           status={status}
           busy={busy}
           webGpu={webGpu}
-          trialIndexCount={trialIndex.length}
-          trialProgress={trialProgress}
           summaryProgress={summaryProgress}
           modelCacheProgress={modelCacheProgress}
-          embeddedTrialUrl={embeddedTrialUrl}
           onClose={() => setShowSettings(false)}
           onChange={(next) => void persistSettings(next)}
           onActivePromptChange={setActivePrompt}
           onPromptChange={(key, value) => void persistPrompt(key, value)}
           onPromptReset={(key) => void restorePrompt(key)}
           onCacheModels={() => void cacheModels()}
-          onPrepareTrialIndex={() => void prepareTrialIndex()}
-          onRefreshCtGov={() => void refreshCtGov()}
-          onLoadEmbeddedTrialFile={(file) => void loadEmbeddedTrialFile(file)}
-          onEmbeddedTrialUrlChange={setEmbeddedTrialUrl}
-          onLoadEmbeddedTrialUrl={() => void loadEmbeddedTrialUrl()}
         />
       )}
     </div>
@@ -1155,22 +1300,14 @@ interface SettingsDialogProps {
   status: StatusMessage[];
   busy: string | null;
   webGpu: boolean | null;
-  trialIndexCount: number;
-  trialProgress: TrialProgress | null;
   summaryProgress: SummaryProgress | null;
   modelCacheProgress: ModelCacheProgress | null;
-  embeddedTrialUrl: string;
   onChange: (settings: ModelSettings) => void;
   onClose: () => void;
   onActivePromptChange: (key: PromptKey) => void;
   onPromptChange: (key: PromptKey, value: string) => void;
   onPromptReset: (key: PromptKey) => void;
   onCacheModels: () => void;
-  onPrepareTrialIndex: () => void;
-  onRefreshCtGov: () => void;
-  onLoadEmbeddedTrialFile: (file: File) => void;
-  onEmbeddedTrialUrlChange: (value: string) => void;
-  onLoadEmbeddedTrialUrl: () => void;
 }
 
 function SettingsDialog({
@@ -1180,26 +1317,18 @@ function SettingsDialog({
   status,
   busy,
   webGpu,
-  trialIndexCount,
-  trialProgress,
   summaryProgress,
   modelCacheProgress,
-  embeddedTrialUrl,
   onChange,
   onClose,
   onActivePromptChange,
   onPromptChange,
   onPromptReset,
-  onCacheModels,
-  onPrepareTrialIndex,
-  onRefreshCtGov,
-  onLoadEmbeddedTrialFile,
-  onEmbeddedTrialUrlChange,
-  onLoadEmbeddedTrialUrl
+  onCacheModels
 }: SettingsDialogProps) {
   const [activeTab, setActiveTab] = useState<"general" | "advanced">("general");
   const busyNow = Boolean(busy);
-  const progressLabel = trialProgress ? formatTrialProgress(trialProgress) : summaryProgress ? formatSummaryProgress(summaryProgress) : modelCacheProgress ? null : busy;
+  const progressLabel = summaryProgress ? formatSummaryProgress(summaryProgress) : modelCacheProgress ? null : busy;
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal">
@@ -1218,48 +1347,12 @@ function SettingsDialog({
         {activeTab === "general" ? (
           <div className="settings-section">
             <div className="settings-subsection">
-              <h3>Models and trials</h3>
+              <h3>Runtime</h3>
               <div className="readiness-grid">
                 <Readiness label="WebGPU" value={webGpu === null ? "checking" : webGpu ? "ready" : "unavailable"} />
-                <Readiness label="Trial spaces" value={trialIndexCount ? `${trialIndexCount}` : "not loaded"} />
+                <Readiness label="Active job" value={busy ?? "none"} />
                 <Readiness label="Deep screen" value={settings.runDeepScreen ? "on" : "off"} />
               </div>
-              <div className="button-grid">
-                <button className="text-button" disabled={busyNow} onClick={onPrepareTrialIndex} type="button">
-                  <Database size={16} /> Load index
-                </button>
-                <button className="text-button" disabled={busyNow} onClick={onRefreshCtGov} type="button">
-                  <RefreshCcw size={16} /> CT.gov refresh
-                </button>
-              </div>
-              <div className="trial-import">
-                <label className={`text-button file-loader ${busyNow ? "disabled-control" : ""}`}>
-                  <Upload size={16} /> Load embedded file
-                  <input
-                    type="file"
-                    accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv"
-                    disabled={busyNow}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) onLoadEmbeddedTrialFile(file);
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                </label>
-                <div className="url-load-row">
-                  <input
-                    aria-label="Embedded trial index URL"
-                    disabled={busyNow}
-                    onChange={(event) => onEmbeddedTrialUrlChange(event.target.value)}
-                    placeholder="https://huggingface.co/.../resolve/main/trials.json"
-                    value={embeddedTrialUrl}
-                  />
-                  <button className="text-button" disabled={busyNow || !embeddedTrialUrl.trim()} onClick={onLoadEmbeddedTrialUrl} type="button">
-                    <Download size={16} /> Load URL
-                  </button>
-                </div>
-              </div>
-              {trialProgress && <ProgressLine label={formatTrialProgress(trialProgress)} />}
             </div>
             <label>
               PDF OCR

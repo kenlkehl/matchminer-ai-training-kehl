@@ -338,6 +338,10 @@ button:disabled {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.trial-readiness {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .readiness,
 .score {
   border: 1px solid var(--line);

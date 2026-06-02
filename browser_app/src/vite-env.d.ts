@@ -34,6 +34,7 @@ interface MatchMinerRuntimeProgress {
 
 interface MatchMinerElectronApi {
   parsePdfWithLocalOcr: (request: { fileName: string; bytes: ArrayBuffer }) => Promise<MatchMinerLocalOcrResult>;
+  stopCurrentJob: () => Promise<unknown>;
   runtimeStatus: () => Promise<{
     llama: { running: boolean; port: number | null; modelPath: string | null; contextTokens: number | null };
     onnx: { workerRunning: boolean; pendingJobs: number };

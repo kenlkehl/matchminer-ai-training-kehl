@@ -1,4 +1,5 @@
 import type { TrialIndexManifest, TrialSpaceRecord } from "../types";
+import { assertNotAborted } from "../lib/abort";
 import { embedText } from "./modelRuntime";
 import { loadTrialIndex, saveTrialIndex } from "./storage";
 
@@ -17,35 +18,43 @@ interface CtGovStudy {
 const CTGOV_CANCER_QUERY = "cancer OR lymphoma OR carcinoma OR leukemia OR sarcoma OR melanoma OR myeloma OR myelodysplastic OR myeloproliferative";
 const CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS = "phase:0 1 2 3,status:not rec,studyType:int";
 
-export async function loadManifest(): Promise<TrialIndexManifest> {
-  const response = await fetch("/trial_index.manifest.json");
+export async function loadManifest(signal?: AbortSignal): Promise<TrialIndexManifest> {
+  assertNotAborted(signal);
+  const response = await fetch("/trial_index.manifest.json", { signal });
   if (!response.ok) throw new Error("Could not load trial index manifest");
+  assertNotAborted(signal);
   return response.json();
 }
 
-export async function loadOrFetchTrialIndex(): Promise<TrialSpaceRecord[]> {
+export async function loadOrFetchTrialIndex(signal?: AbortSignal): Promise<TrialSpaceRecord[]> {
+  assertNotAborted(signal);
   const cached = await loadTrialIndex();
   if (cached.length) return cached;
-  const manifest = await loadManifest();
-  const response = await fetch(manifest.indexUrl);
+  const manifest = await loadManifest(signal);
+  const response = await fetch(manifest.indexUrl, { signal });
   if (!response.ok) throw new Error(`Could not load trial index at ${manifest.indexUrl}`);
+  assertNotAborted(signal);
   const records = (await response.json()) as TrialSpaceRecord[];
+  assertNotAborted(signal);
   await saveTrialIndex(records);
   return records;
 }
 
-export async function ensureTrialEmbeddings(records: TrialSpaceRecord[], modelId: string, onProgress?: (done: number, total: number) => void): Promise<TrialSpaceRecord[]> {
+export async function ensureTrialEmbeddings(records: TrialSpaceRecord[], modelId: string, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<TrialSpaceRecord[]> {
   const updated: TrialSpaceRecord[] = [];
   for (let index = 0; index < records.length; index += 1) {
+    assertNotAborted(signal);
     const record = records[index];
     if (record.embedding?.length) {
       updated.push(record);
     } else {
-      const embedding = await embedText(modelId, record.trialSpaceText);
+      const embedding = await embedText(modelId, record.trialSpaceText, undefined, signal);
       updated.push({ ...record, embedding });
     }
+    assertNotAborted(signal);
     onProgress?.(index + 1, records.length);
   }
+  assertNotAborted(signal);
   await saveTrialIndex(updated);
   return updated;
 }
@@ -53,6 +62,7 @@ export async function ensureTrialEmbeddings(records: TrialSpaceRecord[], modelId
 export async function fetchCtGovCancerTrials(options: {
   pageSize?: number;
   maxPages?: number | null;
+  signal?: AbortSignal;
   onProgress?: (progress: { records: number; totalCount?: number; page: number }) => void;
 } = {}): Promise<TrialSpaceRecord[]> {
   const pageSize = options.pageSize ?? 1000;
@@ -62,6 +72,7 @@ export async function fetchCtGovCancerTrials(options: {
   const seenPageTokens = new Set<string>();
 
   for (let page = 0; maxPages === null || page < maxPages; page += 1) {
+    assertNotAborted(options.signal);
     const params = new URLSearchParams({
       "query.cond": CTGOV_CANCER_QUERY,
       aggFilters: CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS,
@@ -70,13 +81,16 @@ export async function fetchCtGovCancerTrials(options: {
       format: "json"
     });
     if (pageToken) params.set("pageToken", pageToken);
-    const response = await fetch(`https://clinicaltrials.gov/api/v2/studies?${params.toString()}`);
+    const response = await fetch(`https://clinicaltrials.gov/api/v2/studies?${params.toString()}`, { signal: options.signal });
     if (!response.ok) throw new Error(`ClinicalTrials.gov request failed: ${response.status}`);
+    assertNotAborted(options.signal);
     const payload = (await response.json()) as { studies?: CtGovStudy[]; nextPageToken?: string; totalCount?: number };
     for (const study of payload.studies ?? []) {
+      assertNotAborted(options.signal);
       const record = ctGovStudyToTrialSpace(study);
       if (record) records.push(record);
     }
+    assertNotAborted(options.signal);
     options.onProgress?.({ records: records.length, totalCount: payload.totalCount, page: page + 1 });
     if (!payload.nextPageToken) break;
     if (seenPageTokens.has(payload.nextPageToken)) {
