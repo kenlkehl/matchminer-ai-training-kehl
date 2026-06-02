@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""
+Pull current ClinicalTrials.gov cancer trials, extract trial spaces, and
+pre-embed those spaces for browser_app import.
+
+This is an offline/manual orchestration script. It mirrors the browser app's
+ClinicalTrials.gov denominator query, then calls:
+
+  1. 0b_create_trial_spaces.py
+  2. real_eval_code/real_time_eval/embed_trial_spaces.py --input-spaces ...
+
+Unknown CLI arguments are forwarded to 0b_create_trial_spaces.py so advanced
+vLLM flags can still be supplied without teaching this wrapper every option.
+
+Example:
+  ./pull_spacify_and_embed_ctgov \
+    --embedding-model ../models/trialspace \
+    --gpus 0,1,2,3
+
+Remote vLLM example:
+  ./pull_spacify_and_embed_ctgov \
+    --embedding-model ../models/trialspace \
+    --server_urls_file /path/to/servers.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import requests
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+CTGOV_STUDIES_URL = "https://clinicaltrials.gov/api/v2/studies"
+CTGOV_VERSION_URL = "https://clinicaltrials.gov/api/v2/version"
+CTGOV_CANCER_QUERY = (
+    "cancer OR lymphoma OR carcinoma OR leukemia OR sarcoma OR melanoma OR "
+    "myeloma OR myelodysplastic OR myeloproliferative"
+)
+CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS = "phase:0 1 2 3,status:not rec,studyType:int"
+
+
+def parse_args() -> tuple[argparse.Namespace, list[str]]:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help="Path or HF ID for the saved SentenceTransformer TrialSpace embedding model.",
+    )
+    parser.add_argument("--output-dir", default="ctgov_preembedded", help="Directory for all generated artifacts.")
+    parser.add_argument("--page-size", type=int, default=1000, help="ClinicalTrials.gov API page size.")
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Optional development limit. Omit for the full current CT.gov result set.",
+    )
+    parser.add_argument("--pull-timeout", type=float, default=60.0, help="ClinicalTrials.gov request timeout in seconds.")
+    parser.add_argument("--python", default=sys.executable, help="Python executable used for child scripts.")
+
+    parser.add_argument("--trials-json", default=None, help="Raw CT.gov studies JSON output path.")
+    parser.add_argument("--pull-metadata", default=None, help="CT.gov pull metadata JSON output path.")
+    parser.add_argument("--trials-csv", default=None, help="CSV input path for 0b_create_trial_spaces.py.")
+    parser.add_argument("--trials-with-spaces-csv", default=None, help="Per-trial spacifier output CSV path.")
+    parser.add_argument("--spaces-csv", default=None, help="Trial-space line-items CSV path.")
+    parser.add_argument("--parquet-output", default=None, help="Embedded parquet output path.")
+    parser.add_argument("--browser-json-output", default=None, help="Browser-loadable embedded JSON output path.")
+
+    parser.add_argument("--spacify-script", default=str(REPO_ROOT / "0b_create_trial_spaces.py"))
+    parser.add_argument("--spacify-work-dir", default=None, help="Shard work directory for 0b_create_trial_spaces.py.")
+    parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs for local 0b_create_trial_spaces.py mode.")
+    parser.add_argument("--gpus-per-instance", type=int, default=None)
+    parser.add_argument("--server_urls", "--server-urls", dest="server_urls", default=None)
+    parser.add_argument("--server_urls_file", "--server-urls-file", dest="server_urls_file", default=None)
+    parser.add_argument("--spacify-model", default=None, help="Model passed to 0b_create_trial_spaces.py --model.")
+    parser.add_argument("--spacify-download-dir", default=None, help="Value for 0b_create_trial_spaces.py --download-dir.")
+    parser.add_argument("--spacify-batch-size", type=int, default=None, help="Value for 0b_create_trial_spaces.py --batch-size.")
+    parser.add_argument("--spacify-max-model-len", type=int, default=None, help="Value for 0b_create_trial_spaces.py --max-model-len.")
+    parser.add_argument("--spacify-max-tokens", type=int, default=None, help="Value for 0b_create_trial_spaces.py --max-tokens.")
+    parser.add_argument("--spacify-temperature", type=float, default=None, help="Value for 0b_create_trial_spaces.py --temperature.")
+    parser.add_argument("--reasoning-parser", default=None, help="Value for 0b_create_trial_spaces.py --reasoning-parser.")
+
+    parser.add_argument("--embed-script", default=str(REPO_ROOT / "real_eval_code" / "real_time_eval" / "embed_trial_spaces.py"))
+    parser.add_argument("--embedding-gpu", default="0", help="GPU ID for embedding stage.")
+    parser.add_argument("--embedding-batch-size", type=int, default=12)
+    parser.add_argument("--embedding-max-seq-length", type=int, default=2500)
+
+    parser.add_argument("--skip-pull", action="store_true", help="Reuse --trials-csv instead of querying CT.gov.")
+    parser.add_argument("--skip-spacify", action="store_true", help="Reuse --spaces-csv instead of running 0b_create_trial_spaces.py.")
+    parser.add_argument("--skip-embed", action="store_true", help="Stop after producing trial-space line items.")
+    parser.add_argument("--dry-run", action="store_true", help="Print child commands without running them.")
+
+    return parser.parse_known_args()
+
+
+def main() -> None:
+    args, spacify_extra_args = parse_args()
+    if not args.skip_embed and not args.embedding_model:
+        raise SystemExit("--embedding-model is required unless --skip-embed is set.")
+    paths = resolve_paths(args)
+
+    if args.dry_run:
+        print("Dry run: no network pull, files, or child scripts will run.")
+
+    if not args.skip_pull:
+        if args.dry_run:
+            print(
+                "Would query ClinicalTrials.gov with "
+                f"query.cond={CTGOV_CANCER_QUERY!r}, "
+                f"aggFilters={CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS!r}, "
+                f"pageSize={args.page_size}, maxPages={args.max_pages}"
+            )
+        else:
+            studies, version, total_count = fetch_ctgov_studies(args.page_size, args.max_pages, args.pull_timeout)
+            write_json(paths["trials_json"], studies)
+            trials = studies_to_trials(studies)
+            paths["trials_csv"].parent.mkdir(parents=True, exist_ok=True)
+            trials.to_csv(paths["trials_csv"], index=False)
+            write_pull_metadata(paths["pull_metadata"], args, version, total_count, len(studies), len(trials))
+            print(f"Wrote {len(trials)} unique trial rows to {paths['trials_csv']}")
+    elif not args.skip_spacify and not paths["trials_csv"].exists():
+        raise SystemExit(f"--skip-pull was set, but trials CSV does not exist: {paths['trials_csv']}")
+
+    if not args.skip_spacify:
+        ensure_spacify_backend(args)
+        run_command(build_spacify_command(args, paths, spacify_extra_args), args.dry_run)
+    elif not args.skip_embed and not paths["spaces_csv"].exists():
+        raise SystemExit(f"--skip-spacify was set, but spaces CSV does not exist: {paths['spaces_csv']}")
+
+    if not args.skip_embed:
+        run_command(build_embed_command(args, paths), args.dry_run)
+
+    print("\nOutputs:")
+    print(f"  CT.gov trials CSV: {paths['trials_csv']}")
+    print(f"  Trial-space CSV:   {paths['spaces_csv']}")
+    if not args.skip_embed:
+        print(f"  Embedded parquet:  {paths['parquet_output']}")
+        print(f"  Browser JSON:      {paths['browser_json_output']}")
+
+
+def resolve_paths(args: argparse.Namespace) -> dict[str, Path]:
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    return {
+        "output_dir": output_dir,
+        "trials_json": resolve_output(args.trials_json, output_dir / "ctgov_current_cancer_trials.raw.json"),
+        "pull_metadata": resolve_output(args.pull_metadata, output_dir / "ctgov_pull_metadata.json"),
+        "trials_csv": resolve_output(args.trials_csv, output_dir / "ctgov_current_cancer_trials.csv"),
+        "trials_with_spaces_csv": resolve_output(args.trials_with_spaces_csv, output_dir / "trials_with_spaces.csv"),
+        "spaces_csv": resolve_output(args.spaces_csv, output_dir / "trial_space_lineitems.csv"),
+        "parquet_output": resolve_output(args.parquet_output, output_dir / "trial_space_embeddings.parquet"),
+        "browser_json_output": resolve_output(args.browser_json_output, output_dir / "trial_space_embeddings.browser.json"),
+        "spacify_work_dir": resolve_output(args.spacify_work_dir, output_dir / "trial_space_shards"),
+    }
+
+
+def resolve_output(value: str | None, default: Path) -> Path:
+    return Path(value).expanduser().resolve() if value else default
+
+
+def fetch_ctgov_studies(page_size: int, max_pages: int | None, timeout: float) -> tuple[list[dict[str, Any]], dict[str, Any], int | None]:
+    session = requests.Session()
+    version = fetch_ctgov_version(session, timeout)
+    studies: list[dict[str, Any]] = []
+    total_count: int | None = None
+    page_token = ""
+    seen_tokens: set[str] = set()
+
+    page = 0
+    while max_pages is None or page < max_pages:
+        params = {
+            "query.cond": CTGOV_CANCER_QUERY,
+            "aggFilters": CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS,
+            "countTotal": "true",
+            "pageSize": str(page_size),
+            "format": "json",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+
+        response = session.get(CTGOV_STUDIES_URL, params=params, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        page_studies = payload.get("studies") or []
+        studies.extend(page_studies)
+        total_count = payload.get("totalCount", total_count)
+        page += 1
+        total_label = f"/{total_count}" if total_count is not None else ""
+        print(f"Fetched CT.gov page {page}: +{len(page_studies)} studies ({len(studies)}{total_label})")
+
+        next_token = payload.get("nextPageToken")
+        if not next_token:
+            break
+        if next_token in seen_tokens:
+            raise RuntimeError("ClinicalTrials.gov returned a repeated page token")
+        seen_tokens.add(next_token)
+        page_token = next_token
+
+    return studies, version, total_count
+
+
+def fetch_ctgov_version(session: requests.Session, timeout: float) -> dict[str, Any]:
+    try:
+        response = session.get(CTGOV_VERSION_URL, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        print(f"Warning: could not fetch CT.gov version metadata: {exc}")
+        return {}
+
+
+def studies_to_trials(studies: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = [row for study in studies if (row := study_to_trial_row(study))]
+    if not rows:
+        raise ValueError("No CT.gov studies had usable NCT IDs")
+    trials = pd.DataFrame(rows)
+    return trials.drop_duplicates(subset=["nct_id"], keep="first").reset_index(drop=True)
+
+
+def study_to_trial_row(study: dict[str, Any]) -> dict[str, Any] | None:
+    protocol = study.get("protocolSection") or {}
+    identification = protocol.get("identificationModule") or {}
+    description = protocol.get("descriptionModule") or {}
+    eligibility = protocol.get("eligibilityModule") or {}
+    status = protocol.get("statusModule") or {}
+    conditions_module = protocol.get("conditionsModule") or {}
+    design = protocol.get("designModule") or {}
+
+    nct_id = clean_text(identification.get("nctId"))
+    if not nct_id:
+        return None
+
+    title = clean_text(identification.get("briefTitle") or identification.get("officialTitle") or nct_id)
+    brief_summary = clean_text(description.get("briefSummary"))
+    detailed_description = clean_text(description.get("detailedDescription"))
+    eligibility_criteria = clean_text(eligibility.get("eligibilityCriteria"))
+    overall_status = clean_text(status.get("overallStatus"))
+    conditions = [clean_text(item) for item in conditions_module.get("conditions", []) if clean_text(item)]
+    phases = [clean_text(item) for item in design.get("phases", []) if clean_text(item)]
+    minimum_age = clean_text(eligibility.get("minimumAge"))
+    maximum_age = clean_text(eligibility.get("maximumAge"))
+    sex = clean_text(eligibility.get("sex"))
+
+    trial_text = "\n\n".join(
+        part
+        for part in [
+            title,
+            f"Status: {overall_status}" if overall_status else "",
+            f"Phase: {', '.join(phases)}" if phases else "",
+            f"Conditions: {', '.join(conditions)}" if conditions else "",
+            f"Age range: {minimum_age or 'NA'} to {maximum_age or 'NA'}",
+            f"Sex: {sex}" if sex else "",
+            f"Brief summary:\n{brief_summary}" if brief_summary else "",
+            f"Detailed description:\n{detailed_description}" if detailed_description else "",
+            f"Eligibility criteria:\n{eligibility_criteria}" if eligibility_criteria else "",
+        ]
+        if part
+    )
+
+    return {
+        "nct_id": nct_id,
+        "title": title,
+        "brief_summary": brief_summary,
+        "detailed_description": detailed_description,
+        "eligibility_criteria": eligibility_criteria,
+        "overall_status": overall_status,
+        "conditions": json.dumps(conditions),
+        "phases": json.dumps(phases),
+        "minimum_age": minimum_age,
+        "maximum_age": maximum_age,
+        "sex": sex,
+        "trial_text": trial_text,
+    }
+
+
+def clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"Wrote {path}")
+
+
+def write_pull_metadata(
+    path: Path,
+    args: argparse.Namespace,
+    version: dict[str, Any],
+    total_count: int | None,
+    pulled_studies: int,
+    trial_rows: int,
+) -> None:
+    metadata = {
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "source": CTGOV_STUDIES_URL,
+        "queryCond": CTGOV_CANCER_QUERY,
+        "aggFilters": CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS,
+        "pageSize": args.page_size,
+        "maxPages": args.max_pages,
+        "ctgovApiVersion": version.get("apiVersion"),
+        "ctgovDataTimestamp": version.get("dataTimestamp"),
+        "totalCount": total_count,
+        "pulledStudies": pulled_studies,
+        "trialRows": trial_rows,
+    }
+    write_json(path, metadata)
+
+
+def ensure_spacify_backend(args: argparse.Namespace) -> None:
+    if args.gpus or args.server_urls or args.server_urls_file:
+        return
+    raise SystemExit(
+        "0b_create_trial_spaces.py needs a vLLM backend. Pass --gpus for local mode, "
+        "or --server_urls / --server_urls_file for remote mode."
+    )
+
+
+def build_spacify_command(args: argparse.Namespace, paths: dict[str, Path], extra_args: list[str]) -> list[str]:
+    cmd = [
+        args.python,
+        str(Path(args.spacify_script).expanduser().resolve()),
+        "--input",
+        str(paths["trials_csv"]),
+        "--output-trials",
+        str(paths["trials_with_spaces_csv"]),
+        "--output-spaces",
+        str(paths["spaces_csv"]),
+        "--work-dir",
+        str(paths["spacify_work_dir"]),
+    ]
+    append_optional(cmd, "--gpus", args.gpus)
+    append_optional(cmd, "--gpus-per-instance", args.gpus_per_instance)
+    append_optional(cmd, "--server_urls", args.server_urls)
+    append_optional(cmd, "--server_urls_file", args.server_urls_file)
+    append_optional(cmd, "--model", args.spacify_model)
+    append_optional(cmd, "--download-dir", args.spacify_download_dir)
+    append_optional(cmd, "--batch-size", args.spacify_batch_size)
+    append_optional(cmd, "--max-model-len", args.spacify_max_model_len)
+    append_optional(cmd, "--max-tokens", args.spacify_max_tokens)
+    append_optional(cmd, "--temperature", args.spacify_temperature)
+    append_optional(cmd, "--reasoning-parser", args.reasoning_parser)
+    cmd.extend(extra_args)
+    return cmd
+
+
+def build_embed_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]:
+    return [
+        args.python,
+        str(Path(args.embed_script).expanduser().resolve()),
+        args.embedding_model,
+        "--input-spaces",
+        str(paths["spaces_csv"]),
+        "--output",
+        str(paths["parquet_output"]),
+        "--browser-json-output",
+        str(paths["browser_json_output"]),
+        "--gpu",
+        str(args.embedding_gpu),
+        "--batch-size",
+        str(args.embedding_batch_size),
+        "--max-seq-length",
+        str(args.embedding_max_seq_length),
+    ]
+
+
+def append_optional(cmd: list[str], flag: str, value: Any) -> None:
+    if value is not None:
+        cmd.extend([flag, str(value)])
+
+
+def run_command(cmd: list[str], dry_run: bool) -> None:
+    print("\n$ " + shlex.join(cmd))
+    if dry_run:
+        return
+    subprocess.run(cmd, cwd=REPO_ROOT, check=True)
+
+
+if __name__ == "__main__":
+    main()
