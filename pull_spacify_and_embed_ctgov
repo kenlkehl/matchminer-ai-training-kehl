@@ -40,6 +40,7 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = REPO_ROOT.parent / "data" / "no_phi" / "ctgov_preembeded"
+DEFAULT_SPACIFICATION_MODEL = "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
 CTGOV_STUDIES_URL = "https://clinicaltrials.gov/api/v2/studies"
 CTGOV_VERSION_URL = "https://clinicaltrials.gov/api/v2/version"
 CTGOV_CANCER_QUERY = (
@@ -81,10 +82,23 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--spacify-script", default=str(REPO_ROOT / "0b_create_trial_spaces.py"))
     parser.add_argument("--spacify-work-dir", default=None, help="Shard work directory for 0b_create_trial_spaces.py.")
     parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs for local 0b_create_trial_spaces.py mode.")
-    parser.add_argument("--gpus-per-instance", type=int, default=None)
+    parser.add_argument(
+        "--gpus-per-instance",
+        "--gpus-per-server",
+        dest="gpus_per_instance",
+        type=int,
+        default=None,
+        help="Number of GPUs assigned to each local vLLM worker/server for spacification.",
+    )
     parser.add_argument("--server_urls", "--server-urls", dest="server_urls", default=None)
     parser.add_argument("--server_urls_file", "--server-urls-file", dest="server_urls_file", default=None)
-    parser.add_argument("--spacify-model", default=None, help="Model passed to 0b_create_trial_spaces.py --model.")
+    parser.add_argument(
+        "--spacify-model",
+        "--spacification-model",
+        dest="spacify_model",
+        default=DEFAULT_SPACIFICATION_MODEL,
+        help="Model passed to 0b_create_trial_spaces.py --model.",
+    )
     parser.add_argument("--spacify-download-dir", default=None, help="Value for 0b_create_trial_spaces.py --download-dir.")
     parser.add_argument("--spacify-batch-size", type=int, default=None, help="Value for 0b_create_trial_spaces.py --batch-size.")
     parser.add_argument("--spacify-max-model-len", type=int, default=None, help="Value for 0b_create_trial_spaces.py --max-model-len.")
