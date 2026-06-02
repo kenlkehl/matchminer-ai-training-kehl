@@ -22,7 +22,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   llmDtype: "q4",
   classifierDtype: "auto",
   llmContextTokens: DEFAULT_LFM_CONTEXT_TOKENS,
-  maxSummaryTokens: 1600,
+  maxSummaryTokens: 15000,
   summaryChunkTokens: 10000,
   summaryChunkOverlapTokens: 250,
   retrievalCount: 30,

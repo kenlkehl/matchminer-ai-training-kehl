@@ -35,7 +35,7 @@ const DEFAULT_BROWSER_LLM_CONTEXT_TOKENS = DEFAULT_LFM_CONTEXT_TOKENS;
 const MIN_BROWSER_LLM_CONTEXT_TOKENS = 4096;
 const BROWSER_LLM_CONTEXT_MARGIN_TOKENS = 128;
 const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 16;
-const THINKING_SUMMARY_MAX_TOKENS = 6000;
+const THINKING_SUMMARY_MAX_TOKENS = DEFAULT_MODEL_SETTINGS.maxSummaryTokens;
 const LEGACY_SUMMARY_MAX_TOKENS = 1600;
 
 interface TrialProgress {
@@ -1276,7 +1276,7 @@ function SettingsDialog({
               </label>
               <label>
                 Summary tokens
-                <input type="number" min={100} max={12000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
+                <input type="number" min={100} max={15000} value={settings.maxSummaryTokens} onChange={(event) => onChange({ ...settings, maxSummaryTokens: Number(event.target.value) })} />
               </label>
               <label>
                 Summary target chunk tokens

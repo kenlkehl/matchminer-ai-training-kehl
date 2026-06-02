@@ -12,6 +12,7 @@ import { getDefaultPromptValues } from "../data/defaultPrompts";
 
 const LEGACY_LFM_CONTEXT_TOKENS = 32768;
 const LEGACY_ELECTRON_LFM_CONTEXT_TOKENS = 65536;
+const LEGACY_SUMMARY_MAX_TOKENS = 1600;
 const LEGACY_SUMMARY_CHUNK_TOKENS = 24000;
 
 interface PromptRow {
@@ -81,6 +82,10 @@ export async function loadModelSettings(): Promise<ModelSettings> {
   }
   if (stored.summaryChunkTokens === LEGACY_SUMMARY_CHUNK_TOKENS) {
     settings.summaryChunkTokens = DEFAULT_MODEL_SETTINGS.summaryChunkTokens;
+    changed = true;
+  }
+  if (stored.maxSummaryTokens === LEGACY_SUMMARY_MAX_TOKENS) {
+    settings.maxSummaryTokens = DEFAULT_MODEL_SETTINGS.maxSummaryTokens;
     changed = true;
   }
   if (row && changed) {
