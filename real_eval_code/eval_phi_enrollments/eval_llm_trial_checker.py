@@ -27,9 +27,13 @@ import pandas as pd
 import numpy as np
 from eval_utils import (
     eval_model,
-    average_precision_at_k,
+    bootstrap_metric_ci,
+    binary_auroc_score,
+    calculate_map_at_k,
+    format_metric_with_ci,
     generate_ranking_report,
-    load_and_combine_csv_files
+    load_and_combine_csv_files,
+    positive_rate_metric
 )
 from sklearn.metrics import roc_auc_score
 
@@ -137,7 +141,10 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
     print("\n--- Classification Metrics ---")
     gold_binary = (gold.eligibility_result > 0).astype(float)
     auc = roc_auc_score(gold_binary, predictions.values)
-    print(f"AUC: {auc:.4f}")
+    auc_ci = bootstrap_metric_ci(
+        [gold_binary.values, predictions.values], binary_auroc_score
+    )
+    print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     # Generate classification PDF report
     pdf_path = output_dir / "llm_trial_checker_patient_centric_classification.pdf"
@@ -160,15 +167,17 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
     print(f"Mean results per patient: {pruned_gold.groupby('patient_summary').size().mean():.1f}")
     print(f"Unique patients: {pruned_gold.patient_summary.nunique()}")
     print(f"Unique trial spaces: {pruned_gold.this_space.nunique()}")
-    print(f"Positive rate after filtering: {pruned_gold.eligibility_result.mean():.4f}")
+    positive_rate = pruned_gold.eligibility_result.mean()
+    positive_rate_ci = bootstrap_metric_ci(
+        [pruned_gold.eligibility_result.values], positive_rate_metric
+    )
+    print(f"Positive rate after filtering: {format_metric_with_ci(positive_rate, positive_rate_ci)}")
 
     # Calculate MAP@K on filtered set
-    temp = pruned_gold.groupby('patient_summary').head(k)
-    ap_scores = pruned_gold.groupby('patient_summary').eligibility_result.apply(
-        lambda x: average_precision_at_k(x.values)
+    map_k, ranking_stats = calculate_map_at_k(
+        pruned_gold, 'patient_summary', 'eligibility_result', k
     )
-    map_k = ap_scores.mean()
-    print(f"MAP@{k} (after LLM check): {map_k:.4f}")
+    print(f"MAP@{k} (after LLM check): {format_metric_with_ci(map_k, ranking_stats.get('map_at_k_ci'))}")
 
     # Generate ranking PDF report
     pdf_path = output_dir / "llm_trial_checker_patient_centric_ranking.pdf"
@@ -244,7 +253,10 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
     print("\n--- Classification Metrics ---")
     gold_binary = (gold.eligibility_result > 0).astype(float)
     auc = roc_auc_score(gold_binary, predictions.values)
-    print(f"AUC: {auc:.4f}")
+    auc_ci = bootstrap_metric_ci(
+        [gold_binary.values, predictions.values], binary_auroc_score
+    )
+    print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     pdf_path = output_dir / "llm_trial_checker_trial_centric_classification.pdf"
     eval_model(
@@ -265,14 +277,17 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
     print(f"Mean results per trial: {pruned_gold.groupby('this_space').size().mean():.1f}")
     print(f"Unique patients: {pruned_gold.patient_summary.nunique()}")
     print(f"Unique trial spaces: {pruned_gold.this_space.nunique()}")
-    print(f"Positive rate after filtering: {pruned_gold.eligibility_result.mean():.4f}")
+    positive_rate = pruned_gold.eligibility_result.mean()
+    positive_rate_ci = bootstrap_metric_ci(
+        [pruned_gold.eligibility_result.values], positive_rate_metric
+    )
+    print(f"Positive rate after filtering: {format_metric_with_ci(positive_rate, positive_rate_ci)}")
 
     # For trial-centric, group by trial space
-    ap_scores = pruned_gold.groupby('this_space').eligibility_result.apply(
-        lambda x: average_precision_at_k(x.values)
+    map_k, ranking_stats = calculate_map_at_k(
+        pruned_gold, 'this_space', 'eligibility_result', k
     )
-    map_k = ap_scores.mean()
-    print(f"MAP@{k} (after LLM check): {map_k:.4f}")
+    print(f"MAP@{k} (after LLM check): {format_metric_with_ci(map_k, ranking_stats.get('map_at_k_ci'))}")
 
     pdf_path = output_dir / "llm_trial_checker_trial_centric_ranking.pdf"
     generate_ranking_report(

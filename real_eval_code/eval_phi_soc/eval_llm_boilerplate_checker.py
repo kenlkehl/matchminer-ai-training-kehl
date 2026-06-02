@@ -17,6 +17,9 @@ import pandas as pd
 import numpy as np
 from eval_utils import (
     eval_model,
+    bootstrap_metric_ci,
+    binary_auroc_score,
+    format_metric_with_ci,
     load_and_combine_csv_files
 )
 from sklearn.metrics import roc_auc_score
@@ -113,7 +116,10 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
 
     print("\n--- Classification Metrics ---")
     auc = roc_auc_score(gold[label_col], predictions.values)
-    print(f"AUC: {auc:.4f}")
+    auc_ci = bootstrap_metric_ci(
+        [gold[label_col].values, predictions.values], binary_auroc_score
+    )
+    print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     pdf_path = output_dir / "llm_boilerplate_checker_patient_centric_classification_soc.pdf"
     eval_model(
@@ -189,7 +195,10 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
 
     print("\n--- Classification Metrics ---")
     auc = roc_auc_score(gold[label_col], predictions.values)
-    print(f"AUC: {auc:.4f}")
+    auc_ci = bootstrap_metric_ci(
+        [gold[label_col].values, predictions.values], binary_auroc_score
+    )
+    print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     pdf_path = output_dir / "llm_boilerplate_checker_trial_centric_classification_soc.pdf"
     eval_model(

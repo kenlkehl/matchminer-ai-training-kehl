@@ -17,8 +17,14 @@ import numpy as np
 from eval_utils import (
     eval_model,
     average_precision_at_k,
-    generate_ranking_report,
-    load_and_combine_csv_files
+    bootstrap_mean_ci,
+    bootstrap_metric_ci,
+    binary_auroc_score,
+    format_metric_with_ci,
+    mae_metric,
+    pearson_metric,
+    positive_rate_metric,
+    spearman_metric
 )
 from sklearn.metrics import roc_auc_score, cohen_kappa_score
 from scipy.stats import spearmanr, pearsonr
@@ -146,6 +152,8 @@ def _compute_scenario_metrics(df: pd.DataFrame, group_col: str,
             'total_samples': 0, 'median_group_size': 0.0,
             'mean_group_size': 0.0, 'ap_scores': pd.Series(dtype=float),
             'mean_gold_score': 0.0, 'ndcg_at_k': 0.0,
+            'map_at_k_ci': None, 'positive_rate_ci': None,
+            'mean_gold_score_ci': None, 'ndcg_at_k_ci': None,
         }
     ap_scores = top_k.groupby(group_col)[label_col].apply(
         lambda x: average_precision_at_k(x.values)
@@ -155,16 +163,27 @@ def _compute_scenario_metrics(df: pd.DataFrame, group_col: str,
     ndcg_scores = top_k.groupby(group_col)['eligibility_result'].apply(
         lambda x: _ndcg_at_k(x.values)
     )
+    map_at_k = ap_scores.mean()
+    positive_rate = top_k[label_col].mean()
+    ndcg_at_k = ndcg_scores.mean()
     return {
-        'map_at_k': ap_scores.mean(),
-        'positive_rate': top_k[label_col].mean(),
+        'map_at_k': map_at_k,
+        'map_at_k_ci': bootstrap_mean_ci(ap_scores.values),
+        'positive_rate': positive_rate,
+        'positive_rate_ci': bootstrap_metric_ci(
+            [top_k[label_col].values], positive_rate_metric
+        ),
         'num_groups': len(ap_scores),
         'total_samples': len(top_k),
         'median_group_size': group_sizes.median(),
         'mean_group_size': group_sizes.mean(),
         'ap_scores': ap_scores,
         'mean_gold_score': mean_gold,
-        'ndcg_at_k': ndcg_scores.mean(),
+        'mean_gold_score_ci': bootstrap_metric_ci(
+            [top_k['eligibility_result'].values], lambda values: float(np.mean(values))
+        ),
+        'ndcg_at_k': ndcg_at_k,
+        'ndcg_at_k_ci': bootstrap_mean_ci(ndcg_scores.values),
     }
 
 
@@ -180,7 +199,10 @@ def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_di
     gold_binary = (validation_set.eligibility_result > 0).astype(float)
 
     auc = roc_auc_score(gold_binary, validation_set.prediction_score)
-    print(f"AUC: {auc:.4f}")
+    auc_ci = bootstrap_metric_ci(
+        [gold_binary.values, validation_set.prediction_score.values], binary_auroc_score
+    )
+    print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     gold_scores = validation_set.eligibility_result.values
 
@@ -198,7 +220,11 @@ def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_di
             validation_set.eligibility_result == 0.0, 'NEGATIVE', 'POSITIVE'
         )
         kappa = cohen_kappa_score(actual_labels, validation_set.prediction_label.values)
-        print(f"Cohen's Kappa: {kappa:.4f}")
+        kappa_ci = bootstrap_metric_ci(
+            [actual_labels, validation_set.prediction_label.values],
+            lambda y_true, y_pred: cohen_kappa_score(y_true, y_pred)
+        )
+        print(f"Cohen's Kappa: {format_metric_with_ci(kappa, kappa_ci)}")
 
         print("\nCrosstab (actual vs predicted):")
         print(pd.crosstab(
@@ -212,9 +238,12 @@ def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_di
     r, p_r = pearsonr(gold_scores, pred_scores)
     rho, p_rho = spearmanr(gold_scores, pred_scores)
     mae = np.mean(np.abs(gold_scores - pred_scores))
-    print(f"Pearson r: {r:.4f} (p={p_r:.4e})")
-    print(f"Spearman rho: {rho:.4f} (p={p_rho:.4e})")
-    print(f"MAE: {mae:.4f}")
+    r_ci = bootstrap_metric_ci([gold_scores, pred_scores], pearson_metric)
+    rho_ci = bootstrap_metric_ci([gold_scores, pred_scores], spearman_metric)
+    mae_ci = bootstrap_metric_ci([gold_scores, pred_scores], mae_metric)
+    print(f"Pearson r: {format_metric_with_ci(r, r_ci)} (p={p_r:.4e})")
+    print(f"Spearman rho: {format_metric_with_ci(rho, rho_ci)} (p={p_rho:.4e})")
+    print(f"MAE: {format_metric_with_ci(mae, mae_ci)}")
 
     # Generate regression metrics PDF
     import matplotlib
@@ -233,9 +262,9 @@ SOC Trial Checker {mode_label.replace('_', ' ').title()} Regression Metrics
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {'=' * 50}
 
-Pearson r:    {r:.4f}  (p = {p_r:.4e})
-Spearman rho: {rho:.4f}  (p = {p_rho:.4e})
-MAE:          {mae:.4f}
+Pearson r:    {format_metric_with_ci(r, r_ci)}  (p = {p_r:.4e})
+Spearman rho: {format_metric_with_ci(rho, rho_ci)}  (p = {p_rho:.4e})
+MAE:          {format_metric_with_ci(mae, mae_ci)}
 
 Gold score range:      [{gold_scores.min():.2f}, {gold_scores.max():.2f}]
 Predicted score range: [{pred_scores.min():.2f}, {pred_scores.max():.2f}]
@@ -306,11 +335,13 @@ N samples:             {len(gold_scores)}
 
     kstr = f'MAP@{k}'
     nstr = f'NDCG@{k}'
-    print(f"\n{'Scenario':<38} {kstr:<10} {nstr:<10} {'PosRate':<10} {'MeanGold':<10} {'Groups':<8} {'Samples':<10} {'MedSz':<8} {'MeanSz':<8}")
-    print("-" * 112)
+    print(f"\n{'Scenario':<38} {kstr:<34} {nstr:<34} {'PosRate':<34} {'MeanGold':<34} {'Groups':<8} {'Samples':<10} {'MedSz':<8} {'MeanSz':<8}")
+    print("-" * 220)
     for name, stats in scenarios:
-        print(f"{name:<38} {stats['map_at_k']:<10.4f} {stats['ndcg_at_k']:<10.4f} {stats['positive_rate']:<10.4f} "
-              f"{stats['mean_gold_score']:<10.4f} "
+        print(f"{name:<38} {format_metric_with_ci(stats['map_at_k'], stats.get('map_at_k_ci')):<34} "
+              f"{format_metric_with_ci(stats['ndcg_at_k'], stats.get('ndcg_at_k_ci')):<34} "
+              f"{format_metric_with_ci(stats['positive_rate'], stats.get('positive_rate_ci')):<34} "
+              f"{format_metric_with_ci(stats['mean_gold_score'], stats.get('mean_gold_score_ci')):<34} "
               f"{stats['num_groups']:<8} {stats['total_samples']:<10} "
               f"{stats['median_group_size']:<8.1f} {stats['mean_group_size']:<8.1f}")
 
@@ -328,21 +359,23 @@ K = {k}
 {'=' * 100}
 
 Binary Metrics (eligibility > 0 = positive):
-{'Scenario':<42} {kstr:<9} {'PosRate':<9} {'Groups':<8} {'Samples':<9} {'MedSz':<8} {'MeanSz':<8}
-{'-' * 93}
+{'Scenario':<42} {kstr:<34} {'PosRate':<34} {'Groups':<8} {'Samples':<9} {'MedSz':<8} {'MeanSz':<8}
+{'-' * 140}
 """
         for name, stats in scenarios:
-            summary += (f"{name:<42} {stats['map_at_k']:<9.4f} {stats['positive_rate']:<9.4f} "
+            summary += (f"{name:<42} {format_metric_with_ci(stats['map_at_k'], stats.get('map_at_k_ci')):<34} "
+                        f"{format_metric_with_ci(stats['positive_rate'], stats.get('positive_rate_ci')):<34} "
                         f"{stats['num_groups']:<8} {stats['total_samples']:<9} "
                         f"{stats['median_group_size']:<8.1f} {stats['mean_group_size']:<8.1f}\n")
 
         summary += f"""
 Graded Relevance Metrics (using continuous eligibility scores 0-5):
-{'Scenario':<42} {nstr:<10} {'MeanGold':<10}
-{'-' * 62}
+{'Scenario':<42} {nstr:<34} {'MeanGold':<34}
+{'-' * 110}
 """
         for name, stats in scenarios:
-            summary += f"{name:<42} {stats['ndcg_at_k']:<10.4f} {stats['mean_gold_score']:<10.4f}\n"
+            summary += (f"{name:<42} {format_metric_with_ci(stats['ndcg_at_k'], stats.get('ndcg_at_k_ci')):<34} "
+                        f"{format_metric_with_ci(stats['mean_gold_score'], stats.get('mean_gold_score_ci')):<34}\n")
 
         ax.text(0.05, 0.95, summary, transform=ax.transAxes,
                 fontsize=10, verticalalignment='top', fontfamily='monospace')
@@ -356,7 +389,7 @@ Graded Relevance Metrics (using continuous eligibility scores 0-5):
             ap = stats['ap_scores']
             if len(ap) > 0:
                 ax.hist(ap, bins=20, alpha=0.4, color=color, edgecolor=color,
-                        label=f"{name} (MAP@{k}={stats['map_at_k']:.4f})")
+                        label=f"{name} (MAP@{k}={format_metric_with_ci(stats['map_at_k'], stats.get('map_at_k_ci'))})")
         ax.set_xlabel('Average Precision')
         ax.set_ylabel('Frequency')
         ax.set_title(f'{title_base} AP@{k} Distribution by Scenario')
@@ -372,7 +405,7 @@ Graded Relevance Metrics (using continuous eligibility scores 0-5):
             if len(ap) > 0:
                 axes[ax_i].hist(ap, bins=20, alpha=0.7, color=color, edgecolor='black')
                 axes[ax_i].axvline(stats['map_at_k'], color='r', linestyle='--',
-                                   label=f"MAP@{k}={stats['map_at_k']:.4f}")
+                                   label=f"MAP@{k}={format_metric_with_ci(stats['map_at_k'], stats.get('map_at_k_ci'))}")
             axes[ax_i].set_xlabel('Average Precision')
             if ax_i == 0:
                 axes[ax_i].set_ylabel('Frequency')

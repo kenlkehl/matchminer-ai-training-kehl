@@ -84,11 +84,24 @@ def eval_model(predicted, actual, graph=False):
     import matplotlib.pyplot as plt
     import matplotlib.lines as mlines
     import matplotlib.transforms as mtransforms
+    from eval_utils import (
+        average_precision_metric,
+        best_f1_metric,
+        binary_auroc_score,
+        bootstrap_metric_ci,
+        format_metric_with_ci,
+        positive_rate_metric,
+    )
     
+    predicted = np.asarray(predicted)
+    actual = np.asarray(actual)
     outcome_counts = np.unique(actual, return_counts=True)[1]
     try:
         prob_outcome = outcome_counts[1] / (outcome_counts[0] + outcome_counts[1])
-        print("AUC " + str(roc_auc_score(actual, predicted)))
+        auc_value = roc_auc_score(actual, predicted)
+        auc_ci = bootstrap_metric_ci([actual, predicted], binary_auroc_score)
+        prob_outcome_ci = bootstrap_metric_ci([actual], positive_rate_metric)
+        print("AUC " + format_metric_with_ci(auc_value, auc_ci))
 
 
         # calculate the fpr and tpr for all thresholds of the classification
@@ -97,19 +110,22 @@ def eval_model(predicted, actual, graph=False):
 
         from sklearn.metrics import average_precision_score
         average_precision = average_precision_score(actual, predicted)
+        average_precision_ci = bootstrap_metric_ci(
+            [actual, predicted], average_precision_metric
+        )
 
-        print('Outcome probability: ' + str(prob_outcome))
+        print('Outcome probability: ' + format_metric_with_ci(prob_outcome, prob_outcome_ci))
 
 
-        print('Average precision score: {0:0.2f}'.format(
-            average_precision))
+        print('Average precision score: ' + format_metric_with_ci(average_precision, average_precision_ci))
 
         # best F1
         precision, recall, thresholds = precision_recall_curve(actual, predicted)
 
 
         F1 = 2*((precision*recall)/(precision+recall))
-        print("Best F1: " + str(max(F1)))
+        best_f1_ci = bootstrap_metric_ci([actual, predicted], best_f1_metric)
+        print("Best F1: " + format_metric_with_ci(max(F1), best_f1_ci))
 
 
         # threshold for best F1

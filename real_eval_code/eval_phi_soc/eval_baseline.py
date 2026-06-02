@@ -20,9 +20,12 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from eval_utils import (
-    average_precision_at_k,
+    bootstrap_metric_ci,
+    calculate_map_at_k,
+    format_metric_with_ci,
     generate_ranking_report,
-    load_and_combine_csv_files
+    load_and_combine_csv_files,
+    positive_rate_metric
 )
 
 
@@ -111,18 +114,21 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path, k: int = 20,
 
     print("\nEligibility distribution:")
     print(combined_df.eligibility_result.value_counts())
-    print(f"Positive rate: {combined_df.eligibility_result.mean():.4f}")
+    positive_rate = combined_df.eligibility_result.mean()
+    positive_rate_ci = bootstrap_metric_ci(
+        [combined_df.eligibility_result.values], positive_rate_metric
+    )
+    print(f"Positive rate: {format_metric_with_ci(positive_rate, positive_rate_ci)}")
 
     # Calculate MAP@K
     print(f"\nCalculating MAP@{k}...")
     validation_set = combined_df.copy()
 
-    temp = validation_set.groupby('patient_summary').eligibility_result.apply(
-        lambda x: average_precision_at_k(x.head(k).values)
+    map_k, ranking_stats = calculate_map_at_k(
+        validation_set, 'patient_summary', 'eligibility_result', k
     )
-    map_k = temp.mean()
 
-    print(f"MAP@{k}: {map_k:.4f}")
+    print(f"MAP@{k}: {format_metric_with_ci(map_k, ranking_stats.get('map_at_k_ci'))}")
 
     # Generate PDF report
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -204,17 +210,20 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path, k: int = 20,
 
     print("\nEligibility distribution:")
     print(combined_df.eligibility_result.value_counts())
-    print(f"Positive rate: {combined_df.eligibility_result.mean():.4f}")
+    positive_rate = combined_df.eligibility_result.mean()
+    positive_rate_ci = bootstrap_metric_ci(
+        [combined_df.eligibility_result.values], positive_rate_metric
+    )
+    print(f"Positive rate: {format_metric_with_ci(positive_rate, positive_rate_ci)}")
 
     print(f"\nCalculating MAP@{k}...")
     validation_set = combined_df.copy()
 
-    temp = validation_set.groupby('this_space').eligibility_result.apply(
-        lambda x: average_precision_at_k(x.head(k).values)
+    map_k, ranking_stats = calculate_map_at_k(
+        validation_set, 'this_space', 'eligibility_result', k
     )
-    map_k = temp.mean()
 
-    print(f"MAP@{k}: {map_k:.4f}")
+    print(f"MAP@{k}: {format_metric_with_ci(map_k, ranking_stats.get('map_at_k_ci'))}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = output_dir / "baseline_trial_centric_eval_soc.pdf"

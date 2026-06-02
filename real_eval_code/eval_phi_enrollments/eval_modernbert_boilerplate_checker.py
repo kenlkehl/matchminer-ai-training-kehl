@@ -23,6 +23,9 @@ import pandas as pd
 import numpy as np
 from eval_utils import (
     eval_model,
+    bootstrap_metric_ci,
+    binary_auroc_score,
+    format_metric_with_ci,
     load_and_combine_csv_files
 )
 from sklearn.metrics import roc_auc_score, cohen_kappa_score
@@ -231,7 +234,11 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
         print(f"Total samples: {len(validation_set)}")
 
         auc = roc_auc_score(validation_set[label_col], validation_set.prediction_score)
-        print(f"AUC: {auc:.4f}")
+        auc_ci = bootstrap_metric_ci(
+            [validation_set[label_col].values, validation_set.prediction_score.values],
+            binary_auroc_score
+        )
+        print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
         # Generate classification PDF report
         pdf_path = output_dir / "boilerplate_checker_patient_centric_classification.pdf"
@@ -248,7 +255,11 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
                 validation_set[label_col] == 0.0, 'NEGATIVE', 'POSITIVE'
             )
             kappa = cohen_kappa_score(actual_labels, validation_set.prediction_label)
-            print(f"Cohen's Kappa: {kappa:.4f}")
+            kappa_ci = bootstrap_metric_ci(
+                [actual_labels, validation_set.prediction_label.values],
+                lambda y_true, y_pred: cohen_kappa_score(y_true, y_pred)
+            )
+            print(f"Cohen's Kappa: {format_metric_with_ci(kappa, kappa_ci)}")
 
     print(f"\nEvaluation complete. Reports saved to: {output_dir}")
 
@@ -343,7 +354,11 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
         print(f"Total samples: {len(validation_set)}")
 
         auc = roc_auc_score(validation_set[label_col], validation_set.prediction_score)
-        print(f"AUC: {auc:.4f}")
+        auc_ci = bootstrap_metric_ci(
+            [validation_set[label_col].values, validation_set.prediction_score.values],
+            binary_auroc_score
+        )
+        print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
         pdf_path = output_dir / "boilerplate_checker_trial_centric_classification.pdf"
         eval_model(
@@ -358,7 +373,11 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
                 validation_set[label_col] == 0.0, 'NEGATIVE', 'POSITIVE'
             )
             kappa = cohen_kappa_score(actual_labels, validation_set.prediction_label)
-            print(f"Cohen's Kappa: {kappa:.4f}")
+            kappa_ci = bootstrap_metric_ci(
+                [actual_labels, validation_set.prediction_label.values],
+                lambda y_true, y_pred: cohen_kappa_score(y_true, y_pred)
+            )
+            print(f"Cohen's Kappa: {format_metric_with_ci(kappa, kappa_ci)}")
 
     print(f"\nEvaluation complete. Reports saved to: {output_dir}")
 

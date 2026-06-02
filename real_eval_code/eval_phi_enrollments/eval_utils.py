@@ -9,6 +9,7 @@ This module provides functions to:
 """
 
 import itertools
+import warnings
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for PDF generation
@@ -24,13 +25,155 @@ from sklearn.calibration import calibration_curve
 from scipy.stats import spearmanr, pearsonr
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Callable, Sequence
 import pandas as pd
+
+
+DEFAULT_BOOTSTRAP_SAMPLES = 1000
+DEFAULT_BOOTSTRAP_RANDOM_STATE = 0
+DEFAULT_CONFIDENCE_LEVEL = 0.95
 
 
 def sigmoid(x):
     """Apply sigmoid function to input."""
     return 1. / (1. + np.exp(-x))
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    """Return a finite float or None when the metric cannot be used."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def _ci_from_samples(samples: Sequence[float],
+                     confidence_level: float = DEFAULT_CONFIDENCE_LEVEL) -> Optional[Dict[str, Any]]:
+    """Build a percentile confidence interval from bootstrap samples."""
+    values = np.asarray(samples, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return None
+
+    alpha = 1.0 - confidence_level
+    lower, upper = np.percentile(values, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return {
+        'lower': float(lower),
+        'upper': float(upper),
+        'confidence_level': confidence_level,
+        'n_bootstrap': int(len(values)),
+    }
+
+
+def bootstrap_metric_ci(arrays: Sequence[np.ndarray],
+                        metric_fn: Callable[..., float],
+                        n_bootstrap: int = DEFAULT_BOOTSTRAP_SAMPLES,
+                        confidence_level: float = DEFAULT_CONFIDENCE_LEVEL,
+                        random_state: int = DEFAULT_BOOTSTRAP_RANDOM_STATE) -> Optional[Dict[str, Any]]:
+    """
+    Calculate a percentile bootstrap confidence interval for row-aligned arrays.
+
+    Invalid bootstrap samples (for example, AUROC samples with one class) are
+    skipped instead of failing the whole evaluation.
+    """
+    prepared = [np.asarray(array) for array in arrays]
+    if not prepared:
+        return None
+    n = len(prepared[0])
+    if n == 0 or any(len(array) != n for array in prepared):
+        return None
+
+    rng = np.random.default_rng(random_state)
+    samples = []
+    for _ in range(n_bootstrap):
+        indices = rng.integers(0, n, size=n)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                value = metric_fn(*[array[indices] for array in prepared])
+        except Exception:
+            continue
+        value = _finite_float(value)
+        if value is not None:
+            samples.append(value)
+
+    return _ci_from_samples(samples, confidence_level)
+
+
+def bootstrap_mean_ci(values: Sequence[float],
+                      n_bootstrap: int = DEFAULT_BOOTSTRAP_SAMPLES,
+                      confidence_level: float = DEFAULT_CONFIDENCE_LEVEL,
+                      random_state: int = DEFAULT_BOOTSTRAP_RANDOM_STATE) -> Optional[Dict[str, Any]]:
+    """Calculate a percentile bootstrap CI for a mean statistic."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return None
+
+    rng = np.random.default_rng(random_state)
+    samples = []
+    for _ in range(n_bootstrap):
+        indices = rng.integers(0, len(values), size=len(values))
+        samples.append(float(np.mean(values[indices])))
+
+    return _ci_from_samples(samples, confidence_level)
+
+
+def format_metric_with_ci(value: Any,
+                          ci: Optional[Dict[str, Any]],
+                          precision: int = 4) -> str:
+    """Format a metric value with a 95% CI suffix."""
+    value = _finite_float(value)
+    if value is None:
+        return "N/A"
+    if ci is None:
+        return f"{value:.{precision}f} (95% CI N/A)"
+    level = int(round(float(ci.get('confidence_level', DEFAULT_CONFIDENCE_LEVEL)) * 100))
+    lower = ci.get('lower')
+    upper = ci.get('upper')
+    if _finite_float(lower) is None or _finite_float(upper) is None:
+        return f"{value:.{precision}f} ({level}% CI N/A)"
+    return f"{value:.{precision}f} ({level}% CI [{lower:.{precision}f}, {upper:.{precision}f}])"
+
+
+def binary_auroc_score(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Calculate binary AUROC."""
+    return roc_auc_score(actual, predicted)
+
+
+def average_precision_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Calculate average precision/AUPRC."""
+    return average_precision_score(actual, predicted)
+
+
+def positive_rate_metric(actual: np.ndarray) -> float:
+    """Calculate the fraction of positive labels."""
+    return float(np.mean(actual))
+
+
+def best_f1_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Calculate the best F1 score over precision-recall thresholds."""
+    precision, recall, _ = precision_recall_curve(actual, predicted)
+    f1 = 2 * ((precision * recall) / (precision + recall + 1e-10))
+    return float(np.max(f1))
+
+
+def pearson_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Calculate Pearson correlation."""
+    return float(pearsonr(actual, predicted)[0])
+
+
+def spearman_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Calculate Spearman correlation."""
+    return float(spearmanr(actual, predicted)[0])
+
+
+def mae_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Calculate mean absolute error."""
+    return float(np.mean(np.abs(actual - predicted)))
 
 
 def average_precision_at_k(label_array: np.ndarray) -> float:
@@ -101,7 +244,9 @@ def plot_confusion_matrix(cm: np.ndarray, classes: list,
 def eval_model(predicted: np.ndarray, actual: np.ndarray,
                pdf_path: Optional[str] = None,
                title_prefix: str = "",
-               gold_continuous: Optional[np.ndarray] = None) -> Optional[float]:
+               gold_continuous: Optional[np.ndarray] = None,
+               n_bootstrap: int = DEFAULT_BOOTSTRAP_SAMPLES,
+               random_state: int = DEFAULT_BOOTSTRAP_RANDOM_STATE) -> Optional[float]:
     """
     Evaluate model predictions and optionally save results to PDF.
 
@@ -115,11 +260,21 @@ def eval_model(predicted: np.ndarray, actual: np.ndarray,
     Returns:
         Best F1 threshold or None if calculation fails
     """
+    predicted = np.asarray(predicted)
+    actual = np.asarray(actual)
     outcome_counts = np.unique(actual, return_counts=True)[1]
 
     try:
         prob_outcome = outcome_counts[1] / (outcome_counts[0] + outcome_counts[1])
         auc_score = roc_auc_score(actual, predicted)
+        auc_ci = bootstrap_metric_ci(
+            [actual, predicted], binary_auroc_score,
+            n_bootstrap=n_bootstrap, random_state=random_state
+        )
+        prob_outcome_ci = bootstrap_metric_ci(
+            [actual], positive_rate_metric,
+            n_bootstrap=n_bootstrap, random_state=random_state
+        )
 
         # Calculate ROC curve
         fpr, tpr, threshold = roc_curve(actual, predicted)
@@ -127,18 +282,26 @@ def eval_model(predicted: np.ndarray, actual: np.ndarray,
 
         # Calculate precision-recall
         avg_precision = average_precision_score(actual, predicted)
+        avg_precision_ci = bootstrap_metric_ci(
+            [actual, predicted], average_precision_metric,
+            n_bootstrap=n_bootstrap, random_state=random_state
+        )
         precision, recall, thresholds = precision_recall_curve(actual, predicted)
 
         # Best F1
         F1 = 2 * ((precision * recall) / (precision + recall + 1e-10))
         best_f1 = max(F1)
+        best_f1_ci = bootstrap_metric_ci(
+            [actual, predicted], best_f1_metric,
+            n_bootstrap=n_bootstrap, random_state=random_state
+        )
         best_f1_thresh = thresholds[np.argmax(F1)] if len(thresholds) > 0 else 0.5
 
         # Print metrics summary
-        print(f"AUC: {auc_score:.4f}")
-        print(f"Outcome probability: {prob_outcome:.4f}")
-        print(f"Average precision score: {avg_precision:.4f}")
-        print(f"Best F1: {best_f1:.4f}")
+        print(f"AUC: {format_metric_with_ci(auc_score, auc_ci)}")
+        print(f"Outcome probability: {format_metric_with_ci(prob_outcome, prob_outcome_ci)}")
+        print(f"Average precision score: {format_metric_with_ci(avg_precision, avg_precision_ci)}")
+        print(f"Best F1: {format_metric_with_ci(best_f1, best_f1_ci)}")
         print(f"Best F1 threshold: {best_f1_thresh:.4f}")
 
         if pdf_path is None:
@@ -159,9 +322,9 @@ Total samples: {len(actual)}
 Positive samples: {int(sum(actual))} ({prob_outcome:.2%})
 Negative samples: {int(len(actual) - sum(actual))} ({1-prob_outcome:.2%})
 
-AUC-ROC: {auc_score:.4f}
-Average Precision: {avg_precision:.4f}
-Best F1 Score: {best_f1:.4f}
+AUC-ROC: {format_metric_with_ci(auc_score, auc_ci)}
+Average Precision: {format_metric_with_ci(avg_precision, avg_precision_ci)}
+Best F1 Score: {format_metric_with_ci(best_f1, best_f1_ci)}
 Best F1 Threshold: {best_f1_thresh:.4f}
 """
             ax.text(0.1, 0.9, summary_text, transform=ax.transAxes,
@@ -279,9 +442,22 @@ Classification Report at 0.5 Threshold:
 
             # --- Regression metrics pages (only when continuous gold scores provided) ---
             if gold_continuous is not None:
+                gold_continuous = np.asarray(gold_continuous)
                 r, p_r = pearsonr(gold_continuous, predicted)
                 rho, p_rho = spearmanr(gold_continuous, predicted)
                 mae = np.mean(np.abs(gold_continuous - predicted))
+                r_ci = bootstrap_metric_ci(
+                    [gold_continuous, predicted], pearson_metric,
+                    n_bootstrap=n_bootstrap, random_state=random_state
+                )
+                rho_ci = bootstrap_metric_ci(
+                    [gold_continuous, predicted], spearman_metric,
+                    n_bootstrap=n_bootstrap, random_state=random_state
+                )
+                mae_ci = bootstrap_metric_ci(
+                    [gold_continuous, predicted], mae_metric,
+                    n_bootstrap=n_bootstrap, random_state=random_state
+                )
 
                 # Page: Regression summary metrics
                 fig, ax = plt.subplots(figsize=(8, 6))
@@ -290,9 +466,9 @@ Classification Report at 0.5 Threshold:
 {title_prefix} Regression Metrics
 {'=' * 40}
 
-Pearson r:    {r:.4f}  (p = {p_r:.4e})
-Spearman rho: {rho:.4f}  (p = {p_rho:.4e})
-MAE:          {mae:.4f}
+Pearson r:    {format_metric_with_ci(r, r_ci)}  (p = {p_r:.4e})
+Spearman rho: {format_metric_with_ci(rho, rho_ci)}  (p = {p_rho:.4e})
+MAE:          {format_metric_with_ci(mae, mae_ci)}
 
 Gold score range:      [{gold_continuous.min():.2f}, {gold_continuous.max():.2f}]
 Predicted score range: [{predicted.min():.2f}, {predicted.max():.2f}]
@@ -327,7 +503,9 @@ N samples:             {len(gold_continuous)}
 
 def eval_model_categorical(predicted_probs: np.ndarray, actual_labels: np.ndarray,
                            class_names: list, pdf_path: Optional[str] = None,
-                           title_prefix: str = "") -> Optional[Dict[str, Any]]:
+                           title_prefix: str = "",
+                           n_bootstrap: int = DEFAULT_BOOTSTRAP_SAMPLES,
+                           random_state: int = DEFAULT_BOOTSTRAP_RANDOM_STATE) -> Optional[Dict[str, Any]]:
     """
     Evaluate multi-class model predictions and optionally save results to PDF.
 
@@ -344,17 +522,45 @@ def eval_model_categorical(predicted_probs: np.ndarray, actual_labels: np.ndarra
     from sklearn.metrics import accuracy_score
 
     try:
+        predicted_probs = np.asarray(predicted_probs)
+        actual_labels = np.asarray(actual_labels)
         predicted_labels = np.argmax(predicted_probs, axis=1)
         accuracy = accuracy_score(actual_labels, predicted_labels)
         macro_f1 = f1_score(actual_labels, predicted_labels, average='macro')
         weighted_f1 = f1_score(actual_labels, predicted_labels, average='weighted')
         kappa = cohen_kappa_score(actual_labels, predicted_labels)
+        metric_cis = {
+            'accuracy': bootstrap_metric_ci(
+                [actual_labels, predicted_labels],
+                lambda y_true, y_pred: accuracy_score(y_true, y_pred),
+                n_bootstrap=n_bootstrap, random_state=random_state
+            ),
+            'macro_f1': bootstrap_metric_ci(
+                [actual_labels, predicted_labels],
+                lambda y_true, y_pred: f1_score(y_true, y_pred, average='macro'),
+                n_bootstrap=n_bootstrap, random_state=random_state
+            ),
+            'weighted_f1': bootstrap_metric_ci(
+                [actual_labels, predicted_labels],
+                lambda y_true, y_pred: f1_score(y_true, y_pred, average='weighted'),
+                n_bootstrap=n_bootstrap, random_state=random_state
+            ),
+            'kappa': bootstrap_metric_ci(
+                [actual_labels, predicted_labels],
+                lambda y_true, y_pred: cohen_kappa_score(y_true, y_pred),
+                n_bootstrap=n_bootstrap, random_state=random_state
+            ),
+        }
 
         metrics = {
             'accuracy': accuracy,
             'macro_f1': macro_f1,
             'weighted_f1': weighted_f1,
             'kappa': kappa,
+            'accuracy_ci': metric_cis['accuracy'],
+            'macro_f1_ci': metric_cis['macro_f1'],
+            'weighted_f1_ci': metric_cis['weighted_f1'],
+            'kappa_ci': metric_cis['kappa'],
         }
 
         # Multiclass AUROC metrics (One-vs-Rest)
@@ -363,48 +569,79 @@ def eval_model_categorical(predicted_probs: np.ndarray, actual_labels: np.ndarra
                                         multi_class='ovr', average='macro')
             weighted_auroc = roc_auc_score(actual_labels, predicted_probs,
                                            multi_class='ovr', average='weighted')
+            macro_auroc_ci = bootstrap_metric_ci(
+                [actual_labels, predicted_probs],
+                lambda y_true, probs: roc_auc_score(
+                    y_true, probs, multi_class='ovr', average='macro'
+                ),
+                n_bootstrap=n_bootstrap, random_state=random_state
+            )
+            weighted_auroc_ci = bootstrap_metric_ci(
+                [actual_labels, predicted_probs],
+                lambda y_true, probs: roc_auc_score(
+                    y_true, probs, multi_class='ovr', average='weighted'
+                ),
+                n_bootstrap=n_bootstrap, random_state=random_state
+            )
             metrics['macro_auroc'] = macro_auroc
             metrics['weighted_auroc'] = weighted_auroc
+            metrics['macro_auroc_ci'] = macro_auroc_ci
+            metrics['weighted_auroc_ci'] = weighted_auroc_ci
         except ValueError as e:
             macro_auroc = None
             weighted_auroc = None
+            macro_auroc_ci = None
+            weighted_auroc_ci = None
             print(f"Warning: Could not compute multiclass AUROC: {e}")
 
         # Per-class AUROC (one-vs-rest)
         per_class_auroc = {}
+        per_class_auroc_ci = {}
         for i, name in enumerate(class_names):
             try:
                 binary_labels = (actual_labels == i).astype(int)
                 if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
                     class_auroc = roc_auc_score(binary_labels, predicted_probs[:, i])
+                    class_auroc_ci = bootstrap_metric_ci(
+                        [binary_labels, predicted_probs[:, i]], binary_auroc_score,
+                        n_bootstrap=n_bootstrap, random_state=random_state
+                    )
                     per_class_auroc[name] = class_auroc
+                    per_class_auroc_ci[name] = class_auroc_ci
                     metrics[f'auroc_{name}'] = class_auroc
+                    metrics[f'auroc_{name}_ci'] = class_auroc_ci
             except ValueError:
                 pass
 
         # Binary AUROC: first class vs rest (e.g., NO! vs any YES)
         binary_auroc = None
+        binary_auroc_ci = None
         try:
             binary_gold = (actual_labels > 0).astype(int)
             binary_score = 1 - predicted_probs[:, 0]
             if binary_gold.sum() > 0 and binary_gold.sum() < len(binary_gold):
                 binary_auroc = roc_auc_score(binary_gold, binary_score)
+                binary_auroc_ci = bootstrap_metric_ci(
+                    [binary_gold, binary_score], binary_auroc_score,
+                    n_bootstrap=n_bootstrap, random_state=random_state
+                )
                 metrics['binary_auroc'] = binary_auroc
+                metrics['binary_auroc_ci'] = binary_auroc_ci
         except ValueError as e:
             print(f"Warning: Could not compute binary AUROC: {e}")
 
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"Macro F1: {macro_f1:.4f}")
-        print(f"Weighted F1: {weighted_f1:.4f}")
-        print(f"Cohen's Kappa: {kappa:.4f}")
+        print(f"Accuracy: {format_metric_with_ci(accuracy, metric_cis['accuracy'])}")
+        print(f"Macro F1: {format_metric_with_ci(macro_f1, metric_cis['macro_f1'])}")
+        print(f"Weighted F1: {format_metric_with_ci(weighted_f1, metric_cis['weighted_f1'])}")
+        print(f"Cohen's Kappa: {format_metric_with_ci(kappa, metric_cis['kappa'])}")
         if macro_auroc is not None:
-            print(f"Macro AUROC (OvR): {macro_auroc:.4f}")
+            print(f"Macro AUROC (OvR): {format_metric_with_ci(macro_auroc, macro_auroc_ci)}")
         if weighted_auroc is not None:
-            print(f"Weighted AUROC (OvR): {weighted_auroc:.4f}")
+            print(f"Weighted AUROC (OvR): {format_metric_with_ci(weighted_auroc, weighted_auroc_ci)}")
         if binary_auroc is not None:
-            print(f"Binary AUROC ({class_names[0]} vs rest): {binary_auroc:.4f}")
+            print(f"Binary AUROC ({class_names[0]} vs rest): {format_metric_with_ci(binary_auroc, binary_auroc_ci)}")
         for name, auc_val in per_class_auroc.items():
-            print(f"  AUROC {name}: {auc_val:.4f}")
+            print(f"  AUROC {name}: {format_metric_with_ci(auc_val, per_class_auroc_ci.get(name))}")
 
         if pdf_path is None:
             return metrics
@@ -417,15 +654,15 @@ def eval_model_categorical(predicted_probs: np.ndarray, actual_labels: np.ndarra
             counts_str = "\n".join(f"  {name}: {count}" for name, count in zip(class_names, class_counts))
             auroc_str = ""
             if macro_auroc is not None:
-                auroc_str += f"\nMacro AUROC (OvR): {macro_auroc:.4f}"
+                auroc_str += f"\nMacro AUROC (OvR): {format_metric_with_ci(macro_auroc, macro_auroc_ci)}"
             if weighted_auroc is not None:
-                auroc_str += f"\nWeighted AUROC (OvR): {weighted_auroc:.4f}"
+                auroc_str += f"\nWeighted AUROC (OvR): {format_metric_with_ci(weighted_auroc, weighted_auroc_ci)}"
             if binary_auroc is not None:
-                auroc_str += f"\nBinary AUROC ({class_names[0]} vs rest): {binary_auroc:.4f}"
+                auroc_str += f"\nBinary AUROC ({class_names[0]} vs rest): {format_metric_with_ci(binary_auroc, binary_auroc_ci)}"
             if per_class_auroc:
                 auroc_str += "\n\nPer-class AUROC (OvR):"
                 for name, auc_val in per_class_auroc.items():
-                    auroc_str += f"\n  {name}: {auc_val:.4f}"
+                    auroc_str += f"\n  {name}: {format_metric_with_ci(auc_val, per_class_auroc_ci.get(name))}"
 
             summary_text = f"""{title_prefix} Categorical Evaluation Report
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -435,10 +672,10 @@ SUMMARY METRICS
 Total samples: {len(actual_labels)}
 Number of classes: {len(class_names)}
 
-Accuracy: {accuracy:.4f}
-Macro F1: {macro_f1:.4f}
-Weighted F1: {weighted_f1:.4f}
-Cohen's Kappa: {kappa:.4f}
+Accuracy: {format_metric_with_ci(accuracy, metric_cis['accuracy'])}
+Macro F1: {format_metric_with_ci(macro_f1, metric_cis['macro_f1'])}
+Weighted F1: {format_metric_with_ci(weighted_f1, metric_cis['weighted_f1'])}
+Cohen's Kappa: {format_metric_with_ci(kappa, metric_cis['kappa'])}
 {auroc_str}
 
 CLASS DISTRIBUTION (actual):
@@ -502,7 +739,7 @@ CLASS DISTRIBUTION (actual):
                     if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
                         fpr, tpr, _ = roc_curve(binary_labels, predicted_probs[:, i])
                         auc_val = per_class_auroc.get(name)
-                        label = f'AUC = {auc_val:.4f}' if auc_val else 'AUC = N/A'
+                        label = f"AUC = {format_metric_with_ci(auc_val, per_class_auroc_ci.get(name))}" if auc_val is not None else 'AUC = N/A'
                         ax.plot(fpr, tpr, 'b', label=label)
                         ax.plot([0, 1], [0, 1], 'r--', alpha=0.5)
                         ax.legend(loc='lower right', fontsize=8)
@@ -534,7 +771,9 @@ CLASS DISTRIBUTION (actual):
 def calculate_map_at_k(df: pd.DataFrame,
                        group_col: str,
                        label_col: str,
-                       k: int = 20) -> Tuple[float, Dict[str, Any]]:
+                       k: int = 20,
+                       n_bootstrap: int = DEFAULT_BOOTSTRAP_SAMPLES,
+                       random_state: int = DEFAULT_BOOTSTRAP_RANDOM_STATE) -> Tuple[float, Dict[str, Any]]:
     """
     Calculate Mean Average Precision at K.
 
@@ -556,13 +795,23 @@ def calculate_map_at_k(df: pd.DataFrame,
     )
 
     map_k = ap_scores.mean()
+    map_k_ci = bootstrap_mean_ci(
+        ap_scores.values, n_bootstrap=n_bootstrap, random_state=random_state
+    )
+    positive_rate = top_k[label_col].mean()
+    positive_rate_ci = bootstrap_metric_ci(
+        [top_k[label_col].values], positive_rate_metric,
+        n_bootstrap=n_bootstrap, random_state=random_state
+    )
 
     stats = {
         'map_at_k': map_k,
+        'map_at_k_ci': map_k_ci,
         'k': k,
         'num_groups': len(ap_scores),
         'total_samples': len(top_k),
-        'positive_rate': top_k[label_col].mean(),
+        'positive_rate': positive_rate,
+        'positive_rate_ci': positive_rate_ci,
         'median_group_size': top_k.groupby(group_col).size().median(),
         'mean_group_size': top_k.groupby(group_col).size().mean(),
     }
@@ -575,7 +824,9 @@ def generate_ranking_report(df: pd.DataFrame,
                            label_col: str,
                            pdf_path: str,
                            title_prefix: str = "",
-                           k: int = 20) -> Dict[str, Any]:
+                           k: int = 20,
+                           n_bootstrap: int = DEFAULT_BOOTSTRAP_SAMPLES,
+                           random_state: int = DEFAULT_BOOTSTRAP_RANDOM_STATE) -> Dict[str, Any]:
     """
     Generate a PDF report with ranking metrics.
 
@@ -590,7 +841,10 @@ def generate_ranking_report(df: pd.DataFrame,
     Returns:
         Dictionary with computed statistics
     """
-    map_k, stats = calculate_map_at_k(df, group_col, label_col, k)
+    map_k, stats = calculate_map_at_k(
+        df, group_col, label_col, k,
+        n_bootstrap=n_bootstrap, random_state=random_state
+    )
 
     with PdfPages(pdf_path) as pdf:
         # Summary page
@@ -603,10 +857,10 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 RANKING METRICS
 ===============
-MAP@{k}: {map_k:.4f}
+MAP@{k}: {format_metric_with_ci(map_k, stats.get('map_at_k_ci'))}
 Number of {group_col}s: {stats['num_groups']}
 Total samples (top {k} per group): {stats['total_samples']}
-Positive rate: {stats['positive_rate']:.4f}
+Positive rate: {format_metric_with_ci(stats['positive_rate'], stats.get('positive_rate_ci'))}
 Median results per {group_col}: {stats['median_group_size']:.1f}
 Mean results per {group_col}: {stats['mean_group_size']:.1f}
 """
@@ -623,7 +877,10 @@ Mean results per {group_col}: {stats['mean_group_size']:.1f}
 
         fig, ax = plt.subplots(figsize=(8, 6))
         ax.hist(ap_scores, bins=20, edgecolor='black', alpha=0.7)
-        ax.axvline(map_k, color='r', linestyle='--', label=f'MAP@{k} = {map_k:.4f}')
+        ax.axvline(
+            map_k, color='r', linestyle='--',
+            label=f"MAP@{k} = {format_metric_with_ci(map_k, stats.get('map_at_k_ci'))}"
+        )
         ax.set_xlabel('Average Precision')
         ax.set_ylabel('Frequency')
         ax.set_title(f'{title_prefix} Distribution of AP@{k} Scores')

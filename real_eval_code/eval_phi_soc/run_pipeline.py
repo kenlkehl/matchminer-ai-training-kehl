@@ -50,7 +50,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 SOC_SCRIPTS_DIR = REPO_ROOT / "real_eval_code/eval_phi_soc"
 DATA_DIR = REPO_ROOT.parent / "data/phi/soc"
 GOLD_LLM = 'nvidia/Gemma-4-31B-IT-NVFP4' #'RedHatAI/Gemma-4-31B-it-FP8-Dynamic'  # 'nvidia/Gemma-4-31B-IT-NVFP4'
-BASELINE_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+BASELINE_EMBEDDING_MODEL = "nvidia/llama-embed-nemotron-8b" #"Qwen/Qwen3-Embedding-0.6B"
 ONCOREASONING_MODEL = "../../../models/onco_reasoning_lfm/checkpoint-121000"  # Update with actual path or HuggingFace ID
 
 
