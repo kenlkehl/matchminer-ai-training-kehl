@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
@@ -25,7 +25,7 @@ import { hashTextEmbedding } from "./lib/hashEmbedding";
 import { parseCsvPatientFile } from "./services/csvIngest";
 import { parsePdfPatientFile, type PdfProgress } from "./services/pdfIngest";
 import { clearPatientSideData, loadModelSettings, loadPrompts, resetPrompt, saveModelSettings, savePrompt, saveTrialIndex } from "./services/storage";
-import { chunkClinicalNotesForSummary, countTextTokens, embedText, generateText, isWebGpuAvailable, resetTextGenerationPipeline, setRuntimePreferences, splitSummaryChunkForModel, warmModel } from "./services/modelRuntime";
+import { chunkClinicalNotesForSummary, countTextTokens, embedText, generateText, isWebGpuAvailable, resetTextGenerationPipeline, setRuntimePreferences, splitSummaryChunkForModel, warmModel, type WarmModelProgress } from "./services/modelRuntime";
 import { ensureTrialEmbeddings, fetchCtGovCancerTrials, loadOrFetchTrialIndex } from "./services/trialIndex";
 import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services/trialImport";
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
@@ -53,8 +53,26 @@ interface SummaryProgress {
   percent?: number;
 }
 
+interface ModelCacheProgress {
+  label: string;
+  detail?: string;
+  current: number;
+  total: number;
+  percent?: number;
+  loadedBytes?: number;
+  totalBytes?: number;
+}
+
+interface ModelWarmupStep {
+  label: string;
+  modelId: string;
+  task: "text-generation" | "feature-extraction" | "text-classification";
+  dtype: string;
+}
+
 export default function App() {
   const [webGpu, setWebGpu] = useState<boolean | null>(null);
+  const [initialized, setInitialized] = useState(false);
   const [patientDocument, setPatientDocument] = useState<PatientDocument | null>(null);
   const [summary, setSummary] = useState("");
   const [patientBoilerplate, setPatientBoilerplate] = useState("");
@@ -72,7 +90,9 @@ export default function App() {
   const [pdfProgress, setPdfProgress] = useState<PdfProgress | null>(null);
   const [summaryProgress, setSummaryProgress] = useState<SummaryProgress | null>(null);
   const [trialProgress, setTrialProgress] = useState<TrialProgress | null>(null);
+  const [modelCacheProgress, setModelCacheProgress] = useState<ModelCacheProgress | null>(null);
   const [embeddedTrialUrl, setEmbeddedTrialUrl] = useState("");
+  const autoCacheStarted = useRef(false);
 
   useEffect(() => {
     void Promise.all([isWebGpuAvailable(), loadModelSettings(), loadPrompts()]).then(([gpu, savedSettings, savedPrompts]) => {
@@ -91,12 +111,23 @@ export default function App() {
         gpu ? "success" : usingNativeRuntime ? "info" : "warning",
         gpu ? "WebGPU is available." : usingNativeRuntime ? "WebGPU is not available; native runtimes will be used." : "WebGPU is not available in this runtime."
       );
+      setInitialized(true);
     });
   }, []);
 
   useEffect(() => {
     setRuntimePreferences(settings);
   }, [settings]);
+
+  useEffect(() => {
+    if (!initialized || autoCacheStarted.current) return;
+    if (!window.matchminerElectron && webGpu === false) return;
+    const cacheKey = modelCacheStorageKey(settings);
+    if (localStorage.getItem(cacheKey)) return;
+
+    autoCacheStarted.current = true;
+    void cacheModels({ automatic: true, cacheKey });
+  }, [initialized, settings, webGpu]);
 
   const sortedNotes = patientDocument?.notes ?? [];
   const summaryParts = useMemo(() => splitBoilerplate(summary), [summary]);
@@ -436,18 +467,60 @@ export default function App() {
     return spaces;
   }
 
-  async function cacheModels() {
+  async function cacheModels(options: { automatic?: boolean; cacheKey?: string } = {}) {
+    const cacheKey = options.cacheKey ?? modelCacheStorageKey(settings);
+    const steps = modelWarmupSteps(settings);
     setBusy("Caching models");
+    setModelCacheProgress({
+      label: "Preparing model cache",
+      detail: "checking required local models",
+      current: 0,
+      total: steps.length,
+      percent: 0
+    });
     try {
-      await warmModel(settings.llmModelId, "text-generation", settings.llmDtype);
-      await warmModel(settings.trialSpaceModelId, "feature-extraction", settings.classifierDtype);
-      await warmModel(settings.trialCheckerModelId, "text-classification", settings.classifierDtype);
-      await warmModel(settings.boilerplateCheckerModelId, "text-classification", settings.classifierDtype);
-      addStatus("success", "Model cache warmup complete.");
+      for (let index = 0; index < steps.length; index += 1) {
+        const step = steps[index];
+        setModelCacheProgress({
+          label: `Caching ${step.label}`,
+          detail: "checking cache",
+          current: index + 1,
+          total: steps.length,
+          percent: steppedPercent(index, 0, steps.length)
+        });
+        await warmModel(step.modelId, step.task, step.dtype, (progress) => {
+          setModelCacheProgress(modelCacheProgressFromWarmup(step, index, steps.length, progress));
+        });
+        setModelCacheProgress({
+          label: `${step.label} ready`,
+          detail: "cached locally",
+          current: index + 1,
+          total: steps.length,
+          percent: steppedPercent(index, 100, steps.length)
+        });
+      }
+      localStorage.setItem(cacheKey, new Date().toISOString());
+      setModelCacheProgress({
+        label: "Model cache ready",
+        detail: "all required models are available locally",
+        current: steps.length,
+        total: steps.length,
+        percent: 100
+      });
+      addStatus("success", options.automatic ? "First-run model cache complete." : "Model cache warmup complete.");
     } catch (error) {
       addStatus("warning", `Model cache warmup stopped: ${errorMessage(error)}`);
+      setModelCacheProgress({
+        label: "Model cache stopped",
+        detail: errorMessage(error),
+        current: 0,
+        total: steps.length
+      });
     } finally {
       setBusy(null);
+      window.setTimeout(() => {
+        setModelCacheProgress((progress) => progress?.label === "Model cache ready" || progress?.label === "Model cache stopped" ? null : progress);
+      }, 3000);
     }
   }
 
@@ -598,6 +671,8 @@ export default function App() {
         </span>
       </section>
 
+      {modelCacheProgress && <ModelCacheProgressView progress={modelCacheProgress} />}
+
       <main className="workspace">
         <section className="left-column">
           <Panel title="Records" icon={<Upload size={18} />}>
@@ -680,6 +755,7 @@ export default function App() {
           trialIndexCount={trialIndex.length}
           trialProgress={trialProgress}
           summaryProgress={summaryProgress}
+          modelCacheProgress={modelCacheProgress}
           embeddedTrialUrl={embeddedTrialUrl}
           onClose={() => setShowSettings(false)}
           onChange={(next) => void persistSettings(next)}
@@ -754,6 +830,40 @@ function ProgressLine({ label }: { label: string }) {
   );
 }
 
+function ModelCacheProgressView({ progress, compact = false }: { progress: ModelCacheProgress; compact?: boolean }) {
+  const percent = typeof progress.percent === "number" ? Math.round(progress.percent) : undefined;
+  const bytes = formatProgressBytes(progress);
+  const step = progress.total > 0 && progress.current > 0 ? `${progress.current}/${progress.total}` : "";
+  return (
+    <section className={compact ? "model-cache-panel compact" : "model-cache-panel"}>
+      <div className="model-cache-head">
+        <div>
+          <strong>{progress.label}</strong>
+          <span>{[step, progress.detail, bytes].filter(Boolean).join(" - ")}</span>
+        </div>
+        {typeof percent === "number" && <span className="progress-percent">{percent}%</span>}
+      </div>
+      <ProgressBar percent={percent} />
+    </section>
+  );
+}
+
+function ProgressBar({ percent }: { percent?: number }) {
+  const safePercent = typeof percent === "number" ? Math.max(0, Math.min(100, percent)) : undefined;
+  const ariaProps = safePercent === undefined ? {} : { "aria-valuenow": safePercent };
+  return (
+    <div
+      className={`progress-track ${safePercent === undefined ? "indeterminate" : ""}`}
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      {...ariaProps}
+    >
+      <div className="progress-fill" style={{ width: safePercent === undefined ? undefined : `${safePercent}%` }} />
+    </div>
+  );
+}
+
 function formatPdfProgress(progress: PdfProgress): string {
   if (progress.phase === "docling") {
     if (progress.current <= 0) return "Loading Granite Docling WebGPU";
@@ -795,6 +905,115 @@ function formatTrialProgress(progress: TrialProgress): string {
   if (progress.phase === "extract") return `Processing trial ${current}${total}${percent}${detail}`;
   if (progress.phase === "import") return `Loading embedded trial index${total ? ` ${current}${total}${percent}` : ""}${detail}`;
   return `Embedding trial space ${current}${total}${percent}${detail}`;
+}
+
+function modelWarmupSteps(settings: ModelSettings): ModelWarmupStep[] {
+  return [
+    {
+      label: settings.llmBackend === "browser-webgpu" ? "Browser LLM" : "Local LLM",
+      modelId: settings.llmModelId,
+      task: "text-generation",
+      dtype: settings.llmDtype
+    },
+    {
+      label: "TrialSpace model",
+      modelId: settings.trialSpaceModelId,
+      task: "feature-extraction",
+      dtype: settings.classifierDtype
+    },
+    {
+      label: "TrialChecker model",
+      modelId: settings.trialCheckerModelId,
+      task: "text-classification",
+      dtype: settings.classifierDtype
+    },
+    {
+      label: "BoilerplateChecker model",
+      modelId: settings.boilerplateCheckerModelId,
+      task: "text-classification",
+      dtype: settings.classifierDtype
+    }
+  ];
+}
+
+function modelCacheStorageKey(settings: ModelSettings): string {
+  const signature = JSON.stringify({
+    llmBackend: settings.llmBackend,
+    onnxBackend: settings.onnxBackend,
+    browserLlm: settings.llmModelId,
+    nativeLlm: `${settings.llamaModelRepo}/${settings.llamaModelFile}`,
+    trialSpace: settings.trialSpaceModelId,
+    trialChecker: settings.trialCheckerModelId,
+    boilerplateChecker: settings.boilerplateCheckerModelId,
+    llmDtype: settings.llmDtype,
+    classifierDtype: settings.classifierDtype
+  });
+  return `matchminer-model-cache-ready:v2:${signature}`;
+}
+
+function modelCacheProgressFromWarmup(step: ModelWarmupStep, index: number, total: number, progress: WarmModelProgress): ModelCacheProgress {
+  const implicitPercent = progress.status === "ready" ? 100 : undefined;
+  const nestedPercent = firstFinite(progress.overallPercent, progress.progress, implicitPercent);
+  const loadedBytes = firstFinite(progress.loadedBytes, progress.loaded);
+  const totalBytes = firstFinite(progress.totalBytes, progress.loaded !== undefined ? progress.total : undefined);
+  return {
+    label: `Caching ${step.label}`,
+    detail: modelCacheProgressDetail(progress),
+    current: index + 1,
+    total,
+    percent: steppedPercent(index, nestedPercent, total),
+    loadedBytes,
+    totalBytes
+  };
+}
+
+function modelCacheProgressDetail(progress: WarmModelProgress): string {
+  const file = progress.file ? shortFileName(progress.file) : "";
+  if (progress.status === "cached") return progress.detail || (file ? `${file} already cached` : "already cached");
+  if (progress.status === "checking") return progress.detail || "checking cache";
+  if (progress.status === "download") return file ? `starting ${file}` : "starting download";
+  if (progress.status === "progress" || progress.status === "progress_total") return file ? `downloading ${file}` : "downloading model files";
+  if (progress.status === "done") return progress.detail || (file ? `${file} cached` : "cached locally");
+  if (progress.status === "ready") return "loading runtime";
+  if (progress.status === "loading") return progress.detail || "loading runtime";
+  return progress.detail || "warming local runtime";
+}
+
+function formatProgressBytes(progress: ModelCacheProgress): string {
+  if (typeof progress.loadedBytes !== "number") return "";
+  if (typeof progress.totalBytes === "number" && progress.totalBytes > 0) {
+    return `${formatBytes(progress.loadedBytes)} of ${formatBytes(progress.totalBytes)}`;
+  }
+  return formatBytes(progress.loadedBytes);
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function shortFileName(file: string): string {
+  const parts = file.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? file;
+}
+
+function firstFinite(...values: Array<number | undefined>): number | undefined {
+  return values.find((value) => typeof value === "number" && Number.isFinite(value));
+}
+
+function steppedPercent(index: number, nestedPercent: number | undefined, total: number): number | undefined {
+  if (!total || total <= 0) return undefined;
+  const safeNested = typeof nestedPercent === "number" && Number.isFinite(nestedPercent)
+    ? Math.max(0, Math.min(100, nestedPercent))
+    : 0;
+  return Math.round(Math.max(0, Math.min(100, ((index + safeNested / 100) / total) * 100)));
 }
 
 function percentComplete(current: number, total: number | undefined): number | undefined {
@@ -883,6 +1102,7 @@ interface SettingsDialogProps {
   trialIndexCount: number;
   trialProgress: TrialProgress | null;
   summaryProgress: SummaryProgress | null;
+  modelCacheProgress: ModelCacheProgress | null;
   embeddedTrialUrl: string;
   onChange: (settings: ModelSettings) => void;
   onClose: () => void;
@@ -907,6 +1127,7 @@ function SettingsDialog({
   trialIndexCount,
   trialProgress,
   summaryProgress,
+  modelCacheProgress,
   embeddedTrialUrl,
   onChange,
   onClose,
@@ -922,7 +1143,7 @@ function SettingsDialog({
 }: SettingsDialogProps) {
   const [activeTab, setActiveTab] = useState<"general" | "advanced">("general");
   const busyNow = Boolean(busy);
-  const progressLabel = trialProgress ? formatTrialProgress(trialProgress) : summaryProgress ? formatSummaryProgress(summaryProgress) : busy;
+  const progressLabel = trialProgress ? formatTrialProgress(trialProgress) : summaryProgress ? formatSummaryProgress(summaryProgress) : modelCacheProgress ? null : busy;
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal">
@@ -1014,6 +1235,7 @@ function SettingsDialog({
               <button className="text-button" disabled={busyNow} onClick={onCacheModels} type="button">
                 <Download size={16} /> Cache models
               </button>
+              {modelCacheProgress && <ModelCacheProgressView progress={modelCacheProgress} compact />}
               {progressLabel && <ProgressLine label={progressLabel} />}
             </div>
             <div className="settings-grid">

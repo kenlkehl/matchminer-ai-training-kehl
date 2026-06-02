@@ -15,20 +15,37 @@ interface MatchMinerLocalOcrResult {
   engine: string;
 }
 
+interface MatchMinerRuntimeProgress {
+  status?: string;
+  modelId?: string;
+  name?: string;
+  file?: string;
+  current?: number;
+  total?: number;
+  progress?: number;
+  overallPercent?: number;
+  loaded?: number;
+  totalBytes?: number;
+  loadedBytes?: number;
+  fileLoadedBytes?: number;
+  fileTotalBytes?: number;
+  detail?: string;
+}
+
 interface MatchMinerElectronApi {
   parsePdfWithLocalOcr: (request: { fileName: string; bytes: ArrayBuffer }) => Promise<MatchMinerLocalOcrResult>;
   runtimeStatus: () => Promise<{
     llama: { running: boolean; port: number | null; modelPath: string | null; contextTokens: number | null };
     onnx: { workerRunning: boolean; pendingJobs: number };
   }>;
-  prepareRuntimeArtifacts: () => Promise<unknown>;
+  prepareRuntimeArtifacts: (onProgress?: (progress: MatchMinerRuntimeProgress) => void) => Promise<unknown>;
   warmRuntime: (request: {
     task: "text-generation" | "feature-extraction" | "text-classification";
     modelId?: string;
     contextTokens?: number;
     llamaModelRepo?: string;
     llamaModelFile?: string;
-  }) => Promise<unknown>;
+  }, onProgress?: (progress: MatchMinerRuntimeProgress) => void) => Promise<unknown>;
   generateText: (request: {
     prompt: string;
     maxNewTokens: number;

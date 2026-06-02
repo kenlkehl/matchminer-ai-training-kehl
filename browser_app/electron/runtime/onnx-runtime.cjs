@@ -10,9 +10,9 @@ class OnnxRuntime {
     this.pending = new Map();
   }
 
-  async warm(modelId, task) {
+  async warm(modelId, task, options = {}) {
     if (!modelId) throw new Error("ONNX model id is required");
-    const modelDir = await ensureOnnxModel(this.app, modelId);
+    const modelDir = await ensureOnnxModel(this.app, modelId, { onProgress: options.onProgress });
     await this.send({ type: "load", modelId, task, modelDir });
     return { loaded: true, modelId, task, modelDir };
   }

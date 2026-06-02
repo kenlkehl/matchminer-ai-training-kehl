@@ -74,11 +74,18 @@ class LlamaRuntime {
     const contextTokens = normalizeContext(options.contextTokens ?? this.contextTokens ?? DEFAULT_CONTEXT_TOKENS);
     const repo = options.repo || DEFAULT_LLAMA_REPO;
     const file = options.file || DEFAULT_LLAMA_FILE;
-    const modelPath = await ensureLlamaModel(this.app, { repo, file });
+    const modelPath = await ensureLlamaModel(this.app, { repo, file, onProgress: options.onProgress });
 
     if (this.child && this.modelPath === modelPath && this.contextTokens === contextTokens) return;
     await this.stop();
 
+    reportProgress(options.onProgress, {
+      status: "loading",
+      modelId: repo,
+      file,
+      progress: 100,
+      detail: "starting llama.cpp"
+    });
     this.starting = this.startServer({ modelPath, contextTokens }).finally(() => {
       this.starting = null;
     });
@@ -156,6 +163,15 @@ class LlamaRuntime {
   baseUrl(pathname) {
     if (!this.port) throw new Error("llama.cpp server is not running");
     return `http://127.0.0.1:${this.port}${pathname}`;
+  }
+}
+
+function reportProgress(onProgress, progress) {
+  if (typeof onProgress !== "function") return;
+  try {
+    onProgress(progress);
+  } catch {
+    // Runtime progress is advisory and should never interrupt model startup.
   }
 }
 

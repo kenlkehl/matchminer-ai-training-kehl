@@ -45,8 +45,12 @@ ipcMain.handle("matchminer:runtime-status", async () => ({
   llama: llamaRuntime.status(),
   onnx: onnxRuntime.status()
 }));
-ipcMain.handle("matchminer:prepare-runtime-artifacts", async () => ensureDefaultArtifacts(app));
-ipcMain.handle("matchminer:warm-runtime", async (_event, request) => warmRuntime(request));
+ipcMain.handle("matchminer:prepare-runtime-artifacts", async (event, request) =>
+  ensureDefaultArtifacts(app, { onProgress: createProgressEmitter(event, request?.progressToken) })
+);
+ipcMain.handle("matchminer:warm-runtime", async (event, request) =>
+  warmRuntime(request, createProgressEmitter(event, request?.progressToken))
+);
 ipcMain.handle("matchminer:generate-text", async (_event, request) => llamaRuntime.generate(request));
 ipcMain.handle("matchminer:tokenize-text", async (_event, request) => llamaRuntime.tokenize(request));
 ipcMain.handle("matchminer:detokenize-tokens", async (_event, request) => llamaRuntime.detokenize(request));
@@ -169,19 +173,28 @@ function withSecurityHeaders(response) {
   });
 }
 
-async function warmRuntime(request) {
+async function warmRuntime(request, onProgress) {
   const task = request?.task;
   if (task === "text-generation") {
     return llamaRuntime.warm({
       contextTokens: request?.contextTokens,
       repo: request?.llamaModelRepo,
-      file: request?.llamaModelFile
+      file: request?.llamaModelFile,
+      onProgress
     });
   }
   if (task === "feature-extraction" || task === "text-classification") {
-    return onnxRuntime.warm(request?.modelId, task);
+    return onnxRuntime.warm(request?.modelId, task, { onProgress });
   }
   throw new Error(`Unsupported runtime warmup task: ${task}`);
+}
+
+function createProgressEmitter(event, progressToken) {
+  if (!progressToken) return undefined;
+  return (progress) => {
+    if (event.sender.isDestroyed()) return;
+    event.sender.send("matchminer:runtime-progress", { ...progress, progressToken });
+  };
 }
 
 async function runLocalPdfOcr(request) {

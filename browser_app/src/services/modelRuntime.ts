@@ -3,6 +3,18 @@ import { chunkClinicalNotesByTokens, chunkTextByTokens, type SerialSummaryChunk 
 import type { ClinicalNote, ModelSettings } from "../types";
 
 type AnyPipeline = (...args: any[]) => Promise<any> | any;
+export type WarmModelProgress = MatchMinerRuntimeProgress & {
+  status?: string;
+  task?: string;
+  model?: string;
+  file?: string;
+  progress?: number;
+  loaded?: number;
+  total?: number;
+  files?: Record<string, { loaded: number; total: number }>;
+};
+export type WarmModelProgressCallback = (progress: WarmModelProgress) => void;
+
 interface TextGenerationOptions {
   dtype: string;
   maxNewTokens: number;
@@ -35,7 +47,12 @@ export async function isWebGpuAvailable(): Promise<boolean> {
   }
 }
 
-export async function warmModel(modelId: string, task: "text-generation" | "feature-extraction" | "text-classification", dtype: string): Promise<void> {
+export async function warmModel(
+  modelId: string,
+  task: "text-generation" | "feature-extraction" | "text-classification",
+  dtype: string,
+  onProgress?: WarmModelProgressCallback
+): Promise<void> {
   const native = nativeApi();
   if (native && task === "text-generation" && shouldUseNativeLlm()) {
     await native.warmRuntime({
@@ -43,18 +60,18 @@ export async function warmModel(modelId: string, task: "text-generation" | "feat
       contextTokens: runtimePreferences?.llmContextTokens,
       llamaModelRepo: runtimePreferences?.llamaModelRepo ?? DEFAULT_LLAMA_GGUF_REPO,
       llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE
-    });
+    }, onProgress);
     return;
   }
   if (native && task !== "text-generation" && shouldUseNativeOnnx()) {
-    await native.warmRuntime({ task, modelId });
+    await native.warmRuntime({ task, modelId }, onProgress);
     return;
   }
   if (task === "text-classification") {
-    await getClassifier(modelId, dtype);
+    await getClassifier(modelId, dtype, onProgress);
     return;
   }
-  await getPipeline(task, modelId, dtype);
+  await getPipeline(task, modelId, dtype, onProgress);
 }
 
 export async function resetTextGenerationPipeline(modelId: string, dtype: string): Promise<void> {
@@ -211,7 +228,7 @@ function nativeTokenCodec() {
   };
 }
 
-async function getPipeline(task: string, modelId: string, dtype: string): Promise<AnyPipeline> {
+async function getPipeline(task: string, modelId: string, dtype: string, onProgress?: WarmModelProgressCallback): Promise<AnyPipeline> {
   const key = `${task}:${modelId}:${dtype}`;
   if (!pipelineCache.has(key)) {
     pipelineCache.set(
@@ -222,7 +239,7 @@ async function getPipeline(task: string, modelId: string, dtype: string): Promis
           env.backends.onnx.wasm.numThreads = crossOriginIsolated ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)) : 1;
         }
         const pipe = await loadWithRootOnnxFallback<AnyPipeline>((subfolder) =>
-          (module as any).pipeline(task, modelId, modelOptions(dtype, subfolder)) as Promise<AnyPipeline>
+          (module as any).pipeline(task, modelId, modelOptions(dtype, subfolder, onProgress)) as Promise<AnyPipeline>
         );
         if (task === "text-generation") patchGenerationLogitSessions(pipe, module as any);
         return pipe;
@@ -232,7 +249,7 @@ async function getPipeline(task: string, modelId: string, dtype: string): Promis
   return pipelineCache.get(key)!;
 }
 
-async function getClassifier(modelId: string, dtype: string): Promise<{ tokenizer: any; model: any }> {
+async function getClassifier(modelId: string, dtype: string, onProgress?: WarmModelProgressCallback): Promise<{ tokenizer: any; model: any }> {
   const key = `${modelId}:${dtype}`;
   if (!classifierCache.has(key)) {
     classifierCache.set(
@@ -242,9 +259,9 @@ async function getClassifier(modelId: string, dtype: string): Promise<{ tokenize
         if (env?.backends?.onnx?.wasm) {
           env.backends.onnx.wasm.numThreads = crossOriginIsolated ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)) : 1;
         }
-        const tokenizer = await getTokenizer(modelId);
+        const tokenizer = await getTokenizer(modelId, onProgress);
         const model = await loadWithRootOnnxFallback((subfolder) =>
-          (module as any).AutoModelForSequenceClassification.from_pretrained(modelId, modelOptions(dtype, subfolder))
+          (module as any).AutoModelForSequenceClassification.from_pretrained(modelId, modelOptions(dtype, subfolder, onProgress))
         );
         return { tokenizer, model };
       })
@@ -253,12 +270,13 @@ async function getClassifier(modelId: string, dtype: string): Promise<{ tokenize
   return classifierCache.get(key)!;
 }
 
-function modelOptions(dtype: string, subfolder?: string): Record<string, unknown> {
+function modelOptions(dtype: string, subfolder?: string, onProgress?: WarmModelProgressCallback): Record<string, unknown> {
   const options: Record<string, unknown> = {
     device: "webgpu"
   };
   if (dtype !== "auto") options.dtype = dtype;
   if (subfolder !== undefined) options.subfolder = subfolder;
+  if (onProgress) options.progress_callback = onProgress;
   return options;
 }
 
@@ -360,11 +378,13 @@ function shouldRetryRootOnnx(error: unknown): boolean {
   return message.includes("Could not locate file") && /\/resolve\/[^/]+\/onnx\//.test(message);
 }
 
-async function getTokenizer(modelId: string): Promise<any> {
+async function getTokenizer(modelId: string, onProgress?: WarmModelProgressCallback): Promise<any> {
   if (!tokenizerCache.has(modelId)) {
     tokenizerCache.set(
       modelId,
-      import("@huggingface/transformers").then((module) => (module as any).AutoTokenizer.from_pretrained(modelId))
+      import("@huggingface/transformers").then((module) =>
+        (module as any).AutoTokenizer.from_pretrained(modelId, onProgress ? { progress_callback: onProgress } : undefined)
+      )
     );
   }
   return tokenizerCache.get(modelId)!;
