@@ -39,6 +39,7 @@ import requests
 
 
 REPO_ROOT = Path(__file__).resolve().parent
+DEFAULT_OUTPUT_DIR = REPO_ROOT.parent / "data" / "no_phi" / "ctgov_preembeded"
 CTGOV_STUDIES_URL = "https://clinicaltrials.gov/api/v2/studies"
 CTGOV_VERSION_URL = "https://clinicaltrials.gov/api/v2/version"
 CTGOV_CANCER_QUERY = (
@@ -58,7 +59,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         default=None,
         help="Path or HF ID for the saved SentenceTransformer TrialSpace embedding model.",
     )
-    parser.add_argument("--output-dir", default="ctgov_preembedded", help="Directory for all generated artifacts.")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for all generated artifacts.")
     parser.add_argument("--page-size", type=int, default=1000, help="ClinicalTrials.gov API page size.")
     parser.add_argument(
         "--max-pages",
@@ -151,21 +152,27 @@ def main() -> None:
 
 def resolve_paths(args: argparse.Namespace) -> dict[str, Path]:
     output_dir = Path(args.output_dir).expanduser().resolve()
+    run_date = run_date_suffix()
     return {
         "output_dir": output_dir,
-        "trials_json": resolve_output(args.trials_json, output_dir / "ctgov_current_cancer_trials.raw.json"),
-        "pull_metadata": resolve_output(args.pull_metadata, output_dir / "ctgov_pull_metadata.json"),
-        "trials_csv": resolve_output(args.trials_csv, output_dir / "ctgov_current_cancer_trials.csv"),
-        "trials_with_spaces_csv": resolve_output(args.trials_with_spaces_csv, output_dir / "trials_with_spaces.csv"),
-        "spaces_csv": resolve_output(args.spaces_csv, output_dir / "trial_space_lineitems.csv"),
-        "parquet_output": resolve_output(args.parquet_output, output_dir / "trial_space_embeddings.parquet"),
-        "browser_json_output": resolve_output(args.browser_json_output, output_dir / "trial_space_embeddings.browser.json"),
-        "spacify_work_dir": resolve_output(args.spacify_work_dir, output_dir / "trial_space_shards"),
+        "trials_json": resolve_output(args.trials_json, output_dir / f"ctgov_current_cancer_trials_{run_date}.raw.json"),
+        "pull_metadata": resolve_output(args.pull_metadata, output_dir / f"ctgov_pull_metadata_{run_date}.json"),
+        "trials_csv": resolve_output(args.trials_csv, output_dir / f"ctgov_current_cancer_trials_{run_date}.csv"),
+        "trials_with_spaces_csv": resolve_output(args.trials_with_spaces_csv, output_dir / f"trials_with_spaces_{run_date}.csv"),
+        "spaces_csv": resolve_output(args.spaces_csv, output_dir / f"trial_space_lineitems_{run_date}.csv"),
+        "parquet_output": resolve_output(args.parquet_output, output_dir / f"trial_space_embeddings_{run_date}.parquet"),
+        "browser_json_output": resolve_output(args.browser_json_output, output_dir / f"trial_space_embeddings_{run_date}.browser.json"),
+        "spacify_work_dir": resolve_output(args.spacify_work_dir, output_dir / f"trial_space_shards_{run_date}"),
     }
 
 
 def resolve_output(value: str | None, default: Path) -> Path:
     return Path(value).expanduser().resolve() if value else default
+
+
+def run_date_suffix() -> str:
+    now = datetime.now()
+    return f"{now.month}-{now.day}-{now.year % 100:02d}"
 
 
 def fetch_ctgov_studies(page_size: int, max_pages: int | None, timeout: float) -> tuple[list[dict[str, Any]], dict[str, Any], int | None]:
