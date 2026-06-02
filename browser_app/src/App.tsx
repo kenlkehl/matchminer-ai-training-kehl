@@ -35,6 +35,8 @@ const DEFAULT_BROWSER_LLM_CONTEXT_TOKENS = DEFAULT_LFM_CONTEXT_TOKENS;
 const MIN_BROWSER_LLM_CONTEXT_TOKENS = 4096;
 const BROWSER_LLM_CONTEXT_MARGIN_TOKENS = 128;
 const MIN_ADAPTIVE_SUMMARY_CHUNK_TOKENS = 16;
+const MIN_SUMMARY_RETRY_CHUNK_TOKENS = 256;
+const MAX_SERIAL_SUMMARY_ATTEMPTS = 5;
 const THINKING_SUMMARY_MAX_TOKENS = DEFAULT_MODEL_SETTINGS.maxSummaryTokens;
 const LEGACY_SUMMARY_MAX_TOKENS = 1600;
 
@@ -159,25 +161,82 @@ export default function App() {
   }
 
   async function summarize() {
-    if (!patientDocument) return;
+    const loadedPatientDocument = patientDocument;
+    if (!loadedPatientDocument) return;
+    const activePatientDocument: PatientDocument = loadedPatientDocument;
     setBusy("Summarizing");
     setSummaryProgress({ current: 0, detail: "tokenizing clinical record" });
     setMatches([]);
-    let prior = "";
+    let usedAutomaticChunkRetry = false;
     try {
+      let chunkSizeTokens = normalizeSummaryChunkTokens(settings.summaryChunkTokens);
+      let finalResult: { summary: string; splitOversizedSegment: boolean; attempt: number; chunkSizeTokens: number } | null = null;
+      for (let attempt = 1; attempt <= MAX_SERIAL_SUMMARY_ATTEMPTS; attempt += 1) {
+        try {
+          if (attempt > 1) {
+            commitSummaryText("");
+            setSummaryProgress({
+              current: 0,
+              detail: `retrying with ${formatCount(chunkSizeTokens)}-token serial chunks`
+            });
+          }
+          finalResult = await runSerialSummaryAttempt(chunkSizeTokens, attempt);
+          break;
+        } catch (error) {
+          const nextChunkSizeTokens = nextSmallerSummaryRetryChunkSize(chunkSizeTokens);
+          if (
+            attempt >= MAX_SERIAL_SUMMARY_ATTEMPTS ||
+            nextChunkSizeTokens >= chunkSizeTokens ||
+            !isRetryableSummaryGenerationError(error)
+          ) {
+            throw error;
+          }
+          await resetTextGenerationPipeline(settings.llmModelId, settings.llmDtype);
+          console.warn("[MatchMiner Summary] Retrying serial summary with smaller base chunks", {
+            attempt,
+            failedChunkSizeTokens: chunkSizeTokens,
+            nextChunkSizeTokens,
+            error: errorMessage(error)
+          });
+          usedAutomaticChunkRetry = true;
+          addStatus("warning", `LLM summarization attempt ${attempt} failed; retrying with ${formatCount(nextChunkSizeTokens)}-token chunks. ${errorMessage(error)}`);
+          chunkSizeTokens = nextChunkSizeTokens;
+        }
+      }
+      if (!finalResult) {
+        throw new Error("Patient summary generation did not produce a result.");
+      }
+      commitSummaryText(finalResult.summary);
+      const retried = finalResult.attempt > 1;
+      const chunkDetail = retried ? ` after retrying with ${formatCount(finalResult.chunkSizeTokens)}-token chunks` : "";
+      addStatus("success", finalResult.splitOversizedSegment || retried ? `Patient summary generated locally${chunkDetail}.` : "Patient summary generated locally.");
+    } catch (error) {
+      const fallback = buildExtractiveFallbackSummary(activePatientDocument.notes);
+      commitSummaryText(fallback);
+      const retryText = usedAutomaticChunkRetry ? " after automatic chunk-size retries" : "";
+      addStatus("warning", `LLM summarization failed${retryText}; local extractive summary was used. ${errorMessage(error)}`);
+    } finally {
+      setBusy(null);
+      setSummaryProgress(null);
+    }
+
+    async function runSerialSummaryAttempt(effectiveSummaryChunkTokens: number, attempt: number): Promise<{ summary: string; splitOversizedSegment: boolean; attempt: number; chunkSizeTokens: number }> {
+      let prior = "";
       let activeLlmContextTokens = normalizeLlmContextTokens(settings.llmContextTokens);
       const summaryMaxNewTokens = normalizeSummaryMaxNewTokens(settings.maxSummaryTokens);
-      const chunks = await chunkClinicalNotesForSummary(settings.llmModelId, patientDocument.notes, {
-        chunkSizeTokens: settings.summaryChunkTokens,
-        overlapTokens: settings.summaryChunkOverlapTokens
+      const chunks = await chunkClinicalNotesForSummary(settings.llmModelId, activePatientDocument.notes, {
+        chunkSizeTokens: effectiveSummaryChunkTokens,
+        overlapTokens: Math.min(settings.summaryChunkOverlapTokens, effectiveSummaryChunkTokens - 1)
       });
       console.info("[MatchMiner Summary] Prepared serial summary chunks", {
+        attempt,
         chunks: chunks.length,
-        chunkSizeTokens: settings.summaryChunkTokens,
+        chunkSizeTokens: effectiveSummaryChunkTokens,
+        configuredChunkSizeTokens: settings.summaryChunkTokens,
         overlapTokens: settings.summaryChunkOverlapTokens,
         summaryMaxNewTokens,
         activeLlmContextTokens,
-        recordChars: patientDocument.rawText.length
+        recordChars: activePatientDocument.rawText.length
       });
       const pending = [...chunks];
       let completed = 0;
@@ -185,7 +244,7 @@ export default function App() {
       let splitOversizedSegment = false;
       while (pending.length > 0) {
         const chunk = pending.shift()!;
-        const progressDetail = `${formatCount(chunk.tokenCount)} source tokens, ${chunk.firstDate} to ${chunk.lastDate}`;
+        const progressDetail = `${attempt > 1 ? `attempt ${attempt}, ` : ""}${formatCount(chunk.tokenCount)} source tokens, ${chunk.firstDate} to ${chunk.lastDate}`;
         setSummaryProgress({
           current: completed + 1,
           total: totalWork,
@@ -219,6 +278,7 @@ export default function App() {
             percent: percentComplete(completed, totalWork)
           });
           console.warn("[MatchMiner Summary] Split summary segment before LLM call", {
+            attempt,
             originalChunkTokens: chunk.tokenCount,
             smallerChunkSize,
             smallerChunks: smallerChunks.length,
@@ -228,6 +288,7 @@ export default function App() {
           continue;
         }
         console.info("[MatchMiner Summary] Calling local LLM for serial chunk", {
+          attempt,
           chunk: completed + 1,
           chunks: totalWork,
           chunkTokens: chunk.tokenCount,
@@ -249,6 +310,7 @@ export default function App() {
           prior = nextSummary;
           commitSummaryText(prior);
           console.info("[MatchMiner Summary] Received serial summary chunk response", {
+            attempt,
             chunk: completed + 1,
             chunks: totalWork,
             generatedSummaryChars: prior.length
@@ -269,6 +331,7 @@ export default function App() {
               percent: percentComplete(completed, totalWork)
             });
             console.warn("[MatchMiner Summary] Lowered local LLM context and will retry", {
+              attempt,
               activeLlmContextTokens,
               chunkTokens: chunk.tokenCount,
               promptTokens,
@@ -295,6 +358,7 @@ export default function App() {
             percent: percentComplete(completed, totalWork)
           });
           console.warn("[MatchMiner Summary] Split oversized summary segment and will retry serially", {
+            attempt,
             originalChunkTokens: chunk.tokenCount,
             smallerChunkSize,
             smallerChunks: smallerChunks.length,
@@ -311,15 +375,7 @@ export default function App() {
           percent: percentComplete(completed, totalWork)
         });
       }
-      commitSummaryText(prior);
-      addStatus("success", splitOversizedSegment ? "Patient summary generated locally after adaptive serial chunk splitting." : "Patient summary generated locally.");
-    } catch (error) {
-      const fallback = buildExtractiveFallbackSummary(patientDocument.notes);
-      commitSummaryText(fallback);
-      addStatus("warning", `LLM summarization failed; local extractive summary was used. ${errorMessage(error)}`);
-    } finally {
-      setBusy(null);
-      setSummaryProgress(null);
+      return { summary: prior, splitOversizedSegment, attempt, chunkSizeTokens: effectiveSummaryChunkTokens };
     }
   }
 
@@ -1427,6 +1483,16 @@ function normalizeSummaryMaxNewTokens(value: number): number {
   return Number.isFinite(value) ? Math.max(100, Math.floor(value)) : THINKING_SUMMARY_MAX_TOKENS;
 }
 
+function normalizeSummaryChunkTokens(value: number): number {
+  return Number.isFinite(value) ? Math.max(MIN_SUMMARY_RETRY_CHUNK_TOKENS, Math.floor(value)) : DEFAULT_MODEL_SETTINGS.summaryChunkTokens;
+}
+
+function nextSmallerSummaryRetryChunkSize(value: number): number {
+  const current = normalizeSummaryChunkTokens(value);
+  if (current <= MIN_SUMMARY_RETRY_CHUNK_TOKENS) return current;
+  return Math.max(MIN_SUMMARY_RETRY_CHUNK_TOKENS, Math.floor(current / 2));
+}
+
 function nextLowerLlmContextTokens(value: number): number {
   const current = normalizeLlmContextTokens(value);
   if (current <= MIN_BROWSER_LLM_CONTEXT_TOKENS) return current;
@@ -1459,6 +1525,22 @@ function isOversizedGenerationError(error: unknown): boolean {
     message.includes("out of memory") ||
     message.includes("oom") ||
     (message.includes("ortrun") && (message.includes("invalid_argument") || message.includes("error_code: 1")))
+  );
+}
+
+function isRetryableSummaryGenerationError(error: unknown): boolean {
+  if (isOversizedGenerationError(error)) return true;
+  const message = errorMessage(error).toLowerCase();
+  const contextSized =
+    message.includes("context") &&
+    (message.includes("length") || message.includes("token") || message.includes("exceed") || message.includes("window"));
+  return (
+    contextSized ||
+    message.includes("no visible patient summary text") ||
+    message.includes("maximum sequence length") ||
+    message.includes("prompt is too long") ||
+    message.includes("input is too long") ||
+    message.includes("truncat")
   );
 }
 

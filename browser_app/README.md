@@ -162,7 +162,7 @@ python ../real_eval_code/real_time_eval/embed_trial_spaces.py /path/to/model \
 
 ## Patient Summarization
 
-The Summarize button follows the training pipeline's serial summarization pattern: dated notes are concatenated, tokenized with the selected LLM tokenizer, split into overlapping token chunks, and fed through a running summary one chunk at a time. Settings expose the per-chunk input token target and overlap. The browser app also checks the full prompt token count before each local ONNX generation call; if the prompt would exceed the browser LLM budget, that segment is split into smaller serial subsegments before retrying, without truncating the source record.
+The Summarize button follows the training pipeline's serial summarization pattern: dated notes are concatenated, tokenized with the selected LLM tokenizer, split into overlapping token chunks, and fed through a running summary one chunk at a time. Settings expose the per-chunk input token target and overlap. The browser app also checks the full prompt token count before each local generation call; if the prompt would exceed the LLM budget, that segment is split into smaller serial subsegments before retrying, without truncating the source record. If generation still fails with a retryable context, length, memory, or no-visible-summary error, the app restarts summarization from the original notes with smaller base chunks before falling back to the local extractive summary.
 
 ## PDF OCR
 
