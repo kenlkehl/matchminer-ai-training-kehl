@@ -28,7 +28,7 @@ Examples:
         --embeddings trial_space_embeddings.parquet \
         --trial-checker ../../../models/trialchecker \
         --boilerplate-checker ../../../models/boilerplatechecker \
-        --summarization-model RedHatAI/gemma-4-31B-it-FP8-block \
+        --summarization-model RedHatAI/gemma-4-31B-it-FP8-Dynamic \
         --batch-size 64 --checker-batch-size 64 \
         --summarization-additional-vllm-args "--kv-cache-dtype fp8" \
         --gpu 3

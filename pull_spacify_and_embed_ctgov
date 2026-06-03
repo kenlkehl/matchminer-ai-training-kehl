@@ -71,6 +71,20 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--pull-timeout", type=float, default=60.0, help="ClinicalTrials.gov request timeout in seconds.")
     parser.add_argument("--python", default=sys.executable, help="Python executable used for child scripts.")
 
+    parser.add_argument(
+        "--nct-ids",
+        default=None,
+        help="Comma/space-separated NCT IDs to pull instead of the generic cancer query. "
+        "When set (or --nct-ids-file), CT.gov is queried by filter.ids and the phase/status "
+        "aggFilters are not applied.",
+    )
+    parser.add_argument(
+        "--nct-ids-file",
+        default=None,
+        help="Path to a file with one NCT ID per line (blank lines and '#' comments ignored). "
+        "Merged with --nct-ids if both are given.",
+    )
+
     parser.add_argument("--trials-json", default=None, help="Raw CT.gov studies JSON output path.")
     parser.add_argument("--pull-metadata", default=None, help="CT.gov pull metadata JSON output path.")
     parser.add_argument("--trials-csv", default=None, help="CSV input path for 0b_create_trial_spaces.py.")
@@ -123,6 +137,7 @@ def main() -> None:
     args, spacify_extra_args = parse_args()
     if not args.skip_embed and not args.embedding_model:
         raise SystemExit("--embedding-model is required unless --skip-embed is set.")
+    requested_nct_ids = load_requested_nct_ids(args)
     paths = resolve_paths(args)
 
     if args.dry_run:
@@ -130,19 +145,34 @@ def main() -> None:
 
     if not args.skip_pull:
         if args.dry_run:
-            print(
-                "Would query ClinicalTrials.gov with "
-                f"query.cond={CTGOV_CANCER_QUERY!r}, "
-                f"aggFilters={CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS!r}, "
-                f"pageSize={args.page_size}, maxPages={args.max_pages}"
-            )
+            if requested_nct_ids:
+                print(
+                    f"Would fetch {len(requested_nct_ids)} specific NCT IDs from "
+                    f"ClinicalTrials.gov via filter.ids (pageSize={args.page_size})."
+                )
+            else:
+                print(
+                    "Would query ClinicalTrials.gov with "
+                    f"query.cond={CTGOV_CANCER_QUERY!r}, "
+                    f"aggFilters={CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS!r}, "
+                    f"pageSize={args.page_size}, maxPages={args.max_pages}"
+                )
         else:
-            studies, version, total_count = fetch_ctgov_studies(args.page_size, args.max_pages, args.pull_timeout)
+            if requested_nct_ids:
+                studies, version, total_count, missing_nct_ids = fetch_ctgov_studies_by_ids(
+                    requested_nct_ids, args.page_size, args.pull_timeout
+                )
+            else:
+                studies, version, total_count = fetch_ctgov_studies(args.page_size, args.max_pages, args.pull_timeout)
+                missing_nct_ids = []
             write_json(paths["trials_json"], studies)
             trials = studies_to_trials(studies)
             paths["trials_csv"].parent.mkdir(parents=True, exist_ok=True)
             trials.to_csv(paths["trials_csv"], index=False)
-            write_pull_metadata(paths["pull_metadata"], args, version, total_count, len(studies), len(trials))
+            write_pull_metadata(
+                paths["pull_metadata"], args, version, total_count, len(studies), len(trials),
+                requested_nct_ids=requested_nct_ids, missing_nct_ids=missing_nct_ids,
+            )
             print(f"Wrote {len(trials)} unique trial rows to {paths['trials_csv']}")
     elif not args.skip_spacify and not paths["trials_csv"].exists():
         raise SystemExit(f"--skip-pull was set, but trials CSV does not exist: {paths['trials_csv']}")
@@ -240,6 +270,76 @@ def fetch_ctgov_version(session: requests.Session, timeout: float) -> dict[str, 
         return {}
 
 
+def load_requested_nct_ids(args: argparse.Namespace) -> list[str] | None:
+    """Merge --nct-ids and --nct-ids-file into a normalized, de-duplicated list.
+
+    Returns None when neither option is supplied, signalling generic-query mode.
+    """
+    raw: list[str] = []
+    if args.nct_ids:
+        raw.extend(args.nct_ids.replace(",", " ").split())
+    if args.nct_ids_file:
+        ids_path = Path(args.nct_ids_file).expanduser()
+        if not ids_path.exists():
+            raise SystemExit(f"--nct-ids-file does not exist: {ids_path}")
+        for line in ids_path.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                raw.extend(line.replace(",", " ").split())
+
+    if not raw:
+        return None
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in raw:
+        nct = token.strip().upper()
+        if nct and nct not in seen:
+            seen.add(nct)
+            ordered.append(nct)
+    return ordered
+
+
+def fetch_ctgov_studies_by_ids(
+    nct_ids: list[str], page_size: int, timeout: float, batch_size: int = 100
+) -> tuple[list[dict[str, Any]], dict[str, Any], int, list[str]]:
+    """Fetch specific studies by NCT ID via the CT.gov filter.ids parameter.
+
+    Mirrors fetch_ctgov_studies' return shape but adds the list of requested IDs
+    that CT.gov did not return. No phase/status aggFilters are applied, so closed
+    or completed trials are still fetched."""
+    session = requests.Session()
+    version = fetch_ctgov_version(session, timeout)
+    studies: list[dict[str, Any]] = []
+
+    for start in range(0, len(nct_ids), batch_size):
+        batch = nct_ids[start : start + batch_size]
+        params = {
+            "filter.ids": ",".join(batch),
+            "pageSize": str(page_size),
+            "format": "json",
+        }
+        response = session.get(CTGOV_STUDIES_URL, params=params, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        page_studies = payload.get("studies") or []
+        studies.extend(page_studies)
+        batch_num = start // batch_size + 1
+        print(f"Fetched CT.gov id-batch {batch_num}: +{len(page_studies)} studies ({len(studies)}/{len(nct_ids)})")
+
+    returned_ids = {
+        clean_text((study.get("protocolSection") or {}).get("identificationModule", {}).get("nctId"))
+        for study in studies
+    }
+    missing = [nct for nct in nct_ids if nct not in returned_ids]
+    if missing:
+        preview = ", ".join(missing[:10])
+        suffix = ", ..." if len(missing) > 10 else ""
+        print(f"Warning: {len(missing)} requested NCT IDs not returned by CT.gov: {preview}{suffix}")
+
+    return studies, version, len(studies), missing
+
+
 def studies_to_trials(studies: list[dict[str, Any]]) -> pd.DataFrame:
     rows = [row for study in studies if (row := study_to_trial_row(study))]
     if not rows:
@@ -323,12 +423,16 @@ def write_pull_metadata(
     total_count: int | None,
     pulled_studies: int,
     trial_rows: int,
+    requested_nct_ids: list[str] | None = None,
+    missing_nct_ids: list[str] | None = None,
 ) -> None:
+    by_ids = bool(requested_nct_ids)
     metadata = {
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "source": CTGOV_STUDIES_URL,
-        "queryCond": CTGOV_CANCER_QUERY,
-        "aggFilters": CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS,
+        "mode": "ids" if by_ids else "cancer_query",
+        "queryCond": None if by_ids else CTGOV_CANCER_QUERY,
+        "aggFilters": None if by_ids else CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS,
         "pageSize": args.page_size,
         "maxPages": args.max_pages,
         "ctgovApiVersion": version.get("apiVersion"),
@@ -337,6 +441,10 @@ def write_pull_metadata(
         "pulledStudies": pulled_studies,
         "trialRows": trial_rows,
     }
+    if by_ids:
+        metadata["requestedNctIds"] = len(requested_nct_ids)
+        metadata["missingNctIds"] = len(missing_nct_ids or [])
+        metadata["missingNctIdList"] = missing_nct_ids or []
     write_json(path, metadata)
 
 
