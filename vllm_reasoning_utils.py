@@ -24,11 +24,14 @@ MODEL_TO_PARSER: dict[str, str] = {
 }
 
 _SUBSTRING_FALLBACKS: list[tuple[str, str]] = [
-    ("gemma",    "gemma4"),
-    ("qwen",     "qwen3"),
-    ("gpt-oss",  "openai_gptoss"),
-    ("gptoss",   "openai_gptoss"),
-    ("deepseek", "deepseek_r1"),
+    ("gemma",         "gemma4"),
+    ("qwen",          "qwen3"),
+    ("gpt-oss",       "openai_gptoss"),
+    ("gptoss",        "openai_gptoss"),
+    # OncoReasoning is built on LFM 2.5, which emits DeepSeek-R1-style
+    # <think>...</think> reasoning tags — route both to the deepseek_r1 parser.
+    ("oncoreasoning", "deepseek_r1"),
+    ("deepseek",      "deepseek_r1"),
 ]
 
 

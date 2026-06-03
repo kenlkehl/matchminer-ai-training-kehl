@@ -8,7 +8,7 @@ Supports:
 - Configurable sampling parameters
 
 python vllm_parallel_trialcheck.py \
-     --model /ksg/kehl_mm_data/meta/2024/v20/v20_models/oncoreasoning \
+     --model ksg-dfci/OncoReasoning-3B-1225 \
      --input-file ../top_cohorts_tocheck_only_open_phi.csv \
      --output-file ./final_patient_centric_soc_reasonable_check_results.csv \
      --temp-dir ./output_shards \
