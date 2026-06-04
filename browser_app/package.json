@@ -29,6 +29,8 @@
     "@huggingface/transformers": "^4.2.0",
     "date-fns": "^4.1.0",
     "dexie": "^4.2.1",
+    "hyparquet": "^1.26.0",
+    "hyparquet-compressors": "^1.1.1",
     "lucide-react": "^0.511.0",
     "onnxruntime-node-native": "npm:onnxruntime-node@^1.22.0",
     "onnxruntime-web": "^1.22.0",

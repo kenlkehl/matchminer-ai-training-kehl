@@ -597,6 +597,10 @@ details p {
   gap: 12px;
 }
 
+.trial-refresh-modal {
+  width: min(680px, 100%);
+}
+
 .modal-head {
   display: flex;
   align-items: center;

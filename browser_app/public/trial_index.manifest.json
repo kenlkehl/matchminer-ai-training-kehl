@@ -1,10 +1,10 @@
 {
-  "createdAt": "2026-05-30T00:00:00Z",
-  "source": "sample",
+  "createdAt": "2026-06-02T00:00:00Z",
+  "source": "ksg-dfci/mmai-synthetic-0526",
   "ctgovApiVersion": "2.0.5",
-  "ctgovDataTimestamp": "2026-05-29T09:00:06",
+  "ctgovDataTimestamp": "2026-06-02T00:00:00",
   "embeddingModel": "ksg-dfci/TrialSpace-0526-ONNX",
-  "embeddingDim": 0,
-  "trialSpaces": 3,
-  "indexUrl": "/sample_trial_index.json"
+  "embeddingDim": 1024,
+  "trialSpaces": 35161,
+  "indexUrl": "https://huggingface.co/datasets/ksg-dfci/mmai-synthetic-0526/blob/main/trial_space_embeddings_6-2-26.parquet"
 }

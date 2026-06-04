@@ -2,7 +2,7 @@
 
 Static browser app for running a patient-centric MatchMiner-AI workflow locally on the user's machine.
 
-Patient data is parsed and processed in the browser. Network requests are limited to user-triggered downloads of public model artifacts and public ClinicalTrials.gov/trial-index data.
+Patient data is parsed and processed in the browser. Network requests are limited to first-start and user-triggered downloads of public model artifacts, public pre-embedded trial-space data, and public ClinicalTrials.gov data.
 
 ## Development
 
@@ -69,8 +69,8 @@ npm run electron:dev
 The desktop app loads the built renderer from a local secure
 `matchminer://app` protocol with Node integration disabled. Patient files are
 still processed locally in the renderer. The app only makes network requests
-when the user downloads public model artifacts or public ClinicalTrials.gov
-trial data.
+for first-start and user-triggered public model artifacts, public pre-embedded
+trial-space data, or public ClinicalTrials.gov trial data.
 
 ## Native Local Runtime
 
@@ -137,7 +137,7 @@ The temporary LLM default is `onnx-community/gemma-4-E2B-it-ONNX`; it can be rep
 
 ## Trial Index
 
-Normal use should consume a prebuilt trial-space embedding index. The app also includes a ClinicalTrials.gov v2 refresh path that downloads current trials and runs the local LLM trial-space extraction prompt in the browser. This can take a long time for the full CT.gov result set.
+Normal use should consume a prebuilt trial-space embedding index. On first start, the app downloads and caches the default Hugging Face trial-space embedding file from `ksg-dfci/mmai-synthetic-0526`. The app also includes a ClinicalTrials.gov v2 refresh path that downloads current trials and runs the local LLM trial-space extraction prompt in the browser. This can take a long time for the full CT.gov result set.
 
 Build a public heuristic JSON index from Node:
 
@@ -151,9 +151,9 @@ myeloproliferative; open interventional trials; Early Phase 1 through Phase 3.
 Pass `--max-pages N` only when you intentionally want a smaller development
 sample.
 
-For production, run trial-space extraction offline using the MatchMiner model/prompt, pre-embed spaces with TrialSpace, and publish the resulting JSON or sharded JSON files.
+For production, run trial-space extraction offline using the MatchMiner model/prompt, pre-embed spaces with TrialSpace, and publish the resulting Parquet, JSON, JSONL, CSV, or sharded JSON files.
 
-The browser app can import a pre-embedded trial index from a local JSON/JSONL/CSV file or from a URL. The importer accepts the browser-native fields (`spaceId`, `nctId`, `trialSpaceText`, `boilerplateText`, `embedding`) and the real-time eval pre-embed column names (`id`, `nct_id`, `this_cohort`, `boilerplate_text`, `embedding`). Parquet files should be exported to JSON first; `real_eval_code/real_time_eval/embed_trial_spaces.py` supports:
+The browser app can import a pre-embedded trial index from a local Parquet/JSON/JSONL/CSV file or from a URL. Hugging Face `blob` URLs are converted to downloadable `resolve` URLs before loading. The importer accepts the browser-native fields (`spaceId`, `nctId`, `trialSpaceText`, `boilerplateText`, `embedding`) and the real-time eval pre-embed column names (`id`, `nct_id`, `this_cohort`, `boilerplate_text`, `embedding`). `real_eval_code/real_time_eval/embed_trial_spaces.py` also supports exporting browser JSON:
 
 ```bash
 python ../real_eval_code/real_time_eval/embed_trial_spaces.py /path/to/model \

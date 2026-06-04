@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseEmbeddedTrialIndexText } from "../src/services/trialImport";
+import { normalizeEmbeddedTrialIndexUrl, parseEmbeddedTrialIndexText } from "../src/services/trialImport";
 
 describe("parseEmbeddedTrialIndexText", () => {
   it("normalizes real-time eval pre-embedded rows", () => {
@@ -84,5 +84,11 @@ describe("parseEmbeddedTrialIndexText", () => {
     );
 
     expect(records.map((record) => record.spaceId)).toEqual(["space-a", "space-b"]);
+  });
+
+  it("normalizes Hugging Face blob URLs to downloadable dataset files", () => {
+    expect(
+      normalizeEmbeddedTrialIndexUrl("https://huggingface.co/datasets/ksg-dfci/mmai-synthetic-0526/blob/main/trial_space_embeddings_6-2-26.parquet")
+    ).toBe("https://huggingface.co/datasets/ksg-dfci/mmai-synthetic-0526/resolve/main/trial_space_embeddings_6-2-26.parquet?download=true");
   });
 });

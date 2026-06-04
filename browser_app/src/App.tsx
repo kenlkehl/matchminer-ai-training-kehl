@@ -15,7 +15,8 @@ import {
   Settings,
   Table2,
   Trash2,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
 import type { MatchResult, ModelSettings, PatientDocument, PromptKey, StatusMessage, TrialSpaceRecord } from "./types";
 import { DEFAULT_PROMPTS } from "./data/defaultPrompts";
@@ -28,8 +29,8 @@ import { parseCsvPatientFile } from "./services/csvIngest";
 import { parsePdfPatientFile, type PdfProgress } from "./services/pdfIngest";
 import { clearPatientSideData, loadModelSettings, loadPrompts, resetPrompt, saveModelSettings, savePrompt, saveTrialIndex } from "./services/storage";
 import { chunkClinicalNotesForSummary, countTextTokens, embedText, generateText, isWebGpuAvailable, resetTextGenerationPipeline, setRuntimePreferences, splitSummaryChunkForModel, warmModel, type WarmModelProgress } from "./services/modelRuntime";
-import { ensureTrialEmbeddings, fetchCtGovCancerTrials, loadOrFetchTrialIndex } from "./services/trialIndex";
-import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile } from "./services/trialImport";
+import { DEFAULT_EMBEDDED_TRIAL_INDEX_URL, ensureTrialEmbeddings, fetchCtGovCancerTrials, loadOrFetchTrialIndex } from "./services/trialIndex";
+import { fetchEmbeddedTrialIndex, parseEmbeddedTrialIndexFile, type EmbeddedTrialIndexFetchProgress } from "./services/trialImport";
 import { retrieveByEmbedding, scoreAndRankMatches } from "./services/matching";
 
 const promptOrder: PromptKey[] = ["patientSummary", "trialSpaceExtraction", "trialDeepScreen", "boilerplateDeepScreen"];
@@ -48,6 +49,7 @@ interface TrialProgress {
   total?: number;
   detail?: string;
   percent?: number;
+  unit?: "count" | "bytes";
 }
 
 interface SummaryProgress {
@@ -96,8 +98,10 @@ export default function App() {
   const [summaryProgress, setSummaryProgress] = useState<SummaryProgress | null>(null);
   const [trialProgress, setTrialProgress] = useState<TrialProgress | null>(null);
   const [modelCacheProgress, setModelCacheProgress] = useState<ModelCacheProgress | null>(null);
-  const [embeddedTrialUrl, setEmbeddedTrialUrl] = useState("");
+  const [embeddedTrialUrl, setEmbeddedTrialUrl] = useState(DEFAULT_EMBEDDED_TRIAL_INDEX_URL);
+  const [showTrialRefresh, setShowTrialRefresh] = useState(false);
   const autoCacheStarted = useRef(false);
+  const autoTrialIndexStarted = useRef(false);
   const activeJobController = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -134,6 +138,11 @@ export default function App() {
     autoCacheStarted.current = true;
     void cacheModels({ automatic: true, cacheKey });
   }, [initialized, settings, webGpu]);
+
+  useEffect(() => {
+    if (!initialized || busy || autoTrialIndexStarted.current) return;
+    void preloadDefaultTrialIndex();
+  }, [initialized, busy]);
 
   const sortedNotes = patientDocument?.notes ?? [];
   const summaryParts = useMemo(() => splitBoilerplate(summary), [summary]);
@@ -446,20 +455,24 @@ export default function App() {
     }
   }
 
-  async function prepareTrialIndex() {
-    const signal = startJob("Preparing trials");
+  async function preloadDefaultTrialIndex() {
+    const signal = startJob("Loading trial spaces", { automatic: true });
     if (!signal) return;
-    setTrialProgress(null);
+    autoTrialIndexStarted.current = true;
+    setTrialProgress({ phase: "import", current: 0, detail: "checking local trial spaces" });
     try {
-      const records = await loadOrFetchTrialIndex(signal);
+      const records = await loadOrFetchTrialIndex(signal, (progress) => {
+        setTrialProgress(trialProgressFromEmbeddedFetch(progress));
+      });
       assertNotAborted(signal);
       setTrialIndex(records);
-      addStatus("success", `Loaded ${records.length} trial spaces.`);
+      addStatus("success", `Trial spaces ready: ${formatCount(records.length)} loaded.`);
     } catch (error) {
       if (isAbortError(error)) addStoppedStatus("Trial loading");
-      else addStatus("error", errorMessage(error));
+      else addStatus("warning", `Default trial-space download unavailable. ${errorMessage(error)}`);
     } finally {
       finishJob(signal);
+      setTrialProgress(null);
     }
   }
 
@@ -526,10 +539,13 @@ export default function App() {
     }
     const signal = startJob("Loading embedded trial index");
     if (!signal) return;
-    setTrialProgress({ phase: "import", current: 0, detail: "fetching URL" });
+    setTrialProgress({ phase: "import", current: 0, detail: "fetching URL", unit: "bytes" });
     try {
-      const records = await fetchEmbeddedTrialIndex(url, signal);
+      const records = await fetchEmbeddedTrialIndex(url, signal, (progress) => {
+        setTrialProgress(trialProgressFromEmbeddedFetch(progress));
+      });
       await persistEmbeddedTrialIndex(records, url, signal);
+      setShowTrialRefresh(false);
     } catch (error) {
       if (isAbortError(error)) addStoppedStatus("Embedded trial import");
       else addStatus("error", errorMessage(error));
@@ -874,8 +890,16 @@ export default function App() {
               <Readiness label="Deep screen" value={settings.runDeepScreen ? "on" : "off"} />
             </div>
             <div className="button-grid">
-              <button className="text-button" disabled={busyNow} onClick={prepareTrialIndex} type="button">
-                {busy === "Preparing trials" ? <Loader2 className="spin" size={16} /> : <Database size={16} />} Load index
+              <button
+                className="text-button"
+                disabled={busyNow}
+                onClick={() => {
+                  setEmbeddedTrialUrl((url) => url.trim() || DEFAULT_EMBEDDED_TRIAL_INDEX_URL);
+                  setShowTrialRefresh(true);
+                }}
+                type="button"
+              >
+                {busy === "Loading embedded trial index" ? <Loader2 className="spin" size={16} /> : <RefreshCcw size={16} />} Refresh trial spaces
               </button>
               <button className="text-button" disabled={busyNow} onClick={refreshCtGov} type="button">
                 {busy === "Downloading ClinicalTrials.gov" || busy === "Extracting trial spaces" ? <Loader2 className="spin" size={16} /> : <RefreshCcw size={16} />} CT.gov refresh
@@ -886,7 +910,7 @@ export default function App() {
                 <Upload size={16} /> Load embedded file
                 <input
                   type="file"
-                  accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv"
+                  accept=".json,.jsonl,.ndjson,.csv,.parquet,application/json,text/csv"
                   disabled={busyNow}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -895,18 +919,6 @@ export default function App() {
                   }}
                 />
               </label>
-              <div className="url-load-row">
-                <input
-                  aria-label="Embedded trial index URL"
-                  disabled={busyNow}
-                  onChange={(event) => setEmbeddedTrialUrl(event.target.value)}
-                  placeholder="https://huggingface.co/.../resolve/main/trials.json"
-                  value={embeddedTrialUrl}
-                />
-                <button className="text-button" disabled={busyNow || !embeddedTrialUrl.trim()} onClick={loadEmbeddedTrialUrl} type="button">
-                  <Download size={16} /> Load URL
-                </button>
-              </div>
             </div>
             {trialProgress && <ProgressLine label={formatTrialProgress(trialProgress)} />}
           </Panel>
@@ -952,6 +964,17 @@ export default function App() {
           </Panel>
         </section>
       </main>
+
+      {showTrialRefresh && (
+        <TrialRefreshDialog
+          url={embeddedTrialUrl}
+          busy={busy}
+          progress={trialProgress}
+          onUrlChange={setEmbeddedTrialUrl}
+          onClose={() => setShowTrialRefresh(false)}
+          onRefresh={() => void loadEmbeddedTrialUrl()}
+        />
+      )}
 
       {showSettings && (
         <SettingsDialog
@@ -1049,6 +1072,55 @@ function ModelCacheProgressView({ progress, compact = false }: { progress: Model
   );
 }
 
+function TrialRefreshDialog({
+  url,
+  busy,
+  progress,
+  onUrlChange,
+  onClose,
+  onRefresh
+}: {
+  url: string;
+  busy: string | null;
+  progress: TrialProgress | null;
+  onUrlChange: (url: string) => void;
+  onClose: () => void;
+  onRefresh: () => void;
+}) {
+  const busyNow = Boolean(busy);
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="trial-refresh-title">
+      <div className="modal trial-refresh-modal">
+        <div className="modal-head">
+          <h2 id="trial-refresh-title">Refresh trial spaces</h2>
+          <button className="icon-button" disabled={busyNow} onClick={onClose} title="Close" type="button">
+            <X size={18} />
+          </button>
+        </div>
+        <label>
+          Pre-embedded trials URL
+          <input
+            autoFocus
+            disabled={busyNow}
+            onChange={(event) => onUrlChange(event.target.value)}
+            placeholder={DEFAULT_EMBEDDED_TRIAL_INDEX_URL}
+            value={url}
+          />
+        </label>
+        {progress && <ProgressLine label={formatTrialProgress(progress)} />}
+        <div className="compact-row end">
+          <button className="text-button" disabled={busyNow} onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="primary-button" disabled={busyNow || !url.trim()} onClick={onRefresh} type="button">
+            {busy === "Loading embedded trial index" ? <Loader2 className="spin" size={16} /> : <Download size={16} />} Refresh
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProgressBar({ percent }: { percent?: number }) {
   const safePercent = typeof percent === "number" ? Math.max(0, Math.min(100, percent)) : undefined;
   const ariaProps = safePercent === undefined ? {} : { "aria-valuenow": safePercent };
@@ -1098,14 +1170,27 @@ function formatSummaryProgress(progress: SummaryProgress): string {
 }
 
 function formatTrialProgress(progress: TrialProgress): string {
-  const current = formatCount(progress.current);
-  const total = typeof progress.total === "number" ? ` of ${formatCount(progress.total)}` : "";
+  const current = progress.unit === "bytes" ? formatBytes(progress.current) : formatCount(progress.current);
+  const total = typeof progress.total === "number"
+    ? ` of ${progress.unit === "bytes" ? formatBytes(progress.total) : formatCount(progress.total)}`
+    : "";
   const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
   const detail = progress.detail ? ` - ${progress.detail}` : "";
   if (progress.phase === "download") return `Downloading trial records ${current}${total}${percent}${detail}`;
   if (progress.phase === "extract") return `Processing trial ${current}${total}${percent}${detail}`;
   if (progress.phase === "import") return `Loading embedded trial index${total ? ` ${current}${total}${percent}` : ""}${detail}`;
   return `Embedding trial space ${current}${total}${percent}${detail}`;
+}
+
+function trialProgressFromEmbeddedFetch(progress: EmbeddedTrialIndexFetchProgress): TrialProgress {
+  return {
+    phase: "import",
+    current: progress.loadedBytes ?? 0,
+    total: progress.totalBytes,
+    percent: typeof progress.percent === "number" ? Math.round(progress.percent) : undefined,
+    detail: progress.detail,
+    unit: "bytes"
+  };
 }
 
 function modelWarmupSteps(settings: ModelSettings): ModelWarmupStep[] {
@@ -1334,7 +1419,9 @@ function SettingsDialog({
       <div className="modal">
         <div className="modal-head">
           <h2>Settings</h2>
-          <button className="icon-button" onClick={onClose} type="button">x</button>
+          <button className="icon-button" onClick={onClose} title="Close" type="button">
+            <X size={18} />
+          </button>
         </div>
         <div className="tabs modal-tabs" role="tablist">
           <button className={activeTab === "general" ? "tab active" : "tab"} onClick={() => setActiveTab("general")} type="button">

@@ -2,6 +2,7 @@ import type { TrialIndexManifest, TrialSpaceRecord } from "../types";
 import { assertNotAborted } from "../lib/abort";
 import { embedText } from "./modelRuntime";
 import { loadTrialIndex, saveTrialIndex } from "./storage";
+import { fetchEmbeddedTrialIndex, type EmbeddedTrialIndexFetchProgress } from "./trialImport";
 
 interface CtGovStudy {
   protocolSection?: {
@@ -17,6 +18,7 @@ interface CtGovStudy {
 
 const CTGOV_CANCER_QUERY = "cancer OR lymphoma OR carcinoma OR leukemia OR sarcoma OR melanoma OR myeloma OR myelodysplastic OR myeloproliferative";
 const CTGOV_PHASE_I_TO_III_OPEN_INTERVENTIONAL_FILTERS = "phase:0 1 2 3,status:not rec,studyType:int";
+export const DEFAULT_EMBEDDED_TRIAL_INDEX_URL = "https://huggingface.co/datasets/ksg-dfci/mmai-synthetic-0526/blob/main/trial_space_embeddings_6-2-26.parquet";
 
 export async function loadManifest(signal?: AbortSignal): Promise<TrialIndexManifest> {
   assertNotAborted(signal);
@@ -26,15 +28,15 @@ export async function loadManifest(signal?: AbortSignal): Promise<TrialIndexMani
   return response.json();
 }
 
-export async function loadOrFetchTrialIndex(signal?: AbortSignal): Promise<TrialSpaceRecord[]> {
+export async function loadOrFetchTrialIndex(
+  signal?: AbortSignal,
+  onProgress?: (progress: EmbeddedTrialIndexFetchProgress) => void
+): Promise<TrialSpaceRecord[]> {
   assertNotAborted(signal);
   const cached = await loadTrialIndex();
   if (cached.length) return cached;
   const manifest = await loadManifest(signal);
-  const response = await fetch(manifest.indexUrl, { signal });
-  if (!response.ok) throw new Error(`Could not load trial index at ${manifest.indexUrl}`);
-  assertNotAborted(signal);
-  const records = (await response.json()) as TrialSpaceRecord[];
+  const records = await fetchEmbeddedTrialIndex(manifest.indexUrl, signal, onProgress);
   assertNotAborted(signal);
   await saveTrialIndex(records);
   return records;

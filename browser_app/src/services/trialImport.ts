@@ -1,4 +1,6 @@
 import Papa from "papaparse";
+import { parquetReadObjects } from "hyparquet";
+import { compressors } from "hyparquet-compressors";
 import type { TrialSpaceRecord } from "../types";
 import { assertNotAborted } from "../lib/abort";
 
@@ -6,34 +8,85 @@ type RawRecord = Record<string, unknown>;
 
 const RECORD_ARRAY_KEYS = ["records", "trialSpaces", "trial_spaces", "data"];
 
+export interface EmbeddedTrialIndexFetchProgress {
+  loadedBytes?: number;
+  totalBytes?: number;
+  percent?: number;
+  detail?: string;
+}
+
 export async function parseEmbeddedTrialIndexFile(file: File, signal?: AbortSignal): Promise<TrialSpaceRecord[]> {
   assertNotAborted(signal);
-  if (/\.parquet$/i.test(file.name)) {
-    throw new Error("Parquet files cannot be imported directly in the browser. Export JSON, JSONL, or CSV from the pre-embed script.");
+  if (sourceLooksLikeParquet(file.name)) {
+    const buffer = await file.arrayBuffer();
+    assertNotAborted(signal);
+    return parseEmbeddedTrialIndexParquet(buffer, file.name);
   }
   const text = await file.text();
   assertNotAborted(signal);
   return parseEmbeddedTrialIndexText(text, file.name);
 }
 
-export async function fetchEmbeddedTrialIndex(url: string, signal?: AbortSignal): Promise<TrialSpaceRecord[]> {
+export async function fetchEmbeddedTrialIndex(
+  url: string,
+  signal?: AbortSignal,
+  onProgress?: (progress: EmbeddedTrialIndexFetchProgress) => void
+): Promise<TrialSpaceRecord[]> {
   const trimmed = url.trim();
   if (!trimmed) throw new Error("Enter a URL for the embedded trial index");
-  if (/\.parquet(?:$|[?#])/i.test(trimmed)) {
-    throw new Error("Parquet URLs cannot be imported directly in the browser. Publish JSON, JSONL, or CSV instead.");
-  }
+  const downloadUrl = normalizeEmbeddedTrialIndexUrl(trimmed);
   assertNotAborted(signal);
-  const response = await fetch(trimmed, { signal });
+  if (sourceLooksLikeParquet(trimmed) || sourceLooksLikeParquet(downloadUrl)) {
+    const buffer = await fetchArrayBuffer(downloadUrl, signal, onProgress);
+    assertNotAborted(signal);
+    onProgress?.({
+      loadedBytes: buffer.byteLength,
+      totalBytes: buffer.byteLength,
+      percent: 100,
+      detail: "parsing parquet"
+    });
+    return parseEmbeddedTrialIndexParquet(buffer, trimmed);
+  }
+
+  const response = await fetch(downloadUrl, { signal });
   if (!response.ok) throw new Error(`Could not load embedded trial index: ${response.status} ${response.statusText}`);
   const text = await response.text();
   assertNotAborted(signal);
   return parseEmbeddedTrialIndexText(text, trimmed);
 }
 
+export function normalizeEmbeddedTrialIndexUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "huggingface.co") return url;
+
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const blobIndex = segments.indexOf("blob");
+    if (blobIndex === -1 || blobIndex + 2 >= segments.length) return url;
+
+    segments[blobIndex] = "resolve";
+    parsed.pathname = `/${segments.join("/")}`;
+    if (!parsed.searchParams.has("download")) parsed.searchParams.set("download", "true");
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 export function parseEmbeddedTrialIndexText(text: string, sourceName = "embedded trial index"): TrialSpaceRecord[] {
   const trimmed = text.trim();
   if (!trimmed) throw new Error(`${sourceName} is empty`);
   const rows = parseRows(trimmed, sourceName);
+  return normalizeTrialRecords(rows, sourceName);
+}
+
+async function parseEmbeddedTrialIndexParquet(buffer: ArrayBuffer, sourceName: string): Promise<TrialSpaceRecord[]> {
+  const rows = await parquetReadObjects({ file: buffer, compressors });
+  return normalizeTrialRecords(rows, sourceName);
+}
+
+function normalizeTrialRecords(rows: RawRecord[], sourceName: string): TrialSpaceRecord[] {
+  if (!rows.length) throw new Error(`${sourceName} contains no embedded trial records`);
   const records = rows.map((row, index) => normalizeTrialRecord(row, index));
   return ensureUniqueSpaceIds(records);
 }
@@ -120,6 +173,7 @@ function normalizeTrialRecord(row: RawRecord, index: number): TrialSpaceRecord {
 
 function parseEmbedding(value: unknown): number[] {
   if (Array.isArray(value)) return cleanEmbedding(value);
+  if (isArrayLikeObject(value)) return cleanEmbedding(Array.from(value));
   if (typeof value !== "string") return [];
   const trimmed = value.trim();
   if (!trimmed) return [];
@@ -137,6 +191,13 @@ function parseEmbedding(value: unknown): number[] {
 function cleanEmbedding(values: unknown[]): number[] {
   const embedding = values.map((value) => Number(value)).filter((value) => Number.isFinite(value));
   return embedding.length === values.length ? embedding : [];
+}
+
+function isArrayLikeObject(value: unknown): value is ArrayLike<unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  if (value instanceof DataView) return false;
+  const length = (value as { length?: unknown }).length;
+  return typeof length === "number" && Number.isInteger(length) && length >= 0;
 }
 
 function readString(row: RawRecord, keys: string[]): string {
@@ -191,4 +252,65 @@ function looksLikeJson(text: string): boolean {
 
 function isRecord(value: unknown): value is RawRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sourceLooksLikeParquet(sourceName: string): boolean {
+  try {
+    return /\.parquet$/i.test(new URL(sourceName).pathname);
+  } catch {
+    return /\.parquet$/i.test(sourceName.split(/[?#]/)[0] ?? sourceName);
+  }
+}
+
+async function fetchArrayBuffer(
+  url: string,
+  signal?: AbortSignal,
+  onProgress?: (progress: EmbeddedTrialIndexFetchProgress) => void
+): Promise<ArrayBuffer> {
+  onProgress?.({ loadedBytes: 0, detail: "starting download" });
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error(`Could not load embedded trial index: ${response.status} ${response.statusText}`);
+
+  const totalBytes = Number(response.headers.get("content-length")) || undefined;
+  if (!response.body) {
+    const buffer = await response.arrayBuffer();
+    onProgress?.({
+      loadedBytes: buffer.byteLength,
+      totalBytes: totalBytes ?? buffer.byteLength,
+      percent: 100,
+      detail: "downloaded"
+    });
+    return buffer;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loadedBytes = 0;
+  while (true) {
+    assertNotAborted(signal);
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loadedBytes += value.byteLength;
+    onProgress?.({
+      loadedBytes,
+      totalBytes,
+      percent: totalBytes ? Math.min(100, (loadedBytes / totalBytes) * 100) : undefined,
+      detail: "downloading"
+    });
+  }
+
+  const bytes = new Uint8Array(loadedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  onProgress?.({
+    loadedBytes,
+    totalBytes: totalBytes ?? loadedBytes,
+    percent: 100,
+    detail: "downloaded"
+  });
+  return bytes.buffer;
 }
