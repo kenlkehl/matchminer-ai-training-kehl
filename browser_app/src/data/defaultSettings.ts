@@ -25,6 +25,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   maxSummaryTokens: 15000,
   summaryChunkTokens: 10000,
   summaryChunkOverlapTokens: 250,
+  repetitionPenalty: 1.1,
   retrievalCount: 30,
   displayCount: 10,
   runDeepScreen: false

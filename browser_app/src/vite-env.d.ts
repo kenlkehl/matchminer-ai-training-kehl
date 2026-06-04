@@ -53,6 +53,7 @@ interface MatchMinerElectronApi {
     contextTokens?: number;
     llamaModelRepo?: string;
     llamaModelFile?: string;
+    repetitionPenalty?: number;
     enableThinking?: boolean;
     systemPrompt?: string;
   }) => Promise<string>;

@@ -48,6 +48,7 @@ export interface ModelSettings {
   maxSummaryTokens: number;
   summaryChunkTokens: number;
   summaryChunkOverlapTokens: number;
+  repetitionPenalty: number;
   retrievalCount: number;
   displayCount: number;
   runDeepScreen: boolean;

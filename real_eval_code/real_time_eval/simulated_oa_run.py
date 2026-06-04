@@ -1011,7 +1011,7 @@ def main():
 
     # Top 20 per patient
     top_k_retrieve = 20
-    top_k_output = 10
+    top_k_output = 20
     top20_indices = np.argsort(sim_matrix, axis=1)[:, ::-1][:, :top_k_retrieve]
 
     # --- Trial checker scoring (top 20 per patient) -----------------------

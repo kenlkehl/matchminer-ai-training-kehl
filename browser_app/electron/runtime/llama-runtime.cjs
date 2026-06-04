@@ -6,6 +6,7 @@ const path = require("node:path");
 const { DEFAULT_LLAMA_FILE, DEFAULT_LLAMA_REPO, downloadFile, ensureLlamaModel, pathExists, requestText } = require("./artifacts.cjs");
 
 const DEFAULT_CONTEXT_TOKENS = 32768;
+const DEFAULT_REPEAT_PENALTY = 1.1;
 const SERVER_START_TIMEOUT_MS = 180000;
 const GENERATION_SYSTEM_PROMPT = "Reasoning: high";
 
@@ -34,7 +35,7 @@ class LlamaRuntime {
     };
   }
 
-  async generate({ prompt, maxNewTokens, contextTokens, repo, file, llamaModelRepo, llamaModelFile, systemPrompt }) {
+  async generate({ prompt, maxNewTokens, contextTokens, repo, file, llamaModelRepo, llamaModelFile, repetitionPenalty, systemPrompt }) {
     await this.ensureStarted({ contextTokens, repo: repo || llamaModelRepo, file: file || llamaModelFile });
     const response = await postJson(this.baseUrl("/v1/chat/completions"), {
       model: "matchminer-local",
@@ -44,6 +45,7 @@ class LlamaRuntime {
       ],
       max_tokens: Math.max(1, Math.floor(maxNewTokens ?? 512)),
       temperature: 0.2,
+      repeat_penalty: normalizeRepeatPenalty(repetitionPenalty),
       stream: false
     }, 30 * 60 * 1000);
     const text = response?.choices?.[0]?.message?.content ?? response?.choices?.[0]?.text;
@@ -262,6 +264,11 @@ function runProcess(command, args, timeoutMs) {
 
 function normalizeContext(value) {
   return Number.isFinite(Number(value)) ? Math.max(1024, Math.floor(Number(value))) : DEFAULT_CONTEXT_TOKENS;
+}
+
+function normalizeRepeatPenalty(value) {
+  const penalty = Number(value);
+  return Number.isFinite(penalty) && penalty > 0 ? penalty : DEFAULT_REPEAT_PENALTY;
 }
 
 function getFreePort() {

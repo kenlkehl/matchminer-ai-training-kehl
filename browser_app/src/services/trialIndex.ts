@@ -43,18 +43,28 @@ export async function loadOrFetchTrialIndex(
 }
 
 export async function ensureTrialEmbeddings(records: TrialSpaceRecord[], modelId: string, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<TrialSpaceRecord[]> {
+  assertNotAborted(signal);
+  const missingCount = records.reduce((count, record) => count + (record.embedding?.length ? 0 : 1), 0);
+  // The pre-embedded index (e.g. the HF parquet) already has every embedding, so
+  // there is nothing to compute. Returning early avoids re-saving the entire index
+  // (~140 MB for 35k records) to IndexedDB and a misleading "embedding" progress
+  // sweep on every match.
+  if (missingCount === 0) return records;
+
   const updated: TrialSpaceRecord[] = [];
+  let embedded = 0;
   for (let index = 0; index < records.length; index += 1) {
     assertNotAborted(signal);
     const record = records[index];
     if (record.embedding?.length) {
       updated.push(record);
-    } else {
-      const embedding = await embedText(modelId, record.trialSpaceText, undefined, signal);
-      updated.push({ ...record, embedding });
+      continue;
     }
+    const embedding = await embedText(modelId, record.trialSpaceText, undefined, signal);
+    updated.push({ ...record, embedding });
+    embedded += 1;
     assertNotAborted(signal);
-    onProgress?.(index + 1, records.length);
+    onProgress?.(embedded, missingCount);
   }
   assertNotAborted(signal);
   await saveTrialIndex(updated);

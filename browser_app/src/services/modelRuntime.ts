@@ -31,9 +31,9 @@ const classifierCache = new Map<string, Promise<any>>();
 const patchedLogitSessions = new WeakSet<object>();
 const REASONING_SYSTEM_PROMPT = "Reasoning: high";
 let webGpuDetailsLogged = false;
-let runtimePreferences: Pick<ModelSettings, "llmBackend" | "onnxBackend" | "llmContextTokens" | "llamaModelRepo" | "llamaModelFile"> | null = null;
+let runtimePreferences: Pick<ModelSettings, "llmBackend" | "onnxBackend" | "llmContextTokens" | "llamaModelRepo" | "llamaModelFile" | "repetitionPenalty"> | null = null;
 
-export function setRuntimePreferences(settings: Pick<ModelSettings, "llmBackend" | "onnxBackend" | "llmContextTokens" | "llamaModelRepo" | "llamaModelFile">): void {
+export function setRuntimePreferences(settings: Pick<ModelSettings, "llmBackend" | "onnxBackend" | "llmContextTokens" | "llamaModelRepo" | "llamaModelFile" | "repetitionPenalty">): void {
   runtimePreferences = settings;
 }
 
@@ -109,6 +109,7 @@ export async function generateText(modelId: string, prompt: string, options: Tex
       contextTokens: options.contextTokens,
       llamaModelRepo: runtimePreferences?.llamaModelRepo ?? DEFAULT_LLAMA_GGUF_REPO,
       llamaModelFile: runtimePreferences?.llamaModelFile ?? DEFAULT_LLAMA_GGUF_FILE,
+      repetitionPenalty: runtimePreferences?.repetitionPenalty,
       enableThinking,
       systemPrompt
     }).catch((error) => rethrowIfSignalAborted(error, options.signal));
@@ -123,6 +124,7 @@ export async function generateText(modelId: string, prompt: string, options: Tex
     max_new_tokens: options.maxNewTokens,
     temperature: 0.2,
     do_sample: false,
+    repetition_penalty: runtimePreferences?.repetitionPenalty ?? 1,
     return_full_text: false,
     tokenizer_encode_kwargs: {
       max_length: contextTokens,

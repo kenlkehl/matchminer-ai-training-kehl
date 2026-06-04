@@ -101,20 +101,35 @@ async function walk(root) {
 
 async function embedTexts(model, texts) {
   if (!texts.length) return [];
-  const encoded = encodeBatch(model.tokenizer, texts.map((text) => MODEL_QUERY_PROMPT + String(text ?? "")), DEFAULT_TRIALSPACE_MAX_LENGTH);
-  const result = await runSession(model.session, encoded);
-  const output = firstOutput(result);
-  return meanPoolNormalize(output, encoded.attentionMask);
+  const embeddings = [];
+  // Run one text per session call. Batching here pads every row to the longest
+  // sequence in the batch and feeds the whole [batch, seq] tensor through the
+  // transformer at once, which materializes [batch, heads, seq, seq] attention
+  // tensors and OOM-crashes the native ONNX runtime (and the whole process) on
+  // realistic candidate sets. Per-text inference bounds memory to a single row.
+  for (const text of texts) {
+    const encoded = encodeBatch(model.tokenizer, [MODEL_QUERY_PROMPT + String(text ?? "")], DEFAULT_TRIALSPACE_MAX_LENGTH);
+    const result = await runSession(model.session, encoded);
+    const output = firstOutput(result);
+    embeddings.push(...meanPoolNormalize(output, encoded.attentionMaskRows));
+  }
+  return embeddings;
 }
 
 async function scoreTexts(model, texts, transform) {
   if (!texts.length) return [];
   const maxLength = transform === "sigmoid" ? TRIAL_CHECKER_MAX_LENGTH : BOILERPLATE_CHECKER_MAX_LENGTH;
-  const encoded = encodeBatch(model.tokenizer, texts.map((text) => String(text ?? "")), maxLength);
-  const result = await runSession(model.session, encoded);
-  const output = firstOutput(result);
-  const logits = tensorRows(output);
-  return logits.map((row) => transform === "sigmoid" ? sigmoid(row[0] ?? 0) : softmaxPositive(row));
+  const scores = [];
+  // See embedTexts: score each pair on its own so a long candidate cannot pad an
+  // entire batch up to maxLength (4096) and blow up CPU attention memory.
+  for (const text of texts) {
+    const encoded = encodeBatch(model.tokenizer, [String(text ?? "")], maxLength);
+    const result = await runSession(model.session, encoded);
+    const output = firstOutput(result);
+    const row = tensorRows(output)[0] ?? [];
+    scores.push(transform === "sigmoid" ? sigmoid(row[0] ?? 0) : softmaxPositive(row));
+  }
+  return scores;
 }
 
 function encodeBatch(tokenizerBundle, texts, maxLength) {

@@ -1522,6 +1522,10 @@ function SettingsDialog({
                 Summary overlap tokens
                 <input type="number" min={0} max={5000} value={settings.summaryChunkOverlapTokens} onChange={(event) => onChange({ ...settings, summaryChunkOverlapTokens: Number(event.target.value) })} />
               </label>
+              <label>
+                Repetition penalty
+                <input type="number" min={1} max={2} step={0.05} value={settings.repetitionPenalty} onChange={(event) => onChange({ ...settings, repetitionPenalty: Number(event.target.value) })} />
+              </label>
             </div>
             <div className="settings-stack">
               <label>
