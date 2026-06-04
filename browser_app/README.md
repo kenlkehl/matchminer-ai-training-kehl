@@ -83,8 +83,8 @@ Electron builds default to native local inference:
 Model artifacts are downloaded on first warmup into the app user-data directory.
 The default LLM artifact is:
 
-- `LiquidAI/LFM2.5-1.2B-Thinking-GGUF`
-- `LFM2.5-1.2B-Thinking-Q4_K_M.gguf`
+- `ksg-dfci/OncoReasoning-0526-GGUF`
+- `OncoReasoning-0526.Q4_K_M.gguf`
 
 For development, install `llama-server` on `PATH`, set
 `MATCHMINER_LLAMA_SERVER_COMMAND=/path/to/llama-server`, or place a platform

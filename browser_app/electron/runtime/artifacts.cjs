@@ -6,8 +6,8 @@ const path = require("node:path");
 const { Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 
-const DEFAULT_LLAMA_REPO = "LiquidAI/LFM2.5-1.2B-Thinking-GGUF";
-const DEFAULT_LLAMA_FILE = "LFM2.5-1.2B-Thinking-Q4_K_M.gguf";
+const DEFAULT_LLAMA_REPO = "ksg-dfci/OncoReasoning-0526-GGUF";
+const DEFAULT_LLAMA_FILE = "OncoReasoning-0526.Q4_K_M.gguf";
 const DEFAULT_ONNX_MODELS = [
   "ksg-dfci/TrialSpace-0526-ONNX",
   "ksg-dfci/TrialChecker-0526-ONNX",
