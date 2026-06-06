@@ -25,6 +25,11 @@ from eval_utils import (
 from sklearn.metrics import roc_auc_score
 
 
+# Candidate identity. (dfci_mrn, this_space) alone is NOT unique because serial
+# summarization pairs the same patient/trial with multiple patient summaries.
+KEY_COLS = ['dfci_mrn', 'this_space', 'patient_summary']
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate OncoReasoning-3B LLM boilerplate checker for SOC"
@@ -43,14 +48,49 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_llm_results(results_file: Path, label_col: str = 'exclusion_result') -> pd.Series:
-    """Load and aggregate LLM results by prompt_id."""
+def load_predictions(results_file: Path, candidates_path: Path) -> pd.DataFrame:
+    """Load OncoReasoning boilerplate results and attach candidate keys.
+
+    Unlike the trial-check results, the boilerplate results file carries only
+    ``prompt_id`` and ``exclusion_result`` (the model score) -- no key columns.
+    ``prompt_id`` is the positional row index into the *full* candidates file
+    (the way ``vllm_parallel_boilerplate.py`` builds its mapping), so we read the
+    candidates file in the same order to recover the candidate identity for each
+    prompt. Returns a DataFrame with KEY_COLS and a 'prediction' column.
+    """
     print(f"Loading LLM results from: {results_file}")
-    input_frame = pd.read_csv(results_file)
+    input_frame = pd.read_csv(results_file, usecols=['prompt_id', 'exclusion_result'])
     print(f"Loaded {len(input_frame)} rows")
-    predictions = input_frame.groupby(['prompt_id'])[label_col].mean()
+    predictions = input_frame.groupby('prompt_id')['exclusion_result'].mean()
     print(f"Aggregated to {len(predictions)} unique prompts")
-    return predictions
+
+    if not candidates_path.exists():
+        print(f"Candidates file not found (needed for prompt_id keys): {candidates_path}")
+        return pd.DataFrame(columns=KEY_COLS + ['prediction'])
+
+    cand = pd.read_csv(candidates_path, usecols=KEY_COLS).reset_index(drop=True)
+    idx = predictions.index.to_numpy()
+    in_range = idx < len(cand)
+    if not in_range.all():
+        print(f"Warning: {int((~in_range).sum())} prompt_ids exceed candidate rows "
+              f"({len(cand)}); dropping them")
+    idx = idx[in_range]
+    keyed = cand.iloc[idx].copy()
+    keyed['prediction'] = predictions.to_numpy()[in_range]
+    return keyed
+
+
+def load_gold(gold_path: Path, split_filter: str = None) -> pd.DataFrame:
+    """Load reference exclusion labels from the consolidated boilerplate file."""
+    print(f"Loading gold exclusion labels: {gold_path}")
+    wanted = set(KEY_COLS + ['exclusion_result', 'split'])
+    gold = pd.read_csv(gold_path, usecols=lambda c: c in wanted)
+    gold = gold[~gold.patient_summary.isnull()]
+    if split_filter and 'split' in gold.columns:
+        gold = gold[gold.split.str.contains(split_filter)]
+        print(f"Filtered gold to '{split_filter}' split: {len(gold)} rows")
+    print(f"Loaded {len(gold)} gold standard rows")
+    return gold
 
 
 def evaluate_patient_centric(data_dir: Path, output_dir: Path,
@@ -69,62 +109,35 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
         print(f"LLM results file not found: {llm_results_file}")
         return
 
-    predictions = load_llm_results(llm_results_file, 'exclusion_result')
+    candidates_path = data_dir / "patient_centric_candidates.csv"
+    predictions = load_predictions(llm_results_file, candidates_path)
 
-    # Load gold standard labels - prefer consolidated candidate file
-    consolidated_path = data_dir / "patient_centric_candidates.csv"
-    if consolidated_path.exists():
-        print(f"Loading consolidated file: {consolidated_path}")
-        gold = pd.read_csv(consolidated_path)
-    else:
-        # Fallback to shard directories
-        candidates_dir = data_dir / "boilerplates_for_spaces_for_patient_checks"
-        if not candidates_dir.exists():
-            candidates_dir = data_dir / "patient_centric_boilerplate_checks"
-
-        print(f"Loading gold standard from: {candidates_dir}")
-
-        try:
-            gold = load_and_combine_csv_files(str(candidates_dir))
-        except FileNotFoundError:
-            print(f"No gold standard data found in {candidates_dir}")
-            return
-
-    if split_filter and 'split' in gold.columns:
-        gold = gold[gold.split.str.contains(split_filter)]
-        print(f"Filtered to {split_filter} split: {len(gold)} rows")
-
-    if 'Unnamed: 0' in gold.columns:
-        gold = gold.sort_values(by='Unnamed: 0').reset_index(drop=True)
-    else:
-        gold = gold.reset_index(drop=True)
-
-    print(f"Loaded {len(gold)} gold standard rows")
-
-    label_col = 'exclusion_result'
-    if label_col not in gold.columns:
-        print(f"Warning: {label_col} column not found")
+    gold_path = data_dir / "consolidated_boilerplate_patient_centric.csv"
+    if not gold_path.exists():
+        print(f"Gold boilerplate file not found: {gold_path}")
         return
+    gold = load_gold(gold_path, split_filter)
 
-    if len(predictions) != len(gold):
-        print(f"Warning: prediction count ({len(predictions)}) != gold count ({len(gold)})")
-        min_len = min(len(predictions), len(gold))
-        predictions = predictions.head(min_len)
-        gold = gold.head(min_len)
+    merged = gold.merge(predictions, on=KEY_COLS, how='inner')
+    print(f"Matched {len(merged)} prediction/gold pairs "
+          f"(gold={len(gold)}, predictions={len(predictions)})")
+    if len(merged) == 0:
+        print("No overlapping candidates between predictions and gold; aborting.")
+        return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n--- Classification Metrics ---")
-    auc = roc_auc_score(gold[label_col], predictions.values)
+    auc = roc_auc_score(merged.exclusion_result, merged.prediction.values)
     auc_ci = bootstrap_metric_ci(
-        [gold[label_col].values, predictions.values], binary_auroc_score
+        [merged.exclusion_result.values, merged.prediction.values], binary_auroc_score
     )
     print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     pdf_path = output_dir / "llm_boilerplate_checker_patient_centric_classification_soc.pdf"
     eval_model(
-        predictions.values,
-        gold[label_col].values,
+        merged.prediction.values,
+        merged.exclusion_result.values,
         pdf_path=str(pdf_path),
         title_prefix="SOC LLM Boilerplate Checker Patient-Centric"
     )
@@ -148,62 +161,35 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
         print(f"LLM results file not found: {llm_results_file}")
         return
 
-    predictions = load_llm_results(llm_results_file, 'exclusion_result')
+    candidates_path = data_dir / "trial_centric_candidates.csv"
+    predictions = load_predictions(llm_results_file, candidates_path)
 
-    # Load gold standard labels - prefer consolidated candidate file
-    consolidated_path = data_dir / "trial_centric_candidates.csv"
-    if consolidated_path.exists():
-        print(f"Loading consolidated file: {consolidated_path}")
-        gold = pd.read_csv(consolidated_path)
-    else:
-        # Fallback to shard directories
-        candidates_dir = data_dir / "boilerplates_for_patients_for_spaces_checks"
-        if not candidates_dir.exists():
-            candidates_dir = data_dir / "trial_centric_boilerplate_checks"
-
-        print(f"Loading gold standard from: {candidates_dir}")
-
-        try:
-            gold = load_and_combine_csv_files(str(candidates_dir))
-        except FileNotFoundError:
-            print(f"No gold standard data found in {candidates_dir}")
-            return
-
-    if split_filter and 'split' in gold.columns:
-        gold = gold[gold.split.str.contains(split_filter)]
-        print(f"Filtered to {split_filter} split: {len(gold)} rows")
-
-    if 'Unnamed: 0' in gold.columns:
-        gold = gold.sort_values(by='Unnamed: 0').reset_index(drop=True)
-    else:
-        gold = gold.reset_index(drop=True)
-
-    print(f"Loaded {len(gold)} gold standard rows")
-
-    label_col = 'exclusion_result'
-    if label_col not in gold.columns:
-        print(f"Warning: {label_col} column not found")
+    gold_path = data_dir / "consolidated_boilerplate_trial_centric.csv"
+    if not gold_path.exists():
+        print(f"Gold boilerplate file not found: {gold_path}")
         return
+    gold = load_gold(gold_path, split_filter)
 
-    if len(predictions) != len(gold):
-        print(f"Warning: prediction count ({len(predictions)}) != gold count ({len(gold)})")
-        min_len = min(len(predictions), len(gold))
-        predictions = predictions.head(min_len)
-        gold = gold.head(min_len)
+    merged = gold.merge(predictions, on=KEY_COLS, how='inner')
+    print(f"Matched {len(merged)} prediction/gold pairs "
+          f"(gold={len(gold)}, predictions={len(predictions)})")
+    if len(merged) == 0:
+        print("No overlapping candidates between predictions and gold; aborting.")
+        return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n--- Classification Metrics ---")
-    auc = roc_auc_score(gold[label_col], predictions.values)
+    auc = roc_auc_score(merged.exclusion_result, merged.prediction.values)
     auc_ci = bootstrap_metric_ci(
-        [gold[label_col].values, predictions.values], binary_auroc_score
+        [merged.exclusion_result.values, merged.prediction.values], binary_auroc_score
     )
     print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     pdf_path = output_dir / "llm_boilerplate_checker_trial_centric_classification_soc.pdf"
     eval_model(
-        predictions.values,
-        gold[label_col].values,
+        merged.prediction.values,
+        merged.exclusion_result.values,
         pdf_path=str(pdf_path),
         title_prefix="SOC LLM Boilerplate Checker Trial-Centric"
     )

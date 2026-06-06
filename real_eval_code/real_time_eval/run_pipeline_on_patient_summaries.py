@@ -9,8 +9,12 @@ BoilerplateChecker -> (optional) LLM trial check -> (optional) LLM
 boilerplate check.
 
 Each row of the output parquet is one (patient, retrieved trial space) pair.
-No NCT-level deduplication is applied; the output contains exactly
-n_patients * --top-k rows.
+No NCT-level deduplication is applied. Trial spaces are retrieved by TrialSpace
+cosine similarity into a pool of size --top-k-retrieve and the top
+--top-k-output per patient are kept, so the output contains exactly
+n_patients * --top-k-output rows. (The legacy --top-k flag sets both.)
+Ranking is always by TrialSpace cosine similarity; the checker stages only
+populate score columns and never re-order or filter the output.
 
 Default behavior runs all four scoring stages. Use --stages to subset.
 
@@ -148,9 +152,20 @@ def parse_args():
                         help="Batch size for TrialChecker / BoilerplateChecker "
                              "(default: 32).")
 
-    parser.add_argument("--top-k", type=int, default=20,
-                        help="Trial spaces retrieved per patient (default: 20). "
-                             "The output has exactly n_patients * top_k rows.")
+    parser.add_argument("--top-k-retrieve", type=int, default=None,
+                        help="Trial spaces retrieved per patient by TrialSpace "
+                             "cosine similarity before trimming (default: 20).")
+    parser.add_argument("--top-k-output", type=int, default=None,
+                        help="Trial spaces kept per patient in the output "
+                             "(default: 20). The output has exactly "
+                             "n_patients * top_k_output rows.")
+    parser.add_argument("--top-k", type=int, default=None,
+                        help="DEPRECATED alias: sets both --top-k-retrieve and "
+                             "--top-k-output to this value (back-compat).")
+    parser.add_argument("--trialspace-only-ranking", action="store_true",
+                        help="Accepted for parity with simulated_oa_run.py. "
+                             "This script always ranks output by TrialSpace "
+                             "cosine similarity, so the flag has no extra effect.")
 
     parser.add_argument("--no-oncore-exclusion", action="store_true",
                         help="Skip the Supportive/Radiation Oncology NCT filter.")
@@ -287,11 +302,39 @@ def main():
     space_embs_np = np.array(df_trials["embedding"].tolist(), dtype=np.float32)
     print(f"Loaded {len(df_trials)} trial spaces (dim={space_embs_np.shape[1]}).")
 
-    top_k = args.top_k
-    if top_k > len(df_trials):
-        print(f"Warning: --top-k {top_k} exceeds {len(df_trials)} available "
-              f"trial spaces; clamping to {len(df_trials)}.")
-        top_k = len(df_trials)
+    # --- Resolve retrieve / output counts --------------------------------
+    # Legacy --top-k sets both retrieve and output for any value not set
+    # explicitly; otherwise each defaults to 20.
+    DEFAULT_TOPK = 20
+    top_k_retrieve = args.top_k_retrieve
+    top_k_output = args.top_k_output
+    if args.top_k is not None:
+        if top_k_retrieve is None:
+            top_k_retrieve = args.top_k
+        if top_k_output is None:
+            top_k_output = args.top_k
+    if top_k_retrieve is None:
+        top_k_retrieve = DEFAULT_TOPK
+    if top_k_output is None:
+        top_k_output = DEFAULT_TOPK
+
+    if args.trialspace_only_ranking:
+        print("--trialspace-only-ranking: run_pipeline always ranks output by "
+              "TrialSpace cosine similarity; flag has no additional effect.")
+
+    n_trials_total = len(df_trials)
+    if top_k_retrieve > n_trials_total:
+        print(f"Warning: --top-k-retrieve {top_k_retrieve} exceeds "
+              f"{n_trials_total} available trial spaces; clamping to "
+              f"{n_trials_total}.")
+        top_k_retrieve = n_trials_total
+    if top_k_output > top_k_retrieve:
+        print(f"Warning: --top-k-output {top_k_output} exceeds the retrieve "
+              f"pool {top_k_retrieve}; clamping to {top_k_retrieve}.")
+        top_k_output = top_k_retrieve
+
+    # Downstream loops/reshapes operate on the final output count.
+    top_k = top_k_output
 
     # --- Encode patient summaries ----------------------------------------
     print(f"Encoding {n_patients} patient summaries across "
@@ -303,9 +346,12 @@ def main():
     print(f"Patient embeddings shape: {patient_embs.shape}")
 
     # --- Cosine similarity + top-K ---------------------------------------
+    # Retrieve the top_k_retrieve pool by cosine, then (since ranking is purely
+    # by cosine) keep the first top_k_output columns for scoring + output.
     print("Computing cosine similarity matrix ...")
     sim_matrix = patient_embs @ space_embs_np.T  # (N_patients, N_trials)
-    top_indices = np.argsort(sim_matrix, axis=1)[:, ::-1][:, :top_k]
+    pool_indices = np.argsort(sim_matrix, axis=1)[:, ::-1][:, :top_k_retrieve]
+    top_indices = pool_indices[:, :top_k_output]
 
     # --- TrialChecker ----------------------------------------------------
     tc_scores_matrix = np.full((n_patients, top_k), np.nan, dtype=np.float64)

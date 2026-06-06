@@ -23,7 +23,7 @@ def get_db_connection(secrets_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--secrets", help="Path to database_secrets.txt", default="/ksg/kehl_mm_data/mmai/active_serial/data/phi/database_secrets.txt")
+    parser.add_argument("--secrets", help="Path to database_secrets.txt", default="/ksg/kehl_mm_data/mmai/v22/data/phi/database_secrets.txt")
     args = parser.parse_args()
     print(f"Using secrets from: {args.secrets}")
     conn = get_db_connection(args.secrets)

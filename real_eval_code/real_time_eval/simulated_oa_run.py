@@ -8,10 +8,16 @@ patients who generated outbound email drafts.
 
 The script first identifies the MRNs associated with drafted outbound emails,
 pulls their raw notes from the database, runs ../../6_summarize_patients.py to
-rebuild patient summaries from scratch, then retrieves the top 20 trial spaces
-by cosine similarity, optionally re-ranks with a TrialChecker model,
-optionally scores with a BoilerplateChecker model, and keeps the top 10 per
-patient.
+rebuild patient summaries from scratch, then retrieves the top --top-k-retrieve
+trial spaces by cosine similarity, optionally re-ranks with a TrialChecker
+model, optionally scores with a BoilerplateChecker model, and keeps the top
+--top-k-output unique trials per patient.
+
+By default the retrieved pool is re-ranked by the TrialChecker score (when a
+--trial-checker is given). Pass --trialspace-only-ranking to instead keep the
+top --top-k-output trials purely by TrialSpace cosine similarity, without
+narrowing to the subset that scores best on TrialChecker; the checkers still
+run on the final selection to populate their score columns.
 
 Outputs a parquet file with one row per patient per retrieved trial space.
 
@@ -342,6 +348,24 @@ def parse_args():
     parser.add_argument(
         "--sample-seed", type=int, default=None,
         help="Random seed for --sample-mrns (default: non-deterministic).",
+    )
+    parser.add_argument(
+        "--top-k-retrieve", type=int, default=20,
+        help="Number of trial spaces to retrieve by TrialSpace cosine "
+             "similarity before any re-ranking (default: 20).",
+    )
+    parser.add_argument(
+        "--top-k-output", type=int, default=20,
+        help="Number of unique trials (deduplicated by nct_id) kept per "
+             "patient in the output (default: 20).",
+    )
+    parser.add_argument(
+        "--trialspace-only-ranking", action="store_true",
+        help="Select and order the output top-k purely by TrialSpace cosine "
+             "similarity, skipping TrialChecker-based re-ranking. When "
+             "--trial-checker is given, TrialChecker is still scored on the "
+             "final top-k for the output column but does not affect which "
+             "trials are kept or their order.",
     )
     return parser.parse_args()
 
@@ -1009,23 +1033,35 @@ def main():
     print("Computing cosine similarity matrix ...")
     sim_matrix = patient_embs @ space_embs_np.T  # (N_patients, N_trials)
 
-    # Top 20 per patient
-    top_k_retrieve = 20
-    top_k_output = 20
-    top20_indices = np.argsort(sim_matrix, axis=1)[:, ::-1][:, :top_k_retrieve]
+    # Retrieve the top-k-retrieve pool per patient (by cosine similarity).
+    n_trials_total = len(df_trials)
+    top_k_retrieve = min(args.top_k_retrieve, n_trials_total)
+    if args.top_k_retrieve > n_trials_total:
+        print(f"Warning: --top-k-retrieve {args.top_k_retrieve} exceeds "
+              f"{n_trials_total} trial spaces; clamping to {n_trials_total}.")
+    top_k_output = min(args.top_k_output, top_k_retrieve)
+    if args.top_k_output > top_k_retrieve:
+        print(f"Warning: --top-k-output {args.top_k_output} exceeds the "
+              f"retrieve pool {top_k_retrieve}; clamping to {top_k_retrieve}.")
 
-    # --- Trial checker scoring (top 20 per patient) -----------------------
-    # Flatten all (patient, trial) pairs for batched inference
+    # Re-rank the pool by TrialChecker only when a checker is given AND we are
+    # not in TrialSpace-only ranking mode.
+    rerank_with_checker = bool(args.trial_checker) and not args.trialspace_only_ranking
+    if args.trialspace_only_ranking:
+        print("TrialSpace-only ranking: output top-k selected by cosine "
+              "similarity (no TrialChecker re-ranking).")
+
+    top_n_indices = np.argsort(sim_matrix, axis=1)[:, ::-1][:, :top_k_retrieve]
     n_patients = len(patient_ids)
-    tc_scores_flat = np.full(n_patients * top_k_retrieve, np.nan)
 
-    if args.trial_checker:
+    # --- Trial checker scoring on the retrieval pool (only when re-ranking) -
+    if rerank_with_checker:
         print(f"Running trial checker on {n_patients} patients x {top_k_retrieve} "
               f"trials across {len(gpu_ids)} GPU(s) ...")
         tc_texts = []
         for i in range(n_patients):
             for j in range(top_k_retrieve):
-                idx = top20_indices[i, j]
+                idx = top_n_indices[i, j]
                 tc_texts.append(
                     space_texts[idx]
                     + "\nNow here is the patient summary:"
@@ -1035,20 +1071,20 @@ def main():
             tc_texts, gpu_ids, args.trial_checker,
             args.checker_batch_size, 4096, "sigmoid",
         )
+        tc_scores_matrix = tc_scores_flat.reshape(n_patients, top_k_retrieve)
         print("Trial checker scoring complete.")
 
-    tc_scores_matrix = tc_scores_flat.reshape(n_patients, top_k_retrieve)
-
-    # --- Re-rank per patient ----------------------------------------------
-    if args.trial_checker:
-        # Re-rank top 20 by trial checker score (descending)
+        # Re-rank pool by trial checker score (descending).
         rerank_orders = np.argsort(tc_scores_matrix, axis=1)[:, ::-1]
-        top20_indices_reranked = np.take_along_axis(top20_indices, rerank_orders, axis=1)
-        tc_scores_matrix = np.take_along_axis(tc_scores_matrix, rerank_orders, axis=1)
+        ordered_indices = np.take_along_axis(top_n_indices, rerank_orders, axis=1)
+        ordered_tc_scores = np.take_along_axis(tc_scores_matrix, rerank_orders, axis=1)
     else:
-        top20_indices_reranked = top20_indices
+        # TrialSpace-only mode (or no checker): keep cosine order; TrialChecker
+        # scores, if requested, are computed later on the final top-k.
+        ordered_indices = top_n_indices
+        ordered_tc_scores = np.full((n_patients, top_k_retrieve), np.nan)
 
-    # Trim to top 10 unique trials per patient (deduplicate by nct_id).
+    # Trim to top_k_output unique trials per patient (deduplicate by nct_id).
     # A trial may have multiple spaces; keep only the highest-ranked space
     # for each trial, then continue down the list to fill up to top_k_output.
     top_selected_indices = []   # per-patient list of trial-space indices
@@ -1060,19 +1096,44 @@ def main():
         sel_tc = []
         sel_cos = []
         for j in range(top_k_retrieve):
-            idx = top20_indices_reranked[i, j]
+            idx = ordered_indices[i, j]
             nct = nct_ids[idx]
             if nct in seen_ncts:
                 continue
             seen_ncts.add(nct)
             sel_indices.append(idx)
-            sel_tc.append(float(tc_scores_matrix[i, j]))
+            sel_tc.append(float(ordered_tc_scores[i, j]))
             sel_cos.append(float(sim_matrix[i, idx]))
             if len(sel_indices) >= top_k_output:
                 break
         top_selected_indices.append(sel_indices)
         top_selected_tc_scores.append(sel_tc)
         top_selected_cos_sims.append(sel_cos)
+
+    # --- TrialChecker on the final top-k (TrialSpace-only mode) ------------
+    # In TrialSpace-only mode the pool was not scored, so score the selected
+    # trials now purely to populate the trialchecker_score output column.
+    if args.trial_checker and not rerank_with_checker:
+        total_pairs = sum(len(s) for s in top_selected_indices)
+        print(f"Running trial checker on {total_pairs} final top-k pairs "
+              f"across {len(gpu_ids)} GPU(s) ...")
+        tc_texts = []
+        tc_mapping = []  # (patient_idx, position_in_selection)
+        for i in range(n_patients):
+            for j, idx in enumerate(top_selected_indices[i]):
+                tc_texts.append(
+                    space_texts[idx]
+                    + "\nNow here is the patient summary:"
+                    + patient_summaries[i]
+                )
+                tc_mapping.append((i, j))
+        tc_sel_flat = parallel_checker(
+            tc_texts, gpu_ids, args.trial_checker,
+            args.checker_batch_size, 4096, "sigmoid",
+        )
+        for flat_idx, (i, j) in enumerate(tc_mapping):
+            top_selected_tc_scores[i][j] = float(tc_sel_flat[flat_idx])
+        print("Trial checker scoring complete.")
 
     # --- Boilerplate checker scoring (deduplicated top trials per patient) -
     bp_scores_per_patient = [

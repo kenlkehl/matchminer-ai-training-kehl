@@ -28,6 +28,11 @@ from eval_utils import (
 from sklearn.metrics import roc_auc_score
 
 
+# Candidate identity. (dfci_mrn, this_space) alone is NOT unique because serial
+# summarization pairs the same patient/trial with multiple patient summaries.
+KEY_COLS = ['dfci_mrn', 'this_space', 'patient_summary']
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate OncoReasoning-3B LLM trial checker for SOC"
@@ -50,14 +55,57 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_llm_results(results_file: Path) -> pd.Series:
-    """Load and aggregate LLM results by prompt_id."""
+def load_predictions(results_file: Path) -> pd.DataFrame:
+    """Load OncoReasoning trial-check results, one row per prompt.
+
+    The results file's ``eligibility_result`` column is the *model* score (0-5),
+    and every row carries the candidate key columns. We average the score over the
+    repeated samples per ``prompt_id`` and keep the keys so predictions can be
+    aligned to the gold labels by candidate identity (the shard merges that build
+    the gold file do not preserve candidate row order).
+
+    Returns a DataFrame with columns: prompt_id, prediction, and KEY_COLS.
+    """
     print(f"Loading LLM results from: {results_file}")
-    input_frame = pd.read_csv(results_file)
+    input_frame = pd.read_csv(
+        results_file, usecols=['prompt_id', 'eligibility_result'] + KEY_COLS
+    )
     print(f"Loaded {len(input_frame)} rows")
-    predictions = input_frame.groupby(['prompt_id'])['eligibility_result'].mean()
+    predictions = input_frame.groupby('prompt_id', as_index=False).agg(
+        prediction=('eligibility_result', 'mean'),
+        dfci_mrn=('dfci_mrn', 'first'),
+        this_space=('this_space', 'first'),
+        patient_summary=('patient_summary', 'first'),
+    )
     print(f"Aggregated to {len(predictions)} unique prompts")
     return predictions
+
+
+def load_gold(gold_path: Path, split_filter: str = None) -> pd.DataFrame:
+    """Load reference eligibility labels from the consolidated eligibility file."""
+    print(f"Loading gold eligibility labels: {gold_path}")
+    wanted = set(KEY_COLS + ['eligibility_result', 'split'])
+    gold = pd.read_csv(gold_path, usecols=lambda c: c in wanted)
+    gold = gold[~gold.patient_summary.isnull()]
+    if split_filter and 'split' in gold.columns:
+        gold = gold[gold.split.str.contains(split_filter)]
+        print(f"Filtered gold to '{split_filter}' split: {len(gold)} rows")
+    print(f"Loaded {len(gold)} gold standard rows")
+    return gold
+
+
+def align_predictions_to_gold(predictions: pd.DataFrame,
+                               gold: pd.DataFrame) -> pd.DataFrame:
+    """Merge predictions onto gold by candidate identity, restoring rank order.
+
+    Ascending ``prompt_id`` is retrieval-rank order; ``calculate_map_at_k`` assumes
+    the frame is pre-sorted by rank within each group, so we sort by it here.
+    """
+    merged = gold.merge(predictions, on=KEY_COLS, how='inner')
+    print(f"Matched {len(merged)} prediction/gold pairs "
+          f"(gold={len(gold)}, predictions={len(predictions)})")
+    merged = merged.sort_values('prompt_id').reset_index(drop=True)
+    return merged
 
 
 def evaluate_patient_centric(data_dir: Path, output_dir: Path,
@@ -77,84 +125,58 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
         print(f"LLM results file not found: {llm_results_file}")
         return
 
-    predictions = load_llm_results(llm_results_file)
+    predictions = load_predictions(llm_results_file)
 
-    # Load gold standard labels - prefer consolidated candidate file
-    consolidated_path = data_dir / "patient_centric_candidates.csv"
-    if consolidated_path.exists():
-        print(f"Loading consolidated file: {consolidated_path}")
-        gold = pd.read_csv(consolidated_path)
-    else:
-        # Fallback to shard directories
-        candidates_dir = data_dir / "spaces_for_patients_checks"
-        if not candidates_dir.exists():
-            candidates_dir = data_dir / "shards_patient_centric"
+    gold_path = data_dir / "consolidated_eligibility_patient_centric.csv"
+    if not gold_path.exists():
+        print(f"Gold eligibility file not found: {gold_path}")
+        return
+    gold = load_gold(gold_path, split_filter)
 
-        print(f"Loading gold standard from: {candidates_dir}")
-
-        try:
-            gold = load_and_combine_csv_files(str(candidates_dir))
-        except FileNotFoundError:
-            print(f"No gold standard data found")
-            return
-
-    if split_filter and 'split' in gold.columns:
-        gold = gold[gold.split.str.contains(split_filter)]
-        print(f"Filtered to {split_filter} split: {len(gold)} rows")
-
-    gold = gold[~gold.patient_summary.isnull()]
-    if 'Unnamed: 0' in gold.columns:
-        gold = gold.sort_values(by='Unnamed: 0').reset_index(drop=True)
-    else:
-        gold = gold.reset_index(drop=True)
-
-    print(f"Loaded {len(gold)} gold standard rows")
-
-    if len(predictions) != len(gold):
-        print(f"Warning: prediction count ({len(predictions)}) != gold count ({len(gold)})")
-        min_len = min(len(predictions), len(gold))
-        predictions = predictions.head(min_len)
-        gold = gold.head(min_len)
+    merged = align_predictions_to_gold(predictions, gold)
+    if len(merged) == 0:
+        print("No overlapping candidates between predictions and gold; aborting.")
+        return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n--- Classification Metrics ---")
-    gold_binary = (gold.eligibility_result > 0).astype(float)
-    auc = roc_auc_score(gold_binary, predictions.values)
+    gold_binary = (merged.eligibility_result > 0).astype(float)
+    preds = merged.prediction.values
+    auc = roc_auc_score(gold_binary, preds)
     auc_ci = bootstrap_metric_ci(
-        [gold_binary.values, predictions.values], binary_auroc_score
+        [gold_binary.values, preds], binary_auroc_score
     )
     print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     pdf_path = output_dir / "llm_trial_checker_patient_centric_classification_soc.pdf"
     eval_model(
-        predictions.values,
+        preds,
         gold_binary.values,
         pdf_path=str(pdf_path),
         title_prefix="SOC LLM Trial Checker Patient-Centric"
     )
 
     print(f"\n--- Ranking Metrics (threshold={threshold}) ---")
-    positive_mask = predictions.values >= threshold
-    pruned_gold = gold[positive_mask].copy()
+    pruned = merged[merged.prediction >= threshold].copy()
 
-    print(f"Samples after filtering: {len(pruned_gold)}")
+    print(f"Samples after filtering: {len(pruned)}")
 
-    if len(pruned_gold) > 0 and 'eligibility_result' in pruned_gold.columns:
-        positive_rate = pruned_gold.eligibility_result.mean()
+    if len(pruned) > 0:
+        positive_rate = pruned.eligibility_result.mean()
         positive_rate_ci = bootstrap_metric_ci(
-            [pruned_gold.eligibility_result.values], positive_rate_metric
+            [pruned.eligibility_result.values], positive_rate_metric
         )
         print(f"Positive rate after filtering: {format_metric_with_ci(positive_rate, positive_rate_ci)}")
 
         map_k, ranking_stats = calculate_map_at_k(
-            pruned_gold, 'patient_summary', 'eligibility_result', k
+            pruned, 'patient_summary', 'eligibility_result', k
         )
         print(f"MAP@{k} (after LLM check): {format_metric_with_ci(map_k, ranking_stats.get('map_at_k_ci'))}")
 
         pdf_path = output_dir / "llm_trial_checker_patient_centric_ranking_soc.pdf"
         generate_ranking_report(
-            pruned_gold,
+            pruned,
             group_col='patient_summary',
             label_col='eligibility_result',
             pdf_path=str(pdf_path),
@@ -182,78 +204,52 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
         print(f"LLM results file not found: {llm_results_file}")
         return
 
-    predictions = load_llm_results(llm_results_file)
+    predictions = load_predictions(llm_results_file)
 
-    # Load gold standard labels - prefer consolidated candidate file
-    consolidated_path = data_dir / "trial_centric_candidates.csv"
-    if consolidated_path.exists():
-        print(f"Loading consolidated file: {consolidated_path}")
-        gold = pd.read_csv(consolidated_path)
-    else:
-        # Fallback to shard directories
-        candidates_dir = data_dir / "patients_for_spaces_checks"
-        if not candidates_dir.exists():
-            candidates_dir = data_dir / "shards_trial_centric"
+    gold_path = data_dir / "consolidated_eligibility_trial_centric.csv"
+    if not gold_path.exists():
+        print(f"Gold eligibility file not found: {gold_path}")
+        return
+    gold = load_gold(gold_path, split_filter)
 
-        print(f"Loading gold standard from: {candidates_dir}")
-
-        try:
-            gold = load_and_combine_csv_files(str(candidates_dir))
-        except FileNotFoundError:
-            print(f"No gold standard data found")
-            return
-
-    if split_filter and 'split' in gold.columns:
-        gold = gold[gold.split.str.contains(split_filter)]
-        print(f"Filtered to {split_filter} split: {len(gold)} rows")
-
-    gold = gold[~gold.patient_summary.isnull()]
-    if 'Unnamed: 0' in gold.columns:
-        gold = gold.sort_values(by='Unnamed: 0').reset_index(drop=True)
-    else:
-        gold = gold.reset_index(drop=True)
-
-    print(f"Loaded {len(gold)} gold standard rows")
-
-    if len(predictions) != len(gold):
-        print(f"Warning: prediction count ({len(predictions)}) != gold count ({len(gold)})")
-        min_len = min(len(predictions), len(gold))
-        predictions = predictions.head(min_len)
-        gold = gold.head(min_len)
+    merged = align_predictions_to_gold(predictions, gold)
+    if len(merged) == 0:
+        print("No overlapping candidates between predictions and gold; aborting.")
+        return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n--- Classification Metrics ---")
-    gold_binary = (gold.eligibility_result > 0).astype(float)
-    auc = roc_auc_score(gold_binary, predictions.values)
+    gold_binary = (merged.eligibility_result > 0).astype(float)
+    preds = merged.prediction.values
+    auc = roc_auc_score(gold_binary, preds)
     auc_ci = bootstrap_metric_ci(
-        [gold_binary.values, predictions.values], binary_auroc_score
+        [gold_binary.values, preds], binary_auroc_score
     )
     print(f"AUC: {format_metric_with_ci(auc, auc_ci)}")
 
     pdf_path = output_dir / "llm_trial_checker_trial_centric_classification_soc.pdf"
     eval_model(
-        predictions.values,
+        preds,
         gold_binary.values,
         pdf_path=str(pdf_path),
         title_prefix="SOC LLM Trial Checker Trial-Centric"
     )
 
     print(f"\n--- Ranking Metrics (threshold={threshold}) ---")
-    positive_mask = predictions.values >= threshold
-    pruned_gold = gold[positive_mask].copy()
+    pruned = merged[merged.prediction >= threshold].copy()
 
-    print(f"Samples after filtering: {len(pruned_gold)}")
+    print(f"Samples after filtering: {len(pruned)}")
 
-    if len(pruned_gold) > 0 and 'eligibility_result' in pruned_gold.columns:
+    if len(pruned) > 0:
         map_k, ranking_stats = calculate_map_at_k(
-            pruned_gold, 'this_space', 'eligibility_result', k
+            pruned, 'this_space', 'eligibility_result', k
         )
         print(f"MAP@{k} (after LLM check): {format_metric_with_ci(map_k, ranking_stats.get('map_at_k_ci'))}")
 
         pdf_path = output_dir / "llm_trial_checker_trial_centric_ranking_soc.pdf"
         generate_ranking_report(
-            pruned_gold,
+            pruned,
             group_col='this_space',
             label_col='eligibility_result',
             pdf_path=str(pdf_path),
