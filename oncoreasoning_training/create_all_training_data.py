@@ -19,7 +19,9 @@ import json
 import math
 import multiprocessing as mp
 import os
+import random
 import re
+import shutil
 import struct
 from pathlib import Path
 
@@ -846,6 +848,19 @@ class TextParquetWriter:
         self.writer.write_table(table, row_group_size=self.row_group_size)
         self.rows_written += len(texts)
 
+    def write_record_batch(self, record_batch):
+        if record_batch.num_rows == 0:
+            return
+        text_index = record_batch.schema.get_field_index("text")
+        if text_index < 0:
+            raise ValueError("Expected a 'text' column in record batch")
+        table = pa.Table.from_arrays(
+            [record_batch.column(text_index).cast(pa.string())],
+            schema=TEXT_SCHEMA,
+        )
+        self.writer.write_table(table, row_group_size=self.row_group_size)
+        self.rows_written += table.num_rows
+
     def __exit__(self, exc_type, exc, tb):
         if self.writer is not None:
             self.writer.close()
@@ -1044,69 +1059,137 @@ def parquet_row_count(path):
     return pq.ParquetFile(path).metadata.num_rows
 
 
-def balance_task_parquet(input_path, output_path, target):
+def balance_task_parquet(input_path, output_path, target, batch_size=10_000):
     """Balance one task parquet and write the result without keeping other tasks."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    df = pd.read_parquet(input_path, columns=["text"])
-    raw_count = len(df)
+    raw_count = parquet_row_count(input_path)
 
     if raw_count == 0:
-        df.to_parquet(output_path, row_group_size=10_000)
-        del df
-        gc.collect()
+        with TextParquetWriter(output_path):
+            pass
         return raw_count, 0, 0.0
 
-    if raw_count >= target:
-        balanced_df = df.iloc[:target].reset_index(drop=True)
-        replication = 1.0
-    else:
-        reps = math.ceil(target / raw_count)
-        balanced_df = (
-            pd.concat([df] * reps, ignore_index=True)
-            .iloc[:target]
-            .reset_index(drop=True)
-        )
-        replication = reps
+    rows_remaining = target
+    replication = 1.0 if raw_count >= target else math.ceil(target / raw_count)
 
-    final_count = len(balanced_df)
-    balanced_df.to_parquet(output_path, row_group_size=10_000)
-    del df, balanced_df
+    with TextParquetWriter(output_path) as writer:
+        while rows_remaining > 0:
+            wrote_this_pass = 0
+            pf = pq.ParquetFile(input_path)
+            for record_batch in pf.iter_batches(
+                batch_size=batch_size,
+                columns=["text"],
+            ):
+                if rows_remaining <= 0:
+                    break
+                if record_batch.num_rows > rows_remaining:
+                    record_batch = record_batch.slice(0, rows_remaining)
+                writer.write_record_batch(record_batch)
+                rows_remaining -= record_batch.num_rows
+                wrote_this_pass += record_batch.num_rows
+
+            if wrote_this_pass == 0:
+                break
+
+    final_count = target - rows_remaining
     gc.collect()
     return raw_count, final_count, replication
 
 
-def combine_and_shuffle_task_parquets(task_paths, combined_path, seed):
-    """Load balanced task parquets, shuffle once, and write the final parquet."""
-    frames = []
+def combine_and_shuffle_task_parquets(
+    task_paths,
+    combined_path,
+    seed,
+    bucket_count=256,
+    batch_size=10_000,
+):
+    """Combine task parquets with a disk-backed row shuffle."""
+    bucket_count = max(1, bucket_count)
+    batch_size = max(1, batch_size)
+    bucket_dir = f"{combined_path}.shuffle_buckets"
+    if os.path.exists(bucket_dir):
+        shutil.rmtree(bucket_dir)
+    os.makedirs(bucket_dir, exist_ok=True)
+
+    bucket_paths = [
+        os.path.join(bucket_dir, f"bucket-{idx:05d}.parquet")
+        for idx in range(bucket_count)
+    ]
+    rng = random.Random(seed)
     total_rows = 0
 
-    for task_name, path in task_paths:
-        print(f"  Loading balanced {task_name} prompts from {path}...")
-        df = pd.read_parquet(path, columns=["text"])
-        total_rows += len(df)
-        frames.append(df)
+    print(
+        f"Partitioning rows into {bucket_count} shuffle buckets "
+        f"(seed={seed})..."
+    )
+    bucket_writers = []
+    try:
+        for bucket_path in bucket_paths:
+            bucket_writers.append(TextParquetWriter(bucket_path).__enter__())
 
-    if frames:
-        combined_df = pd.concat(frames, ignore_index=True, copy=False)
-    else:
-        combined_df = pd.DataFrame({"text": []})
+        for task_name, path in task_paths:
+            print(f"  Streaming balanced {task_name} prompts from {path}...")
+            task_rows = 0
+            pf = pq.ParquetFile(path)
+            for record_batch in pf.iter_batches(
+                batch_size=batch_size,
+                columns=["text"],
+            ):
+                text_index = record_batch.schema.get_field_index("text")
+                texts = record_batch.column(text_index).to_pylist()
+                bucketed_texts = [[] for _ in range(bucket_count)]
+                for text in texts:
+                    bucketed_texts[rng.randrange(bucket_count)].append(text)
 
-    del frames
-    gc.collect()
+                for bucket_idx, bucket_texts in enumerate(bucketed_texts):
+                    bucket_writers[bucket_idx].write(bucket_texts)
 
-    print(f"Combined dataset: {len(combined_df)} rows")
-    if total_rows:
-        print(f"Shuffling with seed={seed}...")
-        combined_df = (
-            combined_df
-            .sample(frac=1.0, random_state=seed)
-            .reset_index(drop=True)
-        )
+                task_rows += len(texts)
+                total_rows += len(texts)
+                if task_rows % (batch_size * 10) < batch_size:
+                    print(
+                        f"    Partitioned {task_rows} {task_name} rows...",
+                        flush=True,
+                    )
+            print(f"    Partitioned {task_rows} {task_name} rows total")
+    finally:
+        for writer in bucket_writers:
+            writer.__exit__(None, None, None)
 
-    print(f"Saving combined parquet to {combined_path}...")
-    combined_df.to_parquet(combined_path, row_group_size=10_000)
-    rows_written = len(combined_df)
-    del combined_df
+    print(f"Combined dataset: {total_rows} rows")
+    print(f"Writing shuffled combined parquet to {combined_path}...")
+    bucket_order = list(range(bucket_count))
+    random.Random(seed + 1).shuffle(bucket_order)
+
+    rows_written = 0
+    with TextParquetWriter(combined_path) as writer:
+        for bucket_idx in bucket_order:
+            bucket_path = bucket_paths[bucket_idx]
+            bucket_rows = parquet_row_count(bucket_path)
+            if bucket_rows == 0:
+                continue
+
+            table = pq.read_table(bucket_path, columns=["text"])
+            row_order = list(range(table.num_rows))
+            random.Random(seed + 10_000 + bucket_idx).shuffle(row_order)
+            shuffled_table = table.take(pa.array(row_order, type=pa.int64()))
+            writer.writer.write_table(
+                shuffled_table.cast(TEXT_SCHEMA),
+                row_group_size=writer.row_group_size,
+            )
+            writer.rows_written += shuffled_table.num_rows
+            rows_written += shuffled_table.num_rows
+
+            del table, shuffled_table, row_order
+            gc.collect()
+
+            if rows_written % (batch_size * 10) < bucket_rows:
+                print(
+                    f"  Wrote {rows_written}/{total_rows} shuffled rows...",
+                    flush=True,
+                )
+
+    shutil.rmtree(bucket_dir)
     gc.collect()
     return rows_written
 
@@ -1598,6 +1681,24 @@ def parse_args():
         help="Rows per prompt-prep worker task (default: 128)",
     )
     parser.add_argument(
+        "--balance-batch-size",
+        type=positive_int,
+        default=10_000,
+        help="Rows per streaming balance batch (default: 10000)",
+    )
+    parser.add_argument(
+        "--shuffle-batch-size",
+        type=positive_int,
+        default=10_000,
+        help="Rows per streaming shuffle partition batch (default: 10000)",
+    )
+    parser.add_argument(
+        "--shuffle-buckets",
+        type=positive_int,
+        default=256,
+        help="Number of disk-backed shuffle buckets (default: 256)",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=DEFAULT_WORKER_COUNT,
@@ -1614,6 +1715,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Reuse existing all_training_data.parquet and regenerate only the tokenized dataset",
+    )
+    parser.add_argument(
+        "--reuse-balanced-task-parquets",
+        action="store_true",
+        default=False,
+        help="Skip prompt building/balancing and combine existing balanced task parquets",
     )
     return parser.parse_args()
 
@@ -1662,79 +1769,102 @@ def main():
         print("Done!")
         return
 
-    # ---- Step 1 & 2: Load data and build prompts with truncation ----
     task_parquet_paths = {}
-    for task_name in args.tasks:
-        task = TASKS[task_name]
-        task_parquet_path = os.path.join(task_parquet_dir, f'{task_name}.parquet')
+    counts = {}
+    balanced_task_paths = []
+    if args.reuse_balanced_task_parquets:
         print(f"\n{'='*60}")
-        print(f"Task: {task_name}")
+        print("Reusing balanced task parquets")
+        print(f"{'='*60}")
+        if args.sample_rows is not None:
+            print("Note: --sample-rows is ignored with --reuse-balanced-task-parquets.")
+
+        for name in args.tasks:
+            balanced_path = os.path.join(balanced_task_parquet_dir, f'{name}.parquet')
+            if not os.path.exists(balanced_path):
+                raise FileNotFoundError(
+                    f"Cannot reuse balanced task parquets; missing {balanced_path}"
+                )
+            row_count = parquet_row_count(balanced_path)
+            print(f"  {name}: {row_count} rows from {balanced_path}")
+            if row_count > 0:
+                balanced_task_paths.append((name, balanced_path))
+
+        if not balanced_task_paths:
+            raise ValueError("No reusable balanced task parquets had any rows.")
+    else:
+        # ---- Step 1 & 2: Load data and build prompts with truncation ----
+        for task_name in args.tasks:
+            task = TASKS[task_name]
+            task_parquet_path = os.path.join(task_parquet_dir, f'{task_name}.parquet')
+            print(f"\n{'='*60}")
+            print(f"Task: {task_name}")
+            print(f"{'='*60}")
+
+            print("Loading data...")
+            df = task['loader'](args.data_dir)
+            df = sample_task_rows(
+                df=df,
+                sample_rows=args.sample_rows,
+                seed=args.seed,
+                task_name=task_name,
+            )
+
+            print(f"Building prompts (max_seq_length={args.max_seq_length})...")
+            kept_count, truncated_count, dropped_count = build_task_prompt_parquet(
+                task_name=task_name,
+                df=df,
+                tokenizer=tokenizer,
+                max_seq_length=args.max_seq_length,
+                output_path=task_parquet_path,
+                num_workers=prep_workers,
+                chunk_size=prep_chunk_size,
+            )
+
+            print(f"  Built {kept_count} prompts")
+            print(f"  Truncated: {truncated_count}")
+            print(f"  Dropped (too long): {dropped_count}")
+            print(f"  Saved task parquet: {task_parquet_path}")
+            task_parquet_paths[task_name] = task_parquet_path
+
+            del df
+            gc.collect()
+
+        # ---- Step 3: Balance tasks ----
+        print(f"\n{'='*60}")
+        print("Balancing tasks")
         print(f"{'='*60}")
 
-        print("Loading data...")
-        df = task['loader'](args.data_dir)
-        df = sample_task_rows(
-            df=df,
-            sample_rows=args.sample_rows,
-            seed=args.seed,
-            task_name=task_name,
-        )
+        counts = {
+            name: parquet_row_count(path)
+            for name, path in task_parquet_paths.items()
+        }
+        if not counts or max(counts.values()) == 0:
+            raise ValueError("No prompts were generated for the selected tasks.")
 
-        print(f"Building prompts (max_seq_length={args.max_seq_length})...")
-        kept_count, truncated_count, dropped_count = build_task_prompt_parquet(
-            task_name=task_name,
-            df=df,
-            tokenizer=tokenizer,
-            max_seq_length=args.max_seq_length,
-            output_path=task_parquet_path,
-            num_workers=prep_workers,
-            chunk_size=prep_chunk_size,
-        )
+        if args.balance_target == "max":
+            target = max(counts.values())
+            print(f"Balance target: max = {target}")
+        else:
+            target = int(args.balance_target)
+            print(f"Balance target: {target}")
 
-        print(f"  Built {kept_count} prompts")
-        print(f"  Truncated: {truncated_count}")
-        print(f"  Dropped (too long): {dropped_count}")
-        print(f"  Saved task parquet: {task_parquet_path}")
-        task_parquet_paths[task_name] = task_parquet_path
+        for name in args.tasks:
+            raw_path = task_parquet_paths[name]
+            raw_count = counts[name]
+            if raw_count == 0:
+                print(f"  {name}: 0 examples - skipping")
+                continue
 
-        del df
-        gc.collect()
-
-    # ---- Step 3: Balance tasks ----
-    print(f"\n{'='*60}")
-    print("Balancing tasks")
-    print(f"{'='*60}")
-
-    counts = {
-        name: parquet_row_count(path)
-        for name, path in task_parquet_paths.items()
-    }
-    if not counts or max(counts.values()) == 0:
-        raise ValueError("No prompts were generated for the selected tasks.")
-
-    if args.balance_target == "max":
-        target = max(counts.values())
-        print(f"Balance target: max = {target}")
-    else:
-        target = int(args.balance_target)
-        print(f"Balance target: {target}")
-
-    balanced_task_paths = []
-    for name in args.tasks:
-        raw_path = task_parquet_paths[name]
-        raw_count = counts[name]
-        if raw_count == 0:
-            print(f"  {name}: 0 examples - skipping")
-            continue
-
-        balanced_path = os.path.join(balanced_task_parquet_dir, f'{name}.parquet')
-        raw_count, final_count, replication = balance_task_parquet(
-            input_path=raw_path,
-            output_path=balanced_path,
-            target=target,
-        )
-        balanced_task_paths.append((name, balanced_path))
-        print(f"  {name}: {raw_count} raw -> x{replication} -> {final_count} final")
+            balanced_path = os.path.join(balanced_task_parquet_dir, f'{name}.parquet')
+            raw_count, final_count, replication = balance_task_parquet(
+                input_path=raw_path,
+                output_path=balanced_path,
+                target=target,
+                batch_size=args.balance_batch_size,
+            )
+            balanced_task_paths.append((name, balanced_path))
+            print(f"  {name}: {raw_count} raw -> x{replication} -> {final_count} final")
 
     # ---- Step 4: Combine, shuffle, tokenize, save ----
     print(f"\n{'='*60}")
@@ -1745,6 +1875,8 @@ def main():
         task_paths=balanced_task_paths,
         combined_path=combined_path,
         seed=args.seed,
+        bucket_count=args.shuffle_buckets,
+        batch_size=args.shuffle_batch_size,
     )
     print(f"Saved {rows_written} rows")
 
