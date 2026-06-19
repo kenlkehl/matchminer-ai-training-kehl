@@ -32,6 +32,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_training_data"
+DEFAULT_WORKER_COUNT = max(1, (os.cpu_count() or 1) - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +631,223 @@ def build_prompt_with_truncation(
 
 
 # ---------------------------------------------------------------------------
+# Parallel prompt preparation
+# ---------------------------------------------------------------------------
+
+_PROMPT_WORKER_TOKENIZER = None
+_PROMPT_WORKER_MAX_SEQ_LENGTH = None
+_PROMPT_WORKER_TASK = None
+
+
+def _init_prompt_worker(model_name, max_seq_length, task_name):
+    """Load one tokenizer per prompt-prep worker process."""
+    global _PROMPT_WORKER_TOKENIZER
+    global _PROMPT_WORKER_MAX_SEQ_LENGTH
+    global _PROMPT_WORKER_TASK
+
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    _PROMPT_WORKER_TOKENIZER = tokenizer
+    _PROMPT_WORKER_MAX_SEQ_LENGTH = max_seq_length
+    _PROMPT_WORKER_TASK = TASKS[task_name]
+
+
+def _build_prompt_chunk_worker(chunk):
+    """Build prompts for one dataframe-record chunk in a worker process."""
+    chunk_index, records = chunk
+    if _PROMPT_WORKER_TOKENIZER is None or _PROMPT_WORKER_TASK is None:
+        raise RuntimeError("Prompt worker was not initialized")
+
+    prompts = []
+    truncated_count = 0
+    dropped_count = 0
+
+    for row in records:
+        prompt, was_truncated = build_prompt_with_truncation(
+            row=row,
+            tokenizer=_PROMPT_WORKER_TOKENIZER,
+            max_seq_length=_PROMPT_WORKER_MAX_SEQ_LENGTH,
+            build_messages_fn=_PROMPT_WORKER_TASK['build_messages'],
+            get_truncatable_fn=_PROMPT_WORKER_TASK['get_truncatable'],
+            rebuild_fn=_PROMPT_WORKER_TASK['rebuild'],
+        )
+        if prompt is None:
+            dropped_count += 1
+        else:
+            if was_truncated:
+                truncated_count += 1
+            prompts.append(prompt)
+
+    return chunk_index, prompts, truncated_count, dropped_count, len(records)
+
+
+def _iter_dataframe_record_chunks(df, chunk_size):
+    """Yield dataframe rows as picklable dict chunks."""
+    for chunk_index, start in enumerate(range(0, len(df), chunk_size)):
+        stop = min(start + chunk_size, len(df))
+        yield chunk_index, df.iloc[start:stop].to_dict("records")
+
+
+def _build_task_prompts_serial(df, task, tokenizer, max_seq_length):
+    prompts = []
+    truncated_count = 0
+    dropped_count = 0
+    total_rows = len(df)
+    next_log_at = 5_000
+
+    for i in range(total_rows):
+        row = df.iloc[i]
+        prompt, was_truncated = build_prompt_with_truncation(
+            row=row,
+            tokenizer=tokenizer,
+            max_seq_length=max_seq_length,
+            build_messages_fn=task['build_messages'],
+            get_truncatable_fn=task['get_truncatable'],
+            rebuild_fn=task['rebuild'],
+        )
+        if prompt is None:
+            dropped_count += 1
+        else:
+            if was_truncated:
+                truncated_count += 1
+            prompts.append(prompt)
+
+        rows_done = i + 1
+        if rows_done == total_rows or rows_done >= next_log_at:
+            print(
+                f"  Built prompts for {rows_done}/{total_rows} rows "
+                f"({len(prompts)} kept)...",
+                flush=True,
+            )
+            next_log_at += 5_000
+
+    return prompts, truncated_count, dropped_count
+
+
+def build_task_prompts(
+    task_name,
+    df,
+    tokenizer,
+    max_seq_length,
+    num_workers=1,
+    chunk_size=128,
+):
+    """Build all prompts for one task, optionally in parallel."""
+    task = TASKS[task_name]
+    total_rows = len(df)
+    if total_rows == 0:
+        return [], 0, 0
+
+    num_workers = max(1, num_workers)
+    chunk_size = max(1, chunk_size)
+    num_chunks = math.ceil(total_rows / chunk_size)
+    actual_workers = min(num_workers, num_chunks)
+
+    if actual_workers <= 1:
+        return _build_task_prompts_serial(df, task, tokenizer, max_seq_length)
+
+    model_name = tokenizer.name_or_path
+    print(
+        f"  Launching {actual_workers} prompt-prep workers "
+        f"({num_chunks} chunks of up to {chunk_size} rows, start_method=spawn)...",
+        flush=True,
+    )
+
+    prompts = []
+    truncated_count = 0
+    dropped_count = 0
+    rows_done = 0
+    next_log_at = 5_000
+    max_in_flight = actual_workers * 2
+    chunk_iter = _iter_dataframe_record_chunks(df, chunk_size)
+
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(
+        actual_workers,
+        initializer=_init_prompt_worker,
+        initargs=(model_name, max_seq_length, task_name),
+    ) as pool:
+        in_flight = {}
+        next_collect = 0
+
+        def submit_one():
+            try:
+                chunk = next(chunk_iter)
+            except StopIteration:
+                return False
+            chunk_index, _ = chunk
+            in_flight[chunk_index] = pool.apply_async(
+                _build_prompt_chunk_worker,
+                (chunk,),
+            )
+            return True
+
+        for _ in range(max_in_flight):
+            if not submit_one():
+                break
+
+        while in_flight:
+            chunk_index, chunk_prompts, chunk_truncated, chunk_dropped, chunk_rows = (
+                in_flight.pop(next_collect).get()
+            )
+            if chunk_index != next_collect:
+                raise RuntimeError(
+                    f"Unexpected prompt chunk order: got {chunk_index}, "
+                    f"expected {next_collect}"
+                )
+
+            prompts.extend(chunk_prompts)
+            truncated_count += chunk_truncated
+            dropped_count += chunk_dropped
+            rows_done += chunk_rows
+            next_collect += 1
+            submit_one()
+
+            if rows_done == total_rows or rows_done >= next_log_at:
+                print(
+                    f"  Built prompts for {rows_done}/{total_rows} rows "
+                    f"({len(prompts)} kept)...",
+                    flush=True,
+                )
+                while next_log_at <= rows_done:
+                    next_log_at += 5_000
+
+    return prompts, truncated_count, dropped_count
+
+
+def sample_task_rows(df, sample_rows, seed, task_name):
+    """Optionally sample rows from one task dataframe."""
+    if sample_rows is None:
+        return df
+
+    total_rows = len(df)
+    if total_rows <= sample_rows:
+        print(
+            f"  Sample rows requested for {task_name}: {sample_rows}; "
+            f"using all {total_rows} rows",
+            flush=True,
+        )
+        return df.reset_index(drop=True)
+
+    print(
+        f"  Sampling {sample_rows}/{total_rows} rows for {task_name} "
+        f"(seed={seed})...",
+        flush=True,
+    )
+    return df.sample(n=sample_rows, random_state=seed).reset_index(drop=True)
+
+
+def positive_int(value):
+    """Parse a positive integer CLI argument."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+# ---------------------------------------------------------------------------
 # Streaming tokenization — writes directly to Arrow on disk
 # ---------------------------------------------------------------------------
 
@@ -1061,8 +1279,8 @@ def parse_args():
     parser.add_argument(
         "--model-name",
         type=str,
-        default="LiquidAI/LFM2.5-1.2B-Thinking",
-        help="Tokenizer model (default: LiquidAI/LFM-2.5-1.2B-Thinking)",
+        default="google/gemma-4-e2b-it",
+        help="tokenizer. default: google/gemma-4-e2b)",
     )
     parser.add_argument(
         "--balance-target",
@@ -1084,16 +1302,34 @@ def parse_args():
         help="Which tasks to include (default: all four)",
     )
     parser.add_argument(
+        "--sample-rows",
+        type=positive_int,
+        default=None,
+        help="Randomly sample up to this many rows from each selected task dataset before prompt preparation (default: all rows)",
+    )
+    parser.add_argument(
         "--writer-batch-size",
         type=int,
         default=1000,
         help="Writer batch size for tokenization to reduce memory usage (default: 1000)",
     )
     parser.add_argument(
+        "--prep-workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers for prompt/parquet preparation before tokenization (default: --num-workers)",
+    )
+    parser.add_argument(
+        "--prep-chunk-size",
+        type=int,
+        default=128,
+        help="Rows per prompt-prep worker task (default: 128)",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
-        default=os.cpu_count() or 1,
-        help="Number of parallel workers for tokenization (default: all CPUs)",
+        default=DEFAULT_WORKER_COUNT,
+        help="Number of parallel workers for tokenization (default: CPU count minus one)",
     )
     parser.add_argument(
         "--change-to-think",
@@ -1116,6 +1352,10 @@ def main():
     if args.change_to_think:
         print("Note: --change-to-think is deprecated and no longer changes output.")
 
+    prep_workers = args.prep_workers if args.prep_workers is not None else args.num_workers
+    prep_workers = max(1, prep_workers)
+    prep_chunk_size = max(1, args.prep_chunk_size)
+
     print(f"Loading tokenizer: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
@@ -1126,6 +1366,8 @@ def main():
     # Retokenization is explicit-only so stale prompt parquet files are not
     # silently reused after prompt-construction changes.
     if args.retokenize:
+        if args.sample_rows is not None:
+            print("Note: --sample-rows is ignored with --retokenize.")
         if not os.path.exists(combined_path):
             raise FileNotFoundError(f"Cannot retokenize; missing {combined_path}")
         print(f"\nRetokenizing from existing {combined_path}.")
@@ -1156,28 +1398,22 @@ def main():
 
         print("Loading data...")
         df = task['loader'](args.data_dir)
+        df = sample_task_rows(
+            df=df,
+            sample_rows=args.sample_rows,
+            seed=args.seed,
+            task_name=task_name,
+        )
 
         print(f"Building prompts (max_seq_length={args.max_seq_length})...")
-        prompts = []
-        truncated_count = 0
-        dropped_count = 0
-
-        for i in range(len(df)):
-            row = df.iloc[i]
-            prompt, was_truncated = build_prompt_with_truncation(
-                row=row,
-                tokenizer=tokenizer,
-                max_seq_length=args.max_seq_length,
-                build_messages_fn=task['build_messages'],
-                get_truncatable_fn=task['get_truncatable'],
-                rebuild_fn=task['rebuild'],
-            )
-            if prompt is None:
-                dropped_count += 1
-            else:
-                if was_truncated:
-                    truncated_count += 1
-                prompts.append(prompt)
+        prompts, truncated_count, dropped_count = build_task_prompts(
+            task_name=task_name,
+            df=df,
+            tokenizer=tokenizer,
+            max_seq_length=args.max_seq_length,
+            num_workers=prep_workers,
+            chunk_size=prep_chunk_size,
+        )
 
         print(f"  Built {len(prompts)} prompts")
         print(f"  Truncated: {truncated_count}")

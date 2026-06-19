@@ -27,7 +27,7 @@ lora_config = LoraConfig(
 
 
 
-repo_id = "LiquidAI/LFM2.5-1.2B-Thinking"
+repo_id = "google/gemma-4-e2b-it"
 
 torch.backends.cuda.enable_flash_sdp(True)
 print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")
@@ -49,7 +49,7 @@ sft_config = SFTConfig(
     # Actual batch (for updating) is same (1x) as micro-batch size
     gradient_accumulation_steps=1,  
     # The initial (micro) batch size to start off with
-    per_device_train_batch_size=2, 
+    per_device_train_batch_size=1, 
     bf16=True,
     # If batch size would cause OOM, halves its size until it works
     auto_find_batch_size=False,
@@ -80,7 +80,7 @@ sft_config = SFTConfig(
     activation_offloading=True,
     use_liger_kernel=True,
     logging_dir='./logs',
-    output_dir='../../models/onco_reasoning_lfm',
+    output_dir='../../models/onco_reasoning_gemma',
     report_to='none'
 )
 
