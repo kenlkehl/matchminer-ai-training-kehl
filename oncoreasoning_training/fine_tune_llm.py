@@ -3,7 +3,7 @@ import os
 import torch
 from datasets import Dataset
 from peft import LoraConfig, TaskType
-from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq
+from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq, Gemma4ForCausalLM
 from trl import SFTConfig, SFTTrainer
 
 dataset = Dataset.load_from_disk('../../data/no_phi/oncoreasoning_training_data/tokenized_training_data.dataset/')
@@ -32,8 +32,19 @@ repo_id = "google/gemma-4-e2b-it"
 torch.backends.cuda.enable_flash_sdp(True)
 print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")
 
-model = AutoModelForCausalLM.from_pretrained(
-   repo_id, attn_implementation="sdpa", dtype=torch.bfloat16
+base_config = AutoConfig.from_pretrained(repo_id)
+text_config = base_config.get_text_config()
+if hasattr(text_config, "vision_config") or hasattr(text_config, "audio_config"):
+    raise ValueError("Expected a text-only Gemma 4 config without vision/audio towers.")
+
+model = Gemma4ForCausalLM.from_pretrained(
+   repo_id,
+   config=text_config,
+   attn_implementation="sdpa",
+   dtype=torch.bfloat16,
+   key_mapping={
+       r"^model\.language_model\.": "model.",
+   },
 )
 tokenizer = AutoTokenizer.from_pretrained(repo_id)
 tokenizer.pad_token = tokenizer.eos_token
