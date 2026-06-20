@@ -3,12 +3,12 @@ import os
 import torch
 from datasets import Dataset
 from peft import LoraConfig, TaskType
-from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq, Gemma4ForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq
 from trl import SFTConfig, SFTTrainer
 
 dataset = Dataset.load_from_disk('../../data/no_phi/oncoreasoning_training_data/tokenized_training_data.dataset/')
 
-repo_id = "google/gemma-4-e2b-it"
+repo_id = "Qwen/Qwen3.5-2B"
 
 
 lora_config = LoraConfig(
@@ -16,6 +16,7 @@ lora_config = LoraConfig(
     lora_alpha=128,
     target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",
+        "in_proj_qkv", "in_proj_a", "in_proj_b", "in_proj_z", "out_proj",
         "gate_proj", "up_proj", "down_proj"
     ],
     lora_dropout=0.05,
@@ -33,9 +34,9 @@ print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")
 base_config = AutoConfig.from_pretrained(repo_id)
 text_config = base_config.get_text_config()
 if hasattr(text_config, "vision_config") or hasattr(text_config, "audio_config"):
-    raise ValueError("Expected a text-only Gemma 4 config without vision/audio towers.")
+    raise ValueError("Expected a text-only Qwen 3.5 config without vision/audio towers.")
 
-model = Gemma4ForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     repo_id,
     config=text_config,
     attn_implementation="sdpa",
@@ -59,7 +60,7 @@ sft_config = SFTConfig(
     gradient_checkpointing_kwargs={'use_reentrant': False}, 
     # Gradient Accumulation / Batch size
     # Actual batch (for updating) is same (1x) as micro-batch size
-    gradient_accumulation_steps=8,  
+    gradient_accumulation_steps=1,  
     # The initial (micro) batch size to start off with
     per_device_train_batch_size=1, 
     bf16=True,
@@ -92,7 +93,7 @@ sft_config = SFTConfig(
     activation_offloading=True,
     use_liger_kernel=True,
     logging_dir='./logs',
-    output_dir='../../models/onco_reasoning_gemma',
+    output_dir='../../models/onco_reasoning_qwen3_5_2b',
     report_to='none'
 )
 
