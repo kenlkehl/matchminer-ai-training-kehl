@@ -2,6 +2,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -57,9 +58,10 @@ class CharTokenizer:
     def encode(self, text, add_special_tokens=False):
         return [ord(ch) for ch in text]
 
-    def __call__(self, texts, max_length=None, truncation=False):
+    def __call__(self, texts, max_length=None, truncation=False, add_special_tokens=False):
         if isinstance(texts, str):
-            texts = [texts]
+            return FakeTokenResult(self.encode(texts, add_special_tokens=add_special_tokens))
+
         input_ids = []
         for text in texts:
             ids = self.encode(text)
@@ -70,6 +72,26 @@ class CharTokenizer:
             "input_ids": input_ids,
             "attention_mask": [[1] * len(ids) for ids in input_ids],
         }
+
+    def apply_chat_template(
+        self,
+        conversation,
+        add_generation_prompt=True,
+        tokenize=False,
+        enable_thinking=True,
+    ):
+        rendered = []
+        for message in conversation:
+            if message["role"] == "assistant":
+                rendered.append(
+                    "<|start_header_id|>assistant<|end_header_id|>\n\n"
+                    + message["content"]
+                )
+            else:
+                rendered.append(f"{message['role']}\n{message['content']}\n")
+        if add_generation_prompt:
+            rendered.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
+        return "".join(rendered)
 
 
 class OncoReasoningTrainingDataTests(unittest.TestCase):
@@ -107,7 +129,7 @@ class OncoReasoningTrainingDataTests(unittest.TestCase):
         )
         self.assertEqual(
             training_messages[2]["content"],
-            "reasoningassistantfinalsummary",
+            "<think>\nreasoning\n</think>\nsummary",
         )
 
     def test_trialspace_prompt_matches_live_builder(self):
@@ -129,7 +151,7 @@ class OncoReasoningTrainingDataTests(unittest.TestCase):
             live_trialspaces.PROMPT_SUFFIX,
         )
         self.assertEqual(training_messages[:2], live_messages)
-        self.assertEqual(training_messages[2]["content"], "raw response")
+        self.assertEqual(training_messages[2]["content"], "<think>\nraw response\n</think>")
 
     def test_reasoning_columns_are_included_when_present(self):
         boilerplate = training.build_boilerplate_messages(pd.Series({
@@ -147,11 +169,11 @@ class OncoReasoningTrainingDataTests(unittest.TestCase):
 
         self.assertEqual(
             boilerplate[2]["content"],
-            "bp reasoningassistantfinalNo!",
+            "<think>\nbp reasoning\n</think>\nNo!",
         )
         self.assertEqual(
             trialcheck[2]["content"],
-            "tc reasoningassistantfinalFinal score: 3",
+            "<think>\ntc reasoning\n</think>\nFinal score: 3",
         )
 
     def test_final_response_fallback_when_reasoning_is_absent(self):
@@ -201,6 +223,22 @@ class OncoReasoningTrainingDataTests(unittest.TestCase):
             training.DEFAULT_OUTPUT_DIR,
             training.DEFAULT_DATA_DIR / "oncoreasoning_training_data",
         )
+
+    def test_default_model_is_qwen35_4b(self):
+        self.assertEqual(training.DEFAULT_MODEL_NAME, "Qwen/Qwen3.5-4B")
+
+    def test_load_chat_tokenizer_preserves_native_pad_token(self):
+        class TokenizerWithPad:
+            pad_token = "<|endoftext|>"
+            eos_token = "<|im_end|>"
+
+        tokenizer = TokenizerWithPad()
+
+        with patch.object(training.AutoTokenizer, "from_pretrained", return_value=tokenizer):
+            loaded = training.load_chat_tokenizer("Qwen/Qwen3.5-4B")
+
+        self.assertIs(loaded, tokenizer)
+        self.assertEqual(loaded.pad_token, "<|endoftext|>")
 
     def test_streaming_tokenize_masks_prompt_before_assistant_header(self):
         assistant_header = "<|start_header_id|>assistant<|end_header_id|>\n\n"

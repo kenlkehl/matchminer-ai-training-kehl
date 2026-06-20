@@ -3,10 +3,17 @@ import os
 import torch
 from datasets import Dataset
 from peft import LoraConfig, TaskType
-from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq, Gemma4ForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    DataCollatorForSeq2Seq,
+)
 from trl import SFTConfig, SFTTrainer
 
 dataset = Dataset.load_from_disk('../../data/no_phi/oncoreasoning_training_data/tokenized_training_data.dataset/')
+
+repo_id = "Qwen/Qwen3.5-4B"
 
 
 lora_config = LoraConfig(
@@ -14,7 +21,8 @@ lora_config = LoraConfig(
     lora_alpha=128,
     target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj"
+        "gate_proj", "up_proj", "down_proj",
+        "in_proj_qkv", "in_proj_a", "in_proj_b", "in_proj_z", "out_proj",
     ],
     lora_dropout=0.05,
     bias="none",
@@ -25,29 +33,38 @@ lora_config = LoraConfig(
 )
 
 
-
-
-repo_id = "google/gemma-4-e2b-it"
-
 torch.backends.cuda.enable_flash_sdp(True)
 print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")
 
 base_config = AutoConfig.from_pretrained(repo_id)
-text_config = base_config.get_text_config()
-if hasattr(text_config, "vision_config") or hasattr(text_config, "audio_config"):
-    raise ValueError("Expected a text-only Gemma 4 config without vision/audio towers.")
-
-model = Gemma4ForCausalLM.from_pretrained(
-   repo_id,
-   config=text_config,
-   attn_implementation="sdpa",
-   dtype=torch.bfloat16,
-   key_mapping={
-       r"^model\.language_model\.": "model.",
-   },
+text_config = (
+    base_config.get_text_config()
+    if hasattr(base_config, "get_text_config")
+    else base_config
 )
+is_multimodal = hasattr(base_config, "vision_config") or hasattr(base_config, "audio_config")
+if hasattr(text_config, "vision_config") or hasattr(text_config, "audio_config"):
+    raise ValueError("Expected a text-only config without vision/audio towers.")
+
+if is_multimodal:
+    print(f"Detected multimodal config for {repo_id}; loading text component only.")
+
+model_kwargs = {
+    "config": text_config,
+    "attn_implementation": "sdpa",
+    "dtype": torch.bfloat16,
+}
+if is_multimodal:
+    model_kwargs["key_mapping"] = {
+        r"^model\.language_model\.": "model.",
+    }
+
+model = AutoModelForCausalLM.from_pretrained(repo_id, **model_kwargs)
 tokenizer = AutoTokenizer.from_pretrained(repo_id)
-tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.pad_token is None:
+    if tokenizer.eos_token is None:
+        raise ValueError(f"Tokenizer for {repo_id!r} has no pad or eos token")
+    tokenizer.pad_token = tokenizer.eos_token
 
 sft_config = SFTConfig(
     ## GROUP 1: Memory usage
@@ -91,7 +108,7 @@ sft_config = SFTConfig(
     activation_offloading=True,
     use_liger_kernel=True,
     logging_dir='./logs',
-    output_dir='../../models/onco_reasoning_gemma',
+    output_dir='../../models/onco_reasoning_qwen3_5_4b',
     report_to='none'
 )
 

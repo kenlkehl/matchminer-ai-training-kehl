@@ -37,6 +37,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_training_data"
 DEFAULT_WORKER_COUNT = max(1, (os.cpu_count() or 1) - 1)
+DEFAULT_MODEL_NAME = "Qwen/Qwen3.5-4B"
 TEXT_SCHEMA = pa.schema([("text", pa.string())])
 
 
@@ -110,6 +111,16 @@ def truncate_field(text: str, max_tokens: int, tokenizer) -> str:
 def token_len(text: str, tokenizer) -> int:
     """Return the number of tokens in text (no special tokens)."""
     return len(tokenizer(text, add_special_tokens=False).input_ids)
+
+
+def load_chat_tokenizer(model_name: str):
+    """Load the target tokenizer, preserving its native chat/padding config."""
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        if tokenizer.eos_token is None:
+            raise ValueError(f"Tokenizer for {model_name!r} has no pad or eos token")
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
 
 def get_optional_text(row, column: str) -> str:
@@ -651,8 +662,7 @@ def _init_prompt_worker(model_name, max_seq_length, task_name):
     global _PROMPT_WORKER_TASK
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = load_chat_tokenizer(model_name)
 
     _PROMPT_WORKER_TOKENIZER = tokenizer
     _PROMPT_WORKER_MAX_SEQ_LENGTH = max_seq_length
@@ -1280,7 +1290,7 @@ def _tokenize_range_worker(args):
     (source_parquet, row_group_indices, model_name, max_seq_length,
      arrow_path, header_ids, batch_size, worker_idx, num_workers) = args
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = load_chat_tokenizer(model_name)
     pf = pq.ParquetFile(source_parquet)
     header_len = len(header_ids)
     writer = ArrowWriter(path=arrow_path)
@@ -1634,8 +1644,8 @@ def parse_args():
     parser.add_argument(
         "--model-name",
         type=str,
-        default="google/gemma-4-e2b-it",
-        help="tokenizer. default: google/gemma-4-e2b)",
+        default=DEFAULT_MODEL_NAME,
+        help=f"Tokenizer/chat template model (default: {DEFAULT_MODEL_NAME})",
     )
     parser.add_argument(
         "--balance-target",
@@ -1736,8 +1746,7 @@ def main():
     prep_chunk_size = max(1, args.prep_chunk_size)
 
     print(f"Loading tokenizer: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = load_chat_tokenizer(args.model_name)
 
     combined_path = os.path.join(args.output_dir, 'all_training_data.parquet')
     tokenized_path = os.path.join(args.output_dir, 'tokenized_training_data.dataset')
