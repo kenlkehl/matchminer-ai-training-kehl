@@ -37,7 +37,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_training_data"
 DEFAULT_WORKER_COUNT = max(1, (os.cpu_count() or 1) - 1)
-DEFAULT_MODEL_NAME = "Qwen/Qwen3.5-4B"
+DEFAULT_MODEL_NAME = "google/gemma-4-e2b-it"
 TEXT_SCHEMA = pa.schema([("text", pa.string())])
 
 

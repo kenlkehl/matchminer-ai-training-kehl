@@ -3,17 +3,12 @@ import os
 import torch
 from datasets import Dataset
 from peft import LoraConfig, TaskType
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    DataCollatorForSeq2Seq,
-)
+from transformers import AutoConfig, AutoTokenizer, DataCollatorForSeq2Seq, Gemma4ForCausalLM
 from trl import SFTConfig, SFTTrainer
 
 dataset = Dataset.load_from_disk('../../data/no_phi/oncoreasoning_training_data/tokenized_training_data.dataset/')
 
-repo_id = "Qwen/Qwen3.5-4B"
+repo_id = "google/gemma-4-e2b-it"
 
 
 lora_config = LoraConfig(
@@ -21,8 +16,7 @@ lora_config = LoraConfig(
     lora_alpha=128,
     target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-        "in_proj_qkv", "in_proj_a", "in_proj_b", "in_proj_z", "out_proj",
+        "gate_proj", "up_proj", "down_proj"
     ],
     lora_dropout=0.05,
     bias="none",
@@ -37,29 +31,19 @@ torch.backends.cuda.enable_flash_sdp(True)
 print(f"Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}")
 
 base_config = AutoConfig.from_pretrained(repo_id)
-text_config = (
-    base_config.get_text_config()
-    if hasattr(base_config, "get_text_config")
-    else base_config
-)
-is_multimodal = hasattr(base_config, "vision_config") or hasattr(base_config, "audio_config")
+text_config = base_config.get_text_config()
 if hasattr(text_config, "vision_config") or hasattr(text_config, "audio_config"):
-    raise ValueError("Expected a text-only config without vision/audio towers.")
+    raise ValueError("Expected a text-only Gemma 4 config without vision/audio towers.")
 
-if is_multimodal:
-    print(f"Detected multimodal config for {repo_id}; loading text component only.")
-
-model_kwargs = {
-    "config": text_config,
-    "attn_implementation": "sdpa",
-    "dtype": torch.bfloat16,
-}
-if is_multimodal:
-    model_kwargs["key_mapping"] = {
+model = Gemma4ForCausalLM.from_pretrained(
+    repo_id,
+    config=text_config,
+    attn_implementation="sdpa",
+    dtype=torch.bfloat16,
+    key_mapping={
         r"^model\.language_model\.": "model.",
-    }
-
-model = AutoModelForCausalLM.from_pretrained(repo_id, **model_kwargs)
+    },
+)
 tokenizer = AutoTokenizer.from_pretrained(repo_id)
 if tokenizer.pad_token is None:
     if tokenizer.eos_token is None:
@@ -75,7 +59,7 @@ sft_config = SFTConfig(
     gradient_checkpointing_kwargs={'use_reentrant': False}, 
     # Gradient Accumulation / Batch size
     # Actual batch (for updating) is same (1x) as micro-batch size
-    gradient_accumulation_steps=1,  
+    gradient_accumulation_steps=8,  
     # The initial (micro) batch size to start off with
     per_device_train_batch_size=1, 
     bf16=True,
@@ -96,7 +80,7 @@ sft_config = SFTConfig(
     lr_scheduler_type="cosine_with_restarts",
     warmup_ratio = 0.10,
     #save_strategy='epoch',
-    save_steps=2000,
+    save_steps=100,
     #evaluation_strategy='no',
     # Optimizer
     # 8-bit Adam optimizer - doesn't help much if you're using LoRA!
@@ -108,7 +92,7 @@ sft_config = SFTConfig(
     activation_offloading=True,
     use_liger_kernel=True,
     logging_dir='./logs',
-    output_dir='../../models/onco_reasoning_qwen3_5_4b',
+    output_dir='../../models/onco_reasoning_gemma',
     report_to='none'
 )
 
