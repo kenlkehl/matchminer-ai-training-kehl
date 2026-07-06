@@ -37,7 +37,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_training_data"
 DEFAULT_WORKER_COUNT = max(1, (os.cpu_count() or 1) - 1)
-DEFAULT_MODEL_NAME = "google/gemma-4-e2b-it"
+DEFAULT_MODEL_NAME = "Qwen/Qwen3.5-2B"
 TEXT_SCHEMA = pa.schema([("text", pa.string())])
 
 
@@ -187,7 +187,7 @@ def build_reasoning_response(row, reasoning_col: str, response_col: str) -> str:
 def split_combined_reasoning_and_final(combined: str, final_response: str = ""):
     """Split source traces where final output is appended to reasoning.
 
-    Trial-space traces currently store a Gemma-style combined field ending in
+    Trial-space traces currently store a source-model combined field ending in
     the separate ``space_output_no_reasoning`` value, usually after a
     ``<channel|>`` marker.  Prefer the explicit final column when present, and
     fall back to known source-model separators for older data.
