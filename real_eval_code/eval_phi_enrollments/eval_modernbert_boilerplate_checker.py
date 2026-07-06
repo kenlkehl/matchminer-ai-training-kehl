@@ -229,6 +229,15 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path,
         print(f"Warning: {label_col} column not found")
         return
 
+    # Drop rows where the gold-labeling LLM produced no parseable Yes!/No! answer
+    # (exclusion_result == -1, PARSE_FAILED). These are not real labels and would
+    # poison roc_auc_score and become false negatives in the binarized actual labels.
+    n_before = len(validation_set)
+    validation_set = validation_set[validation_set[label_col] >= 0].copy()
+    if n_before - len(validation_set):
+        print(f"Dropped {n_before - len(validation_set)} rows with unparseable gold "
+              f"labels (exclusion_result == -1); {len(validation_set)} remain")
+
     if 'prediction_score' in validation_set.columns:
         print("\n--- Classification Metrics ---")
         print(f"Total samples: {len(validation_set)}")
@@ -348,6 +357,15 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path,
     if label_col not in validation_set.columns:
         print(f"Warning: {label_col} column not found")
         return
+
+    # Drop rows where the gold-labeling LLM produced no parseable Yes!/No! answer
+    # (exclusion_result == -1, PARSE_FAILED). These are not real labels and would
+    # poison roc_auc_score and become false negatives in the binarized actual labels.
+    n_before = len(validation_set)
+    validation_set = validation_set[validation_set[label_col] >= 0].copy()
+    if n_before - len(validation_set):
+        print(f"Dropped {n_before - len(validation_set)} rows with unparseable gold "
+              f"labels (exclusion_result == -1); {len(validation_set)} remain")
 
     if 'prediction_score' in validation_set.columns:
         print("\n--- Classification Metrics ---")

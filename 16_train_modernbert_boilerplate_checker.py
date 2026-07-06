@@ -29,12 +29,20 @@ def main(checkpoint_dir: str, output_dir: str):
     
     boilerplate_checks = boilerplate_checks[~boilerplate_checks.patient_summary.isnull()]
     boilerplate_checks = boilerplate_checks[~(boilerplate_checks.patient_summary == "")]
-    
+
     boilerplate_checks.info()
     dataset = boilerplate_checks
-    
-    dataset.exclusion_result.value_counts()
-    
+
+    # Drop rows where the labeling LLM produced no parseable Yes!/No! answer
+    # (exclusion_result == -1, PARSE_FAILED). These are not real labels and would
+    # otherwise be cast to an int class and silently poison training.
+    n_before = len(dataset)
+    dataset = dataset[dataset.exclusion_result >= 0]
+    print(f"Dropped {n_before - len(dataset)} rows with unparseable labels "
+          f"(exclusion_result == -1); {len(dataset)} remain")
+
+    print(dataset.exclusion_result.value_counts())
+
     dataset['exclusion_result'] = dataset.exclusion_result.astype(int)
     
     

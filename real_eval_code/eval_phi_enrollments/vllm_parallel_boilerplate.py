@@ -300,11 +300,20 @@ def worker_process(
                 )
                 response_id = completion_output.index
 
-                # Parse exclusion result
-                if ("Yes!" in response_text[-10:]) or ("YES!" in response_text[-10:]):
+                # Parse exclusion result. -1.0 (PARSE_FAILED) sentinel when no yes/no
+                # answer is present, so it can be dropped downstream instead of silently
+                # counted as 0.0 ("not excluded").
+                tail = response_text[-10:].upper() if isinstance(response_text, str) else ""
+                if "YES!" in tail:
                     exclusion_result = 1.0
-                else:
+                elif "NO!" in tail:
                     exclusion_result = 0.0
+                elif "YES" in tail:   # loose near-miss (missing '!')
+                    exclusion_result = 1.0
+                elif "NO" in tail:    # loose near-miss (missing '!')
+                    exclusion_result = 0.0
+                else:
+                    exclusion_result = -1.0
 
                 result = {
                     "prompt_id": original_idx,

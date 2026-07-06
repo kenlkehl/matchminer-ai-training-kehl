@@ -1189,6 +1189,16 @@ def main():
                 },
             ])
 
+        # Ranking depth (MAP@K/NDCG@K) matches retrieval depth: 20 patient-centric,
+        # 40 trial-centric. Scope to the trial checker (boilerplate eval is
+        # classification-only and takes no --k). Threaded via extra_args so it flows
+        # through both the sharded-inference and metrics-only code paths.
+        for _t in modernbert_tasks:
+            if _t['script'] == "eval_modernbert_trial_checker.py":
+                _t['extra_args'] = _t.get('extra_args', []) + [
+                    "--k", "40" if _t['mode'] == "trial_centric" else "20"
+                ]
+
         # Run ModernBERT tasks
         for task in modernbert_tasks:
             task['output_dir'].mkdir(parents=True, exist_ok=True)
@@ -1250,7 +1260,33 @@ def main():
                          "--output-dir", str(eval_output_dir / "oncoreasoning-boilerplate-checker")],
                 'description': "SOC OncoReasoning boilerplate checker trial-centric evaluation",
             },
+            # Demographic-stratified breakdown of the above metrics
+            {
+                'script': "eval_demographics.py",
+                'args': ["--mode", "patient_centric", "--data-dir", str(DATA_DIR),
+                         "--eval-dir", str(eval_output_dir),
+                         "--output-dir", str(eval_output_dir / "demographics")],
+                'description': "SOC demographic-stratified metrics (patient-centric)",
+            },
+            {
+                'script': "eval_demographics.py",
+                'args': ["--mode", "trial_centric", "--data-dir", str(DATA_DIR),
+                         "--eval-dir", str(eval_output_dir),
+                         "--output-dir", str(eval_output_dir / "demographics")],
+                'description': "SOC demographic-stratified metrics (trial-centric)",
+            },
         ]
+
+        # Per-mode ranking depth for the ranking evals (baseline, LLM trial checker,
+        # demographics): 20 patient-centric, 40 trial-centric. Evals without a --k arg
+        # (e.g. LLM boilerplate) are left untouched.
+        _RANKING_EVAL_SCRIPTS = {
+            "eval_baseline.py", "eval_llm_trial_checker.py", "eval_demographics.py",
+        }
+        for _t in other_eval_tasks:
+            if _t['script'] in _RANKING_EVAL_SCRIPTS:
+                _mode = _t['args'][_t['args'].index("--mode") + 1]
+                _t['args'] = _t['args'] + ["--k", "40" if _mode == "trial_centric" else "20"]
 
         for task in other_eval_tasks:
             cmd = ["python", task['script']] + task['args']

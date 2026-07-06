@@ -19,7 +19,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.metrics import (
     roc_auc_score, f1_score, classification_report,
     precision_recall_curve, auc, roc_curve, confusion_matrix,
-    average_precision_score, cohen_kappa_score
+    average_precision_score, cohen_kappa_score, r2_score
 )
 from sklearn.calibration import calibration_curve
 from scipy.stats import spearmanr, pearsonr
@@ -174,6 +174,30 @@ def spearman_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
 def mae_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
     """Calculate mean absolute error."""
     return float(np.mean(np.abs(actual - predicted)))
+
+
+def rmse_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Root mean squared error (same units as the target; penalizes large errors)."""
+    actual = np.asarray(actual)
+    predicted = np.asarray(predicted)
+    return float(np.sqrt(np.mean((actual - predicted) ** 2)))
+
+
+def r2_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Coefficient of determination (R^2) against the identity line.
+
+    sklearn r2_score = 1 - SS_res / SS_tot, which penalizes bias and scale error.
+    This is distinct from Pearson r squared (best-fit line) and can be negative
+    when predictions are worse than always predicting the mean.
+    """
+    return float(r2_score(actual, predicted))
+
+
+def bias_metric(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """Mean signed error (predicted - actual); positive => systematic over-prediction."""
+    actual = np.asarray(actual)
+    predicted = np.asarray(predicted)
+    return float(np.mean(predicted - actual))
 
 
 def average_precision_at_k(label_array: np.ndarray) -> float:
@@ -422,16 +446,30 @@ Classification Report at 0.5 Threshold:
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-            # Page 7: Calibration curve
+            # Page 7: Calibration curve. calibration_curve requires predicted in
+            # [0, 1]; some models (e.g. the trial-checker regression head) emit a
+            # 0-5 score, so min-max normalize to [0, 1] for the reliability diagram
+            # when the values fall outside that range. AUC/F1/regression metrics
+            # above intentionally keep predicted on its native scale.
             fig, ax = plt.subplots(figsize=(8, 6))
-            y_plot, x_plot = calibration_curve(actual, sigmoid(predicted), n_bins=15)
+            pred_min, pred_max = float(np.min(predicted)), float(np.max(predicted))
+            if pred_min < 0.0 or pred_max > 1.0:
+                if pred_max > pred_min:
+                    predicted_cal = (predicted - pred_min) / (pred_max - pred_min)
+                else:
+                    predicted_cal = np.clip(predicted, 0.0, 1.0)
+                cal_xlabel = 'Predicted score (min-max normalized to [0, 1])'
+            else:
+                predicted_cal = predicted
+                cal_xlabel = 'Predicted probability'
+            y_plot, x_plot = calibration_curve(actual, predicted_cal, n_bins=15)
             ax.plot(x_plot, y_plot, marker='o', linewidth=1, label='Model calibration')
             line = mlines.Line2D([0, 1], [0, 1], color='black', linestyle='--')
             transform = ax.transAxes
             line.set_transform(transform)
             ax.add_line(line)
             ax.set_title(f'{title_prefix} Calibration Plot')
-            ax.set_xlabel('Predicted probability')
+            ax.set_xlabel(cal_xlabel)
             ax.set_ylabel('True probability in each bin')
             ax.legend()
             ax.set_xlim(0, 1)
@@ -446,6 +484,9 @@ Classification Report at 0.5 Threshold:
                 r, p_r = pearsonr(gold_continuous, predicted)
                 rho, p_rho = spearmanr(gold_continuous, predicted)
                 mae = np.mean(np.abs(gold_continuous - predicted))
+                rmse = rmse_metric(gold_continuous, predicted)
+                r2 = r2_metric(gold_continuous, predicted)
+                bias = bias_metric(gold_continuous, predicted)
                 r_ci = bootstrap_metric_ci(
                     [gold_continuous, predicted], pearson_metric,
                     n_bootstrap=n_bootstrap, random_state=random_state
@@ -456,6 +497,18 @@ Classification Report at 0.5 Threshold:
                 )
                 mae_ci = bootstrap_metric_ci(
                     [gold_continuous, predicted], mae_metric,
+                    n_bootstrap=n_bootstrap, random_state=random_state
+                )
+                rmse_ci = bootstrap_metric_ci(
+                    [gold_continuous, predicted], rmse_metric,
+                    n_bootstrap=n_bootstrap, random_state=random_state
+                )
+                r2_ci = bootstrap_metric_ci(
+                    [gold_continuous, predicted], r2_metric,
+                    n_bootstrap=n_bootstrap, random_state=random_state
+                )
+                bias_ci = bootstrap_metric_ci(
+                    [gold_continuous, predicted], bias_metric,
                     n_bootstrap=n_bootstrap, random_state=random_state
                 )
 
@@ -469,6 +522,9 @@ Classification Report at 0.5 Threshold:
 Pearson r:    {format_metric_with_ci(r, r_ci)}  (p = {p_r:.4e})
 Spearman rho: {format_metric_with_ci(rho, rho_ci)}  (p = {p_rho:.4e})
 MAE:          {format_metric_with_ci(mae, mae_ci)}
+RMSE:         {format_metric_with_ci(rmse, rmse_ci)}
+R^2 (CoD):    {format_metric_with_ci(r2, r2_ci)}
+Bias (pred-gold): {format_metric_with_ci(bias, bias_ci)}
 
 Gold score range:      [{gold_continuous.min():.2f}, {gold_continuous.max():.2f}]
 Predicted score range: [{predicted.min():.2f}, {predicted.max():.2f}]
