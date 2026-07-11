@@ -93,8 +93,13 @@ def parse_args():
                         help="Directory with the pan-DFCI registration tables")
     parser.add_argument("--k", type=int, default=None,
                         help="K value for MAP@K calculation (default: 20)")
-    parser.add_argument("--threshold", type=float, default=0.5,
-                        help="Score threshold for ranking filter (default: 0.5)")
+    parser.add_argument("--threshold", type=float, default=1.0,
+                        help="Score threshold for the TrialChecker ranking filter, on the "
+                             "raw 0-5 'reasonable consideration' scale (normalized to 0-1 for "
+                             "the ModernBERT model). Default 1.0 keeps candidates predicted to "
+                             "be at least a reasonable consideration (score >= 1), matching the "
+                             "main ranking analysis in eval_modernbert_trial_checker.py "
+                             "(scenarios B/C).")
     return parser.parse_args()
 
 
@@ -456,6 +461,10 @@ def main():
         tc = with_demo(tc)
         tc['_gold_bin'] = (tc['eligibility_result'] > 0).astype(float)
         ranked = tc[tc['prediction'] >= args.threshold].copy()
+        # Re-rank surviving candidates by predicted score (descending) within each
+        # group so the stratified MAP@K reflects the deployed TrialChecker re-ranker
+        # (scenario C in eval_modernbert_trial_checker.py), on the same 0-5 scale.
+        ranked = ranked.sort_values([group_col, 'prediction'], ascending=[True, False])
         all_rows += stratify_eval(
             'trial_checker', mode, k,
             clf_frame=tc, score_col='prediction', clf_gold_col='_gold_bin',
@@ -475,6 +484,10 @@ def main():
         mb_tc = with_demo(mb_tc)
         mb_tc['_gold_bin'] = (mb_tc['eligibility_result'] > 0).astype(float)
         mb_ranked = mb_tc[mb_tc['prediction_score'] >= args.threshold].copy()
+        # Re-rank surviving candidates by predicted score (descending) within each
+        # group so the stratified MAP@K reflects the deployed TrialChecker re-ranker
+        # (scenario C in eval_modernbert_trial_checker.py), on the same 0-5 scale.
+        mb_ranked = mb_ranked.sort_values([group_col, 'prediction_score'], ascending=[True, False])
         all_rows += stratify_eval(
             'modernbert_trial_checker', mode, k,
             clf_frame=mb_tc, score_col='prediction_score', clf_gold_col='_gold_bin',
