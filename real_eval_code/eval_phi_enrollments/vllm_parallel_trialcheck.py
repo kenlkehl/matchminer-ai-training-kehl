@@ -31,6 +31,20 @@ import pandas as pd
 import numpy as np
 
 
+def wrap_qwen35_text_config_for_vllm(hf_config):
+    """Wrap Qwen3.5 text-only configs in the top-level config vLLM expects."""
+    if getattr(hf_config, "model_type", None) != "qwen3_5_text":
+        return hf_config
+
+    from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
+
+    return Qwen3_5Config(
+        text_config=hf_config.to_dict(),
+        architectures=getattr(hf_config, "architectures", None),
+        tie_word_embeddings=getattr(hf_config, "tie_word_embeddings", False),
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run parallelized vLLM inference for patient-trial matching"
@@ -116,7 +130,7 @@ def parse_args():
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.08,
+        default=0.20,
         help="GPU memory utilization fraction for vLLM",
     )
     parser.add_argument(
@@ -210,6 +224,8 @@ def worker_process(
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_num_seqs=args.max_num_seqs,
         max_model_len=args.max_model_len,
+        hf_overrides=wrap_qwen35_text_config_for_vllm,
+        language_model_only=True,
     )
     
     tokenizer = llm.get_tokenizer()

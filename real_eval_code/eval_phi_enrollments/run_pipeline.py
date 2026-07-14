@@ -52,7 +52,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent  # eval_phi_enrollments
 DATA_DIR = REPO_ROOT.parent / "data/phi/enrollments"
 GOLD_LLM = "RedHatAI/Gemma-4-31B-it-FP8-Dynamic" #"nvidia/Gemma-4-31B-IT-NVFP4"
 BASELINE_EMBEDDING_MODEL = "nvidia/llama-embed-nemotron-8b"   #"Qwen/Qwen3-Embedding-0.6B"
-ONCOREASONING_MODEL = "../../../models/onco_reasoning_lfm/checkpoint-121000"
+ONCOREASONING_MODEL = "../../../models/onco_reasoning_qwen3_5_2b_checkpoint_7-12-26"
 
 STAGES = [
     "prepare",        # Data preparation
