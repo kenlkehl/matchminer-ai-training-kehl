@@ -22,6 +22,9 @@ from eval_utils import (
     binary_auroc_score,
     format_metric_with_ci,
     mae_metric,
+    rmse_metric,
+    r2_metric,
+    bias_metric,
     pearson_metric,
     positive_rate_metric,
     spearman_metric
@@ -45,8 +48,8 @@ def parse_args():
                         help="Path to trial checker model")
     parser.add_argument("--gpu", type=str, default="0",
                         help="GPU device to use")
-    parser.add_argument("--k", type=int, default=20,
-                        help="K value for MAP@K calculation (default: 20)")
+    parser.add_argument("--k", type=int, default=None,
+                        help="K for MAP@K/NDCG@K (default: 20 patient-centric, 40 trial-centric)")
     parser.add_argument("--run-inference", action="store_true",
                         help="Run model inference (requires GPU)")
     parser.add_argument("--batch-size", type=int, default=32,
@@ -194,6 +197,16 @@ def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_di
         print("Missing prediction_score or eligibility_result columns, skipping evaluation")
         return
 
+    # Drop rows where the gold-labeling LLM could not parse a score (eligibility_result == -1).
+    # These are PARSE_FAILED sentinels, not real grades, and corrupt regression metrics and
+    # silently become false negatives in the binarized classification labels.
+    n_before = len(validation_set)
+    validation_set = validation_set[validation_set.eligibility_result >= 0].copy()
+    n_dropped = n_before - len(validation_set)
+    if n_dropped:
+        print(f"Dropped {n_dropped} rows with unparseable gold labels "
+              f"(eligibility_result == -1); {len(validation_set)} remain")
+
     # --- Classification Metrics (binarized) ---
     print("\n--- Classification Metrics ---")
     gold_binary = (validation_set.eligibility_result > 0).astype(float)
@@ -238,12 +251,21 @@ def _evaluate_classification_and_ranking(validation_set: pd.DataFrame, output_di
     r, p_r = pearsonr(gold_scores, pred_scores)
     rho, p_rho = spearmanr(gold_scores, pred_scores)
     mae = np.mean(np.abs(gold_scores - pred_scores))
+    rmse = rmse_metric(gold_scores, pred_scores)
+    r2 = r2_metric(gold_scores, pred_scores)
+    bias = bias_metric(gold_scores, pred_scores)
     r_ci = bootstrap_metric_ci([gold_scores, pred_scores], pearson_metric)
     rho_ci = bootstrap_metric_ci([gold_scores, pred_scores], spearman_metric)
     mae_ci = bootstrap_metric_ci([gold_scores, pred_scores], mae_metric)
+    rmse_ci = bootstrap_metric_ci([gold_scores, pred_scores], rmse_metric)
+    r2_ci = bootstrap_metric_ci([gold_scores, pred_scores], r2_metric)
+    bias_ci = bootstrap_metric_ci([gold_scores, pred_scores], bias_metric)
     print(f"Pearson r: {format_metric_with_ci(r, r_ci)} (p={p_r:.4e})")
     print(f"Spearman rho: {format_metric_with_ci(rho, rho_ci)} (p={p_rho:.4e})")
     print(f"MAE: {format_metric_with_ci(mae, mae_ci)}")
+    print(f"RMSE: {format_metric_with_ci(rmse, rmse_ci)}")
+    print(f"R^2 (CoD): {format_metric_with_ci(r2, r2_ci)}")
+    print(f"Bias (pred-gold): {format_metric_with_ci(bias, bias_ci)}")
 
     # Generate regression metrics PDF
     import matplotlib
@@ -265,6 +287,9 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Pearson r:    {format_metric_with_ci(r, r_ci)}  (p = {p_r:.4e})
 Spearman rho: {format_metric_with_ci(rho, rho_ci)}  (p = {p_rho:.4e})
 MAE:          {format_metric_with_ci(mae, mae_ci)}
+RMSE:         {format_metric_with_ci(rmse, rmse_ci)}
+R^2 (CoD):    {format_metric_with_ci(r2, r2_ci)}
+Bias (pred-gold): {format_metric_with_ci(bias, bias_ci)}
 
 Gold score range:      [{gold_scores.min():.2f}, {gold_scores.max():.2f}]
 Predicted score range: [{pred_scores.min():.2f}, {pred_scores.max():.2f}]
@@ -597,13 +622,15 @@ def main():
 
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
+    # Ranking depth matches retrieval depth: 20 patient-centric, 40 trial-centric.
+    k = args.k if args.k is not None else (40 if args.mode == "trial_centric" else 20)
 
     if args.mode == "patient_centric":
         evaluate_patient_centric(
             data_dir, output_dir,
             model_path=args.model_path,
             gpu=args.gpu,
-            k=args.k,
+            k=k,
             run_inference=args.run_inference,
             batch_size=args.batch_size,
             split_filter=args.split_filter,
@@ -616,7 +643,7 @@ def main():
             data_dir, output_dir,
             model_path=args.model_path,
             gpu=args.gpu,
-            k=args.k,
+            k=k,
             run_inference=args.run_inference,
             batch_size=args.batch_size,
             split_filter=args.split_filter,

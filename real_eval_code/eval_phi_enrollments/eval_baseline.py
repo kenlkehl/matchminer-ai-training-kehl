@@ -40,7 +40,7 @@ def parse_args():
                         help="Directory containing candidate CSV files")
     parser.add_argument("--output-dir", type=str, required=True,
                         help="Directory to save evaluation outputs")
-    parser.add_argument("--k", type=int, default=20,
+    parser.add_argument("--k", type=int, default=None,
                         help="K value for MAP@K calculation (default: 20)")
     parser.add_argument("--prefix", type=str, default="",
                         help="Prefix for data files (e.g., 'baseline_' for baseline evaluation)")
@@ -100,6 +100,15 @@ def evaluate_patient_centric(data_dir: Path, output_dir: Path, k: int = 20, pref
     if 'eligibility_result' not in combined_df.columns:
         print("Warning: eligibility_result column not found")
         return
+
+    # Drop rows where the gold-labeling LLM could not parse a score (eligibility_result == -1).
+    # These PARSE_FAILED sentinels corrupt the positive rate (mean) and add phantom
+    # irrelevant rows to the ranking.
+    n_before = len(combined_df)
+    combined_df = combined_df[combined_df.eligibility_result >= 0]
+    if n_before - len(combined_df):
+        print(f"Dropped {n_before - len(combined_df)} rows with unparseable gold labels "
+              f"(eligibility_result == -1); {len(combined_df)} remain")
 
     # Print eligibility distribution
     print("\nEligibility distribution:")
@@ -192,6 +201,15 @@ def evaluate_trial_centric(data_dir: Path, output_dir: Path, k: int = 20, prefix
         print("Warning: eligibility_result column not found")
         return
 
+    # Drop rows where the gold-labeling LLM could not parse a score (eligibility_result == -1).
+    # These PARSE_FAILED sentinels corrupt the positive rate (mean) and add phantom
+    # irrelevant rows to the ranking.
+    n_before = len(combined_df)
+    combined_df = combined_df[combined_df.eligibility_result >= 0]
+    if n_before - len(combined_df):
+        print(f"Dropped {n_before - len(combined_df)} rows with unparseable gold labels "
+              f"(eligibility_result == -1); {len(combined_df)} remain")
+
     # Print eligibility distribution
     print("\nEligibility distribution:")
     print(combined_df.eligibility_result.value_counts())
@@ -234,11 +252,13 @@ def main():
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
     prefix = args.prefix
+    # Ranking depth matches retrieval depth: 20 patient-centric, 40 trial-centric.
+    k = args.k if args.k is not None else (40 if args.mode == "trial_centric" else 20)
 
     if args.mode == "patient_centric":
-        evaluate_patient_centric(data_dir, output_dir, args.k, prefix)
+        evaluate_patient_centric(data_dir, output_dir, k, prefix)
     else:
-        evaluate_trial_centric(data_dir, output_dir, args.k, prefix)
+        evaluate_trial_centric(data_dir, output_dir, k, prefix)
 
 
 if __name__ == "__main__":

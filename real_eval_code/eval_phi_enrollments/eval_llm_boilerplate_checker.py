@@ -68,6 +68,13 @@ def load_predictions(results_file: Path, candidates_path: Path) -> pd.DataFrame:
     print(f"Loading LLM results from: {results_file}")
     input_frame = pd.read_csv(results_file, usecols=['prompt_id', 'exclusion_result'])
     print(f"Loaded {len(input_frame)} rows")
+    # Drop the model's own PARSE_FAILED samples (exclusion_result == -1) so a sentinel
+    # is never averaged into a prompt's mean prediction (which would push it below 0).
+    n_before = len(input_frame)
+    input_frame = input_frame[input_frame.exclusion_result >= 0]
+    if n_before - len(input_frame):
+        print(f"Dropped {n_before - len(input_frame)} unparseable prediction samples "
+              f"(exclusion_result == -1)")
     predictions = input_frame.groupby('prompt_id')['exclusion_result'].mean()
     print(f"Aggregated to {len(predictions)} unique prompts")
 
@@ -93,6 +100,13 @@ def load_gold(gold_path: Path) -> pd.DataFrame:
     wanted = set(KEY_COLS + ['exclusion_result', 'split'])
     gold = pd.read_csv(gold_path, usecols=lambda c: c in wanted)
     gold = gold[~gold.patient_summary.isnull()]
+    # Drop rows where the gold-labeling LLM produced no parseable Yes!/No! answer
+    # (exclusion_result == -1, PARSE_FAILED); they are not real labels.
+    n_before = len(gold)
+    gold = gold[gold.exclusion_result >= 0]
+    if n_before - len(gold):
+        print(f"Dropped {n_before - len(gold)} gold rows with unparseable labels "
+              f"(exclusion_result == -1)")
     print(f"Loaded {len(gold)} gold standard rows")
     return gold
 

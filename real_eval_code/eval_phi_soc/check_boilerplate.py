@@ -124,10 +124,19 @@ def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model,
     exclusion_results = []
 
     for response_text in response_texts:
-        if ("Yes!" in response_text[-10:]) or ("YES!" in response_text[-10:]):
+        # -1.0 (PARSE_FAILED) sentinel when no yes/no answer is present, so it can be
+        # dropped downstream instead of silently counted as 0.0 ("not excluded").
+        tail = response_text[-10:].upper() if isinstance(response_text, str) else ""
+        if "YES!" in tail:
             exclusion_results.append(1.0)
-        else:
+        elif "NO!" in tail:
             exclusion_results.append(0.0)
+        elif "YES" in tail:   # loose near-miss (missing '!')
+            exclusion_results.append(1.0)
+        elif "NO" in tail:    # loose near-miss (missing '!')
+            exclusion_results.append(0.0)
+        else:
+            exclusion_results.append(-1.0)
 
     return responses, response_reasonings, response_texts, exclusion_results
 

@@ -46,7 +46,7 @@ def parse_args():
                         help="Directory to save evaluation outputs")
     parser.add_argument("--llm-results-file", type=str, default=None,
                         help="Path to LLM results CSV file")
-    parser.add_argument("--k", type=int, default=20,
+    parser.add_argument("--k", type=int, default=None,
                         help="K value for MAP@K calculation")
     parser.add_argument("--threshold", type=float, default=0.5,
                         help="Threshold for positive classification")
@@ -71,6 +71,13 @@ def load_predictions(results_file: Path) -> pd.DataFrame:
         results_file, usecols=['prompt_id', 'eligibility_result'] + KEY_COLS
     )
     print(f"Loaded {len(input_frame)} rows")
+    # Drop the model's own PARSE_FAILED samples (eligibility_result == -1) so a sentinel
+    # is never averaged into a prompt's mean prediction (which would push it below 0).
+    n_before = len(input_frame)
+    input_frame = input_frame[input_frame.eligibility_result >= 0]
+    if n_before - len(input_frame):
+        print(f"Dropped {n_before - len(input_frame)} unparseable prediction samples "
+              f"(eligibility_result == -1)")
     predictions = input_frame.groupby('prompt_id', as_index=False).agg(
         prediction=('eligibility_result', 'mean'),
         dfci_mrn=('dfci_mrn', 'first'),
@@ -87,6 +94,14 @@ def load_gold(gold_path: Path, split_filter: str = None) -> pd.DataFrame:
     wanted = set(KEY_COLS + ['eligibility_result', 'split'])
     gold = pd.read_csv(gold_path, usecols=lambda c: c in wanted)
     gold = gold[~gold.patient_summary.isnull()]
+    # Drop rows where the gold-labeling LLM could not parse a score (eligibility_result == -1).
+    # These PARSE_FAILED sentinels are not real grades and would silently become false
+    # negatives in the binarized classification labels and corrupt the ranking/positive rate.
+    n_before = len(gold)
+    gold = gold[gold.eligibility_result >= 0]
+    if n_before - len(gold):
+        print(f"Dropped {n_before - len(gold)} gold rows with unparseable labels "
+              f"(eligibility_result == -1)")
     if split_filter and 'split' in gold.columns:
         gold = gold[gold.split.str.contains(split_filter)]
         print(f"Filtered gold to '{split_filter}' split: {len(gold)} rows")
@@ -266,12 +281,14 @@ def main():
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
     llm_results_file = Path(args.llm_results_file) if args.llm_results_file else None
+    # Ranking depth matches retrieval depth: 20 patient-centric, 40 trial-centric.
+    k = args.k if args.k is not None else (40 if args.mode == "trial_centric" else 20)
 
     if args.mode == "patient_centric":
         evaluate_patient_centric(
             data_dir, output_dir,
             llm_results_file=llm_results_file,
-            k=args.k,
+            k=k,
             threshold=args.threshold,
             split_filter=args.split_filter
         )
@@ -279,7 +296,7 @@ def main():
         evaluate_trial_centric(
             data_dir, output_dir,
             llm_results_file=llm_results_file,
-            k=args.k,
+            k=k,
             threshold=args.threshold,
             split_filter=args.split_filter
         )

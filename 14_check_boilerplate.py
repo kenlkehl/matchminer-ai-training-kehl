@@ -73,16 +73,24 @@ def build_prompts(patient_boilerplates: List[str], trial_boilerplates: List[str]
     return prompts
 
 
-def parse_yes_no_at_end(text: str) -> int:
-    #look near the end for one of the exact tokens
+def parse_yes_no_at_end(text: str) -> float:
+    # Look near the end for one of the exact tokens. Emit a -1.0 (PARSE_FAILED)
+    # sentinel when the model produced no parseable yes/no answer (e.g. a truncated
+    # generation), so downstream training/eval can drop it instead of silently
+    # treating an unparseable response as 0.0 ("not excluded").
+    if not isinstance(text, str):
+        return -1.0
     tail = text[-10:].upper()
     if "YES!" in tail:
         return 1.0
     elif "NO!" in tail:
         return 0.0
+    elif "YES" in tail:   # loose near-miss (missing '!')
+        return 1.0
+    elif "NO" in tail:    # loose near-miss (missing '!')
+        return 0.0
     else:
-        # fallback: simple heuristic
-        return (1.0 if "YES" in tail else 0.0)
+        return -1.0       # PARSE_FAILED sentinel
 
 
 
@@ -232,7 +240,7 @@ def worker_process(worker_id: int,
                 print(err, flush=True)
                 resp_reasonings = [""] * len(batch)
                 resp_texts = [err] * len(batch)
-                excl = [0] * len(batch)
+                excl = [-1.0] * len(batch)  # PARSE_FAILED sentinel for errored generations
 
             batch['boilerplate_check_llm_reasoning'] = resp_reasonings
             batch['boilerplate_check_llm_response'] = resp_texts
@@ -384,7 +392,7 @@ def remote_main(args, unique_df: pd.DataFrame) -> int:
         for row_id, result in payload:
             if isinstance(result, str) and result.startswith("ERROR:"):
                 reasoning, response_text = "", result
-                exclusion = 0.0
+                exclusion = -1.0  # PARSE_FAILED sentinel for errored generations
             else:
                 reasoning, response_text = result
                 exclusion = float(parse_yes_no_at_end(response_text))
