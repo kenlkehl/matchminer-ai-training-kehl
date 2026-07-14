@@ -136,7 +136,7 @@ def parse_args():
     parser.add_argument(
         "--repetition-penalty",
         type=float,
-        default=1.0,
+        default=1.1,
         help="Repetition penalty for generation",
     )
     parser.add_argument(

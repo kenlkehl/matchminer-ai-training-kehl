@@ -51,7 +51,8 @@ SOC_SCRIPTS_DIR = REPO_ROOT / "real_eval_code/eval_phi_soc"
 DATA_DIR = REPO_ROOT.parent / "data/phi/soc"
 GOLD_LLM = 'nvidia/Gemma-4-31B-IT-NVFP4' #'RedHatAI/Gemma-4-31B-it-FP8-Dynamic'  # 'nvidia/Gemma-4-31B-IT-NVFP4'
 BASELINE_EMBEDDING_MODEL = "nvidia/llama-embed-nemotron-8b" #"Qwen/Qwen3-Embedding-0.6B"
-ONCOREASONING_MODEL = "../../../models/onco_reasoning_lfm/checkpoint-121000"  # Update with actual path or HuggingFace ID
+ONCOREASONING_MODEL = "../../../models/onco_reasoning_qwen3_5_2b_checkpoint_7-12-26"  # Update with actual path or HuggingFace ID
+ONCOREASONING_REASONING_PARSER = "qwen3"
 
 
 STAGES = [
@@ -142,6 +143,10 @@ Examples:
     parser.add_argument("--oncoreasoning-model", type=str,
                         default=ONCOREASONING_MODEL,
                         help="OncoReasoning model for vLLM inference (HuggingFace ID or path)")
+    parser.add_argument("--oncoreasoning-reasoning-parser", type=str,
+                        default=ONCOREASONING_REASONING_PARSER,
+                        help="vLLM reasoning parser for OncoReasoning inference "
+                             "(default: qwen3; use 'auto' to infer from the model name)")
     parser.add_argument("--oncoreasoning-n-samples", type=int, default=50,
                         help="Number of samples per prompt for OncoReasoning inference")
     parser.add_argument("--categorical-trial-checker-model", type=str, default=None,
@@ -956,6 +961,7 @@ def main():
                     "--temp-dir", task['temp_dir'],
                     "--gpus", gpu_str,
                     "--n-samples", str(args.oncoreasoning_n_samples),
+                    "--reasoning-parser", args.oncoreasoning_reasoning_parser,
                 ]
                 ret = run_command(cmd, task['description'], args.dry_run)
                 if ret != 0:
