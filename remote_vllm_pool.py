@@ -86,12 +86,17 @@ def add_remote_cli_args(parser: argparse.ArgumentParser) -> None:
              "a request error.",
     )
     g.add_argument(
-        "--results_per_shard", type=int, default=200,
+        "--results_per_shard", "--results-per-shard", type=int, default=200,
         help="Number of completed items per shard written by the pool.",
     )
     g.add_argument(
         "--request_timeout", type=float, default=600.0,
         help="Per-request timeout in seconds (passed to work_fn).",
+    )
+    g.add_argument(
+        "--api_key_env", "--api-key-env", type=str, default="OPENAI_API_KEY",
+        help="Environment variable containing the endpoint API key. If it is "
+             "unset, use 'not-needed' for ordinary local vLLM servers.",
     )
     g.add_argument(
         "--max_attempts", type=int, default=200,
@@ -218,6 +223,7 @@ class DynamicServerRegistry:
         servers_file: Optional[str] = None,
         static_urls: Optional[List[str]] = None,
         refresh_seconds: float = 15.0,
+        api_key: str = "not-needed",
     ):
         if not servers_file and not static_urls:
             raise ValueError("Either servers_file or static_urls must be set.")
@@ -229,6 +235,7 @@ class DynamicServerRegistry:
         self._concurrency_increase_step = concurrency_increase_step
         self._concurrency_backoff_factor = concurrency_backoff_factor
         self._request_timeout = request_timeout
+        self._api_key = api_key or "not-needed"
 
         self._entries: dict[str, ServerEntry] = {}
         self._lock = asyncio.Lock()
@@ -288,7 +295,7 @@ class DynamicServerRegistry:
     def _make_client(self, url: str) -> AsyncOpenAI:
         return AsyncOpenAI(
             base_url=url,
-            api_key="not-needed",
+            api_key=self._api_key,
             timeout=self._request_timeout + 60,
             max_retries=0,  # we own retry policy
         )
@@ -945,6 +952,8 @@ def build_registry_from_args(args) -> DynamicServerRegistry:
     if getattr(args, "server_urls", None) and getattr(args, "server_urls_file", None):
         raise ValueError("Specify only one of --server_urls / --server_urls_file.")
     static_urls = parse_static_urls(getattr(args, "server_urls", None))
+    api_key_env = str(getattr(args, "api_key_env", "OPENAI_API_KEY") or "")
+    api_key = os.environ.get(api_key_env, "not-needed") if api_key_env else "not-needed"
     return DynamicServerRegistry(
         max_concurrent_per_server=int(getattr(args, "max_concurrent_per_server", 25)),
         concurrency_success_threshold=int(getattr(args, "concurrency_success_threshold", 3)),
@@ -954,4 +963,5 @@ def build_registry_from_args(args) -> DynamicServerRegistry:
         servers_file=getattr(args, "server_urls_file", None) or None,
         static_urls=static_urls or None,
         refresh_seconds=float(getattr(args, "server_urls_refresh", 15.0)),
+        api_key=api_key,
     )

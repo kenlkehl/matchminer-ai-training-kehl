@@ -416,4 +416,23 @@ accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 
 echo 16 done
 
+# Step 17 — subjective potential-benefit labels and GoodOptionChecker.
+# Drug-only web research runs before app-owned local vLLM endpoints are started.
+if skip_if_done ../models/goodoptionchecker "step 17 good option checker"; then
+  echo 17 skipped
+else
+  python train_good_option_checker.py research
+
+  python train_good_option_checker.py label \
+    --model "$MODEL" \
+    --reasoning-parser "$REASONING_PARSER" \
+    --download-dir ~/models \
+    --gpus 0,1,2,3,4,5,6,7 \
+    --gpus-per-server 1 \
+    --max-model-len 50000 \
+    --gpu-memory-utilization 0.95
+
+  accelerate launch --num_processes 8 train_good_option_checker.py train
+  echo 17 done
+fi
 

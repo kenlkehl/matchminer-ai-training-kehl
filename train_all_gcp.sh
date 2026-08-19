@@ -7,7 +7,8 @@
 # brought up before every vLLM step and torn down again (full instance
 # stop) before each non-vLLM step listed by the user (make_top_matches,
 # finetune_embedder, 15_train_modernbert_trial_checker,
-# 16_train_modernbert_boilerplate_checker). When the script exits
+# 16_train_modernbert_boilerplate_checker, and GoodOptionChecker training).
+# When the script exits
 # (success, failure, or Ctrl-C), all worker instances are stopped.
 #
 # Required env:
@@ -506,4 +507,27 @@ skip_if_done ../models/boilerplatechecker "step 16 boilerplate checker" || \
 accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 echo 16 done
 
-echo "[train_all_gcp] all 16 steps complete."
+# ---------------------------------------------------------------------------
+# Step 17 — drug research, subjective potential-benefit labels, and training
+# ---------------------------------------------------------------------------
+if skip_if_done ../models/goodoptionchecker "step 17 good option checker"; then
+  echo 17 skipped
+else
+  # This stage accepts only NCT IDs and performs drug-only web searches, so no
+  # patient text reaches ClinicalTrials.gov or the search provider.
+  python train_good_option_checker.py research
+
+  start_vllm_cluster 50000 256 0.95 1
+  python train_good_option_checker.py label \
+    --server_urls_file "$SERVERS_FILE" \
+    --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
+    --download-dir ~/models \
+    --max-model-len 50000 --gpu-memory-utilization 0.95
+  stop_vllm_cluster
+
+  stop_workers_fully
+  accelerate launch --num_processes 8 train_good_option_checker.py train
+  echo 17 done
+fi
+
+echo "[train_all_gcp] all 17 steps complete."
