@@ -59,14 +59,66 @@ def _candidate_frame(*, duplicate: bool = False) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _rubric_response() -> dict[str, object]:
+    return {
+        "patient_disease_type": "Cancer A",
+        "targeted_biomarkers": ["Marker A"],
+        "disease_type_benefit": {
+            "point": 1,
+            "rationale": "Human benefit was reported in Cancer A.",
+            "evidence_labels": ["S1"],
+        },
+        "common_biomarker_in_disease": {
+            "point": 1,
+            "rationale": "Marker A is common in Cancer A.",
+            "evidence_labels": ["S2", "INVENTED"],
+        },
+        "patient_biomarker_targeted": {
+            "point": 1,
+            "rationale": "The tumor documents Marker A and Drug A targets it.",
+            "evidence_labels": ["PATIENT", "CT"],
+        },
+        "biomarker_targeted_benefit": {
+            "point": 0,
+            "rationale": "No human biomarker-directed benefit evidence was supplied.",
+            "evidence_labels": [],
+        },
+        "key_uncertainties": ["Small study"],
+    }
+
+
 def test_drug_query_api_structurally_excludes_patient_context() -> None:
-    query_parameters = inspect.signature(good_option.build_drug_search_queries).parameters
+    query_parameters = inspect.signature(
+        good_option.build_drug_search_queries
+    ).parameters
+    expression_parameters = inspect.signature(
+        good_option.build_biomarker_expression_search_queries
+    ).parameters
     research_parameters = inspect.signature(good_option.research_trials).parameters
+    enrichment_parameters = inspect.signature(
+        good_option.enrich_trial_with_biomarker_expression_research
+    ).parameters
 
     assert list(query_parameters) == ["interventions"]
+    assert list(expression_parameters) == ["interventions"]
     assert "patient_summary" not in research_parameters
     assert "patient_history" not in research_parameters
+    assert "patient_summary" not in enrichment_parameters
+    assert "clinical_space_summary" not in enrichment_parameters
     assert good_option.research_trials.__module__ == "matchminer_ai.help_me_choose"
+
+
+def test_biomarker_expression_queries_use_only_drug_names() -> None:
+    queries = good_option.build_biomarker_expression_search_queries(
+        good_option.extract_drug_interventions(STUDY)
+    )
+
+    assert queries == (
+        '"Drug A" oncology molecular target biomarker expression prevalence '
+        "across cancer types",
+        '"Drug B" oncology molecular target biomarker expression prevalence '
+        "across cancer types",
+    )
 
 
 def test_extracts_only_non_placebo_drug_interventions() -> None:
@@ -79,7 +131,9 @@ def test_extracts_only_non_placebo_drug_interventions() -> None:
     ]
 
 
-def test_patient_text_enters_after_drug_only_search(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_patient_text_enters_after_drug_only_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured_queries: list[str] = []
 
     async def fake_fetch(_nct_id: str, *, client: object):
@@ -112,47 +166,92 @@ def test_patient_text_enters_after_drug_only_search(monkeypatch: pytest.MonkeyPa
             search_function=fake_search,
         )
     )
+    research = asyncio.run(
+        good_option.enrich_trial_with_biomarker_expression_research(
+            research,
+            search_function=fake_search,
+        )
+    )
     marker = "PRIVATE_PATIENT_MARKER"
     messages = good_option.build_good_option_messages(
         patient_summary=f"Synthetic patient {marker}",
         clinical_space_summary="Cancer A treated with Drug A.",
         research=research,
     )
+    prompt_text = messages[1]["content"].lower()
 
     assert captured_queries
     assert all(marker not in query for query in captured_queries)
+    assert any("biomarker expression prevalence" in query for query in captured_queries)
     assert marker in messages[1]["content"]
-    assert "not a response probability" in messages[0]["content"].lower()
+    assert "four-criterion evidence rubric" in messages[0]["content"].lower()
     assert "do not score eligibility" in messages[0]["content"].lower()
     assert "untrusted" in messages[0]["content"].lower()
+    assert "patient_disease_type" in messages[1]["content"]
+    assert "full relevant disease and histology population" in prompt_text
+    assert "defined independently of the biomarker being scored" in prompt_text
+    assert (
+        "common within a biomarker-positive subgroup does not establish" in prompt_text
+    )
+    assert "state the population and denominator in the rationale" in prompt_text
 
 
-def test_good_option_response_parser_preserves_both_scales() -> None:
+def test_good_option_response_parser_derives_four_point_score() -> None:
     parsed = good_option.parse_good_option_response(
-        json.dumps(
-            {
-                "score": 73,
-                "confidence": "medium",
-                "potential_benefit_rationale": "A patient-relevant signal.",
-                "key_uncertainties": ["Small study"],
-                "evidence_labels": ["CT", "S1", "INVENTED"],
-            }
-        )
+        json.dumps(_rubric_response()),
+        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
+        biomarker_expression_evidence_labels={"S2"},
     )
 
     assert parsed.status == "ok"
-    assert parsed.score_0_100 == 73
-    assert parsed.score_0_1 == pytest.approx(0.73)
+    assert parsed.total_points == 3
+    assert parsed.score_0_1 == pytest.approx(0.75)
+    assert parsed.point_disease_type_benefit == 1
+    assert parsed.point_common_biomarker_in_disease == 1
+    assert parsed.point_patient_biomarker_targeted == 1
+    assert parsed.point_biomarker_targeted_benefit == 0
     assert json.loads(parsed.uncertainties_json) == ["Small study"]
-    assert json.loads(parsed.evidence_labels_json) == ["CT", "S1"]
+    assert json.loads(parsed.evidence_common_biomarker_in_disease_json) == ["S2"]
 
 
-@pytest.mark.parametrize("score", [-1, 101, "unknown", True])
-def test_good_option_response_parser_rejects_invalid_scores(score: object) -> None:
-    parsed = good_option.parse_good_option_response(json.dumps({"score": score}))
+def test_old_holistic_score_response_is_rejected() -> None:
+    parsed = good_option.parse_good_option_response('{"score": 72}')
 
     assert parsed.status == "parse_failed"
     assert pd.isna(parsed.score_0_1)
+
+
+@pytest.mark.parametrize("point", [-1, 2, "unknown", True])
+def test_good_option_response_parser_rejects_invalid_points(point: object) -> None:
+    response = _rubric_response()
+    response["disease_type_benefit"]["point"] = point  # type: ignore[index]
+    parsed = good_option.parse_good_option_response(json.dumps(response))
+
+    assert parsed.status == "parse_failed"
+    assert pd.isna(parsed.score_0_1)
+
+
+def test_awarded_point_requires_criterion_specific_evidence() -> None:
+    response = _rubric_response()
+    response["common_biomarker_in_disease"]["evidence_labels"] = [  # type: ignore[index]
+        "PATIENT"
+    ]
+
+    parsed = good_option.parse_good_option_response(json.dumps(response))
+
+    assert parsed.status == "parse_failed"
+    assert "web source" in parsed.parse_error
+
+
+def test_common_biomarker_point_requires_expression_research_source() -> None:
+    parsed = good_option.parse_good_option_response(
+        json.dumps(_rubric_response()),
+        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
+        biomarker_expression_evidence_labels={"S3"},
+    )
+
+    assert parsed.status == "parse_failed"
+    assert "target-expression research source" in parsed.parse_error
 
 
 def test_candidate_stream_deduplicates_across_top_files(tmp_path: Path) -> None:
@@ -194,9 +293,7 @@ def test_research_record_round_trip() -> None:
         nct_id="NCT12345678",
         title="Synthetic trial",
         phases=("PHASE2",),
-        interventions=(
-            good_option.DrugIntervention("Drug A", "DRUG", "Description"),
-        ),
+        interventions=(good_option.DrugIntervention("Drug A", "DRUG", "Description"),),
         search_results=(
             good_option.DrugSearchResult(
                 query='"Drug A" oncology mechanism efficacy safety clinical trial',
@@ -216,6 +313,52 @@ def test_research_record_round_trip() -> None:
     assert restored == research
     assert record["fetched_at_utc"] == "2026-08-19T00:00:00+00:00"
     assert len(record["research_implementation_sha256"]) == 64
+    assert (
+        record["biomarker_expression_query_version"]
+        == good_option.BIOMARKER_EXPRESSION_QUERY_VERSION
+    )
+
+
+def test_research_map_rejects_stale_expression_query_cache(tmp_path: Path) -> None:
+    research = good_option.TrialDrugResearch(nct_id="NCT12345678")
+    record = good_option.research_to_record(research)
+    record["biomarker_expression_query_version"] = "stale-version"
+    output = tmp_path / "research.parquet"
+    pd.DataFrame([record]).to_parquet(output, index=False)
+
+    loaded = good_option._research_map(output, tmp_path / "missing-shards")
+
+    assert loaded == {}
+
+
+def test_label_resume_uses_only_current_successful_schema(tmp_path: Path) -> None:
+    output = tmp_path / "labels.parquet"
+    pd.DataFrame(
+        [
+            {
+                "candidate_id": "current",
+                "good_option_label_status": "ok",
+                "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
+                "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
+            },
+            {
+                "candidate_id": "failed",
+                "good_option_label_status": "parse_failed",
+                "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
+                "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
+            },
+            {
+                "candidate_id": "old",
+                "good_option_label_status": "ok",
+                "prompt_version": "old-prompt",
+                "label_schema_version": "1",
+            },
+        ]
+    ).to_parquet(output, index=False)
+
+    done = good_option.load_done_candidate_ids(output, tmp_path / "missing-shards")
+
+    assert done == {"current"}
 
 
 def test_checker_drug_context_excludes_teacher_web_snippets() -> None:
@@ -248,8 +391,13 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
                 "this_space": "Space A",
                 "trial_drug_context": "DRUG: Drug A",
                 "split": "train",
+                "good_option_points": 1,
                 "good_option_score": 0.25,
                 "good_option_label_status": "ok",
+                "point_disease_type_benefit": 1,
+                "point_common_biomarker_in_disease": 0,
+                "point_patient_biomarker_targeted": 0,
+                "point_biomarker_targeted_benefit": 0,
             },
             {
                 "candidate_id": "b",
@@ -257,8 +405,13 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
                 "this_space": "Space B",
                 "trial_drug_context": "DRUG: Drug B",
                 "split": "train",
+                "good_option_points": 3,
                 "good_option_score": 0.75,
                 "good_option_label_status": "ok",
+                "point_disease_type_benefit": 1,
+                "point_common_biomarker_in_disease": 1,
+                "point_patient_biomarker_targeted": 1,
+                "point_biomarker_targeted_benefit": 0,
             },
             {
                 "candidate_id": "bad",
@@ -266,8 +419,27 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
                 "this_space": "Space C",
                 "trial_drug_context": "DRUG: Drug C",
                 "split": "train",
+                "good_option_points": -1,
                 "good_option_score": float("nan"),
                 "good_option_label_status": "parse_failed",
+                "point_disease_type_benefit": -1,
+                "point_common_biomarker_in_disease": -1,
+                "point_patient_biomarker_targeted": -1,
+                "point_biomarker_targeted_benefit": -1,
+            },
+            {
+                "candidate_id": "inconsistent",
+                "patient_summary": "Third synthetic patient",
+                "this_space": "Space D",
+                "trial_drug_context": "DRUG: Drug D",
+                "split": "train",
+                "good_option_points": 2,
+                "good_option_score": 0.75,
+                "good_option_label_status": "ok",
+                "point_disease_type_benefit": 1,
+                "point_common_biomarker_in_disease": 1,
+                "point_patient_biomarker_targeted": 0,
+                "point_biomarker_targeted_benefit": 0,
             },
         ]
     )

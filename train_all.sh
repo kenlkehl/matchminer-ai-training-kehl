@@ -416,9 +416,11 @@ accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 
 echo 16 done
 
-# Step 17 — subjective potential-benefit labels and GoodOptionChecker.
-# Drug-only web research runs before app-owned local vLLM endpoints are started.
-if skip_if_done ../models/goodoptionchecker "step 17 good option checker"; then
+# Step 17 — four-point drug-patient evidence labels and GoodOptionChecker.
+# Drug-only efficacy and target-expression research runs before local vLLM.
+if skip_if_done \
+  ../models/goodoptionchecker_four_point \
+  "step 17 good option checker"; then
   echo 17 skipped
 else
   python train_good_option_checker.py research
@@ -435,4 +437,3 @@ else
   accelerate launch --num_processes 8 train_good_option_checker.py train
   echo 17 done
 fi
-

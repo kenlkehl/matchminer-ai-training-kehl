@@ -508,13 +508,16 @@ accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 echo 16 done
 
 # ---------------------------------------------------------------------------
-# Step 17 — drug research, subjective potential-benefit labels, and training
+# Step 17 — drug research, four-point evidence labels, and training
 # ---------------------------------------------------------------------------
-if skip_if_done ../models/goodoptionchecker "step 17 good option checker"; then
+if skip_if_done \
+  ../models/goodoptionchecker_four_point \
+  "step 17 good option checker"; then
   echo 17 skipped
 else
-  # This stage accepts only NCT IDs and performs drug-only web searches, so no
-  # patient text reaches ClinicalTrials.gov or the search provider.
+  # This stage accepts only NCT IDs and performs drug-name-only efficacy and
+  # target-expression searches, so no patient text or disease reaches the
+  # registry or search provider.
   python train_good_option_checker.py research
 
   start_vllm_cluster 50000 256 0.95 1
