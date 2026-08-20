@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -39,6 +40,46 @@ STUDY = {
 }
 
 
+RCT_STUDY = {
+    "protocolSection": {
+        "identificationModule": {"briefTitle": "Novel-X versus standard therapy"},
+        "statusModule": {"overallStatus": "RECRUITING"},
+        "designModule": {"phases": ["PHASE3"]},
+        "descriptionModule": {"briefSummary": "A randomized treatment study."},
+        "armsInterventionsModule": {
+            "armGroups": [
+                {
+                    "label": "Experimental arm",
+                    "type": "EXPERIMENTAL",
+                    "description": "Participants receive Novel-X.",
+                    "interventionNames": ["DRUG: Novel-X"],
+                },
+                {
+                    "label": "Standard-of-care arm",
+                    "type": "ACTIVE_COMPARATOR",
+                    "description": "Participants receive Standard-Y.",
+                    "interventionNames": ["DRUG: Standard-Y"],
+                },
+            ],
+            "interventions": [
+                {
+                    "type": "DRUG",
+                    "name": "Novel-X tablets",
+                    "description": "Novel-X is administered orally.",
+                    "armGroupLabels": ["Experimental arm"],
+                },
+                {
+                    "type": "DRUG",
+                    "name": "Standard-Y",
+                    "description": "Standard systemic therapy.",
+                    "armGroupLabels": ["Standard-of-care arm"],
+                },
+            ],
+        },
+    }
+}
+
+
 def _candidate_frame(*, duplicate: bool = False) -> pd.DataFrame:
     rows = [
         {
@@ -62,27 +103,34 @@ def _candidate_frame(*, duplicate: bool = False) -> pd.DataFrame:
 def _rubric_response() -> dict[str, object]:
     return {
         "patient_disease_type": "Cancer A",
-        "targeted_biomarkers": ["Marker A"],
-        "disease_type_benefit": {
-            "point": 1,
-            "rationale": "Human benefit was reported in Cancer A.",
-            "evidence_labels": ["S1"],
-        },
-        "common_biomarker_in_disease": {
-            "point": 1,
-            "rationale": "Marker A is common in Cancer A.",
-            "evidence_labels": ["S2", "INVENTED"],
-        },
-        "patient_biomarker_targeted": {
-            "point": 1,
-            "rationale": "The tumor documents Marker A and Drug A targets it.",
-            "evidence_labels": ["PATIENT", "CT"],
-        },
-        "biomarker_targeted_benefit": {
-            "point": 0,
-            "rationale": "No human biomarker-directed benefit evidence was supplied.",
-            "evidence_labels": [],
-        },
+        "drug_assessments": [
+            {
+                "drug_name": "Drug A",
+                "targeted_biomarkers": ["Marker A"],
+                "disease_type_benefit": {
+                    "point": 1,
+                    "rationale": "Human benefit was reported in Cancer A.",
+                    "evidence_labels": ["S1"],
+                },
+                "common_biomarker_in_disease": {
+                    "point": 1,
+                    "rationale": "Marker A is common in Cancer A.",
+                    "evidence_labels": ["S2", "INVENTED"],
+                },
+                "patient_biomarker_targeted": {
+                    "point": 1,
+                    "rationale": "The tumor documents Marker A and Drug A targets it.",
+                    "evidence_labels": ["PATIENT", "CT"],
+                },
+                "biomarker_targeted_benefit": {
+                    "point": 0,
+                    "rationale": (
+                        "No human biomarker-directed benefit evidence was supplied."
+                    ),
+                    "evidence_labels": [],
+                },
+            }
+        ],
         "key_uncertainties": ["Small study"],
     }
 
@@ -90,6 +138,12 @@ def _rubric_response() -> dict[str, object]:
 def test_drug_query_api_structurally_excludes_patient_context() -> None:
     query_parameters = inspect.signature(
         good_option.build_drug_search_queries
+    ).parameters
+    experimental_query_parameters = inspect.signature(
+        good_option.build_experimental_drug_search_queries
+    ).parameters
+    normalization_parameters = inspect.signature(
+        good_option.build_drug_name_normalization_messages
     ).parameters
     expression_parameters = inspect.signature(
         good_option.build_biomarker_expression_search_queries
@@ -100,12 +154,339 @@ def test_drug_query_api_structurally_excludes_patient_context() -> None:
     ).parameters
 
     assert list(query_parameters) == ["interventions"]
+    assert list(experimental_query_parameters) == ["interventions"]
+    assert list(normalization_parameters) == ["interventions"]
     assert list(expression_parameters) == ["interventions"]
     assert "patient_summary" not in research_parameters
     assert "patient_history" not in research_parameters
     assert "patient_summary" not in enrichment_parameters
     assert "clinical_space_summary" not in enrichment_parameters
     assert good_option.research_trials.__module__ == "matchminer_ai.help_me_choose"
+
+
+def test_teacher_canonicalizes_registry_qualifiers_without_inventing_names() -> None:
+    interventions = (
+        good_option.DrugIntervention(
+            name="Dose-Escalation (Part One) Agent-X capsule",
+            intervention_type="DRUG",
+            description="Participants receive Agent-X orally.",
+        ),
+        good_option.DrugIntervention(
+            name="Dose-Expansion (Part Two) Agent-X capsule",
+            intervention_type="DRUG",
+        ),
+        good_option.DrugIntervention(
+            name="Combination cohort: Agent-Y plus Agent-Z infusion",
+            intervention_type="DRUG",
+        ),
+    )
+    response = {
+        "interventions": [
+                {
+                    "source_index": 0,
+                    "experimental_role": "investigational",
+                    "canonical_drug_names": ["Agent-X"],
+                "rationale": "Agent-X appears in the registry name.",
+            },
+                {
+                    "source_index": 1,
+                    "experimental_role": "investigational",
+                    "canonical_drug_names": ["Agent-X"],
+                "rationale": "Agent-X appears in the registry name.",
+            },
+                {
+                    "source_index": 2,
+                    "experimental_role": "investigational",
+                    "canonical_drug_names": ["Agent-Y", "Agent-Z"],
+                "rationale": "Both names appear in the registry name.",
+            },
+        ]
+    }
+
+    parsed = good_option.parse_drug_name_normalization_response(
+        json.dumps(response),
+        nct_id="NCT12345678",
+        interventions=interventions,
+    )
+
+    assert parsed.status == "ok"
+    assert [item.name for item in parsed.canonical_interventions] == [
+        "Agent-X",
+        "Agent-Y",
+        "Agent-Z",
+    ]
+    assert all("Dose-" not in item.name for item in parsed.canonical_interventions)
+    assert json.loads(parsed.mappings_json)[1]["canonical_drug_names"] == ["Agent-X"]
+
+
+def test_registry_arm_context_forces_comparator_only_drug_exclusion() -> None:
+    interventions = good_option.extract_registry_drug_interventions(RCT_STUDY)
+
+    assert good_option._registry_arm_types(interventions[0]) == {"EXPERIMENTAL"}
+    assert good_option._registry_arm_types(interventions[1]) == {
+        "ACTIVE_COMPARATOR"
+    }
+    prompt = good_option.build_drug_name_normalization_messages(interventions)
+    assert "Standard-of-care arm" in prompt[1]["content"]
+
+    response = {
+        "interventions": [
+            {
+                "source_index": 0,
+                "experimental_role": "investigational",
+                "canonical_drug_names": ["Novel-X"],
+                "rationale": "Novel-X is assigned to the experimental arm.",
+            },
+            {
+                "source_index": 1,
+                "experimental_role": "investigational",
+                "canonical_drug_names": ["Standard-Y"],
+                "rationale": "Incorrectly selected.",
+            },
+        ]
+    }
+
+    parsed = good_option.parse_drug_name_normalization_response(
+        json.dumps(response),
+        nct_id="NCT12345678",
+        interventions=interventions,
+    )
+
+    assert [item.name for item in parsed.canonical_interventions] == ["Novel-X"]
+    mappings = json.loads(parsed.mappings_json)
+    assert mappings[1]["experimental_role"] == "not_investigational"
+    assert mappings[1]["control_only_exclusion"] is True
+    assert mappings[1]["canonical_drug_names"] == []
+
+
+def test_registry_fetch_retains_public_arm_context_without_web_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_ids: list[str] = []
+
+    async def fake_fetch(nct_id: str, *, client: object):
+        del client
+        requested_ids.append(nct_id)
+        return RCT_STUDY
+
+    monkeypatch.setattr(good_option.help_me_choose, "fetch_trial_study", fake_fetch)
+    records = asyncio.run(
+        good_option.fetch_trial_registry_research(
+            ["NCT12345678"],
+            max_concurrency=1,
+            request_timeout=1,
+        )
+    )
+
+    assert requested_ids == ["NCT12345678"]
+    assert len(records) == 1
+    assert good_option._registry_arm_types(records[0].interventions[0]) == {
+        "EXPERIMENTAL"
+    }
+    assert good_option._registry_arm_types(records[0].interventions[1]) == {
+        "ACTIVE_COMPARATOR"
+    }
+    assert records[0].search_results == ()
+
+
+def test_experimental_arm_drug_is_preserved_after_many_comparators() -> None:
+    study = json.loads(json.dumps(RCT_STUDY))
+    module = study["protocolSection"]["armsInterventionsModule"]
+    controls = [
+        {
+            "type": "DRUG",
+            "name": f"Standard-{index}",
+            "armGroupLabels": ["Standard-of-care arm"],
+        }
+        for index in range(8)
+    ]
+    novel = module["interventions"][0]
+    module["interventions"] = [*controls, novel]
+
+    interventions = good_option.extract_registry_drug_interventions(study)
+
+    assert interventions[0].name == "Novel-X tablets"
+    assert "Novel-X tablets" in {item.name for item in interventions}
+
+
+def test_noninvestigational_standard_background_drug_is_not_searched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interventions = good_option.extract_registry_drug_interventions(RCT_STUDY)
+    registry = good_option.trial_registry_research_from_study(
+        "NCT12345678",
+        RCT_STUDY,
+    )
+    normalization = good_option.parse_drug_name_normalization_response(
+        json.dumps(
+            {
+                "interventions": [
+                    {
+                        "source_index": 0,
+                        "experimental_role": "investigational",
+                        "canonical_drug_names": ["Novel-X"],
+                        "rationale": "Experimental arm agent.",
+                    },
+                    {
+                        "source_index": 1,
+                        "experimental_role": "not_investigational",
+                        "canonical_drug_names": [],
+                        "rationale": "Active comparator only.",
+                    },
+                ]
+            }
+        ),
+        nct_id=registry.nct_id,
+        interventions=interventions,
+    )
+    captured_queries: list[str] = []
+
+    def fake_search(queries):
+        captured_queries.extend(queries)
+        return (), ()
+
+    async def run_inline(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(good_option.asyncio, "to_thread", run_inline)
+    researched = asyncio.run(
+        good_option.research_canonical_drug_names(
+            registry,
+            normalization,
+            search_function=fake_search,
+        )
+    )
+
+    assert [item.name for item in researched.interventions] == ["Novel-X"]
+    assert captured_queries == [
+        '"Novel-X" oncology mechanism efficacy safety clinical trial'
+    ]
+    assert all("Standard-Y" not in query for query in captured_queries)
+
+
+def test_control_only_trial_is_terminal_without_web_search() -> None:
+    comparator = good_option.extract_registry_drug_interventions(RCT_STUDY)[1]
+    registry = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        interventions=(comparator,),
+    )
+    normalization = good_option.parse_drug_name_normalization_response(
+        json.dumps(
+            {
+                "interventions": [
+                    {
+                        "source_index": 0,
+                        "experimental_role": "investigational",
+                        "canonical_drug_names": ["Standard-Y"],
+                        "rationale": "Incorrect teacher selection.",
+                    }
+                ]
+            }
+        ),
+        nct_id=registry.nct_id,
+        interventions=registry.interventions,
+    )
+    captured_queries: list[str] = []
+
+    def fake_search(queries):
+        captured_queries.extend(queries)
+        return (), ()
+
+    researched = asyncio.run(
+        good_option.research_canonical_drug_names(
+            registry,
+            normalization,
+            search_function=fake_search,
+        )
+    )
+
+    assert normalization.status == "no_experimental_interventions"
+    assert researched.interventions == ()
+    assert captured_queries == []
+    assert good_option.research_status(researched) == (
+        "no_experimental_drug_intervention"
+    )
+
+
+def test_teacher_name_not_supported_by_registry_text_falls_back() -> None:
+    intervention = good_option.DrugIntervention(
+        name="Dose cohort: Agent-X tablet",
+        intervention_type="DRUG",
+    )
+    response = {
+        "interventions": [
+            {
+                "source_index": 0,
+                "experimental_role": "investigational",
+                "canonical_drug_names": ["Invented-Y"],
+                "rationale": "Unsupported guess.",
+            }
+        ]
+    }
+
+    parsed = good_option.parse_drug_name_normalization_response(
+        json.dumps(response),
+        nct_id="NCT12345678",
+        interventions=(intervention,),
+    )
+
+    assert parsed.status == "partial_fallback"
+    assert parsed.canonical_interventions == (intervention,)
+    assert "unsupported name" in parsed.parse_error
+    assert json.loads(parsed.mappings_json)[0]["used_fallback"] is True
+
+
+def test_canonical_drug_names_become_literal_search_terms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_intervention = good_option.DrugIntervention(
+        name="Dose-Escalation (Part One) Agent-X capsule",
+        intervention_type="DRUG",
+    )
+    registry = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        interventions=(registry_intervention,),
+    )
+    normalization = good_option.parse_drug_name_normalization_response(
+        json.dumps(
+            {
+                "interventions": [
+                    {
+                        "source_index": 0,
+                        "experimental_role": "investigational",
+                        "canonical_drug_names": ["Agent-X"],
+                        "rationale": "Supported by the registry name.",
+                    }
+                ]
+            }
+        ),
+        nct_id=registry.nct_id,
+        interventions=registry.interventions,
+    )
+    captured_queries: list[str] = []
+
+    def fake_search(queries):
+        captured_queries.extend(queries)
+        return (), ()
+
+    async def run_inline(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(good_option.asyncio, "to_thread", run_inline)
+
+    researched = asyncio.run(
+        good_option.research_canonical_drug_names(
+            registry,
+            normalization,
+            search_function=fake_search,
+        )
+    )
+
+    assert captured_queries == [
+        '"Agent-X" oncology mechanism efficacy safety clinical trial'
+    ]
+    assert [item.name for item in researched.interventions] == ["Agent-X"]
+    assert all("Dose-Escalation" not in query for query in captured_queries)
 
 
 def test_biomarker_expression_queries_use_only_drug_names() -> None:
@@ -119,6 +500,47 @@ def test_biomarker_expression_queries_use_only_drug_names() -> None:
         '"Drug B" oncology molecular target biomarker expression prevalence '
         "across cancer types",
     )
+
+
+def test_web_queries_are_chunked_so_later_drugs_are_not_starved() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_search(queries):
+        calls.append(tuple(queries))
+        return (
+            tuple(
+                good_option.DrugSearchResult(
+                    query=query,
+                    title=query,
+                    snippet="Evidence",
+                    url=f"https://example.org/{index}-{len(calls)}",
+                )
+                for index, query in enumerate(queries)
+            ),
+            (),
+        )
+
+    queries = tuple(f"drug-{index}" for index in range(7))
+    results, notices = good_option._search_query_chunks(fake_search, queries)
+
+    assert [len(call) for call in calls] == [3, 3, 1]
+    assert [item.query for item in results] == list(queries)
+    assert notices == ()
+
+
+def test_training_queries_preserve_every_selected_canonical_drug() -> None:
+    interventions = tuple(
+        good_option.DrugIntervention(f"Experimental-{index}", "DRUG")
+        for index in range(10)
+    )
+
+    baseline = good_option.build_experimental_drug_search_queries(interventions)
+    expression = good_option.build_biomarker_expression_search_queries(interventions)
+
+    assert len(baseline) == 10
+    assert len(expression) == 10
+    assert "Experimental-9" in baseline[-1]
+    assert "Experimental-9" in expression[-1]
 
 
 def test_extracts_only_non_placebo_drug_interventions() -> None:
@@ -175,7 +597,6 @@ def test_patient_text_enters_after_drug_only_search(
     marker = "PRIVATE_PATIENT_MARKER"
     messages = good_option.build_good_option_messages(
         patient_summary=f"Synthetic patient {marker}",
-        clinical_space_summary="Cancer A treated with Drug A.",
         research=research,
     )
     prompt_text = messages[1]["content"].lower()
@@ -204,14 +625,242 @@ def test_good_option_response_parser_derives_four_point_score() -> None:
     )
 
     assert parsed.status == "ok"
+    assert parsed.drug_count == 1
     assert parsed.total_points == 3
+    assert parsed.max_points == 4
     assert parsed.score_0_1 == pytest.approx(0.75)
     assert parsed.point_disease_type_benefit == 1
     assert parsed.point_common_biomarker_in_disease == 1
     assert parsed.point_patient_biomarker_targeted == 1
     assert parsed.point_biomarker_targeted_benefit == 0
     assert json.loads(parsed.uncertainties_json) == ["Small study"]
-    assert json.loads(parsed.evidence_common_biomarker_in_disease_json) == ["S2"]
+    assert json.loads(parsed.evidence_common_biomarker_in_disease_json) == [
+        {"drug_name": "Drug A", "evidence_labels": ["S2"]}
+    ]
+
+
+def test_multidrug_response_is_normalized_by_four_times_drug_count() -> None:
+    response = _rubric_response()
+    second = json.loads(json.dumps(response["drug_assessments"][0]))  # type: ignore[index]
+    second["drug_name"] = "Drug B"
+    second["targeted_biomarkers"] = ["Marker B"]
+    second["common_biomarker_in_disease"]["point"] = 0
+    second["common_biomarker_in_disease"]["evidence_labels"] = []
+    second["patient_biomarker_targeted"]["point"] = 0
+    second["patient_biomarker_targeted"]["evidence_labels"] = []
+    response["drug_assessments"].append(second)  # type: ignore[union-attr]
+
+    parsed = good_option.parse_good_option_response(
+        json.dumps(response),
+        expected_drug_names=["Drug A", "Drug B"],
+        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
+        biomarker_expression_evidence_labels={"S2"},
+    )
+
+    assert parsed.status == "ok"
+    assert parsed.drug_count == 2
+    assert parsed.total_points == 4
+    assert parsed.max_points == 8
+    assert parsed.score_0_1 == pytest.approx(0.5)
+    assert len(json.loads(parsed.drug_assessments_json)) == 2
+
+
+def test_multidrug_response_requires_exactly_one_assessment_per_drug() -> None:
+    parsed = good_option.parse_good_option_response(
+        json.dumps(_rubric_response()),
+        expected_drug_names=["Drug A", "Drug B"],
+    )
+
+    assert parsed.status == "parse_failed"
+    assert "missing=['Drug B']" in parsed.parse_error
+
+
+def test_multi_patient_request_shares_trial_context_and_parses_each_case() -> None:
+    research = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        title="Synthetic Drug A trial",
+        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
+    )
+    messages = good_option.build_good_option_batch_messages(
+        patient_cases=[
+            ("case-a", "Synthetic patient A with Cancer A."),
+            ("case-b", "Synthetic patient B with Cancer B."),
+        ],
+        research=research,
+    )
+    prompt = messages[1]["content"]
+
+    assert prompt.count('"candidate_trial"') == 1
+    assert prompt.count('"case-a"') == 1
+    assert prompt.count('"case-b"') == 1
+    assert "Synthetic patient A" in prompt
+    assert "Synthetic patient B" in prompt
+
+    first = _rubric_response()
+    second = json.loads(json.dumps(first))
+    second["patient_disease_type"] = "Cancer B"
+    response = {
+        "patient_trials": [
+            {"candidate_id": "case-a", **first},
+            {"candidate_id": "case-b", **second},
+        ]
+    }
+    parsed = good_option.parse_good_option_batch_response(
+        json.dumps(response),
+        expected_candidate_ids=["case-a", "case-b"],
+        expected_drug_names=["Drug A"],
+        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
+        biomarker_expression_evidence_labels={"S2"},
+    )
+
+    assert parsed["case-a"].status == "ok"
+    assert parsed["case-b"].status == "ok"
+    assert parsed["case-a"].patient_disease_type == "Cancer A"
+    assert parsed["case-b"].patient_disease_type == "Cancer B"
+
+
+def test_multi_patient_response_marks_only_missing_case_as_failed() -> None:
+    response = {
+        "patient_trials": [
+            {"candidate_id": "case-a", **_rubric_response()},
+        ]
+    }
+
+    parsed = good_option.parse_good_option_batch_response(
+        json.dumps(response),
+        expected_candidate_ids=["case-a", "case-b"],
+        expected_drug_names=["Drug A"],
+        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
+        biomarker_expression_evidence_labels={"S2"},
+    )
+
+    assert parsed["case-a"].status == "ok"
+    assert parsed["case-b"].status == "parse_failed"
+    assert "Missing patient_trials item" in parsed["case-b"].parse_error
+
+
+def test_label_stage_batches_patient_trials_sharing_one_trial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "patient_summary": "Synthetic patient A with Cancer A.",
+                "nct_id": "NCT12345678",
+                "this_space": "1. First matching space.",
+                "split": "train",
+            },
+            {
+                "patient_summary": "Synthetic patient A with Cancer A.",
+                "nct_id": "NCT12345678",
+                "this_space": "2. Duplicate trial through another space.",
+                "split": "train",
+            },
+            {
+                "patient_summary": "Synthetic patient B with Cancer B.",
+                "nct_id": "NCT12345678",
+                "this_space": "3. Third matching space.",
+                "split": "train",
+            },
+        ]
+    )
+    candidate_path = tmp_path / "top_patients_tocheck_round1.parquet"
+    candidates.to_parquet(candidate_path, index=False)
+    research = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        title="Drug A trial",
+        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
+        search_results=(
+            good_option.DrugSearchResult(
+                query='"Drug A" oncology mechanism efficacy safety clinical trial',
+                title="Benefit",
+                snippet="Human benefit in Cancer A.",
+                url="https://example.org/benefit",
+            ),
+            good_option.DrugSearchResult(
+                query=(
+                    '"Drug A" oncology molecular target biomarker expression '
+                    "prevalence across cancer types"
+                ),
+                title="Expression",
+                snippet="Marker A prevalence.",
+                url="https://example.org/expression",
+            ),
+        ),
+    )
+    research_output = tmp_path / "research.parquet"
+    pd.DataFrame([good_option.research_to_record(research)]).to_parquet(
+        research_output,
+        index=False,
+    )
+
+    class FakeTokenizer:
+        def apply_chat_template(self, conversation, **_kwargs):
+            return conversation[-1]["content"]
+
+    submitted_prompt_count = 0
+
+    async def fake_run_pool(*, work_items, shard_writer, starting_shard_idx, **_kwargs):
+        nonlocal submitted_prompt_count
+        payload = []
+        for prompt_id, request in work_items:
+            submitted_prompt_count += 1
+            _instructions, prompt_json = request["prompt"].split("\n\n", 1)
+            prompt_payload = json.loads(prompt_json)
+            response_rows = []
+            for patient in prompt_payload[
+                "patient_trials_private_to_configured_llm"
+            ]:
+                response_rows.append(
+                    {
+                        "candidate_id": patient["candidate_id"],
+                        **_rubric_response(),
+                    }
+                )
+            payload.append(
+                (
+                    prompt_id,
+                    ("", json.dumps({"patient_trials": response_rows})),
+                )
+            )
+        shard_writer(payload, starting_shard_idx)
+        return len(payload)
+
+    monkeypatch.setattr("remote_vllm_pool.run_pool", fake_run_pool)
+    args = SimpleNamespace(
+        research_output=str(research_output),
+        research_shards_dir=str(tmp_path / "research_shards"),
+        label_output=str(tmp_path / "labels.parquet"),
+        label_shards_dir=str(tmp_path / "label_shards"),
+        scan_batch_size=10,
+        submission_batch_size=10,
+        max_candidates=None,
+        patients_per_request=4,
+        max_batch_new_tokens=8000,
+        max_new_tokens=2000,
+        results_per_shard=200,
+        max_attempts=2,
+        store_reasoning=False,
+        model="teacher-model",
+    )
+    runtime = good_option.TeacherRuntime(
+        tokenizer=FakeTokenizer(),
+        registry=object(),
+        work_fn=object(),
+        local_servers=[],
+    )
+
+    output = asyncio.run(
+        good_option.run_label_stage(args, [candidate_path], runtime=runtime)
+    )
+    labels = pd.read_parquet(output)
+
+    assert submitted_prompt_count == 1
+    assert len(labels) == 2
+    assert labels["candidate_id"].is_unique
+    assert "this_space" not in labels.columns
+    assert labels["good_option_label_status"].eq("ok").all()
 
 
 def test_old_holistic_score_response_is_rejected() -> None:
@@ -224,7 +873,7 @@ def test_old_holistic_score_response_is_rejected() -> None:
 @pytest.mark.parametrize("point", [-1, 2, "unknown", True])
 def test_good_option_response_parser_rejects_invalid_points(point: object) -> None:
     response = _rubric_response()
-    response["disease_type_benefit"]["point"] = point  # type: ignore[index]
+    response["drug_assessments"][0]["disease_type_benefit"]["point"] = point  # type: ignore[index]
     parsed = good_option.parse_good_option_response(json.dumps(response))
 
     assert parsed.status == "parse_failed"
@@ -233,14 +882,19 @@ def test_good_option_response_parser_rejects_invalid_points(point: object) -> No
 
 def test_awarded_point_requires_criterion_specific_evidence() -> None:
     response = _rubric_response()
-    response["common_biomarker_in_disease"]["evidence_labels"] = [  # type: ignore[index]
-        "PATIENT"
-    ]
+    response["drug_assessments"][0]["common_biomarker_in_disease"][  # type: ignore[index]
+        "evidence_labels"
+    ] = ["PATIENT"]
 
     parsed = good_option.parse_good_option_response(json.dumps(response))
 
-    assert parsed.status == "parse_failed"
-    assert "web source" in parsed.parse_error
+    assert parsed.status == "ok"
+    assert parsed.point_common_biomarker_in_disease == 0
+    assessments = json.loads(parsed.drug_assessments_json)
+    assert (
+        "Validator reset this point to 0"
+        in assessments[0]["common_biomarker_in_disease"]["rationale"]
+    )
 
 
 def test_common_biomarker_point_requires_expression_research_source() -> None:
@@ -250,15 +904,22 @@ def test_common_biomarker_point_requires_expression_research_source() -> None:
         biomarker_expression_evidence_labels={"S3"},
     )
 
-    assert parsed.status == "parse_failed"
-    assert "target-expression research source" in parsed.parse_error
+    assert parsed.status == "ok"
+    assert parsed.point_common_biomarker_in_disease == 0
+    assessments = json.loads(parsed.drug_assessments_json)
+    assert (
+        "target-expression research source"
+        in assessments[0]["common_biomarker_in_disease"]["rationale"]
+    )
 
 
 def test_candidate_stream_deduplicates_across_top_files(tmp_path: Path) -> None:
     first = tmp_path / "top_cohorts_tocheck_round1.parquet"
     second = tmp_path / "top_patients_tocheck_round1.parquet"
     _candidate_frame(duplicate=True).to_parquet(first, index=False)
-    _candidate_frame().iloc[[0]].to_parquet(second, index=False)
+    second_frame = _candidate_frame().iloc[[0]].copy()
+    second_frame["this_space"] = "2. A second space for the same patient and trial."
+    second_frame.to_parquet(second, index=False)
 
     batches = list(
         good_option.iter_unique_candidate_batches(
@@ -317,12 +978,73 @@ def test_research_record_round_trip() -> None:
         record["biomarker_expression_query_version"]
         == good_option.BIOMARKER_EXPRESSION_QUERY_VERSION
     )
+    assert (
+        record["drug_name_normalization_prompt_version"]
+        == good_option.DRUG_NAME_NORMALIZATION_PROMPT_VERSION
+    )
+
+
+def test_research_record_preserves_registry_and_canonical_names() -> None:
+    registry_intervention = good_option.DrugIntervention(
+        name="Dose-Escalation Agent-X capsule",
+        intervention_type="DRUG",
+    )
+    canonical_intervention = good_option.DrugIntervention(
+        name="Agent-X",
+        intervention_type="DRUG",
+    )
+    normalization = good_option.DrugNameNormalization(
+        nct_id="NCT12345678",
+        registry_interventions=(registry_intervention,),
+        canonical_interventions=(canonical_intervention,),
+        mappings_json=json.dumps(
+            [
+                {
+                    "source_index": 0,
+                    "registry_name": registry_intervention.name,
+                    "canonical_drug_names": [canonical_intervention.name],
+                    "used_fallback": False,
+                }
+            ]
+        ),
+        status="ok",
+        raw_response='{"interventions": []}',
+    )
+    research = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        interventions=(canonical_intervention,),
+    )
+
+    record = good_option.research_to_record(
+        research,
+        normalization=normalization,
+        teacher_model="teacher-model",
+    )
+
+    assert json.loads(record["registry_interventions_json"])[0]["name"] == (
+        registry_intervention.name
+    )
+    assert json.loads(record["interventions_json"])[0]["name"] == "Agent-X"
+    assert record["drug_name_normalization_status"] == "ok"
+    assert record["drug_name_normalization_teacher_model"] == "teacher-model"
 
 
 def test_research_map_rejects_stale_expression_query_cache(tmp_path: Path) -> None:
     research = good_option.TrialDrugResearch(nct_id="NCT12345678")
     record = good_option.research_to_record(research)
     record["biomarker_expression_query_version"] = "stale-version"
+    output = tmp_path / "research.parquet"
+    pd.DataFrame([record]).to_parquet(output, index=False)
+
+    loaded = good_option._research_map(output, tmp_path / "missing-shards")
+
+    assert loaded == {}
+
+
+def test_research_map_rejects_stale_name_normalization_cache(tmp_path: Path) -> None:
+    research = good_option.TrialDrugResearch(nct_id="NCT12345678")
+    record = good_option.research_to_record(research)
+    record["drug_name_normalization_prompt_version"] = "stale-version"
     output = tmp_path / "research.parquet"
     pd.DataFrame([record]).to_parquet(output, index=False)
 
@@ -353,12 +1075,18 @@ def test_label_resume_uses_only_current_successful_schema(tmp_path: Path) -> Non
                 "prompt_version": "old-prompt",
                 "label_schema_version": "1",
             },
+            {
+                "candidate_id": "no-experimental-drug",
+                "good_option_label_status": "no_experimental_drug_intervention",
+                "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
+                "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
+            },
         ]
     ).to_parquet(output, index=False)
 
     done = good_option.load_done_candidate_ids(output, tmp_path / "missing-shards")
 
-    assert done == {"current"}
+    assert done == {"current", "no-experimental-drug"}
 
 
 def test_checker_drug_context_excludes_teacher_web_snippets() -> None:
@@ -391,7 +1119,9 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
                 "this_space": "Space A",
                 "trial_drug_context": "DRUG: Drug A",
                 "split": "train",
+                "drug_count": 1,
                 "good_option_points": 1,
+                "good_option_max_points": 4,
                 "good_option_score": 0.25,
                 "good_option_label_status": "ok",
                 "point_disease_type_benefit": 1,
@@ -405,13 +1135,15 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
                 "this_space": "Space B",
                 "trial_drug_context": "DRUG: Drug B",
                 "split": "train",
-                "good_option_points": 3,
+                "drug_count": 2,
+                "good_option_points": 6,
+                "good_option_max_points": 8,
                 "good_option_score": 0.75,
                 "good_option_label_status": "ok",
-                "point_disease_type_benefit": 1,
+                "point_disease_type_benefit": 2,
                 "point_common_biomarker_in_disease": 1,
-                "point_patient_biomarker_targeted": 1,
-                "point_biomarker_targeted_benefit": 0,
+                "point_patient_biomarker_targeted": 2,
+                "point_biomarker_targeted_benefit": 1,
             },
             {
                 "candidate_id": "bad",
@@ -419,7 +1151,9 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
                 "this_space": "Space C",
                 "trial_drug_context": "DRUG: Drug C",
                 "split": "train",
+                "drug_count": 0,
                 "good_option_points": -1,
+                "good_option_max_points": -1,
                 "good_option_score": float("nan"),
                 "good_option_label_status": "parse_failed",
                 "point_disease_type_benefit": -1,
@@ -433,7 +1167,9 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
                 "this_space": "Space D",
                 "trial_drug_context": "DRUG: Drug D",
                 "split": "train",
+                "drug_count": 1,
                 "good_option_points": 2,
+                "good_option_max_points": 4,
                 "good_option_score": 0.75,
                 "good_option_label_status": "ok",
                 "point_disease_type_benefit": 1,
@@ -453,8 +1189,10 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
     assert len(prepared) == 2
     assert prepared["partition"].nunique() == 1
     assert prepared["label"].tolist() == pytest.approx([0.25, 0.75])
-    assert prepared["text"].str.contains("Clinical trial space:").all()
-    assert prepared["text"].str.contains("Registry drug context:").all()
+    assert not prepared["text"].str.contains("Clinical trial space:").any()
+    assert prepared["text"].str.contains(
+        "Registry investigational-drug context:"
+    ).all()
 
 
 def test_local_vllm_command_uses_openai_server_and_requested_parser() -> None:

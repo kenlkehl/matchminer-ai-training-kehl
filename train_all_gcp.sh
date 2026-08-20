@@ -508,20 +508,19 @@ accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 echo 16 done
 
 # ---------------------------------------------------------------------------
-# Step 17 — drug research, four-point evidence labels, and training
+# Step 17 — canonical drug research, per-drug evidence labels, and training
 # ---------------------------------------------------------------------------
 if skip_if_done \
   ../models/goodoptionchecker_four_point \
   "step 17 good option checker"; then
   echo 17 skipped
 else
-  # This stage accepts only NCT IDs and performs drug-name-only efficacy and
-  # target-expression searches, so no patient text or disease reaches the
-  # registry or search provider.
-  python train_good_option_checker.py research
-
+  # The first teacher call sees only public registry intervention/arm fields,
+  # excludes comparator/background drugs, and produces investigational names for
+  # drug-only searches. Later grouped patient-trial scoring never sends patient
+  # text to web search.
   start_vllm_cluster 50000 256 0.95 1
-  python train_good_option_checker.py label \
+  python train_good_option_checker.py generate \
     --server_urls_file "$SERVERS_FILE" \
     --model "$MODEL" --reasoning-parser "$REASONING_PARSER" \
     --download-dir ~/models \

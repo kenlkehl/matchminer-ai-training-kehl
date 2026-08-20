@@ -38,8 +38,9 @@ patient. This is intentionally distinct from TrialChecker eligibility/match
 reasonableness. The label is an auditable evidence count, not a response
 probability or a treatment or enrollment recommendation.
 
-The LLM does not choose a holistic 0-100 score. It independently awards one
-binary point for each of four criteria:
+The LLM does not choose a holistic 0-100 score. For every distinct canonical
+investigational drug in the trial, it independently awards one binary point for
+each of four criteria:
 
 1. human evidence of benefit from the same drug/regimen in the patient's
    disease type;
@@ -52,45 +53,73 @@ binary point for each of four criteria:
    also supported.
 
 Missing, ambiguous, merely mechanistic, or preclinical-only evidence receives
-zero where the criterion requires human evidence. Code validates all four
-binary decisions, sums them, and divides by four to produce the 0-1 training
-target. For the population-prevalence point, a rate calculated only among an
-already biomarker-positive or otherwise enriched subgroup does not qualify, nor
-does being common relative to other alterations; the evidence must use the full
-relevant disease population as its denominator.
+zero where the criterion requires human evidence. Code requires exactly one
+four-point assessment per distinct canonical drug, sums every awarded point,
+and divides by `4 * number_of_drugs` to produce the 0-1 training target. Repeated
+arm strings that normalize to the same investigational drug count once. Drugs
+used only as standard-of-care, active-comparator, placebo, sham, supportive-care,
+rescue, premedication, or unevaluated background therapy are not scored and do
+not enter the denominator. For the population-prevalence point, a rate
+calculated only among an already
+biomarker-positive or otherwise enriched subgroup does not qualify, nor does
+being common relative to other alterations; the evidence must use the full
+relevant disease population as its denominator. If the teacher awards a point
+without the criterion's required evidence labels, code resets that individual
+point to zero and records the validation reason instead of discarding the other
+drug assessments.
 
-The component calls the public `matchminer_ai.help_me_choose` drug-research
-APIs rather than duplicating their registry and baseline search logic. It then
-adds a second query per structured intervention for the drug's molecular target
-and biomarker-expression prevalence across cancer types. In this staging
-workspace, install the sibling `matchminer-ai-inference` checkout in editable
-mode when testing unpublished changes to those APIs.
+Before web research, the teacher receives only public ClinicalTrials.gov
+DRUG/BIOLOGICAL intervention fields plus their structured arm labels, arm types,
+and arm descriptions. It first classifies each drug as investigational,
+non-investigational, or uncertain. Code always excludes an intervention assigned
+only to control-type arms even if the teacher tries to select it. Uncertain and
+non-investigational drugs are not searched. For selected investigational drugs,
+the teacher removes arm, cohort, phase, dose, route, and formulation wording and
+returns canonical active names that must be textually supported by the registry;
+an unsupported normalized name falls back only to that selected intervention's
+original registry string. The component then calls the public
+`matchminer_ai.help_me_choose` search APIs with those names and adds a second
+query per drug for its molecular target and biomarker-expression prevalence
+across cancer types. The training wrapper preserves all distinct structured
+registry drugs and submits search queries in small chunks so the interactive
+helper's per-call result cap cannot starve later investigational drugs of
+evidence. In this staging workspace, install the sibling
+`matchminer-ai-inference` checkout in editable mode when testing unpublished
+changes to those APIs.
 
 The default workflow consumes all six `top_cohorts_tocheck_round*` and
-`top_patients_tocheck_round*` files. It deduplicates patient-space pairs and
-caches research once per unique NCT ID:
+`top_patients_tocheck_round*` files. It deduplicates at the patient--trial level;
+candidate trial-space text is mining provenance and is not part of this label or
+the trained checker input. Research is cached once per unique NCT ID. During
+labeling, the default `--patients-per-request 8` shares one trial and web-evidence
+payload across as many as eight patient--trial cases while preserving an
+independent response object and validation result for each patient. For multi-drug
+trials, `--max-drug-assessments-per-request 16` automatically reduces the patient
+count to bound response size. The request pool also dispatches these grouped
+prompts concurrently across all configured vLLM endpoints:
 
 ```bash
-# 1. ClinicalTrials.gov lookup plus drug-only efficacy and target-expression
-#    web research (no patient or patient disease text)
-python train_good_option_checker.py research
-
-# 2a. Label with app-owned local vLLM servers, one per listed GPU by default
-python train_good_option_checker.py label \
+# 1a. Normalize names, research drugs, and label with one app-owned vLLM pool
+python train_good_option_checker.py generate \
   --gpus 0,1,2,3,4,5,6,7 \
   --model nvidia/Gemma-4-31B-IT-NVFP4 \
   --reasoning-parser auto \
   --download-dir ~/models
 
-# 2b. Or use existing OpenAI-compatible endpoints
-python train_good_option_checker.py label \
+# 1b. Or use existing OpenAI-compatible endpoints for both teacher calls
+python train_good_option_checker.py generate \
   --server_urls http://host-a:8000/v1,http://host-b:8000/v1 \
   --model nvidia/Gemma-4-31B-IT-NVFP4 \
   --reasoning-parser auto
 
-# 3. Fit the single-logit ModernBERT checker (safe to launch with accelerate)
+# 2. Fit the single-logit ModernBERT checker (safe to launch with accelerate)
 accelerate launch --num_processes 8 train_good_option_checker.py train
 ```
+
+The `research` and `label` subcommands remain available for separate resumable
+runs. Because canonicalization now precedes search, `research` accepts the same
+model, endpoint, or local-GPU arguments as `generate`; no patient context is
+sent during that stage.
 
 For an authenticated endpoint, put its key in `OPENAI_API_KEY`, or name another
 environment variable with `--api-key-env`. Dynamic endpoint lists written by
@@ -103,27 +132,35 @@ prompt and schema versions.
 Use `--max-trials` and `--max-candidates` only for bounded development runs;
 labeling refuses candidate NCT IDs that do not yet have a research record. The
 full stage is large and must respect the search provider's operational limits.
+Increase `--patients-per-request` only when the endpoint context window and
+completion limit can accommodate the larger grouped response; use
+`--max-batch-new-tokens` and `--max-drug-assessments-per-request` to cap that
+response.
 
 The generated non-PHI artifacts are:
 
 - `../data/no_phi/good_option_drug_research.parquet`: dated registry metadata,
-  structured interventions, efficacy/safety and target-expression queries,
-  snippets, URLs, notices, and implementation/query fingerprints;
-- `../data/no_phi/good_option_four_point_labels.parquet`: four individual
-  points, criterion-specific rationales and evidence references, the code-
-  derived 0-4 total and 0-1 training target, prompt/schema versions, source
-  timestamps, and the registry-derived drug context used as checker input; and
+  raw intervention strings, teacher-normalized canonical names and mappings,
+  efficacy/safety and target-expression queries, snippets, URLs, notices, and
+  implementation/query/prompt fingerprints;
+- `../data/no_phi/good_option_four_point_labels.parquet`: one patient--trial
+  record containing a four-point assessment per canonical investigational drug,
+  criterion-specific rationales and evidence references, drug count,
+  code-derived total and maximum points, the normalized 0-1 training target,
+  prompt/schema versions, source timestamps, and the registry-derived drug
+  context used as checker input; and
 - `../models/goodoptionchecker_four_point`: a one-logit model whose sigmoid is
-  the predicted fraction of the four evidence criteria satisfied.
+  the predicted fraction of all per-drug evidence criteria satisfied.
 
-The privacy boundary is structural: registry calls receive only NCT IDs, and
-web queries are built only from non-placebo `DRUG` and `BIOLOGICAL`
-intervention names. Even the target-expression query asks generically about
-prevalence across cancer types; it does not contain the patient's disease.
+The privacy boundary is structural: registry calls receive only NCT IDs; the
+name-normalization teacher call receives only public registry intervention and
+arm fields; and web queries are built only from its textually supported canonical
+investigational-drug names. Even the target-expression query asks generically
+about prevalence across cancer types; it does not contain the patient's disease.
 Patient summaries and their disease context enter only the later LLM-labeling
-prompt.
-The trained checker consumes patient summary + clinical space + registry drug
-context; web snippets supervise the LLM teacher but are not checker inputs.
+prompt. The trained checker consumes patient summary + registry
+investigational-drug context. Neither candidate-space text nor web snippets are
+checker inputs; web snippets supervise only the LLM teacher.
 Custom candidate files outside `../data/no_phi` are rejected unless
 `--confirm-inputs-are-non-phi` is supplied. Do not use that override for real
 clinical data unless the endpoint and data flow have the required authorization

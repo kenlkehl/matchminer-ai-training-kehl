@@ -416,16 +416,15 @@ accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 
 echo 16 done
 
-# Step 17 — four-point drug-patient evidence labels and GoodOptionChecker.
-# Drug-only efficacy and target-expression research runs before local vLLM.
+# Step 17 — per-drug evidence labels and GoodOptionChecker. One local teacher
+# pool uses public registry arm metadata to exclude comparator/background drugs
+# before drug-only web research, then labels grouped patient-trial examples.
 if skip_if_done \
   ../models/goodoptionchecker_four_point \
   "step 17 good option checker"; then
   echo 17 skipped
 else
-  python train_good_option_checker.py research
-
-  python train_good_option_checker.py label \
+  python train_good_option_checker.py generate \
     --model "$MODEL" \
     --reasoning-parser "$REASONING_PARSER" \
     --download-dir ~/models \
