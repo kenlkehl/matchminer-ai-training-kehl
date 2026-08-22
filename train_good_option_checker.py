@@ -44,7 +44,7 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -100,7 +100,17 @@ BIOMARKER_EXPRESSION_QUERY_SUFFIX = (
 )
 DRUG_SEARCH_QUERY_CHUNK_SIZE = 3
 DRUG_NAME_NORMALIZATION_PROMPT_VERSION = (
-    "experimental-drug-names-from-registry-arms-v3-qwen-thinking"
+    "experimental-drug-names-from-registry-arms-v4-qwen-thinking-retry"
+)
+TECHNICAL_NORMALIZATION_FAILURE_STATUSES = frozenset(
+    {"parse_failed", "experimental_selection_failed"}
+)
+TERMINAL_NO_DRUG_NORMALIZATION_STATUSES = frozenset(
+    {
+        "no_interventions",
+        "no_experimental_interventions",
+        "no_identifiable_experimental_drug",
+    }
 )
 CONTROL_ONLY_ARM_TYPES = frozenset(
     {
@@ -144,6 +154,7 @@ def _research_implementation_fingerprint() -> str:
         "extract_registry_drug_interventions",
         "trial_registry_research_from_study",
         "build_drug_name_normalization_messages",
+        "build_drug_name_normalization_retry_messages",
         "parse_drug_name_normalization_response",
         "_search_query_chunks",
         "build_experimental_drug_search_queries",
@@ -179,7 +190,7 @@ REQUIRED_CANDIDATE_COLUMNS = (
 )
 
 GOOD_OPTION_PROMPT_VERSION = "good-option-patient-trial-per-drug-v5"
-GOOD_OPTION_LABEL_SCHEMA_VERSION = "5"
+GOOD_OPTION_LABEL_SCHEMA_VERSION = "6"
 VALID_LABEL_STATUSES = frozenset({"ok"})
 COMPLETED_LABEL_STATUSES = frozenset(
     {"ok", "no_experimental_drug_intervention"}
@@ -232,6 +243,10 @@ class DrugNameNormalization:
     status: str = "parse_failed"
     raw_response: str = ""
     parse_error: str = ""
+    attempt_count: int = 0
+    attempts_json: str = "[]"
+    finish_reason: str = ""
+    reasoning_char_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -256,7 +271,7 @@ class ResearchQualitySummary:
     normalization_trials: int
     normalization_failures: int
     selected_drug_trials: int
-    selection_expected_trials: int
+    technical_failure_trials: int
     confirmed_no_experimental_drug_trials: int
 
     @property
@@ -273,7 +288,8 @@ class ResearchQualitySummary:
             f"{self.selected_drug_trials:,}, confirmed_no_experimental_drug="
             f"{self.confirmed_no_experimental_drug_trials:,}, registry_failures="
             f"{self.registry_failures:,}/{self.total_trials:,} "
-            f"({self.registry_failure_fraction:.1%}), selection_failures="
+            f"({self.registry_failure_fraction:.1%}), "
+            "technical_normalization_failures="
             f"{self.normalization_failures:,}/{self.normalization_trials:,} "
             f"({self.normalization_failure_fraction:.1%})"
         )
@@ -607,6 +623,39 @@ def build_drug_name_normalization_messages(
     ]
 
 
+def build_drug_name_normalization_retry_messages(
+    interventions: Sequence[DrugIntervention],
+    *,
+    prior_response: str,
+    parse_error: str,
+) -> list[dict[str, str]]:
+    """Request a complete repaired final JSON after a technical parse failure."""
+
+    messages = build_drug_name_normalization_messages(interventions)
+    previous = str(prior_response or "").strip()
+    messages.extend(
+        [
+            {
+                "role": "assistant",
+                "content": previous[:20_000]
+                or "[The previous attempt produced no final answer.]",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "The previous final answer was unusable: "
+                    f"{_clean_text(parse_error, max_chars=500)}. Reason efficiently, "
+                    "then return a complete final JSON object. "
+                    "Do not omit or truncate any source_index. Return only the exact "
+                    "`{\"interventions\":[...]}` schema requested above; do not add "
+                    "commentary or a markdown fence."
+                ),
+            },
+        ]
+    )
+    return messages
+
+
 def _canonical_name_support_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
@@ -782,8 +831,10 @@ def parse_drug_name_normalization_response(
             and not warnings
             else "partial_fallback"
         )
-    elif uncertain_count or errors:
+    elif errors:
         status = "experimental_selection_failed"
+    elif uncertain_count:
+        status = "no_identifiable_experimental_drug"
     else:
         status = "no_experimental_interventions"
     return DrugNameNormalization(
@@ -973,21 +1024,14 @@ async def research_canonical_drug_names(
     interventions = normalization.canonical_interventions
     queries = build_experimental_drug_search_queries(interventions)
     notices = list(registry_research.notices)
-    if normalization.status not in {
-        "ok",
-        "no_interventions",
-        "no_experimental_interventions",
-    }:
+    if normalization.status not in {"ok", *TERMINAL_NO_DRUG_NORMALIZATION_STATUSES}:
         notices.append(
             "Experimental-drug selection was incomplete or used a supported "
             "registry-name fallback: "
             f"{normalization.parse_error or normalization.status}"
         )
     if not queries:
-        if normalization.status in {
-            "no_interventions",
-            "no_experimental_interventions",
-        }:
+        if normalization.status in TERMINAL_NO_DRUG_NORMALIZATION_STATUSES:
             notices.append(
                 "No investigational DRUG or BIOLOGICAL agent was identified; "
                 "comparator/background interventions were not searched."
@@ -1233,6 +1277,18 @@ def research_to_record(
         "drug_name_normalization_parse_error": (
             normalization.parse_error if normalization is not None else ""
         ),
+        "drug_name_normalization_attempt_count": (
+            normalization.attempt_count if normalization is not None else 0
+        ),
+        "drug_name_normalization_attempts_json": (
+            normalization.attempts_json if normalization is not None else "[]"
+        ),
+        "drug_name_normalization_finish_reason": (
+            normalization.finish_reason if normalization is not None else ""
+        ),
+        "drug_name_normalization_reasoning_char_count": (
+            normalization.reasoning_char_count if normalization is not None else 0
+        ),
         "registry_interventions_json": json.dumps(
             [asdict(item) for item in registry_interventions],
             ensure_ascii=False,
@@ -1313,12 +1369,8 @@ def summarize_research_quality(
     normalization_trials = 0
     normalization_failures = 0
     selected_drug_trials = 0
-    selection_expected_trials = 0
+    technical_failure_trials = 0
     confirmed_no_experimental = 0
-    terminal_normalization_statuses = {
-        "no_interventions",
-        "no_experimental_interventions",
-    }
     for record in rows:
         status = str(record.get("research_status") or "")
         if status == "registry_lookup_failed":
@@ -1334,17 +1386,22 @@ def summarize_research_quality(
             continue
         normalization_trials += 1
         normalization_status = str(record.get("drug_name_normalization_status") or "")
-        if normalization_status not in terminal_normalization_statuses:
-            selection_expected_trials += 1
-            if not selected_interventions:
-                normalization_failures += 1
+        if (
+            normalization_status in TECHNICAL_NORMALIZATION_FAILURE_STATUSES
+            or (
+                normalization_status not in TERMINAL_NO_DRUG_NORMALIZATION_STATUSES
+                and not selected_interventions
+            )
+        ):
+            technical_failure_trials += 1
+            normalization_failures += 1
     return ResearchQualitySummary(
         total_trials=len(rows),
         registry_failures=registry_failures,
         normalization_trials=normalization_trials,
         normalization_failures=normalization_failures,
         selected_drug_trials=selected_drug_trials,
-        selection_expected_trials=selection_expected_trials,
+        technical_failure_trials=technical_failure_trials,
         confirmed_no_experimental_drug_trials=confirmed_no_experimental,
     )
 
@@ -1380,14 +1437,9 @@ def validate_research_quality(
         and summary.normalization_failure_fraction > normalization_limit
     ):
         failures.append(
-            "experimental-drug selection failure fraction "
+            "technical drug-normalization failure fraction "
             f"{summary.normalization_failure_fraction:.1%} exceeded "
             f"{normalization_limit:.1%}"
-        )
-    if summary.selection_expected_trials > 0 and summary.selected_drug_trials == 0:
-        failures.append(
-            "zero trials retained a drug even though experimental-drug selection "
-            "was expected"
         )
     if failures:
         raise RuntimeError(
@@ -1431,7 +1483,7 @@ def validate_normalization_batch(
     maximum_failure_fraction: float,
     context: str,
 ) -> None:
-    """Fail before web search when drug selection collapsed across a batch."""
+    """Fail before web search only for systemic technical teacher failures."""
 
     limit = float(maximum_failure_fraction)
     if not 0.0 <= limit <= 1.0:
@@ -1441,31 +1493,19 @@ def validate_normalization_batch(
     eligible = [item for item in registry_items if item.interventions]
     if not eligible:
         return
-    terminal_statuses = {"no_interventions", "no_experimental_interventions"}
-    expected = [
-        item
-        for item in eligible
-        if normalizations[item.nct_id].status not in terminal_statuses
-    ]
     failed = [
         item
-        for item in expected
-        if not normalizations[item.nct_id].canonical_interventions
-    ]
-    selected = [
-        item for item in eligible if normalizations[item.nct_id].canonical_interventions
+        for item in eligible
+        if normalizations[item.nct_id].status
+        in TECHNICAL_NORMALIZATION_FAILURE_STATUSES
     ]
     fraction = len(failed) / max(1, len(eligible))
     problems: list[str] = []
     if failed and fraction > limit:
         problems.append(
             f"{len(failed):,}/{len(eligible):,} intervention-bearing trials "
-            f"failed selection ({fraction:.1%}), above the {limit:.1%} limit"
-        )
-    if expected and not selected:
-        problems.append(
-            "zero trials retained a drug even though experimental-drug selection "
-            "was expected"
+            "still had technical normalization failures "
+            f"({fraction:.1%}), above the {limit:.1%} limit"
         )
     if problems:
         raise RuntimeError(
@@ -1770,61 +1810,157 @@ async def canonicalize_trial_interventions_with_teacher(
     *,
     runtime: TeacherRuntime,
     max_new_tokens: int,
+    retry_max_new_tokens: int | None = None,
+    parse_retries: int = 1,
     max_attempts: int,
 ) -> dict[str, DrugNameNormalization]:
-    """Canonicalize public intervention strings through the teacher pool."""
+    """Canonicalize public interventions and retry only technical bad outputs."""
 
     from remote_vllm_pool import run_pool
 
     by_id = {item.nct_id: item for item in registry_items}
     enable_thinking = runtime.reasoning_parser.casefold().startswith("qwen")
+    attempt_histories: dict[str, list[dict[str, Any]]] = {}
     output: dict[str, DrugNameNormalization] = {
-        item.nct_id: parse_drug_name_normalization_response(
-            "",
-            nct_id=item.nct_id,
-            interventions=(),
+        item.nct_id: replace(
+            parse_drug_name_normalization_response(
+                "",
+                nct_id=item.nct_id,
+                interventions=(),
+            ),
+            attempt_count=0,
         )
         for item in registry_items
         if not item.interventions
     }
-    work_items = [
-        (
-            item.nct_id,
-            {
-                "prompt": render_teacher_prompt(
-                    runtime.tokenizer,
-                    build_drug_name_normalization_messages(item.interventions),
-                    enable_thinking=enable_thinking,
-                ),
-                "max_tokens": max(1, int(max_new_tokens)),
-            },
+
+    async def run_round(
+        work_items: Sequence[tuple[str, dict[str, Any]]],
+        *,
+        attempt_number: int,
+    ) -> None:
+        raw_results: dict[str, Any] = {}
+
+        def collect(payload: list[tuple[Any, Any]], _shard_index: int) -> None:
+            for item_id, result in payload:
+                raw_results[str(item_id)] = result
+
+        await run_pool(
+            work_items=work_items,
+            work_fn=runtime.work_fn,
+            registry=runtime.registry,
+            shard_writer=collect,
+            results_per_shard=max(1, len(work_items)),
+            max_attempts=max(1, int(max_attempts)),
         )
-        for item in registry_items
-        if item.interventions
-    ]
-    raw_results: dict[str, Any] = {}
+        tokens_by_id = {
+            str(item_id): max(1, int(payload["max_tokens"]))
+            for item_id, payload in work_items
+        }
+        for nct_id, result in raw_results.items():
+            reasoning = ""
+            metadata: Mapping[str, Any] = {}
+            if isinstance(result, tuple) and len(result) == 3:
+                reasoning, response_text, raw_metadata = result
+                if isinstance(raw_metadata, Mapping):
+                    metadata = raw_metadata
+            elif isinstance(result, tuple) and len(result) == 2:
+                reasoning, response_text = result
+            else:
+                response_text = str(result or "")
+            parsed = parse_drug_name_normalization_response(
+                str(response_text or ""),
+                nct_id=nct_id,
+                interventions=by_id[nct_id].interventions,
+            )
+            history = attempt_histories.setdefault(nct_id, [])
+            history.append(
+                {
+                    "attempt": attempt_number,
+                    "max_tokens": tokens_by_id[nct_id],
+                    "status": parsed.status,
+                    "finish_reason": str(metadata.get("finish_reason") or ""),
+                    "reasoning_char_count": len(str(reasoning or "")),
+                    "response_char_count": len(str(response_text or "")),
+                    "raw_text_char_count": int(
+                        metadata.get("raw_text_char_count") or 0
+                    ),
+                    "parse_error": parsed.parse_error,
+                    "failed_response_excerpt": (
+                        str(response_text or "")[:20_000]
+                        if parsed.status in TECHNICAL_NORMALIZATION_FAILURE_STATUSES
+                        else ""
+                    ),
+                }
+            )
+            output[nct_id] = replace(
+                parsed,
+                attempt_count=len(history),
+                attempts_json=json.dumps(history, ensure_ascii=False),
+                finish_reason=str(metadata.get("finish_reason") or ""),
+                reasoning_char_count=len(str(reasoning or "")),
+            )
 
-    def collect(payload: list[tuple[Any, Any]], _shard_index: int) -> None:
-        for item_id, result in payload:
-            raw_results[str(item_id)] = result
-
-    await run_pool(
-        work_items=work_items,
-        work_fn=runtime.work_fn,
-        registry=runtime.registry,
-        shard_writer=collect,
-        results_per_shard=max(1, len(work_items)),
-        max_attempts=max(1, int(max_attempts)),
+    initial_tokens = max(1, int(max_new_tokens))
+    await run_round(
+        [
+            (
+                item.nct_id,
+                {
+                    "prompt": render_teacher_prompt(
+                        runtime.tokenizer,
+                        build_drug_name_normalization_messages(item.interventions),
+                        enable_thinking=enable_thinking,
+                    ),
+                    "max_tokens": initial_tokens,
+                    "include_completion_metadata": True,
+                },
+            )
+            for item in registry_items
+            if item.interventions
+        ],
+        attempt_number=1,
     )
-    for nct_id, result in raw_results.items():
-        if isinstance(result, tuple) and len(result) == 2:
-            _reasoning, response_text = result
-        else:
-            response_text = str(result or "")
-        output[nct_id] = parse_drug_name_normalization_response(
-            str(response_text or ""),
-            nct_id=nct_id,
-            interventions=by_id[nct_id].interventions,
+
+    retry_tokens = max(
+        initial_tokens * 2,
+        int(retry_max_new_tokens or initial_tokens * 3),
+    )
+    for retry_index in range(max(0, int(parse_retries))):
+        retry_ids = [
+            nct_id
+            for nct_id, normalization in output.items()
+            if normalization.status in TECHNICAL_NORMALIZATION_FAILURE_STATUSES
+        ]
+        if not retry_ids:
+            break
+        thinking_note = " with thinking enabled" if enable_thinking else ""
+        print(
+            "Retrying technical drug-normalization failures"
+            f"{thinking_note}: {len(retry_ids):,} trials, "
+            f"{retry_tokens:,} max tokens."
+        )
+        await run_round(
+            [
+                (
+                    nct_id,
+                    {
+                        "prompt": render_teacher_prompt(
+                            runtime.tokenizer,
+                            build_drug_name_normalization_retry_messages(
+                                by_id[nct_id].interventions,
+                                prior_response=output[nct_id].raw_response,
+                                parse_error=output[nct_id].parse_error,
+                            ),
+                            enable_thinking=enable_thinking,
+                        ),
+                        "max_tokens": retry_tokens,
+                        "include_completion_metadata": True,
+                    },
+                )
+                for nct_id in retry_ids
+            ],
+            attempt_number=retry_index + 2,
         )
     for item in registry_items:
         if item.nct_id not in output:
@@ -2444,6 +2580,65 @@ def _next_shard_index(shards_dir: Path, prefix: str) -> int:
     return maximum + 1
 
 
+def write_normalization_failure_diagnostics(
+    *,
+    registry_items: Sequence[TrialDrugResearch],
+    normalizations: Mapping[str, DrugNameNormalization],
+    research_shards_dir: Path,
+    teacher_model: str,
+    batch_number: int,
+) -> Path | None:
+    """Persist patient-free technical failures before a quality-gate abort."""
+
+    by_id = {item.nct_id: item for item in registry_items}
+    failed_ids = [
+        nct_id
+        for nct_id, normalization in normalizations.items()
+        if normalization.status in TECHNICAL_NORMALIZATION_FAILURE_STATUSES
+    ]
+    if not failed_ids:
+        return None
+    diagnostics_dir = research_shards_dir / "normalization_failure_diagnostics"
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    next_index = _next_shard_index(diagnostics_dir, "normalization_failures")
+    output_path = diagnostics_dir / f"normalization_failures_{next_index:06d}.parquet"
+    recorded_at = utc_now()
+    frame = pd.DataFrame(
+        [
+            {
+                "nct_id": nct_id,
+                "title": by_id[nct_id].title,
+                "batch_number": int(batch_number),
+                "recorded_at_utc": recorded_at,
+                "teacher_model": str(teacher_model or ""),
+                "prompt_version": DRUG_NAME_NORMALIZATION_PROMPT_VERSION,
+                "research_implementation_sha256": RESEARCH_IMPLEMENTATION_SHA256,
+                "normalization_status": normalizations[nct_id].status,
+                "normalization_parse_error": normalizations[nct_id].parse_error,
+                "normalization_finish_reason": normalizations[nct_id].finish_reason,
+                "normalization_reasoning_char_count": normalizations[
+                    nct_id
+                ].reasoning_char_count,
+                "normalization_attempt_count": normalizations[nct_id].attempt_count,
+                "normalization_attempts_json": normalizations[nct_id].attempts_json,
+                "normalization_response": normalizations[nct_id].raw_response,
+                "normalization_mappings_json": normalizations[nct_id].mappings_json,
+                "registry_interventions_json": json.dumps(
+                    [asdict(item) for item in by_id[nct_id].interventions],
+                    ensure_ascii=False,
+                ),
+            }
+            for nct_id in sorted(failed_ids)
+        ]
+    )
+    atomic_write_parquet(frame, output_path)
+    print(
+        f"Wrote {output_path} ({len(frame):,} patient-free technical "
+        "normalization failures)."
+    )
+    return output_path
+
+
 def load_research_records(
     output_path: Path, shards_dir: Path
 ) -> dict[str, dict[str, Any]]:
@@ -2525,6 +2720,8 @@ async def run_research_stage(
         runtime = await create_teacher_runtime(args)
     next_index = _next_shard_index(shards_dir, "research")
     completed_total = 0
+    unresolved_technical_ids: set[str] = set()
+    diagnostic_paths: list[Path] = []
     try:
         for start in range(0, len(pending), args.research_batch_size):
             batch_ids = pending[start : start + args.research_batch_size]
@@ -2566,8 +2763,23 @@ async def run_research_stage(
                 registry_items,
                 runtime=runtime,
                 max_new_tokens=args.drug_name_max_new_tokens,
+                retry_max_new_tokens=getattr(
+                    args,
+                    "drug_name_retry_max_new_tokens",
+                    24_000,
+                ),
+                parse_retries=getattr(args, "drug_name_parse_retries", 1),
                 max_attempts=args.max_attempts,
             )
+            diagnostic_path = write_normalization_failure_diagnostics(
+                registry_items=registry_items,
+                normalizations=normalizations,
+                research_shards_dir=shards_dir,
+                teacher_model=args.model,
+                batch_number=start // args.research_batch_size + 1,
+            )
+            if diagnostic_path is not None:
+                diagnostic_paths.append(diagnostic_path)
             validate_normalization_batch(
                 registry_items,
                 normalizations,
@@ -2580,6 +2792,16 @@ async def run_research_stage(
                     "experimental-drug normalization batch "
                     f"{start // args.research_batch_size + 1:,}"
                 ),
+            )
+            technical_ids = {
+                nct_id
+                for nct_id, normalization in normalizations.items()
+                if normalization.status
+                in TECHNICAL_NORMALIZATION_FAILURE_STATUSES
+            }
+            unresolved_technical_ids.update(technical_ids)
+            researchable_registry_items = tuple(
+                item for item in registry_items if item.nct_id not in technical_ids
             )
             print(
                 "Experimental-drug selection/normalization progress: "
@@ -2595,7 +2817,7 @@ async def run_research_stage(
                     )
 
             results = await research_canonical_trials(
-                registry_items,
+                researchable_registry_items,
                 normalizations,
                 max_concurrency=args.web_search_concurrency,
                 progress_callback=drug_progress,
@@ -2615,27 +2837,39 @@ async def run_research_stage(
                 progress_callback=expression_progress,
             )
             fetched_at_utc = utc_now()
-            frame = pd.DataFrame(
-                [
-                    research_to_record(
-                        item,
-                        fetched_at_utc=fetched_at_utc,
-                        normalization=normalizations[item.nct_id],
-                        teacher_model=args.model,
-                    )
-                    for item in results
-                ]
-            )
-            shard_path = shards_dir / f"research_{next_index:06d}.parquet"
-            atomic_write_parquet(frame, shard_path)
-            print(f"Wrote {shard_path} ({len(frame):,} trials).")
-            next_index += 1
+            if results:
+                frame = pd.DataFrame(
+                    [
+                        research_to_record(
+                            item,
+                            fetched_at_utc=fetched_at_utc,
+                            normalization=normalizations[item.nct_id],
+                            teacher_model=args.model,
+                        )
+                        for item in results
+                    ]
+                )
+                shard_path = shards_dir / f"research_{next_index:06d}.parquet"
+                atomic_write_parquet(frame, shard_path)
+                print(f"Wrote {shard_path} ({len(frame):,} trials).")
+                next_index += 1
             completed_total += len(batch_ids)
     finally:
         if owns_runtime and runtime is not None:
             await close_teacher_runtime(runtime)
 
     finalize_research_shards(shards_dir, output_path)
+    if unresolved_technical_ids:
+        sample = ", ".join(sorted(unresolved_technical_ids)[:10])
+        diagnostics = ", ".join(str(path) for path in diagnostic_paths[-3:])
+        raise RuntimeError(
+            f"{len(unresolved_technical_ids):,} trials still had malformed or empty "
+            "drug-normalization answers after repair attempts (sample: "
+            f"{sample}). Successful and valid no-drug trials were cached, but "
+            "technical failures were deliberately left pending and no patient "
+            f"labels were generated. Diagnostics: {diagnostics}. Rerun without "
+            "--refresh-research to retry only the unresolved trials."
+        )
     current_records = load_current_research_records(output_path, shards_dir)
     validate_research_quality(
         {
@@ -3837,8 +4071,9 @@ def add_research_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.10,
         help=(
-            "Abort when intervention-bearing trials without a selected drug exceed "
-            "this fraction, excluding confirmed non-investigational-only trials."
+            "Abort when malformed/empty intervention-name answers still exceed "
+            "this fraction after repair attempts. Valid answers with no identifiable "
+            "experimental drug never count as failures."
         ),
     )
     parser.add_argument(
@@ -3911,6 +4146,24 @@ def add_teacher_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Maximum teacher tokens for one patient-free intervention-name response; "
             "this includes Qwen thinking tokens."
+        ),
+    )
+    parser.add_argument(
+        "--drug-name-retry-max-new-tokens",
+        type=int,
+        default=24_000,
+        help=(
+            "Completion-token budget for a repair attempt after an empty, "
+            "truncated, or otherwise malformed intervention-name answer."
+        ),
+    )
+    parser.add_argument(
+        "--drug-name-parse-retries",
+        type=int,
+        default=1,
+        help=(
+            "Repair attempts for technical intervention-name parse failures. "
+            "Valid no-identifiable-drug answers are never retried as failures."
         ),
     )
 

@@ -90,8 +90,14 @@ changes to those APIs.
 When the configured reasoning parser is `qwen3` (including automatic parser
 selection for a Qwen model), the intervention-selection prompt explicitly
 enables Qwen thinking and the parser separates that reasoning from the final
-JSON. The default `--drug-name-max-new-tokens 8000` leaves room for both. Other
-model families retain their existing chat-template behavior.
+JSON. The default initial `--drug-name-max-new-tokens 8000` leaves room for
+both. An empty, truncated, or malformed final answer gets one focused repair
+attempt by default, using `--drug-name-retry-max-new-tokens 24000`; Qwen
+thinking remains enabled for that repair. Configure the number of repairs with
+`--drug-name-parse-retries`. A complete answer that says the registry does not
+identify a named experimental drug is a valid terminal result, not a parse
+failure, and is neither retried nor sent to web search. Other model families
+retain their existing chat-template behavior.
 
 The default workflow consumes all six `top_cohorts_tocheck_round*` and
 `top_patients_tocheck_round*` files. It deduplicates at the patient--trial level;
@@ -138,14 +144,22 @@ prompt and schema versions.
 ClinicalTrials.gov request starts are globally paced, and HTTP 429, transient
 5xx, timeout, and transport errors use shared exponential cooldowns that honor
 `Retry-After`. The defaults allow ten attempts. Research aborts before web search
-or patient labeling if exhausted registry failures exceed 5%, intervention-name
-selection failures exceed 10%, or drug selection unexpectedly collapses to zero.
+or patient labeling if exhausted registry failures exceed 5% or malformed/empty
+teacher answers still exceed 10% after repair. The teacher gate counts only
+technical failures. Any number of trials may validly have no identifiable named
+experimental drug, including trials with no structured DRUG/BIOLOGICAL entry and
+trials whose intervention strings name only a regimen, transplant, cell product,
+or other non-drug treatment. There is no zero-selected-drug failure condition.
 The limits and pacing are configurable with the `--registry-*` and
 `--max-*-failure-fraction` options.
-Regardless of the aggregate limits, labeling stops if any in-scope trial still
-has unavailable registry or teacher research; those failures are never expanded
-into patient-level labels. A successful registry record with no structured
-DRUG/BIOLOGICAL intervention is instead a confirmed no-experimental-drug result.
+
+Regardless of the aggregate limits, labeling stops if an in-scope trial still
+has unavailable registry or technically invalid teacher research; those
+failures are never expanded into patient-level labels. Successfully normalized
+and valid no-drug trials are cached, while unresolved technical trials remain
+pending. Their public-trial-only diagnostics are written under
+`good_option_drug_research_shards/normalization_failure_diagnostics/`; rerun
+without `--refresh-research` to retry only the unresolved trials.
 
 If an older run cached widespread registry or empty Qwen-answer failures, rerun
 the same `generate` command with `--refresh-research`. The current research
@@ -164,8 +178,12 @@ The generated non-PHI artifacts are:
 
 - `../data/no_phi/good_option_drug_research.parquet`: dated registry metadata,
   raw intervention strings, teacher-normalized canonical names and mappings,
-  efficacy/safety and target-expression queries, snippets, URLs, notices, and
-  implementation/query/prompt fingerprints;
+  normalization attempt/finish metadata, efficacy/safety and target-expression
+  queries, snippets, URLs, notices, and implementation/query/prompt
+  fingerprints;
+- `../data/no_phi/good_option_drug_research_shards/normalization_failure_diagnostics/`:
+  patient-free diagnostic Parquet shards for malformed or empty normalization
+  responses that remain after repair attempts;
 - `../data/no_phi/good_option_four_point_labels.parquet`: one patient--trial
   record containing a four-point assessment per canonical investigational drug,
   criterion-specific rationales and evidence references, drug count,

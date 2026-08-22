@@ -10,7 +10,11 @@ import pandas as pd
 import pytest
 
 import train_good_option_checker as good_option
-from remote_vllm_pool import DynamicServerRegistry
+from remote_vllm_pool import (
+    CompletionSampling,
+    DynamicServerRegistry,
+    make_completion_work_fn,
+)
 
 
 STUDY = {
@@ -445,6 +449,102 @@ def test_drug_normalization_enables_thinking_for_qwen_only(
     ]
 
 
+def test_qwen_normalization_repairs_empty_final_answer_with_larger_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thinking_values: list[bool] = []
+    rendered_conversations: list[list[dict[str, str]]] = []
+    requested_tokens: list[int] = []
+
+    class FakeTokenizer:
+        def apply_chat_template(
+            self,
+            conversation,
+            *,
+            add_generation_prompt,
+            tokenize,
+            enable_thinking,
+        ):
+            del add_generation_prompt, tokenize
+            thinking_values.append(enable_thinking)
+            rendered_conversations.append(conversation)
+            return "rendered prompt"
+
+    response = {
+        "interventions": [
+            {
+                "source_index": 0,
+                "experimental_role": "investigational",
+                "canonical_drug_names": ["Novel-X"],
+                "rationale": "Novel-X is assigned to the experimental arm.",
+            },
+            {
+                "source_index": 1,
+                "experimental_role": "not_investigational",
+                "canonical_drug_names": [],
+                "rationale": "Standard-Y is the active comparator.",
+            },
+        ]
+    }
+    pool_calls = 0
+
+    async def fake_run_pool(*, work_items, shard_writer, **_kwargs):
+        nonlocal pool_calls
+        pool_calls += 1
+        requested_tokens.append(work_items[0][1]["max_tokens"])
+        if pool_calls == 1:
+            result = (
+                "r" * 8_000,
+                "",
+                {"finish_reason": "length", "raw_text_char_count": 8_000},
+            )
+        else:
+            result = (
+                "concise reasoning",
+                json.dumps(response),
+                {"finish_reason": "stop", "raw_text_char_count": 900},
+            )
+        shard_writer([(work_items[0][0], result)], 0)
+        return 1
+
+    monkeypatch.setattr("remote_vllm_pool.run_pool", fake_run_pool)
+    registry_item = good_option.trial_registry_research_from_study(
+        "NCT12345678",
+        RCT_STUDY,
+    )
+    runtime = good_option.TeacherRuntime(
+        tokenizer=FakeTokenizer(),
+        registry=object(),
+        work_fn=object(),
+        local_servers=[],
+        reasoning_parser="qwen3",
+    )
+
+    parsed = asyncio.run(
+        good_option.canonicalize_trial_interventions_with_teacher(
+            [registry_item],
+            runtime=runtime,
+            max_new_tokens=8_000,
+            retry_max_new_tokens=24_000,
+            parse_retries=1,
+            max_attempts=2,
+        )
+    )["NCT12345678"]
+
+    assert thinking_values == [True, True]
+    assert requested_tokens == [8_000, 24_000]
+    assert "previous attempt produced no final answer" in str(
+        rendered_conversations[1]
+    ).lower()
+    assert parsed.status == "ok"
+    assert parsed.attempt_count == 2
+    assert parsed.finish_reason == "stop"
+    attempts = json.loads(parsed.attempts_json)
+    assert [item["status"] for item in attempts] == ["parse_failed", "ok"]
+    assert attempts[0]["finish_reason"] == "length"
+    assert attempts[0]["reasoning_char_count"] == 8_000
+
+
 def test_experimental_arm_drug_is_preserved_after_many_comparators() -> None:
     study = json.loads(json.dumps(RCT_STUDY))
     module = study["protocolSection"]["armsInterventionsModule"]
@@ -562,6 +662,72 @@ def test_control_only_trial_is_terminal_without_web_search() -> None:
     assert good_option.research_status(researched) == (
         "no_experimental_drug_intervention"
     )
+
+
+def test_valid_all_uncertain_answer_is_terminal_not_a_quality_failure() -> None:
+    intervention = good_option.DrugIntervention(
+        name="HSCT with conditioning regimen",
+        intervention_type="BIOLOGICAL",
+    )
+    registry = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        interventions=(intervention,),
+    )
+    normalization = good_option.parse_drug_name_normalization_response(
+        json.dumps(
+            {
+                "interventions": [
+                    {
+                        "source_index": 0,
+                        "experimental_role": "uncertain",
+                        "canonical_drug_names": [],
+                        "rationale": (
+                            "The registry does not identify a named experimental "
+                            "drug in this regimen."
+                        ),
+                    }
+                ]
+            }
+        ),
+        nct_id=registry.nct_id,
+        interventions=registry.interventions,
+    )
+    captured_queries: list[str] = []
+
+    def fake_search(queries):
+        captured_queries.extend(queries)
+        return (), ()
+
+    good_option.validate_normalization_batch(
+        [registry],
+        {registry.nct_id: normalization},
+        maximum_failure_fraction=0.0,
+        context="all-uncertain test",
+    )
+    researched = asyncio.run(
+        good_option.research_canonical_drug_names(
+            registry,
+            normalization,
+            search_function=fake_search,
+        )
+    )
+    record = good_option.research_to_record(
+        researched,
+        normalization=normalization,
+    )
+    summary = good_option.validate_research_quality(
+        [record],
+        maximum_registry_failure_fraction=0.0,
+        maximum_normalization_failure_fraction=0.0,
+        context="all-uncertain test",
+    )
+
+    assert normalization.status == "no_identifiable_experimental_drug"
+    assert captured_queries == []
+    assert good_option.research_status(researched) == (
+        "no_experimental_drug_intervention"
+    )
+    assert summary.normalization_failures == 0
 
 
 def test_trial_without_structured_drug_is_terminal_without_web_search() -> None:
@@ -1324,7 +1490,7 @@ def test_research_quality_gate_rejects_empty_teacher_answers() -> None:
 
     with pytest.raises(
         RuntimeError,
-        match="experimental-drug selection failure fraction 100.0%",
+        match="technical drug-normalization failure fraction 100.0%",
     ):
         good_option.validate_research_quality(
             records,
@@ -1332,6 +1498,53 @@ def test_research_quality_gate_rejects_empty_teacher_answers() -> None:
             maximum_normalization_failure_fraction=0.10,
             context="test empty answers",
         )
+
+
+def test_technical_normalization_diagnostics_are_persisted(
+    tmp_path: Path,
+) -> None:
+    intervention = good_option.DrugIntervention("Experimental-X", "DRUG")
+    registry = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        title="Experimental-X trial",
+        interventions=(intervention,),
+    )
+    attempts = [
+        {
+            "attempt": 1,
+            "max_tokens": 8_000,
+            "status": "parse_failed",
+            "finish_reason": "length",
+        }
+    ]
+    normalization = good_option.DrugNameNormalization(
+        nct_id=registry.nct_id,
+        registry_interventions=(intervention,),
+        canonical_interventions=(),
+        status="parse_failed",
+        raw_response="",
+        parse_error="No valid interventions JSON object was found.",
+        attempt_count=1,
+        attempts_json=json.dumps(attempts),
+        finish_reason="length",
+        reasoning_char_count=8_000,
+    )
+
+    output = good_option.write_normalization_failure_diagnostics(
+        registry_items=[registry],
+        normalizations={registry.nct_id: normalization},
+        research_shards_dir=tmp_path / "research_shards",
+        teacher_model="teacher-model",
+        batch_number=1,
+    )
+
+    assert output is not None
+    frame = pd.read_parquet(output)
+    assert frame.loc[0, "nct_id"] == "NCT12345678"
+    assert frame.loc[0, "normalization_finish_reason"] == "length"
+    assert frame.loc[0, "normalization_attempt_count"] == 1
+    assert json.loads(frame.loc[0, "normalization_attempts_json"]) == attempts
+    assert "patient" not in " ".join(frame.columns).lower()
 
 
 def test_research_quality_gate_allows_confirmed_control_only_trial() -> None:
@@ -1562,3 +1775,45 @@ def test_remote_registry_accepts_api_key_without_exposing_it() -> None:
 
     assert registry._api_key == "secret-test-value"
     assert "secret-test-value" not in repr(registry)
+
+
+def test_completion_work_fn_optionally_returns_finish_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vllm_reasoning_utils.parse_reasoning_output",
+        lambda text, parser_name, tokenizer: (
+            f"reasoning:{parser_name}",
+            f"answer:{text}:{tokenizer}",
+        ),
+    )
+
+    class FakeCompletions:
+        async def create(self, **_kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(text="raw", finish_reason="length")]
+            )
+
+    client = SimpleNamespace(completions=FakeCompletions())
+    work_fn = make_completion_work_fn(
+        CompletionSampling(model="teacher", request_timeout=1),
+        "qwen3",
+        "tokenizer",
+    )
+
+    result = asyncio.run(
+        work_fn(
+            client,
+            {
+                "prompt": "prompt",
+                "max_tokens": 100,
+                "include_completion_metadata": True,
+            },
+        )
+    )
+
+    assert result == (
+        "reasoning:qwen3",
+        "answer:raw:tokenizer",
+        {"finish_reason": "length", "raw_text_char_count": 3},
+    )

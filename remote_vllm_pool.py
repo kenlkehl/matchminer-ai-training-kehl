@@ -901,8 +901,10 @@ def make_completion_work_fn(
       - 'max_tokens': int      required
       - 'temperature': float   optional override
       - 'top_p': float         optional override
+      - 'include_completion_metadata': bool optional; return finish metadata
 
-    Returns (reasoning, answer) tuples to the shard_writer.
+    Returns (reasoning, answer) tuples to the shard_writer, or
+    (reasoning, answer, metadata) when requested by the payload.
     """
     from vllm_reasoning_utils import parse_reasoning_output  # local import keeps module import-light
 
@@ -931,8 +933,18 @@ def make_completion_work_fn(
             ),
             timeout=sampling.request_timeout,
         )
-        raw_text = response.choices[0].text
+        choice = response.choices[0]
+        raw_text = choice.text or ""
         reasoning, answer = parse_reasoning_output(raw_text, parser_name, tokenizer)
+        if payload.get("include_completion_metadata"):
+            return (
+                reasoning,
+                answer,
+                {
+                    "finish_reason": str(getattr(choice, "finish_reason", "") or ""),
+                    "raw_text_char_count": len(raw_text or ""),
+                },
+            )
         return (reasoning, answer)
 
     return work_fn
