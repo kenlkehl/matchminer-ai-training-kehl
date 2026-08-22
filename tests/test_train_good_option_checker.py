@@ -1788,8 +1788,11 @@ def test_completion_work_fn_optionally_returns_finish_metadata(
         ),
     )
 
+    requests: list[dict[str, object]] = []
+
     class FakeCompletions:
-        async def create(self, **_kwargs):
+        async def create(self, **kwargs):
+            requests.append(kwargs)
             return SimpleNamespace(
                 choices=[SimpleNamespace(text="raw", finish_reason="length")]
             )
@@ -1817,3 +1820,10 @@ def test_completion_work_fn_optionally_returns_finish_metadata(
         "answer:raw:tokenizer",
         {"finish_reason": "length", "raw_text_char_count": 3},
     )
+    assert requests[0]["extra_body"]["repetition_penalty"] == 1.1
+
+
+def test_good_option_cli_defaults_repetition_penalty_to_1_1() -> None:
+    args = good_option.build_parser().parse_args(["generate"])
+
+    assert args.repetition_penalty == 1.1

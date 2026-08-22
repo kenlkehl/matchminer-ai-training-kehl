@@ -136,7 +136,10 @@ sent during that stage.
 For an authenticated endpoint, put its key in `OPENAI_API_KEY`, or name another
 environment variable with `--api-key-env`. Dynamic endpoint lists written by
 `gcp_vllm_orchestrator.py` are accepted through `--server_urls_file`. Labeling
-and research are resumable from Parquet shards.
+and research are resumable from Parquet shards. Every teacher request defaults
+to vLLM `repetition_penalty=1.1`; override it with `--repetition-penalty` only
+when intentionally testing another sampling configuration. The effective value
+is printed when the shared teacher runtime starts.
 Use `--refresh-research` when intentionally taking a new dated registry/search
 snapshot. Research caches whose implementation/query fingerprint is stale are
 automatically refreshed. Label resume state is restricted to the current

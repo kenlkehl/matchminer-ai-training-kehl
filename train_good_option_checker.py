@@ -3151,6 +3151,10 @@ async def create_teacher_runtime(args: argparse.Namespace) -> TeacherRuntime:
         repetition_penalty=args.repetition_penalty,
         request_timeout=args.request_timeout,
     )
+    print(
+        "Teacher sampling: temperature=0, top_k=1, top_p=1, "
+        f"repetition_penalty={sampling.repetition_penalty:g}."
+    )
     work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
     return TeacherRuntime(
         tokenizer=tokenizer,
