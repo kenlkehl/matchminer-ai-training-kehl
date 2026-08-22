@@ -289,6 +289,162 @@ def test_registry_fetch_retains_public_arm_context_without_web_search(
     assert records[0].search_results == ()
 
 
+def test_registry_fetch_retries_http_429_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    async def fake_fetch(nct_id: str, *, client: object):
+        nonlocal attempts
+        del client
+        attempts += 1
+        if attempts == 1:
+            request = good_option.httpx.Request(
+                "GET",
+                f"https://clinicaltrials.gov/api/v2/studies/{nct_id}",
+            )
+            response = good_option.httpx.Response(
+                429,
+                headers={"Retry-After": "0"},
+                request=request,
+            )
+            raise good_option.httpx.HTTPStatusError(
+                "Too Many Requests",
+                request=request,
+                response=response,
+            )
+        return RCT_STUDY
+
+    monkeypatch.setattr(good_option.help_me_choose, "fetch_trial_study", fake_fetch)
+    records = asyncio.run(
+        good_option.fetch_trial_registry_research(
+            ["NCT12345678"],
+            max_concurrency=1,
+            request_timeout=1,
+            max_attempts=2,
+            minimum_request_interval=0,
+            initial_backoff=0,
+            maximum_backoff=0,
+        )
+    )
+
+    assert attempts == 2
+    assert good_option.research_status(records[0]) != "registry_lookup_failed"
+    assert records[0].title == "Novel-X versus standard therapy"
+
+
+def test_registry_fetch_does_not_retry_nontransient_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    async def fake_fetch(nct_id: str, *, client: object):
+        nonlocal attempts
+        del client
+        attempts += 1
+        request = good_option.httpx.Request(
+            "GET",
+            f"https://clinicaltrials.gov/api/v2/studies/{nct_id}",
+        )
+        response = good_option.httpx.Response(404, request=request)
+        raise good_option.httpx.HTTPStatusError(
+            "Not Found",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr(good_option.help_me_choose, "fetch_trial_study", fake_fetch)
+    records = asyncio.run(
+        good_option.fetch_trial_registry_research(
+            ["NCT12345678"],
+            max_concurrency=1,
+            request_timeout=1,
+            max_attempts=10,
+            minimum_request_interval=0,
+        )
+    )
+
+    assert attempts == 1
+    assert good_option.research_status(records[0]) == "registry_lookup_failed"
+
+
+@pytest.mark.parametrize(
+    ("reasoning_parser", "expected_thinking"),
+    [("qwen3", True), ("gemma4", False)],
+)
+def test_drug_normalization_enables_thinking_for_qwen_only(
+    monkeypatch: pytest.MonkeyPatch,
+    reasoning_parser: str,
+    expected_thinking: bool,
+) -> None:
+    thinking_values: list[bool] = []
+
+    class FakeTokenizer:
+        def apply_chat_template(
+            self,
+            conversation,
+            *,
+            add_generation_prompt,
+            tokenize,
+            enable_thinking,
+        ):
+            del conversation, add_generation_prompt, tokenize
+            thinking_values.append(enable_thinking)
+            return "rendered prompt"
+
+    response = {
+        "interventions": [
+            {
+                "source_index": 0,
+                "experimental_role": "investigational",
+                "canonical_drug_names": ["Novel-X"],
+                "rationale": "The registry assigns Novel-X to the experimental arm.",
+            },
+            {
+                "source_index": 1,
+                "experimental_role": "not_investigational",
+                "canonical_drug_names": [],
+                "rationale": "Standard-Y is an active comparator.",
+            },
+        ]
+    }
+
+    async def fake_run_pool(*, work_items, shard_writer, **_kwargs):
+        shard_writer(
+            [(work_items[0][0], ("private reasoning", json.dumps(response)))],
+            0,
+        )
+        return 1
+
+    monkeypatch.setattr("remote_vllm_pool.run_pool", fake_run_pool)
+    registry_item = good_option.trial_registry_research_from_study(
+        "NCT12345678",
+        RCT_STUDY,
+    )
+    runtime = good_option.TeacherRuntime(
+        tokenizer=FakeTokenizer(),
+        registry=object(),
+        work_fn=object(),
+        local_servers=[],
+        reasoning_parser=reasoning_parser,
+    )
+
+    parsed = asyncio.run(
+        good_option.canonicalize_trial_interventions_with_teacher(
+            [registry_item],
+            runtime=runtime,
+            max_new_tokens=8000,
+            max_attempts=2,
+        )
+    )
+
+    assert thinking_values == [expected_thinking]
+    assert parsed["NCT12345678"].status == "ok"
+    assert [item.name for item in parsed["NCT12345678"].canonical_interventions] == [
+        "Novel-X"
+    ]
+
+
 def test_experimental_arm_drug_is_preserved_after_many_comparators() -> None:
     study = json.loads(json.dumps(RCT_STUDY))
     module = study["protocolSection"]["armsInterventionsModule"]
@@ -403,6 +559,32 @@ def test_control_only_trial_is_terminal_without_web_search() -> None:
     assert normalization.status == "no_experimental_interventions"
     assert researched.interventions == ()
     assert captured_queries == []
+    assert good_option.research_status(researched) == (
+        "no_experimental_drug_intervention"
+    )
+
+
+def test_trial_without_structured_drug_is_terminal_without_web_search() -> None:
+    registry = good_option.TrialDrugResearch(nct_id="NCT12345678")
+    normalization = good_option.parse_drug_name_normalization_response(
+        "",
+        nct_id=registry.nct_id,
+        interventions=(),
+    )
+
+    def unexpected_search(_queries):
+        raise AssertionError("A no-drug trial must not issue a web search.")
+
+    researched = asyncio.run(
+        good_option.research_canonical_drug_names(
+            registry,
+            normalization,
+            search_function=unexpected_search,
+        )
+    )
+
+    assert normalization.status == "no_interventions"
+    assert researched.interventions == ()
     assert good_option.research_status(researched) == (
         "no_experimental_drug_intervention"
     )
@@ -863,6 +1045,77 @@ def test_label_stage_batches_patient_trials_sharing_one_trial(
     assert labels["good_option_label_status"].eq("ok").all()
 
 
+def test_label_stage_refuses_research_failure_as_patient_label(
+    tmp_path: Path,
+) -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "patient_summary": "Synthetic patient A.",
+                "nct_id": "NCT12345678",
+                "this_space": "Synthetic space A.",
+                "split": "train",
+            },
+            {
+                "patient_summary": "Synthetic patient B.",
+                "nct_id": "NCT87654321",
+                "this_space": "Synthetic space B.",
+                "split": "train",
+            },
+        ]
+    )
+    candidate_path = tmp_path / "top_patients_tocheck_round1.parquet"
+    candidates.to_parquet(candidate_path, index=False)
+    intervention = good_option.DrugIntervention("Experimental-X", "DRUG")
+    good_normalization = good_option.DrugNameNormalization(
+        nct_id="NCT12345678",
+        registry_interventions=(intervention,),
+        canonical_interventions=(intervention,),
+        status="ok",
+    )
+    failed_normalization = good_option.DrugNameNormalization(
+        nct_id="NCT87654321",
+        registry_interventions=(intervention,),
+        canonical_interventions=(),
+        status="parse_failed",
+        parse_error="Empty teacher answer.",
+    )
+    research_output = tmp_path / "research.parquet"
+    pd.DataFrame(
+        [
+            good_option.research_to_record(
+                good_option.TrialDrugResearch(
+                    nct_id="NCT12345678",
+                    interventions=(intervention,),
+                ),
+                normalization=good_normalization,
+            ),
+            good_option.research_to_record(
+                good_option.TrialDrugResearch(nct_id="NCT87654321"),
+                normalization=failed_normalization,
+            ),
+        ]
+    ).to_parquet(research_output, index=False)
+    args = SimpleNamespace(
+        patients_per_request=1,
+        max_batch_new_tokens=100,
+        max_drug_assessments_per_request=1,
+        research_output=str(research_output),
+        research_shards_dir=str(tmp_path / "research_shards"),
+        scan_batch_size=10,
+        max_registry_failure_fraction=1.0,
+        max_drug_normalization_failure_fraction=1.0,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Infrastructure/teacher failures are not patient labels",
+    ):
+        asyncio.run(good_option.run_label_stage(args, [candidate_path]))
+
+    assert not (tmp_path / "label_shards").exists()
+
+
 def test_old_holistic_score_response_is_rejected() -> None:
     parsed = good_option.parse_good_option_response('{"score": 72}')
 
@@ -1027,6 +1280,89 @@ def test_research_record_preserves_registry_and_canonical_names() -> None:
     assert json.loads(record["interventions_json"])[0]["name"] == "Agent-X"
     assert record["drug_name_normalization_status"] == "ok"
     assert record["drug_name_normalization_teacher_model"] == "teacher-model"
+
+
+def test_research_quality_gate_rejects_registry_outage() -> None:
+    records = []
+    for index in range(10):
+        research = good_option.TrialDrugResearch(
+            nct_id=f"NCT{index:08d}",
+            notices=("ClinicalTrials.gov lookup failed: HTTP 429",),
+        )
+        records.append(good_option.research_to_record(research))
+
+    with pytest.raises(RuntimeError, match="registry failure fraction 100.0%"):
+        good_option.validate_research_quality(
+            records,
+            maximum_registry_failure_fraction=0.05,
+            maximum_normalization_failure_fraction=0.10,
+            context="test outage",
+        )
+
+
+def test_research_quality_gate_rejects_empty_teacher_answers() -> None:
+    registry_intervention = good_option.DrugIntervention(
+        "Experimental-X",
+        "DRUG",
+    )
+    records = []
+    for index in range(10):
+        nct_id = f"NCT{index:08d}"
+        normalization = good_option.DrugNameNormalization(
+            nct_id=nct_id,
+            registry_interventions=(registry_intervention,),
+            canonical_interventions=(),
+            status="parse_failed",
+            parse_error="No valid interventions JSON object was found.",
+        )
+        records.append(
+            good_option.research_to_record(
+                good_option.TrialDrugResearch(nct_id=nct_id),
+                normalization=normalization,
+            )
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="experimental-drug selection failure fraction 100.0%",
+    ):
+        good_option.validate_research_quality(
+            records,
+            maximum_registry_failure_fraction=0.05,
+            maximum_normalization_failure_fraction=0.10,
+            context="test empty answers",
+        )
+
+
+def test_research_quality_gate_allows_confirmed_control_only_trial() -> None:
+    registry_intervention = good_option.DrugIntervention("Standard-Y", "DRUG")
+    normalization = good_option.DrugNameNormalization(
+        nct_id="NCT12345678",
+        registry_interventions=(registry_intervention,),
+        canonical_interventions=(),
+        status="no_experimental_interventions",
+    )
+    research = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        notices=(
+            "No investigational drug or biological agent was identified; "
+            "comparator/background interventions were not searched.",
+        ),
+    )
+    record = good_option.research_to_record(
+        research,
+        normalization=normalization,
+    )
+
+    summary = good_option.validate_research_quality(
+        [record],
+        maximum_registry_failure_fraction=0.05,
+        maximum_normalization_failure_fraction=0.10,
+        context="test control-only trial",
+    )
+
+    assert summary.confirmed_no_experimental_drug_trials == 1
+    assert summary.normalization_failures == 0
 
 
 def test_research_map_rejects_stale_expression_query_cache(tmp_path: Path) -> None:

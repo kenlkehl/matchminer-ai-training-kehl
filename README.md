@@ -87,6 +87,12 @@ evidence. In this staging workspace, install the sibling
 `matchminer-ai-inference` checkout in editable mode when testing unpublished
 changes to those APIs.
 
+When the configured reasoning parser is `qwen3` (including automatic parser
+selection for a Qwen model), the intervention-selection prompt explicitly
+enables Qwen thinking and the parser separates that reasoning from the final
+JSON. The default `--drug-name-max-new-tokens 8000` leaves room for both. Other
+model families retain their existing chat-template behavior.
+
 The default workflow consumes all six `top_cohorts_tocheck_round*` and
 `top_patients_tocheck_round*` files. It deduplicates at the patient--trial level;
 candidate trial-space text is mining provenance and is not part of this label or
@@ -129,6 +135,23 @@ Use `--refresh-research` when intentionally taking a new dated registry/search
 snapshot. Research caches whose implementation/query fingerprint is stale are
 automatically refreshed. Label resume state is restricted to the current
 prompt and schema versions.
+ClinicalTrials.gov request starts are globally paced, and HTTP 429, transient
+5xx, timeout, and transport errors use shared exponential cooldowns that honor
+`Retry-After`. The defaults allow ten attempts. Research aborts before web search
+or patient labeling if exhausted registry failures exceed 5%, intervention-name
+selection failures exceed 10%, or drug selection unexpectedly collapses to zero.
+The limits and pacing are configurable with the `--registry-*` and
+`--max-*-failure-fraction` options.
+Regardless of the aggregate limits, labeling stops if any in-scope trial still
+has unavailable registry or teacher research; those failures are never expanded
+into patient-level labels. A successful registry record with no structured
+DRUG/BIOLOGICAL intervention is instead a confirmed no-experimental-drug result.
+
+If an older run cached widespread registry or empty Qwen-answer failures, rerun
+the same `generate` command with `--refresh-research`. The current research
+prompt/fingerprint forces fresh trial records, and the current label schema
+ignores the old unscored shards without deleting them. The quality gate runs
+again before any patient-bearing teacher request.
 Use `--max-trials` and `--max-candidates` only for bounded development runs;
 labeling refuses candidate NCT IDs that do not yet have a research record. The
 full stage is large and must respect the search provider's operational limits.
