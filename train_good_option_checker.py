@@ -189,8 +189,8 @@ REQUIRED_CANDIDATE_COLUMNS = (
     "split",
 )
 
-GOOD_OPTION_PROMPT_VERSION = "good-option-patient-trial-per-drug-v5"
-GOOD_OPTION_LABEL_SCHEMA_VERSION = "6"
+GOOD_OPTION_PROMPT_VERSION = "good-option-patient-trial-per-drug-v6-single-patient"
+GOOD_OPTION_LABEL_SCHEMA_VERSION = "7"
 VALID_LABEL_STATUSES = frozenset({"ok"})
 COMPLETED_LABEL_STATUSES = frozenset(
     {"ok", "no_experimental_drug_intervention"}
@@ -1713,68 +1713,6 @@ def build_good_option_messages(
     ]
 
 
-def build_good_option_batch_messages(
-    *,
-    patient_cases: Sequence[tuple[str, str]],
-    research: TrialDrugResearch,
-) -> list[dict[str, str]]:
-    """Share one trial/evidence payload across several patient--trial cases."""
-
-    cases = [(str(item_id), str(summary)) for item_id, summary in patient_cases]
-    if not cases:
-        raise ValueError("At least one patient--trial case is required.")
-    if len({item_id for item_id, _summary in cases}) != len(cases):
-        raise ValueError("Patient--trial case IDs must be unique within a prompt.")
-
-    first_messages = build_good_option_messages(
-        patient_summary=cases[0][1],
-        research=research,
-    )
-    _instructions, payload_text = first_messages[1]["content"].split("\n\n", 1)
-    single_payload = json.loads(payload_text)
-    patient_template = single_payload["patient_context_private_to_configured_llm"]
-    patient_payloads = []
-    for item_id, summary in cases:
-        patient_payloads.append(
-            {
-                **patient_template,
-                "candidate_id": item_id,
-                "cancer_history_summary": _clean_text(summary, max_chars=16000),
-            }
-        )
-    payload = {
-        "scoring_task": single_payload["scoring_task"],
-        "patient_trials_private_to_configured_llm": patient_payloads,
-        "candidate_trial": single_payload["candidate_trial"],
-    }
-    system_message = (
-        first_messages[0]["content"]
-        + " Several synthetic patients may be supplied for the same trial to reduce "
-        "duplicated inference. Assess each candidate_id independently. Never transfer "
-        "a disease, biomarker, treatment history, point, or rationale from one patient "
-        "case to another. Within each returned patient object, `PATIENT` refers only "
-        "to that object's corresponding patient payload."
-    )
-    user_message = (
-        "For every object in `patient_trials_private_to_configured_llm`, apply all "
-        "four criteria independently to every exact string in "
-        "`canonical_drugs_to_score`. Do not return totals or normalized scores; code "
-        "computes them. Return exactly one JSON object with `patient_trials` as an "
-        "array. Return exactly one array item per supplied patient, in supplied order, "
-        "with no additions or omissions. Each item must contain the exact "
-        "`candidate_id`, `patient_disease_type`, `drug_assessments`, and "
-        "`key_uncertainties`. The latter three fields must follow the same schema and "
-        "evidence rules as a single-patient response: one assessment per canonical "
-        "drug, four binary criterion objects per drug, and evidence labels restricted "
-        "to `PATIENT`, `CT`, and supplied `S#` labels.\n\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-    )
-    return [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": user_message},
-    ]
-
-
 def render_teacher_prompt(
     tokenizer: Any,
     messages: Sequence[Mapping[str, str]],
@@ -2262,89 +2200,6 @@ def parse_good_option_response(
     )
 
 
-def _find_patient_trial_batch_json(text: str) -> Mapping[str, Any] | None:
-    cleaned = str(text or "").strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    with contextlib.suppress(json.JSONDecodeError):
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, Mapping) and isinstance(
-            parsed.get("patient_trials"), list
-        ):
-            return parsed
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", cleaned):
-        with contextlib.suppress(json.JSONDecodeError):
-            parsed, _end = decoder.raw_decode(cleaned[match.start() :])
-            if isinstance(parsed, Mapping) and isinstance(
-                parsed.get("patient_trials"), list
-            ):
-                return parsed
-    return None
-
-
-def parse_good_option_batch_response(
-    text: str,
-    *,
-    expected_candidate_ids: Sequence[str],
-    expected_drug_names: Sequence[str],
-    allowed_evidence_labels: set[str] | None = None,
-    biomarker_expression_evidence_labels: set[str] | None = None,
-) -> dict[str, ParsedGoodOptionLabel]:
-    """Validate one shared-trial response into independent patient labels."""
-
-    expected_ids = tuple(str(item) for item in expected_candidate_ids)
-    failed = {
-        item_id: ParsedGoodOptionLabel(
-            parse_error="No valid patient_trials JSON object was found."
-        )
-        for item_id in expected_ids
-    }
-    parsed = _find_patient_trial_batch_json(text)
-    if parsed is None:
-        return failed
-
-    by_id: dict[str, Mapping[str, Any]] = {}
-    duplicate_ids: set[str] = set()
-    for item in parsed.get("patient_trials") or []:
-        if not isinstance(item, Mapping):
-            continue
-        item_id = str(item.get("candidate_id") or "")
-        if item_id in by_id:
-            duplicate_ids.add(item_id)
-        elif item_id in expected_ids:
-            by_id[item_id] = item
-
-    output: dict[str, ParsedGoodOptionLabel] = {}
-    for item_id in expected_ids:
-        if item_id in duplicate_ids:
-            output[item_id] = ParsedGoodOptionLabel(
-                parse_error=f"Duplicate patient_trials item for {item_id}."
-            )
-            continue
-        item = by_id.get(item_id)
-        if item is None:
-            output[item_id] = ParsedGoodOptionLabel(
-                parse_error=f"Missing patient_trials item for {item_id}."
-            )
-            continue
-        single_response = {
-            "patient_disease_type": item.get("patient_disease_type"),
-            "drug_assessments": item.get("drug_assessments"),
-            "key_uncertainties": item.get("key_uncertainties"),
-        }
-        output[item_id] = parse_good_option_response(
-            json.dumps(single_response, ensure_ascii=False),
-            expected_drug_names=expected_drug_names,
-            allowed_evidence_labels=allowed_evidence_labels,
-            biomarker_expression_evidence_labels=(
-                biomarker_expression_evidence_labels
-            ),
-        )
-    return output
-
-
 def candidate_id(patient_summary: str, nct_id: str) -> str:
     """Return the stable ID for one patient--trial treatment-option label."""
 
@@ -2522,8 +2377,8 @@ def iter_unique_candidate_batches(
         if not buffered:
             return
         combined = pd.concat(buffered, ignore_index=True)
-        # Preserve streaming memory bounds while clustering trials so the later
-        # multi-patient prompt builder can share each trial/evidence payload.
+        # Preserve streaming memory bounds while clustering trials for research
+        # cache locality. Each later teacher prompt still contains one patient.
         combined = combined.sort_values(
             ["nct_id", "candidate_id"],
             kind="stable",
@@ -3395,12 +3250,12 @@ async def run_label_stage(
 ) -> Path:
     from remote_vllm_pool import run_pool
 
-    if int(args.patients_per_request) < 1:
-        raise ValueError("--patients-per-request must be at least 1.")
-    if int(args.max_batch_new_tokens) < 1:
-        raise ValueError("--max-batch-new-tokens must be at least 1.")
-    if int(getattr(args, "max_drug_assessments_per_request", 16)) < 1:
-        raise ValueError("--max-drug-assessments-per-request must be at least 1.")
+    if int(args.prompts_per_vllm_request) < 1:
+        raise ValueError("--prompts-per-vllm-request must be at least 1.")
+    if int(args.max_new_tokens) < 1:
+        raise ValueError("--max-new-tokens must be at least 1.")
+    if float(args.label_request_timeout) <= 0:
+        raise ValueError("--label-request-timeout must be positive.")
 
     research_output = Path(args.research_output).expanduser().resolve()
     research_shards = Path(args.research_shards_dir).expanduser().resolve()
@@ -3552,121 +3407,124 @@ async def run_label_stage(
                     continue
             indexed = batch.set_index("candidate_id", drop=False)
             work_items: list[tuple[str, dict[str, Any]]] = []
-            batch_members: dict[str, tuple[str, ...]] = {}
-            for nct_id, trial_rows in batch.groupby("nct_id", sort=False):
-                research = research_by_id[str(nct_id)].research
-                assessment_limit = max(
-                    1,
-                    int(getattr(args, "max_drug_assessments_per_request", 16)),
+            request_members: dict[str, tuple[str, ...]] = {}
+            independent_prompts: list[tuple[str, str]] = []
+            for row in batch.itertuples(index=False):
+                item_id = str(row.candidate_id)
+                research = research_by_id[str(row.nct_id)].research
+                messages = build_good_option_messages(
+                    patient_summary=str(row.patient_summary),
+                    research=research,
                 )
-                patients_in_prompt = min(
-                    int(args.patients_per_request),
-                    max(1, assessment_limit // len(research.interventions)),
+                independent_prompts.append(
+                    (item_id, render_good_option_prompt(tokenizer, messages))
                 )
-                for start in range(0, len(trial_rows), patients_in_prompt):
-                    patient_rows = trial_rows.iloc[
-                        start : start + patients_in_prompt
-                    ]
-                    member_ids = tuple(patient_rows["candidate_id"].astype(str))
-                    digest = hashlib.sha256()
-                    for member_id in member_ids:
-                        encoded = member_id.encode("ascii")
-                        digest.update(len(encoded).to_bytes(4, "big"))
-                        digest.update(encoded)
-                    prompt_id = digest.hexdigest()
-                    batch_members[prompt_id] = member_ids
-                    messages = build_good_option_batch_messages(
-                        patient_cases=list(
-                            zip(
-                                member_ids,
-                                patient_rows["patient_summary"].astype(str),
-                                strict=True,
-                            )
-                        ),
-                        research=research,
+
+            prompts_per_request = int(args.prompts_per_vllm_request)
+            for start in range(0, len(independent_prompts), prompts_per_request):
+                request_prompts = independent_prompts[
+                    start : start + prompts_per_request
+                ]
+                member_ids = tuple(item_id for item_id, _prompt in request_prompts)
+                digest = hashlib.sha256()
+                for member_id in member_ids:
+                    encoded = member_id.encode("ascii")
+                    digest.update(len(encoded).to_bytes(4, "big"))
+                    digest.update(encoded)
+                request_id = digest.hexdigest()
+                request_members[request_id] = member_ids
+                work_items.append(
+                    (
+                        request_id,
+                        {
+                            "prompt": [prompt for _item_id, prompt in request_prompts],
+                            "max_tokens": int(args.max_new_tokens),
+                            "request_timeout": float(args.label_request_timeout),
+                        },
                     )
-                    work_items.append(
-                        (
-                            prompt_id,
-                            {
-                                "prompt": render_good_option_prompt(tokenizer, messages),
-                                "max_tokens": min(
-                                    args.max_batch_new_tokens,
-                                    args.max_new_tokens * len(member_ids),
-                                ),
-                            },
-                        )
-                    )
+                )
+            print(
+                "LLM label transport: "
+                f"{len(independent_prompts):,} independent single-patient prompts "
+                f"in {len(work_items):,} vLLM request(s), up to "
+                f"{prompts_per_request:,} prompts/request and "
+                f"{int(args.max_new_tokens):,} completion tokens/prompt."
+            )
 
             def shard_writer(payload: list[tuple[Any, Any]], shard_index: int) -> None:
                 rows: list[dict[str, Any]] = []
                 labeled_at = utc_now()
-                expanded: list[
-                    tuple[str, Any, ParsedGoodOptionLabel, CachedTrialResearch]
-                ] = []
-                for prompt_id, result in payload:
-                    if isinstance(result, tuple) and len(result) == 2:
-                        _reasoning, response_text = result
+                for request_id, result in payload:
+                    member_ids = request_members[str(request_id)]
+                    if isinstance(result, list) and len(result) == len(member_ids):
+                        completion_results = result
                     else:
-                        response_text = str(result or "")
-                    member_ids = batch_members[str(prompt_id)]
-                    first_original = indexed.loc[member_ids[0]].to_dict()
-                    cached_research = research_by_id[
-                        str(first_original["nct_id"])
-                    ]
-                    research = cached_research.research
-                    source_labels = {
-                        f"S{index}"
-                        for index, _result in enumerate(
-                            research.search_results,
-                            start=1,
-                        )
-                    }
-                    expression_source_labels = {
-                        f"S{index}"
-                        for index, source in enumerate(
-                            research.search_results,
-                            start=1,
-                        )
-                        if _is_biomarker_expression_query(source.query)
-                    }
-                    parsed_by_id = parse_good_option_batch_response(
-                        response_text,
-                        expected_candidate_ids=member_ids,
-                        expected_drug_names=[
-                            intervention.name for intervention in research.interventions
-                        ],
-                        allowed_evidence_labels={"PATIENT", "CT"} | source_labels,
-                        biomarker_expression_evidence_labels=(expression_source_labels),
-                    )
-                    for member_id in member_ids:
-                        expanded.append(
-                            (
-                                member_id,
-                                result,
-                                parsed_by_id[member_id],
-                                cached_research,
+                        error = (
+                            str(result or "")
+                            if not isinstance(result, list)
+                            else (
+                                "ERROR: vLLM returned "
+                                f"{len(result)} completions for "
+                                f"{len(member_ids)} prompts."
                             )
                         )
-
-                for item_id, result, parsed, cached_research in expanded:
-                    original = indexed.loc[item_id].to_dict()
-                    if isinstance(result, tuple) and len(result) == 2:
-                        reasoning, response_text = result
-                    else:
-                        reasoning, response_text = "", str(result or "")
-                    rows.append(
-                        _label_record(
-                            original=original,
-                            cached_research=cached_research,
-                            parsed=parsed,
-                            response_text=response_text,
-                            reasoning=reasoning,
-                            teacher_model=args.model,
-                            store_reasoning=args.store_reasoning,
-                            labeled_at=labeled_at,
+                        completion_results = [("", error) for _ in member_ids]
+                    for item_id, completion_result in zip(
+                        member_ids,
+                        completion_results,
+                        strict=True,
+                    ):
+                        original = indexed.loc[item_id].to_dict()
+                        cached_research = research_by_id[str(original["nct_id"])]
+                        research = cached_research.research
+                        if (
+                            isinstance(completion_result, tuple)
+                            and len(completion_result) >= 2
+                        ):
+                            reasoning = str(completion_result[0] or "")
+                            response_text = str(completion_result[1] or "")
+                        else:
+                            reasoning = ""
+                            response_text = str(completion_result or "")
+                        source_labels = {
+                            f"S{index}"
+                            for index, _result in enumerate(
+                                research.search_results,
+                                start=1,
+                            )
+                        }
+                        expression_source_labels = {
+                            f"S{index}"
+                            for index, source in enumerate(
+                                research.search_results,
+                                start=1,
+                            )
+                            if _is_biomarker_expression_query(source.query)
+                        }
+                        parsed = parse_good_option_response(
+                            response_text,
+                            expected_drug_names=[
+                                intervention.name
+                                for intervention in research.interventions
+                            ],
+                            allowed_evidence_labels={"PATIENT", "CT"}
+                            | source_labels,
+                            biomarker_expression_evidence_labels=(
+                                expression_source_labels
+                            ),
                         )
-                    )
+                        rows.append(
+                            _label_record(
+                                original=original,
+                                cached_research=cached_research,
+                                parsed=parsed,
+                                response_text=response_text,
+                                reasoning=reasoning,
+                                teacher_model=args.model,
+                                store_reasoning=args.store_reasoning,
+                                labeled_at=labeled_at,
+                            )
+                        )
                 output = label_shards / f"labels_{shard_index:06d}.parquet"
                 atomic_write_parquet(_label_rows_frame(rows), output)
                 print(f"Wrote {output} ({len(rows):,} patient-trial labels).")
@@ -3679,6 +3537,10 @@ async def run_label_stage(
                 results_per_shard=args.results_per_shard,
                 starting_shard_idx=next_shard_index,
                 max_attempts=args.max_attempts,
+                stale_giveup_secs=max(
+                    1_800.0,
+                    float(args.label_request_timeout) + 300.0,
+                ),
             )
             next_shard_index = _next_shard_index(label_shards, "labels")
             labeled_this_run += len(batch)
@@ -4104,29 +3966,32 @@ def add_label_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--submission-batch-size", type=int, default=2_000)
     parser.add_argument("--max-candidates", type=int, default=None)
-    parser.add_argument("--max-new-tokens", type=int, default=2_000)
     parser.add_argument(
-        "--patients-per-request",
+        "--max-new-tokens",
         type=int,
-        default=8,
+        default=100_000,
         help=(
-            "Patient--trial cases sharing an NCT ID per teacher prompt. Trial and "
-            "web evidence are included once per request."
+            "Maximum completion tokens for each independent single-patient prompt, "
+            "including any model thinking tokens."
         ),
     )
     parser.add_argument(
-        "--max-batch-new-tokens",
+        "--prompts-per-vllm-request",
         type=int,
-        default=16_000,
-        help="Maximum completion tokens for one multi-patient teacher request.",
+        default=8,
+        help=(
+            "Independent single-patient rendered prompts sent together as one "
+            "vLLM /v1/completions prompt array. This changes transport batching "
+            "only; no prompt ever contains more than one patient."
+        ),
     )
     parser.add_argument(
-        "--max-drug-assessments-per-request",
-        type=int,
-        default=16,
+        "--label-request-timeout",
+        type=float,
+        default=7_200.0,
         help=(
-            "Reduce the patient batch automatically for multi-drug trials so one "
-            "response contains at most this many patient-by-drug assessments."
+            "Timeout in seconds for one transport-batched label request. The "
+            "default permits very long thinking-enabled 100k-token completions."
         ),
     )
     parser.add_argument("--store-reasoning", action="store_true")
@@ -4186,7 +4051,15 @@ def add_teacher_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--gpus-per-server", type=int, default=1)
     parser.add_argument("--base-port", type=int, default=8100)
-    parser.add_argument("--max-model-len", type=int, default=50_000)
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=131_072,
+        help=(
+            "Context length for app-owned vLLM servers. The default leaves room "
+            "for a single-patient input plus a 100k-token completion."
+        ),
+    )
     parser.add_argument("--max-num-seqs", type=int, default=256)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.92)
     parser.add_argument("--server-start-timeout", type=float, default=1800.0)

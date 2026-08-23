@@ -1023,71 +1023,7 @@ def test_multidrug_response_requires_exactly_one_assessment_per_drug() -> None:
     assert "missing=['Drug B']" in parsed.parse_error
 
 
-def test_multi_patient_request_shares_trial_context_and_parses_each_case() -> None:
-    research = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        title="Synthetic Drug A trial",
-        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
-    )
-    messages = good_option.build_good_option_batch_messages(
-        patient_cases=[
-            ("case-a", "Synthetic patient A with Cancer A."),
-            ("case-b", "Synthetic patient B with Cancer B."),
-        ],
-        research=research,
-    )
-    prompt = messages[1]["content"]
-
-    assert prompt.count('"candidate_trial"') == 1
-    assert prompt.count('"case-a"') == 1
-    assert prompt.count('"case-b"') == 1
-    assert "Synthetic patient A" in prompt
-    assert "Synthetic patient B" in prompt
-
-    first = _rubric_response()
-    second = json.loads(json.dumps(first))
-    second["patient_disease_type"] = "Cancer B"
-    response = {
-        "patient_trials": [
-            {"candidate_id": "case-a", **first},
-            {"candidate_id": "case-b", **second},
-        ]
-    }
-    parsed = good_option.parse_good_option_batch_response(
-        json.dumps(response),
-        expected_candidate_ids=["case-a", "case-b"],
-        expected_drug_names=["Drug A"],
-        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
-        biomarker_expression_evidence_labels={"S2"},
-    )
-
-    assert parsed["case-a"].status == "ok"
-    assert parsed["case-b"].status == "ok"
-    assert parsed["case-a"].patient_disease_type == "Cancer A"
-    assert parsed["case-b"].patient_disease_type == "Cancer B"
-
-
-def test_multi_patient_response_marks_only_missing_case_as_failed() -> None:
-    response = {
-        "patient_trials": [
-            {"candidate_id": "case-a", **_rubric_response()},
-        ]
-    }
-
-    parsed = good_option.parse_good_option_batch_response(
-        json.dumps(response),
-        expected_candidate_ids=["case-a", "case-b"],
-        expected_drug_names=["Drug A"],
-        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
-        biomarker_expression_evidence_labels={"S2"},
-    )
-
-    assert parsed["case-a"].status == "ok"
-    assert parsed["case-b"].status == "parse_failed"
-    assert "Missing patient_trials item" in parsed["case-b"].parse_error
-
-
-def test_label_stage_batches_patient_trials_sharing_one_trial(
+def test_label_stage_transport_batches_independent_single_patient_prompts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1147,31 +1083,33 @@ def test_label_stage_batches_patient_trials_sharing_one_trial(
         def apply_chat_template(self, conversation, **_kwargs):
             return conversation[-1]["content"]
 
-    submitted_prompt_count = 0
+    submitted_request_count = 0
+    submitted_prompts: list[str] = []
+    submitted_max_tokens: list[int] = []
+    submitted_timeouts: list[float] = []
 
     async def fake_run_pool(*, work_items, shard_writer, starting_shard_idx, **_kwargs):
-        nonlocal submitted_prompt_count
+        nonlocal submitted_request_count
         payload = []
-        for prompt_id, request in work_items:
-            submitted_prompt_count += 1
-            _instructions, prompt_json = request["prompt"].split("\n\n", 1)
-            prompt_payload = json.loads(prompt_json)
-            response_rows = []
-            for patient in prompt_payload[
-                "patient_trials_private_to_configured_llm"
-            ]:
-                response_rows.append(
-                    {
-                        "candidate_id": patient["candidate_id"],
-                        **_rubric_response(),
-                    }
+        for request_id, request in work_items:
+            submitted_request_count += 1
+            assert isinstance(request["prompt"], list)
+            submitted_prompts.extend(request["prompt"])
+            submitted_max_tokens.append(request["max_tokens"])
+            submitted_timeouts.append(request["request_timeout"])
+            completion_results = []
+            for prompt in request["prompt"]:
+                _instructions, prompt_json = prompt.split("\n\n", 1)
+                prompt_payload = json.loads(prompt_json)
+                assert "patient_context_private_to_configured_llm" in prompt_payload
+                assert "patient_trials_private_to_configured_llm" not in prompt_payload
+                response = _rubric_response()
+                if "Synthetic patient B" in prompt:
+                    response["patient_disease_type"] = "Cancer B"
+                completion_results.append(
+                    ("", json.dumps(response))
                 )
-            payload.append(
-                (
-                    prompt_id,
-                    ("", json.dumps({"patient_trials": response_rows})),
-                )
-            )
+            payload.append((request_id, completion_results))
         shard_writer(payload, starting_shard_idx)
         return len(payload)
 
@@ -1184,9 +1122,9 @@ def test_label_stage_batches_patient_trials_sharing_one_trial(
         scan_batch_size=10,
         submission_batch_size=10,
         max_candidates=None,
-        patients_per_request=4,
-        max_batch_new_tokens=8000,
-        max_new_tokens=2000,
+        prompts_per_vllm_request=4,
+        max_new_tokens=100_000,
+        label_request_timeout=7_200.0,
         results_per_shard=200,
         max_attempts=2,
         store_reasoning=False,
@@ -1204,7 +1142,16 @@ def test_label_stage_batches_patient_trials_sharing_one_trial(
     )
     labels = pd.read_parquet(output)
 
-    assert submitted_prompt_count == 1
+    assert submitted_request_count == 1
+    assert len(submitted_prompts) == 2
+    assert all(
+        not (
+            "Synthetic patient A" in prompt and "Synthetic patient B" in prompt
+        )
+        for prompt in submitted_prompts
+    )
+    assert submitted_max_tokens == [100_000]
+    assert submitted_timeouts == [7_200.0]
     assert len(labels) == 2
     assert labels["candidate_id"].is_unique
     assert "this_space" not in labels.columns
@@ -1263,9 +1210,9 @@ def test_label_stage_refuses_research_failure_as_patient_label(
         ]
     ).to_parquet(research_output, index=False)
     args = SimpleNamespace(
-        patients_per_request=1,
-        max_batch_new_tokens=100,
-        max_drug_assessments_per_request=1,
+        prompts_per_vllm_request=1,
+        max_new_tokens=100_000,
+        label_request_timeout=7_200.0,
         research_output=str(research_output),
         research_shards_dir=str(tmp_path / "research_shards"),
         scan_batch_size=10,
@@ -1823,7 +1770,68 @@ def test_completion_work_fn_optionally_returns_finish_metadata(
     assert requests[0]["extra_body"]["repetition_penalty"] == 1.1
 
 
+def test_completion_work_fn_transport_batches_prompts_in_choice_index_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vllm_reasoning_utils.parse_reasoning_output",
+        lambda text, parser_name, tokenizer: (
+            f"reasoning:{text}",
+            f"answer:{text}",
+        ),
+    )
+    requests: list[dict[str, object]] = []
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            requests.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(index=1, text="second", finish_reason="stop"),
+                    SimpleNamespace(index=0, text="first", finish_reason="length"),
+                ]
+            )
+
+    work_fn = make_completion_work_fn(
+        CompletionSampling(model="teacher", request_timeout=1),
+        "qwen3",
+        "tokenizer",
+    )
+    result = asyncio.run(
+        work_fn(
+            SimpleNamespace(completions=FakeCompletions()),
+            {
+                "prompt": ["patient-a prompt", "patient-b prompt"],
+                "max_tokens": 100_000,
+                "request_timeout": 7_200.0,
+                "include_completion_metadata": True,
+            },
+        )
+    )
+
+    assert requests[0]["prompt"] == ["patient-a prompt", "patient-b prompt"]
+    assert requests[0]["max_tokens"] == 100_000
+    assert requests[0]["timeout"] == 7_200.0
+    assert result == [
+        (
+            "reasoning:first",
+            "answer:first",
+            {"finish_reason": "length", "raw_text_char_count": 5},
+        ),
+        (
+            "reasoning:second",
+            "answer:second",
+            {"finish_reason": "stop", "raw_text_char_count": 6},
+        ),
+    ]
+
+
 def test_good_option_cli_defaults_repetition_penalty_to_1_1() -> None:
     args = good_option.build_parser().parse_args(["generate"])
 
     assert args.repetition_penalty == 1.1
+    assert args.max_new_tokens == 100_000
+    assert args.prompts_per_vllm_request == 8
+    assert args.label_request_timeout == 7_200.0
+    assert args.max_model_len == 131_072
+    assert not hasattr(args, "patients_per_request")

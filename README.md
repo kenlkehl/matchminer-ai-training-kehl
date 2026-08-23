@@ -103,12 +103,17 @@ The default workflow consumes all six `top_cohorts_tocheck_round*` and
 `top_patients_tocheck_round*` files. It deduplicates at the patient--trial level;
 candidate trial-space text is mining provenance and is not part of this label or
 the trained checker input. Research is cached once per unique NCT ID. During
-labeling, the default `--patients-per-request 8` shares one trial and web-evidence
-payload across as many as eight patient--trial cases while preserving an
-independent response object and validation result for each patient. For multi-drug
-trials, `--max-drug-assessments-per-request 16` automatically reduces the patient
-count to bound response size. The request pool also dispatches these grouped
-prompts concurrently across all configured vLLM endpoints:
+labeling, every rendered LLM prompt contains exactly one patient and one trial;
+there is no multi-patient prompt or response schema. Transport batching happens
+only after rendering: the default `--prompts-per-vllm-request 8` sends up to eight
+independent prompt strings in one vLLM `/v1/completions` prompt array and maps the
+indexed choices back to their individual patient--trial records. Each prompt has
+its own default `--max-new-tokens 100000` completion allowance, including thinking
+tokens. `--label-request-timeout 7200` and the pool watchdog permit those long
+responses. The request pool dispatches these transport batches concurrently
+across all configured vLLM endpoints. App-owned servers default to
+`--max-model-len 131072`; externally managed endpoints likewise need enough
+context for each individual prompt plus its requested completion:
 
 ```bash
 # 1a. Normalize names, research drugs, and label with one app-owned vLLM pool
@@ -172,10 +177,10 @@ again before any patient-bearing teacher request.
 Use `--max-trials` and `--max-candidates` only for bounded development runs;
 labeling refuses candidate NCT IDs that do not yet have a research record. The
 full stage is large and must respect the search provider's operational limits.
-Increase `--patients-per-request` only when the endpoint context window and
-completion limit can accommodate the larger grouped response; use
-`--max-batch-new-tokens` and `--max-drug-assessments-per-request` to cap that
-response.
+Tune `--prompts-per-vllm-request` for endpoint throughput and memory. This option
+never changes prompt contents: each batched element still contains one patient.
+The endpoint model's context window must accommodate each prompt plus its
+per-prompt `--max-new-tokens` allowance.
 
 The generated non-PHI artifacts are:
 

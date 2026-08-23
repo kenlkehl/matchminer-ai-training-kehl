@@ -36,7 +36,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Iterable, List, Optional, Sequence, Tuple
 
 from openai import AsyncOpenAI
 
@@ -897,22 +897,44 @@ def make_completion_work_fn(
     vllm_reasoning_utils.parse_reasoning_output.
 
     Payload schema (dict):
-      - 'prompt': str          required
+      - 'prompt': str | list[str] required; a list batches independent prompts
       - 'max_tokens': int      required
       - 'temperature': float   optional override
       - 'top_p': float         optional override
+      - 'request_timeout': float optional per-call timeout override
       - 'include_completion_metadata': bool optional; return finish metadata
 
-    Returns (reasoning, answer) tuples to the shard_writer, or
-    (reasoning, answer, metadata) when requested by the payload.
+    A scalar prompt returns one (reasoning, answer) tuple, or a triple including
+    metadata when requested. A prompt list returns a list of those results in
+    prompt order. Prompt arrays are transport batching only: the rendered prompt
+    strings remain semantically independent.
     """
     from vllm_reasoning_utils import parse_reasoning_output  # local import keeps module import-light
 
     async def work_fn(client: AsyncOpenAI, payload: dict):
         prompt = payload["prompt"]
+        prompt_is_batch = isinstance(prompt, Sequence) and not isinstance(
+            prompt,
+            (str, bytes),
+        )
+        if prompt_is_batch:
+            request_prompt = list(prompt)
+            if not request_prompt or not all(
+                isinstance(item, str) and item for item in request_prompt
+            ):
+                raise ValueError("Batched completion prompts must be non-empty strings.")
+        elif isinstance(prompt, str) and prompt:
+            request_prompt = prompt
+        else:
+            raise ValueError("Completion prompt must be a non-empty string or list.")
         max_tokens = int(payload["max_tokens"])
         temperature = float(payload.get("temperature", sampling.temperature))
         top_p = float(payload.get("top_p", sampling.top_p))
+        request_timeout = float(
+            payload.get("request_timeout", sampling.request_timeout)
+        )
+        if request_timeout <= 0:
+            raise ValueError("Completion request_timeout must be positive.")
         extra = {
             "top_k": sampling.top_k,
             "repetition_penalty": sampling.repetition_penalty,
@@ -924,28 +946,67 @@ def make_completion_work_fn(
         response = await asyncio.wait_for(
             client.completions.create(
                 model=sampling.model,
-                prompt=prompt,
+                prompt=request_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 top_p=top_p,
                 presence_penalty=sampling.presence_penalty,
                 extra_body=extra,
+                timeout=request_timeout,
             ),
-            timeout=sampling.request_timeout,
+            timeout=request_timeout,
         )
-        choice = response.choices[0]
-        raw_text = choice.text or ""
-        reasoning, answer = parse_reasoning_output(raw_text, parser_name, tokenizer)
-        if payload.get("include_completion_metadata"):
-            return (
-                reasoning,
-                answer,
-                {
-                    "finish_reason": str(getattr(choice, "finish_reason", "") or ""),
-                    "raw_text_char_count": len(raw_text or ""),
-                },
+
+        def parse_choice(choice: Any) -> tuple[Any, ...]:
+            raw_text = choice.text or ""
+            reasoning, answer = parse_reasoning_output(
+                raw_text,
+                parser_name,
+                tokenizer,
             )
-        return (reasoning, answer)
+            if payload.get("include_completion_metadata"):
+                return (
+                    reasoning,
+                    answer,
+                    {
+                        "finish_reason": str(
+                            getattr(choice, "finish_reason", "") or ""
+                        ),
+                        "raw_text_char_count": len(raw_text),
+                    },
+                )
+            return (reasoning, answer)
+
+        choices = list(response.choices)
+        if not prompt_is_batch:
+            if not choices:
+                raise RuntimeError("Completion endpoint returned no choices.")
+            return parse_choice(choices[0])
+
+        choices_by_index: dict[int, Any] = {}
+        for position, choice in enumerate(choices):
+            raw_index = getattr(choice, "index", position)
+            if (
+                not isinstance(raw_index, int)
+                or isinstance(raw_index, bool)
+                or raw_index < 0
+                or raw_index >= len(request_prompt)
+                or raw_index in choices_by_index
+            ):
+                raise RuntimeError(
+                    "Completion endpoint returned invalid batched choice indices."
+                )
+            choices_by_index[raw_index] = choice
+        missing = sorted(set(range(len(request_prompt))) - set(choices_by_index))
+        if missing:
+            raise RuntimeError(
+                "Completion endpoint omitted batched prompt choices at indices "
+                f"{missing}."
+            )
+        return [
+            parse_choice(choices_by_index[index])
+            for index in range(len(request_prompt))
+        ]
 
     return work_fn
 
