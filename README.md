@@ -87,17 +87,19 @@ evidence. In this staging workspace, install the sibling
 `matchminer-ai-inference` checkout in editable mode when testing unpublished
 changes to those APIs.
 
-When the configured reasoning parser is `qwen3` (including automatic parser
-selection for a Qwen model), the intervention-selection prompt explicitly
-enables Qwen thinking and the parser separates that reasoning from the final
-JSON. The default initial `--drug-name-max-new-tokens 8000` leaves room for
-both. An empty, truncated, or malformed final answer gets one focused repair
-attempt by default, using `--drug-name-retry-max-new-tokens 24000`; Qwen
-thinking remains enabled for that repair. Configure the number of repairs with
+Every teacher conversation is rendered locally with
+`tokenizer.apply_chat_template(..., enable_thinking=True)` before its resulting
+prompt string is sent to vLLM's `/v1/completions` endpoint. This applies to both
+intervention selection and patient-specific GoodOption scoring, independent of
+the configured reasoning parser. Tokenizers whose template does not accept that
+keyword retain the existing compatibility fallback. The default initial
+`--drug-name-max-new-tokens 8000` leaves room for thinking and the final JSON.
+An empty, truncated, or malformed final answer gets one focused repair attempt
+by default, using `--drug-name-retry-max-new-tokens 24000`; thinking remains
+enabled for that repair. Configure the number of repairs with
 `--drug-name-parse-retries`. A complete answer that says the registry does not
 identify a named experimental drug is a valid terminal result, not a parse
-failure, and is neither retried nor sent to web search. Other model families
-retain their existing chat-template behavior.
+failure, and is neither retried nor sent to web search.
 
 The default workflow consumes all six `top_cohorts_tocheck_round*` and
 `top_patients_tocheck_round*` files. It deduplicates at the patient--trial level;

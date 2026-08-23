@@ -100,7 +100,7 @@ BIOMARKER_EXPRESSION_QUERY_SUFFIX = (
 )
 DRUG_SEARCH_QUERY_CHUNK_SIZE = 3
 DRUG_NAME_NORMALIZATION_PROMPT_VERSION = (
-    "experimental-drug-names-from-registry-arms-v4-qwen-thinking-retry"
+    "experimental-drug-names-from-registry-arms-v5-all-teacher-thinking"
 )
 TECHNICAL_NORMALIZATION_FAILURE_STATUSES = frozenset(
     {"parse_failed", "experimental_selection_failed"}
@@ -1716,9 +1716,9 @@ def build_good_option_messages(
 def render_teacher_prompt(
     tokenizer: Any,
     messages: Sequence[Mapping[str, str]],
-    *,
-    enable_thinking: bool,
 ) -> str:
+    """Render one teacher conversation with model thinking explicitly enabled."""
+
     kwargs = {
         "conversation": list(messages),
         "add_generation_prompt": True,
@@ -1727,7 +1727,7 @@ def render_teacher_prompt(
     try:
         return tokenizer.apply_chat_template(
             **kwargs,
-            enable_thinking=enable_thinking,
+            enable_thinking=True,
         )
     except TypeError:
         return tokenizer.apply_chat_template(**kwargs)
@@ -1736,11 +1736,7 @@ def render_teacher_prompt(
 def render_good_option_prompt(
     tokenizer: Any, messages: Sequence[Mapping[str, str]]
 ) -> str:
-    return render_teacher_prompt(
-        tokenizer,
-        messages,
-        enable_thinking=True,
-    )
+    return render_teacher_prompt(tokenizer, messages)
 
 
 async def canonicalize_trial_interventions_with_teacher(
@@ -1757,7 +1753,6 @@ async def canonicalize_trial_interventions_with_teacher(
     from remote_vllm_pool import run_pool
 
     by_id = {item.nct_id: item for item in registry_items}
-    enable_thinking = runtime.reasoning_parser.casefold().startswith("qwen")
     attempt_histories: dict[str, list[dict[str, Any]]] = {}
     output: dict[str, DrugNameNormalization] = {
         item.nct_id: replace(
@@ -1848,7 +1843,6 @@ async def canonicalize_trial_interventions_with_teacher(
                     "prompt": render_teacher_prompt(
                         runtime.tokenizer,
                         build_drug_name_normalization_messages(item.interventions),
-                        enable_thinking=enable_thinking,
                     ),
                     "max_tokens": initial_tokens,
                     "include_completion_metadata": True,
@@ -1872,10 +1866,9 @@ async def canonicalize_trial_interventions_with_teacher(
         ]
         if not retry_ids:
             break
-        thinking_note = " with thinking enabled" if enable_thinking else ""
         print(
-            "Retrying technical drug-normalization failures"
-            f"{thinking_note}: {len(retry_ids):,} trials, "
+            "Retrying technical drug-normalization failures with thinking enabled: "
+            f"{len(retry_ids):,} trials, "
             f"{retry_tokens:,} max tokens."
         )
         await run_round(
@@ -1890,7 +1883,6 @@ async def canonicalize_trial_interventions_with_teacher(
                                 prior_response=output[nct_id].raw_response,
                                 parse_error=output[nct_id].parse_error,
                             ),
-                            enable_thinking=enable_thinking,
                         ),
                         "max_tokens": retry_tokens,
                         "include_completion_metadata": True,

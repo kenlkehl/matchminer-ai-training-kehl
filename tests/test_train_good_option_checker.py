@@ -372,14 +372,10 @@ def test_registry_fetch_does_not_retry_nontransient_http_error(
     assert good_option.research_status(records[0]) == "registry_lookup_failed"
 
 
-@pytest.mark.parametrize(
-    ("reasoning_parser", "expected_thinking"),
-    [("qwen3", True), ("gemma4", False)],
-)
-def test_drug_normalization_enables_thinking_for_qwen_only(
+@pytest.mark.parametrize("reasoning_parser", ["qwen3", "gemma4"])
+def test_drug_normalization_enables_thinking_for_all_teacher_parsers(
     monkeypatch: pytest.MonkeyPatch,
     reasoning_parser: str,
-    expected_thinking: bool,
 ) -> None:
     thinking_values: list[bool] = []
 
@@ -442,11 +438,36 @@ def test_drug_normalization_enables_thinking_for_qwen_only(
         )
     )
 
-    assert thinking_values == [expected_thinking]
+    assert thinking_values == [True]
     assert parsed["NCT12345678"].status == "ok"
     assert [item.name for item in parsed["NCT12345678"].canonical_interventions] == [
         "Novel-X"
     ]
+
+
+def test_good_option_prompt_explicitly_enables_thinking() -> None:
+    thinking_values: list[bool] = []
+
+    class FakeTokenizer:
+        def apply_chat_template(
+            self,
+            conversation,
+            *,
+            add_generation_prompt,
+            tokenize,
+            enable_thinking,
+        ):
+            del conversation, add_generation_prompt, tokenize
+            thinking_values.append(enable_thinking)
+            return "rendered prompt"
+
+    rendered = good_option.render_good_option_prompt(
+        FakeTokenizer(),
+        [{"role": "user", "content": "Synthetic patient-trial prompt"}],
+    )
+
+    assert rendered == "rendered prompt"
+    assert thinking_values == [True]
 
 
 def test_qwen_normalization_repairs_empty_final_answer_with_larger_budget(
