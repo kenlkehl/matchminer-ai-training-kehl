@@ -139,6 +139,26 @@ def _rubric_response() -> dict[str, object]:
     }
 
 
+def _label_research_provenance(nct_id: str) -> dict[str, str]:
+    return {
+        "nct_id": nct_id,
+        "research_fetched_at_utc": "2026-08-24T00:00:00+00:00",
+        "research_implementation_sha256": "implementation-sha",
+        "biomarker_expression_query_version": "query-version",
+        "drug_name_normalization_prompt_version": "normalization-version",
+    }
+
+
+def _label_research_key(nct_id: str) -> good_option.ResearchSnapshotKey:
+    return good_option.research_snapshot_key(
+        nct_id=nct_id,
+        fetched_at_utc="2026-08-24T00:00:00+00:00",
+        implementation_sha256="implementation-sha",
+        biomarker_expression_query_version="query-version",
+        drug_name_normalization_prompt_version="normalization-version",
+    )
+
+
 def test_drug_query_api_structurally_excludes_patient_context() -> None:
     query_parameters = inspect.signature(
         good_option.build_drug_search_queries
@@ -1627,12 +1647,122 @@ def test_checker_drug_context_excludes_teacher_web_snippets() -> None:
     assert "TEACHER_ONLY_SNIPPET" not in context
 
 
+def test_checker_research_context_contains_drug_only_web_extracts() -> None:
+    research = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        title="Metadata that is not the research extract",
+        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
+        search_results=(
+            good_option.DrugSearchResult(
+                query='"Drug A" oncology mechanism efficacy safety clinical trial',
+                title="Human evidence result",
+                snippet="TEACHER_ONLY_SNIPPET",
+                url="https://example.org/result",
+            ),
+            good_option.DrugSearchResult(
+                query=(
+                    '"Drug A" oncology molecular target biomarker expression '
+                    "prevalence across cancer types"
+                ),
+                title="Prevalence result",
+                snippet="Marker A occurs in 35% of the full disease population.",
+                url="https://example.org/prevalence",
+            ),
+        ),
+        notices=("One additional query timed out.",),
+    )
+
+    context = good_option.build_trial_drug_research_context(research)
+
+    assert "DRUG: Drug A" in context
+    assert "TEACHER_ONLY_SNIPPET" in context
+    assert "drug mechanism, efficacy, and safety" in context
+    assert "target and biomarker prevalence across cancer types" in context
+    assert "https://example.org/prevalence" in context
+    assert "One additional query timed out." in context
+    assert "patient" not in inspect.signature(
+        good_option.build_trial_drug_research_context
+    ).parameters
+
+
+def test_research_snapshot_context_loader_preserves_exact_dated_evidence(
+    tmp_path: Path,
+) -> None:
+    research = good_option.TrialDrugResearch(
+        nct_id="NCT12345678",
+        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
+        search_results=(
+            good_option.DrugSearchResult(
+                query="drug-only query",
+                title="Result",
+                snippet="Exact dated extract",
+                url="https://example.org/result",
+            ),
+        ),
+    )
+    older_record = good_option.research_to_record(
+        research,
+        fetched_at_utc="2026-08-24T00:00:00+00:00",
+    )
+    newer_record = good_option.research_to_record(
+        good_option.TrialDrugResearch(
+            nct_id="NCT12345678",
+            interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
+            search_results=(
+                good_option.DrugSearchResult(
+                    query="drug-only query",
+                    title="Updated result",
+                    snippet="Newer exact extract",
+                    url="https://example.org/updated-result",
+                ),
+            ),
+        ),
+        fetched_at_utc="2026-08-25T00:00:00+00:00",
+    )
+    output = tmp_path / "research.parquet"
+    pd.DataFrame([older_record, newer_record]).to_parquet(output, index=False)
+
+    contexts = good_option.load_research_snapshot_contexts(
+        output,
+        tmp_path / "missing-shards",
+    )
+    older_key = good_option.research_snapshot_key(
+        nct_id=older_record["nct_id"],
+        fetched_at_utc=older_record["fetched_at_utc"],
+        implementation_sha256=older_record["research_implementation_sha256"],
+        biomarker_expression_query_version=older_record[
+            "biomarker_expression_query_version"
+        ],
+        drug_name_normalization_prompt_version=older_record[
+            "drug_name_normalization_prompt_version"
+        ],
+    )
+    newer_key = good_option.research_snapshot_key(
+        nct_id=newer_record["nct_id"],
+        fetched_at_utc=newer_record["fetched_at_utc"],
+        implementation_sha256=newer_record["research_implementation_sha256"],
+        biomarker_expression_query_version=newer_record[
+            "biomarker_expression_query_version"
+        ],
+        drug_name_normalization_prompt_version=newer_record[
+            "drug_name_normalization_prompt_version"
+        ],
+    )
+
+    assert list(contexts) == [older_key, newer_key]
+    assert "Exact dated extract" in contexts[older_key]
+    assert "Newer exact extract" not in contexts[older_key]
+    assert "Newer exact extract" in contexts[newer_key]
+    assert "2026-08-24T00:00:00+00:00" not in contexts[older_key]
+
+
 def test_training_frame_uses_patient_level_validation_split() -> None:
     labels = pd.DataFrame(
         [
             {
                 "candidate_id": "a",
                 "patient_summary": "Same synthetic patient",
+                **_label_research_provenance("NCT00000001"),
                 "this_space": "Space A",
                 "trial_drug_context": "DRUG: Drug A",
                 "split": "train",
@@ -1649,6 +1779,7 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
             {
                 "candidate_id": "b",
                 "patient_summary": "Same synthetic patient",
+                **_label_research_provenance("NCT00000002"),
                 "this_space": "Space B",
                 "trial_drug_context": "DRUG: Drug B",
                 "split": "train",
@@ -1665,6 +1796,7 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
             {
                 "candidate_id": "bad",
                 "patient_summary": "Another synthetic patient",
+                **_label_research_provenance("NCT00000003"),
                 "this_space": "Space C",
                 "trial_drug_context": "DRUG: Drug C",
                 "split": "train",
@@ -1681,6 +1813,7 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
             {
                 "candidate_id": "inconsistent",
                 "patient_summary": "Third synthetic patient",
+                **_label_research_provenance("NCT00000004"),
                 "this_space": "Space D",
                 "trial_drug_context": "DRUG: Drug D",
                 "split": "train",
@@ -1699,6 +1832,10 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
 
     prepared = good_option.prepare_training_frame(
         labels,
+        research_contexts={
+            _label_research_key("NCT00000001"): "WEB RESEARCH FOR DRUG A",
+            _label_research_key("NCT00000002"): "WEB RESEARCH FOR DRUG B",
+        },
         validation_fraction=0.5,
         seed=42,
     )
@@ -1710,6 +1847,22 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
     assert prepared["text"].str.contains(
         "Registry investigational-drug context:"
     ).all()
+    assert prepared["text"].str.contains(
+        "Investigational-drug public research evidence:"
+    ).all()
+    assert prepared["text"].str.contains("WEB RESEARCH FOR DRUG").all()
+    first_text = prepared.iloc[0]["text"]
+    assert first_text.index("Patient cancer history:") < first_text.index(
+        "Investigational-drug public research evidence:"
+    ) < first_text.index("Registry investigational-drug context:")
+
+    with pytest.raises(ValueError, match="exact research snapshots"):
+        good_option.prepare_training_frame(
+            labels.iloc[:1],
+            research_contexts={},
+            validation_fraction=0.5,
+            seed=42,
+        )
 
 
 def test_local_vllm_command_uses_openai_server_and_requested_parser() -> None:
@@ -1849,6 +2002,7 @@ def test_completion_work_fn_transport_batches_prompts_in_choice_index_order(
 
 def test_good_option_cli_defaults_repetition_penalty_to_1_1() -> None:
     args = good_option.build_parser().parse_args(["generate"])
+    train_args = good_option.build_parser().parse_args(["train"])
 
     assert args.repetition_penalty == 1.1
     assert args.max_new_tokens == 100_000
@@ -1856,3 +2010,9 @@ def test_good_option_cli_defaults_repetition_penalty_to_1_1() -> None:
     assert args.label_request_timeout == 7_200.0
     assert args.max_model_len == 131_072
     assert not hasattr(args, "patients_per_request")
+    assert train_args.max_length == 8192
+    assert Path(train_args.research_output).name == "good_option_drug_research.parquet"
+    assert (
+        Path(train_args.research_shards_dir).name
+        == "good_option_drug_research_shards"
+    )

@@ -135,6 +135,16 @@ python train_good_option_checker.py generate \
 accelerate launch --num_processes 8 train_good_option_checker.py train
 ```
 
+Checker training joins every patient--trial label to the exact dated research
+snapshot identified by its NCT ID, fetch time, implementation fingerprint, query
+version, and drug-normalization version. Preserve the research shards until
+training is complete; they avoid both evidence drift and duplication of the same
+NCT-level extracts across millions of label rows. Existing labels from the
+current schema remain usable because they already store this provenance. The
+student input is ordered as patient summary, drug-focused web research, then
+registry investigational-drug context, and defaults to ModernBERT's 8,192-token
+window.
+
 The `research` and `label` subcommands remain available for separate resumable
 runs. Because canonicalization now precedes search, `research` accepts the same
 model, endpoint, or local-GPU arguments as `generate`; no patient context is
@@ -186,6 +196,9 @@ per-prompt `--max-new-tokens` allowance.
 
 The generated non-PHI artifacts are:
 
+- `../data/no_phi/good_option_drug_research_shards/research_*.parquet`:
+  immutable dated research snapshots used for exact evidence joins during
+  checker training; retain these shards until the model is trained;
 - `../data/no_phi/good_option_drug_research.parquet`: dated registry metadata,
   raw intervention strings, teacher-normalized canonical names and mappings,
   normalization attempt/finish metadata, efficacy/safety and target-expression
@@ -198,8 +211,8 @@ The generated non-PHI artifacts are:
   record containing a four-point assessment per canonical investigational drug,
   criterion-specific rationales and evidence references, drug count,
   code-derived total and maximum points, the normalized 0-1 training target,
-  prompt/schema versions, source timestamps, and the registry-derived drug
-  context used as checker input; and
+  prompt/schema versions, exact research-snapshot provenance, and the
+  registry-derived drug context retained for checker input and audit; and
 - `../models/goodoptionchecker_four_point`: a one-logit model whose sigmoid is
   the predicted fraction of all per-drug evidence criteria satisfied.
 
@@ -209,9 +222,11 @@ arm fields; and web queries are built only from its textually supported canonica
 investigational-drug names. Even the target-expression query asks generically
 about prevalence across cancer types; it does not contain the patient's disease.
 Patient summaries and their disease context enter only the later LLM-labeling
-prompt. The trained checker consumes patient summary + registry
-investigational-drug context. Neither candidate-space text nor web snippets are
-checker inputs; web snippets supervise only the LLM teacher.
+prompt. The trained checker consumes the patient summary, the exact patient-free
+drug research extracts used by the teacher, and registry investigational-drug
+context. Candidate-space text remains excluded. At eventual classifier
+inference, drug research must still complete before patient context is combined
+with it; patient text must never be placed in a web query.
 Custom candidate files outside `../data/no_phi` are rejected unless
 `--confirm-inputs-are-non-phi` is supplied. Do not use that override for real
 clinical data unless the endpoint and data flow have the required authorization
