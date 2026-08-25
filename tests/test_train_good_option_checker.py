@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -1756,7 +1757,7 @@ def test_research_snapshot_context_loader_preserves_exact_dated_evidence(
     assert "2026-08-24T00:00:00+00:00" not in contexts[older_key]
 
 
-def test_training_frame_uses_patient_level_validation_split() -> None:
+def test_training_frame_filters_labels_and_builds_checker_input() -> None:
     labels = pd.DataFrame(
         [
             {
@@ -1836,12 +1837,15 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
             _label_research_key("NCT00000001"): "WEB RESEARCH FOR DRUG A",
             _label_research_key("NCT00000002"): "WEB RESEARCH FOR DRUG B",
         },
-        validation_fraction=0.5,
+        patient_validation_fraction=0.0,
+        trial_validation_fraction=0.0,
+        auroc_positive_threshold=0.5,
         seed=42,
     )
 
     assert len(prepared) == 2
     assert prepared["partition"].nunique() == 1
+    assert prepared["partition"].eq(good_option.TRAIN_PARTITION).all()
     assert prepared["label"].tolist() == pytest.approx([0.25, 0.75])
     assert not prepared["text"].str.contains("Clinical trial space:").any()
     assert prepared["text"].str.contains(
@@ -1860,9 +1864,207 @@ def test_training_frame_uses_patient_level_validation_split() -> None:
         good_option.prepare_training_frame(
             labels.iloc[:1],
             research_contexts={},
-            validation_fraction=0.5,
+            patient_validation_fraction=0.0,
+            trial_validation_fraction=0.0,
+            auroc_positive_threshold=0.5,
             seed=42,
         )
+
+
+def test_patient_and_trial_group_folds_create_three_validation_cohorts() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "candidate_id": f"candidate-{patient_index}-{trial_index}",
+                "patient_summary": f"Synthetic patient {patient_index}",
+                "nct_id": f"NCT{trial_index:08d}",
+                "split": "train",
+                "label": (
+                    0.75 if (patient_index * 3 + trial_index) % 11 == 0 else 0.0
+                ),
+            }
+            for patient_index in range(25)
+            for trial_index in range(20)
+        ]
+    )
+
+    frame["partition"] = good_option.assign_good_option_partitions(
+        frame,
+        patient_validation_fraction=0.2,
+        trial_validation_fraction=0.2,
+        auroc_positive_threshold=0.5,
+        seed=42,
+    )
+
+    assert set(frame["partition"]) == {
+        good_option.TRAIN_PARTITION,
+        good_option.UNSEEN_PATIENT_PARTITION,
+        good_option.UNSEEN_TRIAL_PARTITION,
+        good_option.STRICT_VALIDATION_PARTITION,
+    }
+    patient_is_held_out = frame["partition"].isin(
+        {
+            good_option.UNSEEN_PATIENT_PARTITION,
+            good_option.STRICT_VALIDATION_PARTITION,
+        }
+    )
+    trial_is_held_out = frame["partition"].isin(
+        {
+            good_option.UNSEEN_TRIAL_PARTITION,
+            good_option.STRICT_VALIDATION_PARTITION,
+        }
+    )
+    assert (
+        pd.DataFrame(
+            {
+                "patient": frame["patient_summary"],
+                "held_out": patient_is_held_out,
+            }
+        )
+        .groupby("patient")["held_out"]
+        .nunique()
+        .max()
+        == 1
+    )
+    assert (
+        pd.DataFrame(
+            {"trial": frame["nct_id"], "held_out": trial_is_held_out}
+        )
+        .groupby("trial")["held_out"]
+        .nunique()
+        .max()
+        == 1
+    )
+    assert frame.loc[patient_is_held_out, "patient_summary"].nunique() == 5
+    assert frame.loc[trial_is_held_out, "nct_id"].nunique() == 4
+
+
+def test_explicit_validation_row_holds_out_both_entities_everywhere() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "candidate_id": f"candidate-{patient_index}-{trial_index}",
+                "patient_summary": f"Synthetic patient {patient_index}",
+                "nct_id": f"NCT{trial_index:08d}",
+                "split": (
+                    "validation"
+                    if patient_index == 0 and trial_index == 0
+                    else "train"
+                ),
+                "label": float((patient_index + trial_index) % 2),
+            }
+            for patient_index in range(3)
+            for trial_index in range(3)
+        ]
+    )
+
+    frame["partition"] = good_option.assign_good_option_partitions(
+        frame,
+        patient_validation_fraction=0.0,
+        trial_validation_fraction=0.0,
+        auroc_positive_threshold=0.5,
+        seed=42,
+    )
+
+    assert frame.loc[
+        frame["patient_summary"].eq("Synthetic patient 0"), "partition"
+    ].isin(
+        {
+            good_option.UNSEEN_PATIENT_PARTITION,
+            good_option.STRICT_VALIDATION_PARTITION,
+        }
+    ).all()
+    assert frame.loc[frame["nct_id"].eq("NCT00000000"), "partition"].isin(
+        {
+            good_option.UNSEEN_TRIAL_PARTITION,
+            good_option.STRICT_VALIDATION_PARTITION,
+        }
+    ).all()
+
+
+def test_split_manifest_omits_patient_text_and_resume_requires_same_split(
+    tmp_path: Path,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "candidate_id": "candidate-a",
+                "patient_group_id": "patient-hash-a",
+                "nct_id": "NCT00000001",
+                "label": 0.0,
+                "partition": good_option.TRAIN_PARTITION,
+            },
+            {
+                "candidate_id": "candidate-b",
+                "patient_group_id": "patient-hash-b",
+                "nct_id": "NCT00000002",
+                "label": 1.0,
+                "partition": good_option.STRICT_VALIDATION_PARTITION,
+            },
+        ]
+    )
+    manifest = good_option.build_good_option_split_manifest(
+        frame,
+        patient_validation_fraction=0.2,
+        trial_validation_fraction=0.2,
+        auroc_positive_threshold=0.5,
+        seed=42,
+    )
+    serialized = json.dumps(manifest)
+    assert "patient-hash-a" not in serialized
+    assert manifest["held_out_trial_ids"] == ["NCT00000002"]
+
+    checkpoint = tmp_path / "checkpoint-1"
+    checkpoint.mkdir()
+    metadata = good_option._split_checkpoint_metadata(manifest)
+    (checkpoint / "config.json").write_text(json.dumps(metadata))
+    good_option.validate_resume_checkpoint_split(
+        checkpoint,
+        expected_metadata=metadata,
+    )
+    incompatible = dict(metadata)
+    incompatible["matchminer_split_fingerprint_sha256"] = "different"
+    with pytest.raises(ValueError, match="incompatible"):
+        good_option.validate_resume_checkpoint_split(
+            checkpoint,
+            expected_metadata=incompatible,
+        )
+
+
+def test_split_fraction_must_map_to_whole_group_folds() -> None:
+    with pytest.raises(ValueError, match="reciprocal"):
+        good_option._validation_fold_count(
+            0.15,
+            argument_name="trial_validation_fraction",
+        )
+
+
+def test_checker_metrics_report_soft_regression_and_thresholded_auroc() -> None:
+    probabilities = np.asarray([0.1, 0.2, 0.8, 0.9])
+    logits = np.log(probabilities / (1.0 - probabilities))
+    labels = np.asarray([0.0, 0.25, 0.5, 1.0])
+
+    metrics = good_option.compute_good_option_checker_metrics(
+        logits,
+        labels,
+        auroc_positive_threshold=0.5,
+    )
+
+    assert metrics["mae"] == pytest.approx(0.1375)
+    assert metrics["rmse"] == pytest.approx(np.sqrt(0.028125))
+    assert metrics["auroc"] == pytest.approx(1.0)
+    assert metrics["auroc_positive_threshold"] == pytest.approx(0.5)
+    assert metrics["auroc_positive_fraction"] == pytest.approx(0.5)
+
+
+def test_checker_metrics_return_nan_auroc_for_single_class() -> None:
+    metrics = good_option.compute_good_option_checker_metrics(
+        [0.0, 1.0],
+        [0.0, 0.25],
+        auroc_positive_threshold=0.5,
+    )
+
+    assert np.isnan(metrics["auroc"])
 
 
 def test_local_vllm_command_uses_openai_server_and_requested_parser() -> None:
@@ -2011,6 +2213,13 @@ def test_good_option_cli_defaults_repetition_penalty_to_1_1() -> None:
     assert args.max_model_len == 131_072
     assert not hasattr(args, "patients_per_request")
     assert train_args.max_length == 8192
+    assert train_args.auroc_positive_threshold == pytest.approx(0.5)
+    assert train_args.patient_validation_fraction == pytest.approx(0.2)
+    assert train_args.trial_validation_fraction == pytest.approx(0.2)
+    assert train_args.gradient_accumulation_steps == 1
+    assert train_args.bf16 is False
+    assert train_args.gradient_checkpointing is False
+    assert train_args.group_by_length is False
     assert Path(train_args.research_output).name == "good_option_drug_research.parquet"
     assert (
         Path(train_args.research_shards_dir).name

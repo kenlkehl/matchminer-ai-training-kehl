@@ -433,6 +433,8 @@ else
     --max-model-len 50000 \
     --gpu-memory-utilization 0.95
 
-  accelerate launch --num_processes 8 train_good_option_checker.py train
+  accelerate launch --num_processes 8 train_good_option_checker.py train \
+    --patient-validation-fraction 0.20 \
+    --trial-validation-fraction 0.20
   echo 17 done
 fi

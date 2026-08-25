@@ -194,6 +194,11 @@ REQUIRED_CANDIDATE_COLUMNS = (
 GOOD_OPTION_PROMPT_VERSION = "good-option-patient-trial-per-drug-v6-single-patient"
 GOOD_OPTION_LABEL_SCHEMA_VERSION = "7"
 GOOD_OPTION_CHECKER_INPUT_VERSION = "patient-drug-research-plus-registry-v1"
+GOOD_OPTION_SPLIT_STRATEGY = "stratified-patient-and-nct-group-fold-v1"
+TRAIN_PARTITION = "train"
+UNSEEN_PATIENT_PARTITION = "validation_unseen_patient"
+UNSEEN_TRIAL_PARTITION = "validation_unseen_trial"
+STRICT_VALIDATION_PARTITION = "validation_unseen_patient_and_trial"
 VALID_LABEL_STATUSES = frozenset({"ok"})
 COMPLETED_LABEL_STATUSES = frozenset(
     {"ok", "no_experimental_drug_intervention"}
@@ -2469,6 +2474,22 @@ def atomic_write_parquet(frame: pd.DataFrame, output_path: Path) -> None:
             temporary.unlink()
 
 
+def atomic_write_json(payload: Mapping[str, Any], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(
+        f".{output_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, output_path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+
 def _next_shard_index(shards_dir: Path, prefix: str) -> int:
     pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)\.parquet$")
     maximum = -1
@@ -3701,11 +3722,307 @@ async def run_label_stage(
     return label_output
 
 
-def _patient_validation_bucket(patient_summary: str, seed: int) -> float:
-    digest = hashlib.sha256(
-        f"{seed}\0{patient_summary.strip()}".encode("utf-8", errors="replace")
-    ).digest()
-    return int.from_bytes(digest[:8], "big") / float(2**64)
+def _validation_fold_count(fraction: float, *, argument_name: str) -> int:
+    """Convert a validation fraction to an auditable whole group-fold count."""
+    value = float(fraction)
+    if not 0.0 <= value < 1.0:
+        raise ValueError(f"{argument_name} must be in [0, 1).")
+    if value == 0.0:
+        return 0
+    fold_count = int(round(1.0 / value))
+    if fold_count < 2 or not math.isclose(
+        value,
+        1.0 / fold_count,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError(
+            f"{argument_name} must be zero or the reciprocal of a whole number "
+            "of folds (for example 0.2, 0.1, or 0.05)."
+        )
+    return fold_count
+
+
+def _stratified_group_validation_mask(
+    frame: pd.DataFrame,
+    *,
+    group_column: str,
+    binary_labels: pd.Series,
+    explicit_validation: pd.Series,
+    validation_fraction: float,
+    seed: int,
+    argument_name: str,
+) -> pd.Series:
+    """Select one deterministic label-stratified fold of whole entities."""
+    from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
+
+    fold_count = _validation_fold_count(
+        validation_fraction,
+        argument_name=argument_name,
+    )
+    explicit_groups = set(
+        frame.loc[explicit_validation, group_column].astype(str).tolist()
+    )
+    if fold_count == 0:
+        return frame[group_column].astype(str).isin(explicit_groups)
+
+    group_count = int(frame[group_column].nunique())
+    if group_count < fold_count:
+        raise ValueError(
+            f"{argument_name}={validation_fraction:g} requires at least "
+            f"{fold_count} unique {group_column} groups; found {group_count}."
+        )
+
+    ordered = frame.assign(
+        _binary_split_label=binary_labels.astype("int8")
+    ).sort_values("candidate_id", kind="stable")
+    ordered_labels = ordered["_binary_split_label"]
+    ordered_groups = ordered[group_column].astype(str)
+    has_enough_binary_rows = (
+        ordered_labels.nunique() == 2
+        and int(ordered_labels.value_counts().min()) >= fold_count
+    )
+    if has_enough_binary_rows:
+        splitter: Any = StratifiedGroupKFold(
+            n_splits=fold_count,
+            shuffle=True,
+            random_state=int(seed),
+        )
+    else:
+        splitter = GroupKFold(
+            n_splits=fold_count,
+            shuffle=True,
+            random_state=int(seed),
+        )
+    _, validation_positions = next(
+        splitter.split(
+            ordered,
+            ordered_labels,
+            groups=ordered_groups,
+        )
+    )
+    held_out_groups = set(ordered_groups.iloc[validation_positions].tolist())
+    held_out_groups.update(explicit_groups)
+    return frame[group_column].astype(str).isin(held_out_groups)
+
+
+def _patient_group_id(patient_summary: str) -> str:
+    return hashlib.sha256(
+        b"GoodOptionChecker patient group\0"
+        + str(patient_summary or "").strip().encode("utf-8", errors="replace")
+    ).hexdigest()
+
+
+def assign_good_option_partitions(
+    frame: pd.DataFrame,
+    *,
+    patient_validation_fraction: float,
+    trial_validation_fraction: float,
+    auroc_positive_threshold: float,
+    seed: int,
+) -> pd.Series:
+    """Partition both patients and NCT IDs before forming evaluation cohorts."""
+    required = {"candidate_id", "patient_summary", "nct_id", "split", "label"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"Split input is missing required columns: {missing}")
+    threshold = float(auroc_positive_threshold)
+    if not 0.0 < threshold <= 1.0:
+        raise ValueError("auroc_positive_threshold must be in (0, 1].")
+
+    explicit_validation = frame["split"].astype(str).str.casefold().isin(
+        {"valid", "validation", "dev"}
+    )
+    binary_labels = pd.to_numeric(frame["label"], errors="raise").ge(threshold)
+    patient_held_out = _stratified_group_validation_mask(
+        frame,
+        group_column="patient_summary",
+        binary_labels=binary_labels,
+        explicit_validation=explicit_validation,
+        validation_fraction=patient_validation_fraction,
+        seed=seed,
+        argument_name="patient_validation_fraction",
+    )
+    trial_held_out = _stratified_group_validation_mask(
+        frame,
+        group_column="nct_id",
+        binary_labels=binary_labels,
+        explicit_validation=explicit_validation,
+        validation_fraction=trial_validation_fraction,
+        seed=seed,
+        argument_name="trial_validation_fraction",
+    )
+    return pd.Series(
+        np.select(
+            [
+                patient_held_out & trial_held_out,
+                patient_held_out,
+                trial_held_out,
+            ],
+            [
+                STRICT_VALIDATION_PARTITION,
+                UNSEEN_PATIENT_PARTITION,
+                UNSEEN_TRIAL_PARTITION,
+            ],
+            default=TRAIN_PARTITION,
+        ),
+        index=frame.index,
+        dtype="string",
+    )
+
+
+def build_good_option_split_manifest(
+    frame: pd.DataFrame,
+    *,
+    patient_validation_fraction: float,
+    trial_validation_fraction: float,
+    auroc_positive_threshold: float,
+    seed: int,
+) -> dict[str, Any]:
+    """Build non-patient-bearing split provenance and cohort counts."""
+    required = {"candidate_id", "patient_group_id", "nct_id", "label", "partition"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"Split manifest input is missing columns: {missing}")
+    digest = hashlib.sha256()
+    digest.update(GOOD_OPTION_SPLIT_STRATEGY.encode("utf-8"))
+    digest.update(b"\0")
+    for row in frame[["candidate_id", "partition"]].sort_values(
+        ["candidate_id", "partition"],
+        kind="stable",
+    ).itertuples(index=False):
+        digest.update(str(row.candidate_id).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(row.partition).encode("utf-8"))
+        digest.update(b"\n")
+
+    positive = frame["label"].ge(float(auroc_positive_threshold))
+    partition_counts: dict[str, dict[str, int | float]] = {}
+    partition_order = (
+        TRAIN_PARTITION,
+        UNSEEN_PATIENT_PARTITION,
+        UNSEEN_TRIAL_PARTITION,
+        STRICT_VALIDATION_PARTITION,
+    )
+    for partition in partition_order:
+        mask = frame["partition"].eq(partition)
+        if not mask.any():
+            continue
+        partition_counts[partition] = {
+            "rows": int(mask.sum()),
+            "patients": int(frame.loc[mask, "patient_group_id"].nunique()),
+            "trials": int(frame.loc[mask, "nct_id"].nunique()),
+            "positive_rows": int(positive.loc[mask].sum()),
+            "positive_fraction": float(positive.loc[mask].mean()),
+        }
+
+    patient_held_out = frame["partition"].isin(
+        {UNSEEN_PATIENT_PARTITION, STRICT_VALIDATION_PARTITION}
+    )
+    trial_held_out = frame["partition"].isin(
+        {UNSEEN_TRIAL_PARTITION, STRICT_VALIDATION_PARTITION}
+    )
+    all_patients = int(frame["patient_group_id"].nunique())
+    all_trials = int(frame["nct_id"].nunique())
+    held_out_patients = int(frame.loc[patient_held_out, "patient_group_id"].nunique())
+    held_out_trials = sorted(frame.loc[trial_held_out, "nct_id"].unique().tolist())
+    return {
+        "split_strategy": GOOD_OPTION_SPLIT_STRATEGY,
+        "split_fingerprint_sha256": digest.hexdigest(),
+        "seed": int(seed),
+        "patient_validation_fraction_requested": float(patient_validation_fraction),
+        "trial_validation_fraction_requested": float(trial_validation_fraction),
+        "stratification_positive_threshold": float(auroc_positive_threshold),
+        "total_rows": int(len(frame)),
+        "total_patients": all_patients,
+        "total_trials": all_trials,
+        "held_out_patients": held_out_patients,
+        "held_out_patient_fraction": held_out_patients / all_patients,
+        "held_out_trials": len(held_out_trials),
+        "held_out_trial_fraction": len(held_out_trials) / all_trials,
+        "held_out_trial_ids": held_out_trials,
+        "partition_counts": partition_counts,
+    }
+
+
+def _split_checkpoint_metadata(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "matchminer_split_strategy": manifest["split_strategy"],
+        "matchminer_split_fingerprint_sha256": manifest[
+            "split_fingerprint_sha256"
+        ],
+        "matchminer_split_seed": manifest["seed"],
+        "matchminer_patient_validation_fraction": manifest[
+            "patient_validation_fraction_requested"
+        ],
+        "matchminer_trial_validation_fraction": manifest[
+            "trial_validation_fraction_requested"
+        ],
+        "matchminer_split_stratification_positive_threshold": manifest[
+            "stratification_positive_threshold"
+        ],
+    }
+
+
+def validate_resume_checkpoint_split(
+    checkpoint_dir: Path,
+    *,
+    expected_metadata: Mapping[str, Any],
+) -> None:
+    """Refuse optimizer resume when entity membership or split policy changed."""
+    config_path = checkpoint_dir / "config.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Cannot validate the split provenance in resume checkpoint "
+            f"{checkpoint_dir}. Use a new --checkpoint-dir."
+        ) from exc
+    mismatches = [
+        key
+        for key, expected in expected_metadata.items()
+        if config.get(key) != expected
+    ]
+    if mismatches:
+        raise ValueError(
+            f"Resume checkpoint {checkpoint_dir} was created with an incompatible "
+            "GoodOptionChecker split or label snapshot "
+            f"({', '.join(mismatches)}). Use a new --checkpoint-dir rather than "
+            "mixing patient/trial partitions."
+        )
+
+
+def compute_good_option_checker_metrics(
+    predictions: Any,
+    references: Any,
+    *,
+    auroc_positive_threshold: float,
+) -> dict[str, float]:
+    """Evaluate the soft score and a declared binary operating definition."""
+    from sklearn.metrics import roc_auc_score
+
+    threshold = float(auroc_positive_threshold)
+    if not 0.0 < threshold <= 1.0:
+        raise ValueError("auroc_positive_threshold must be in (0, 1].")
+    logits = np.asarray(predictions).reshape(-1)
+    labels_array = np.asarray(references).reshape(-1)
+    if logits.shape != labels_array.shape:
+        raise ValueError("Predictions and references must have the same shape.")
+    scores = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
+    errors = scores - labels_array
+    binary_labels = labels_array >= threshold
+    metrics = {
+        "mae": float(np.mean(np.abs(errors))),
+        "rmse": float(np.sqrt(np.mean(np.square(errors)))),
+        "auroc_positive_threshold": threshold,
+        "auroc_positive_fraction": float(np.mean(binary_labels)),
+    }
+    metrics["auroc"] = (
+        float(roc_auc_score(binary_labels, scores))
+        if np.unique(binary_labels).size == 2
+        else float("nan")
+    )
+    return metrics
 
 
 def build_checker_text(
@@ -3727,7 +4044,9 @@ def prepare_training_frame(
     labels: pd.DataFrame,
     *,
     research_contexts: Mapping[ResearchSnapshotKey, str],
-    validation_fraction: float,
+    patient_validation_fraction: float,
+    trial_validation_fraction: float,
+    auroc_positive_threshold: float,
     seed: int,
 ) -> pd.DataFrame:
     required = {
@@ -3751,6 +4070,8 @@ def prepare_training_frame(
     if missing:
         raise ValueError(f"Label data is missing required columns: {missing}")
     frame = labels.copy()
+    frame["patient_summary"] = frame["patient_summary"].astype(str).str.strip()
+    frame["nct_id"] = frame["nct_id"].astype(str).str.strip().str.upper()
     numeric_columns = [
         "good_option_points",
         "good_option_max_points",
@@ -3832,20 +4153,6 @@ def prepare_training_frame(
     frame["trial_drug_research_context"] = [
         research_contexts[key] for key in snapshot_keys
     ]
-    fraction = float(validation_fraction)
-    if not 0 <= fraction < 1:
-        raise ValueError("validation_fraction must be in [0, 1).")
-    explicit_validation = (
-        frame["split"].astype(str).str.casefold().isin({"valid", "validation", "dev"})
-    )
-    held_out = frame["patient_summary"].map(
-        lambda text: _patient_validation_bucket(str(text), seed) < fraction
-    )
-    frame["partition"] = np.where(
-        explicit_validation | held_out,
-        "validation",
-        "train",
-    )
     frame["text"] = [
         build_checker_text(patient, research_context, drug_context)
         for patient, research_context, drug_context in zip(
@@ -3858,7 +4165,24 @@ def prepare_training_frame(
     frame["label"] = (
         frame["good_option_points"] / frame["good_option_max_points"]
     ).astype("float32")
-    return frame[["candidate_id", "text", "label", "partition"]].reset_index(drop=True)
+    frame["partition"] = assign_good_option_partitions(
+        frame,
+        patient_validation_fraction=patient_validation_fraction,
+        trial_validation_fraction=trial_validation_fraction,
+        auroc_positive_threshold=auroc_positive_threshold,
+        seed=seed,
+    )
+    frame["patient_group_id"] = frame["patient_summary"].map(_patient_group_id)
+    return frame[
+        [
+            "candidate_id",
+            "patient_group_id",
+            "nct_id",
+            "text",
+            "label",
+            "partition",
+        ]
+    ].reset_index(drop=True)
 
 
 def run_train_stage(args: argparse.Namespace) -> Path:
@@ -3872,9 +4196,24 @@ def run_train_stage(args: argparse.Namespace) -> Path:
         Trainer,
         TrainingArguments,
     )
+    from transformers.trainer_utils import get_last_checkpoint
 
     if int(args.max_length) < 1:
         raise ValueError("max_length must be at least 1.")
+    if int(args.gradient_accumulation_steps) < 1:
+        raise ValueError("gradient_accumulation_steps must be at least 1.")
+    if int(args.dataloader_num_workers) < 0:
+        raise ValueError("dataloader_num_workers cannot be negative.")
+    if not 0.0 < float(args.auroc_positive_threshold) <= 1.0:
+        raise ValueError("auroc_positive_threshold must be in (0, 1].")
+    _validation_fold_count(
+        args.patient_validation_fraction,
+        argument_name="patient_validation_fraction",
+    )
+    _validation_fold_count(
+        args.trial_validation_fraction,
+        argument_name="trial_validation_fraction",
+    )
 
     labels_path = Path(args.label_output).expanduser().resolve()
     if not labels_path.is_file():
@@ -3914,31 +4253,70 @@ def run_train_stage(args: argparse.Namespace) -> Path:
     frame = prepare_training_frame(
         labels,
         research_contexts=research_contexts,
-        validation_fraction=args.validation_fraction,
+        patient_validation_fraction=args.patient_validation_fraction,
+        trial_validation_fraction=args.trial_validation_fraction,
+        auroc_positive_threshold=args.auroc_positive_threshold,
         seed=args.seed,
     )
     if args.max_train_samples is not None:
-        frame = frame.iloc[: max(1, int(args.max_train_samples))].copy()
-    print(frame["partition"].value_counts())
+        train_rows = frame[frame["partition"].eq(TRAIN_PARTITION)].iloc[
+            : max(1, int(args.max_train_samples))
+        ]
+        frame = pd.concat(
+            [
+                train_rows,
+                frame[~frame["partition"].eq(TRAIN_PARTITION)],
+            ],
+            ignore_index=True,
+        )
+    split_manifest = build_good_option_split_manifest(
+        frame,
+        patient_validation_fraction=args.patient_validation_fraction,
+        trial_validation_fraction=args.trial_validation_fraction,
+        auroc_positive_threshold=args.auroc_positive_threshold,
+        seed=args.seed,
+    )
+    split_metadata = _split_checkpoint_metadata(split_manifest)
+    checkpoint_dir = Path(args.checkpoint_dir).expanduser().resolve()
+    resume_checkpoint_text = (
+        get_last_checkpoint(str(checkpoint_dir)) if checkpoint_dir.is_dir() else None
+    )
+    resume_checkpoint = (
+        Path(resume_checkpoint_text).resolve() if resume_checkpoint_text else None
+    )
+    if resume_checkpoint is not None:
+        validate_resume_checkpoint_split(
+            resume_checkpoint,
+            expected_metadata=split_metadata,
+        )
+    print(json.dumps(split_manifest["partition_counts"], indent=2, sort_keys=True))
     print(frame["label"].describe())
 
-    train_frame = frame[frame["partition"].eq("train")][["text", "label"]]
-    validation_frame = frame[frame["partition"].eq("validation")][["text", "label"]]
+    train_frame = frame[frame["partition"].eq(TRAIN_PARTITION)][["text", "label"]]
     if train_frame.empty:
-        raise ValueError("The patient-level split produced no training rows.")
+        raise ValueError("The patient/trial split produced no training rows.")
+    dataset_frames = {TRAIN_PARTITION: train_frame}
+    for partition in (
+        UNSEEN_PATIENT_PARTITION,
+        UNSEEN_TRIAL_PARTITION,
+        STRICT_VALIDATION_PARTITION,
+    ):
+        partition_frame = frame[frame["partition"].eq(partition)][["text", "label"]]
+        if not partition_frame.empty:
+            dataset_frames[partition] = partition_frame
+    if (
+        float(args.patient_validation_fraction) > 0.0
+        and float(args.trial_validation_fraction) > 0.0
+        and STRICT_VALIDATION_PARTITION not in dataset_frames
+    ):
+        raise ValueError(
+            "The patient/trial split produced no strict unseen-patient-and-trial "
+            "validation rows. Choose a different seed or use more labeled data."
+        )
     datasets = DatasetDict(
         {
-            "train": Dataset.from_pandas(train_frame, preserve_index=False),
-            **(
-                {
-                    "validation": Dataset.from_pandas(
-                        validation_frame,
-                        preserve_index=False,
-                    )
-                }
-                if not validation_frame.empty
-                else {}
-            ),
+            partition: Dataset.from_pandas(data, preserve_index=False)
+            for partition, data in dataset_frames.items()
         }
     )
 
@@ -3953,6 +4331,28 @@ def run_train_stage(args: argparse.Namespace) -> Path:
 
     tokenized = datasets.map(preprocess, batched=True)
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    validation_partitions = [
+        partition
+        for partition in (
+            UNSEEN_PATIENT_PARTITION,
+            UNSEEN_TRIAL_PARTITION,
+            STRICT_VALIDATION_PARTITION,
+        )
+        if partition in tokenized
+    ]
+    primary_validation_partition = (
+        STRICT_VALIDATION_PARTITION
+        if STRICT_VALIDATION_PARTITION in validation_partitions
+        else (
+            UNSEEN_TRIAL_PARTITION
+            if UNSEEN_TRIAL_PARTITION in validation_partitions
+            else (
+                UNSEEN_PATIENT_PARTITION
+                if UNSEEN_PATIENT_PARTITION in validation_partitions
+                else None
+            )
+        )
+    )
 
     class SoftLabelBCETrainer(Trainer):
         def compute_loss(
@@ -4003,27 +4403,39 @@ def run_train_stage(args: argparse.Namespace) -> Path:
     model.config.matchminer_drug_scope = "investigational_agents_only"
     model.config.matchminer_prompt_version = GOOD_OPTION_PROMPT_VERSION
     model.config.matchminer_research_use_only = True
+    model.config.matchminer_auroc_positive_threshold = float(
+        args.auroc_positive_threshold
+    )
+    for metadata_key, metadata_value in split_metadata.items():
+        setattr(model.config, metadata_key, metadata_value)
+    model.config.matchminer_primary_validation_partition = (
+        primary_validation_partition
+    )
+    model.config.matchminer_split_partition_counts = split_manifest[
+        "partition_counts"
+    ]
 
-    has_validation = "validation" in tokenized
+    has_validation = primary_validation_partition is not None
 
     def compute_metrics(eval_prediction: Any) -> dict[str, float]:
         predictions, references = eval_prediction
-        logits = np.asarray(predictions).reshape(-1)
-        labels_array = np.asarray(references).reshape(-1)
-        scores = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
-        errors = scores - labels_array
-        return {
-            "mae": float(np.mean(np.abs(errors))),
-            "rmse": float(np.sqrt(np.mean(np.square(errors)))),
-        }
+        return compute_good_option_checker_metrics(
+            predictions,
+            references,
+            auroc_positive_threshold=args.auroc_positive_threshold,
+        )
 
     training_kwargs: dict[str, Any] = {
         "output_dir": str(Path(args.checkpoint_dir).expanduser().resolve()),
         "learning_rate": args.learning_rate,
         "per_device_train_batch_size": args.train_batch_size,
         "per_device_eval_batch_size": args.eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "num_train_epochs": args.epochs,
         "weight_decay": args.weight_decay,
+        "bf16": args.bf16,
+        "gradient_checkpointing": args.gradient_checkpointing,
+        "dataloader_num_workers": args.dataloader_num_workers,
         "save_strategy": "epoch",
         "save_total_limit": 2,
         "logging_steps": args.logging_steps,
@@ -4031,6 +4443,13 @@ def run_train_stage(args: argparse.Namespace) -> Path:
         "report_to": "none",
         "seed": args.seed,
     }
+    if args.group_by_length:
+        if "train_sampling_strategy" in inspect.signature(
+            TrainingArguments
+        ).parameters:
+            training_kwargs["train_sampling_strategy"] = "group_by_length"
+        else:
+            training_kwargs["group_by_length"] = True
     if has_validation:
         strategy_name = (
             "eval_strategy"
@@ -4041,7 +4460,9 @@ def run_train_stage(args: argparse.Namespace) -> Path:
         training_kwargs.update(
             {
                 "load_best_model_at_end": True,
-                "metric_for_best_model": "mae",
+                "metric_for_best_model": (
+                    f"eval_{primary_validation_partition}_mae"
+                ),
                 "greater_is_better": False,
             }
         )
@@ -4050,23 +4471,40 @@ def run_train_stage(args: argparse.Namespace) -> Path:
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
-        eval_dataset=tokenized.get("validation") if has_validation else None,
+        eval_dataset=(
+            {
+                primary_validation_partition: tokenized[
+                    primary_validation_partition
+                ]
+            }
+            if has_validation
+            else None
+        ),
         processing_class=tokenizer,
         data_collator=collator,
         compute_metrics=compute_metrics if has_validation else None,
     )
-    checkpoint_dir = Path(args.checkpoint_dir).expanduser().resolve()
-    resume = checkpoint_dir.is_dir() and any(
-        path.name.startswith("checkpoint-") for path in checkpoint_dir.iterdir()
+    if trainer.is_world_process_zero():
+        atomic_write_json(split_manifest, checkpoint_dir / "split_manifest.json")
+    trainer.train(
+        resume_from_checkpoint=(
+            str(resume_checkpoint) if resume_checkpoint is not None else None
+        )
     )
-    trainer.train(resume_from_checkpoint=resume)
     if has_validation:
-        evaluation_metrics = trainer.evaluate()
+        evaluation_metrics = trainer.evaluate(
+            eval_dataset={
+                partition: tokenized[partition]
+                for partition in validation_partitions
+            }
+        )
         trainer.log_metrics("eval", evaluation_metrics)
         trainer.save_metrics("eval", evaluation_metrics)
     output_dir = Path(args.output_dir).expanduser().resolve()
     trainer.save_model(str(output_dir))
     tokenizer.save_pretrained(output_dir)
+    if trainer.is_world_process_zero():
+        atomic_write_json(split_manifest, output_dir / "split_manifest.json")
     print(
         f"Saved GoodOptionChecker to {output_dir}. Apply sigmoid to its single "
         "logit to obtain the normalized per-drug four-point evidence score."
@@ -4327,9 +4765,53 @@ def add_train_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--train-batch-size", type=int, default=8)
     parser.add_argument("--eval-batch-size", type=int, default=8)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--group-by-length",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Group similarly sized inputs to reduce dynamic-padding overhead.",
+    )
+    parser.add_argument("--dataloader-num-workers", type=int, default=0)
     parser.add_argument("--epochs", type=float, default=2.0)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--validation-fraction", type=float, default=0.05)
+    parser.add_argument(
+        "--patient-validation-fraction",
+        "--validation-fraction",
+        dest="patient_validation_fraction",
+        type=float,
+        default=0.20,
+        help=(
+            "Fraction of whole patient-summary groups held out. The legacy "
+            "--validation-fraction spelling remains an alias. The value must be "
+            "zero or a reciprocal fold fraction such as 0.2, 0.1, or 0.05."
+        ),
+    )
+    parser.add_argument(
+        "--trial-validation-fraction",
+        type=float,
+        default=0.20,
+        help=(
+            "Fraction of whole NCT IDs held out independently from patients. "
+            "Training uses only train-patient/train-trial rows, and the strict "
+            "validation cohort holds out both entities."
+        ),
+    )
+    parser.add_argument(
+        "--auroc-positive-threshold",
+        type=float,
+        default=0.5,
+        help=(
+            "Binarize the continuous 0-1 evidence target at this threshold for "
+            "validation AUROC; regression training is unchanged."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--logging-steps", type=int, default=50)
     parser.add_argument("--max-train-samples", type=int, default=None)

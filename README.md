@@ -132,7 +132,9 @@ python train_good_option_checker.py generate \
   --reasoning-parser auto
 
 # 2. Fit the single-logit ModernBERT checker (safe to launch with accelerate)
-accelerate launch --num_processes 8 train_good_option_checker.py train
+accelerate launch --num_processes 8 train_good_option_checker.py train \
+  --patient-validation-fraction 0.20 \
+  --trial-validation-fraction 0.20
 ```
 
 Checker training joins every patient--trial label to the exact dated research
@@ -144,6 +146,20 @@ current schema remain usable because they already store this provenance. The
 student input is ordered as patient summary, drug-focused web research, then
 registry investigational-drug context, and defaults to ModernBERT's 8,192-token
 window.
+
+Checker training independently assigns whole patient summaries and whole NCT
+IDs to fixed-seed, label-stratified group folds. The production default holds
+out one of five patient folds and one of five trial folds. Only
+train-patient/train-trial rows update the model. Evaluation reports three
+disjoint cohorts: unseen patients with seen trials, seen patients with unseen
+trials, and the primary strict cohort in which both the patient and NCT ID are
+unseen. Consequently, the NCT-level registry and web-research context in the
+strict cohort never appears in training. Because candidate observations are not
+a complete patient-by-trial Cartesian product, the resulting row percentages
+need not be exactly 64%, 16%, 16%, and 4%. The generated
+`split_manifest.json` records the held-out public NCT IDs, cohort counts, seed,
+fractions, and a candidate/partition fingerprint without storing patient text.
+Checkpoints whose fingerprint or split policy differs are not resumed.
 
 The `research` and `label` subcommands remain available for separate resumable
 runs. Because canonicalization now precedes search, `research` accepts the same
