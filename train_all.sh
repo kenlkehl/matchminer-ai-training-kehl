@@ -416,25 +416,25 @@ accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
 
 echo 16 done
 
-# Step 17 — per-drug evidence labels and GoodOptionChecker. One local teacher
-# pool uses public registry arm metadata to exclude comparator/background drugs
-# before drug-only web research, then labels grouped patient-trial examples.
+# Step 17 — build and validate the patient-free global drug catalog, label
+# scoreable patient-drug examples, and train the four-logit GoodOptionChecker.
 if skip_if_done \
-  ../models/goodoptionchecker_four_point \
+  ../models/goodoptionchecker_four_point_v2 \
   "step 17 good option checker"; then
   echo 17 skipped
 else
-  python train_good_option_checker.py generate \
+  python train_good_option_checker.py catalog \
     --model "$MODEL" \
-    --reasoning-parser "$REASONING_PARSER" \
-    --download-dir ~/models \
-    --gpus 0,1,2,3,4,5,6,7 \
-    --gpus-per-server 1 \
-    --max-model-len 50000 \
-    --gpu-memory-utilization 0.95
+    --tensor-parallel-size 8
+
+  python train_good_option_checker.py validate-catalog
+
+  python train_good_option_checker.py label \
+    --model "$MODEL" \
+    --tensor-parallel-size 8
 
   accelerate launch --num_processes 8 train_good_option_checker.py train \
     --patient-validation-fraction 0.20 \
-    --trial-validation-fraction 0.20
+    --drug-validation-fraction 0.20
   echo 17 done
 fi

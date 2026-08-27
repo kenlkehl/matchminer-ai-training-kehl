@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,2217 +9,357 @@ import pandas as pd
 import pytest
 
 import train_good_option_checker as good_option
-from remote_vllm_pool import (
-    CompletionSampling,
-    DynamicServerRegistry,
-    make_completion_work_fn,
+from matchminer_ai.good_options import (
+    RUBRIC_CRITERIA,
+    DrugSummary,
+    GoodOptionCatalog,
+    TrialDrugAssignment,
 )
 
 
-STUDY = {
-    "protocolSection": {
-        "identificationModule": {"briefTitle": "Drug A plus Drug B study"},
-        "statusModule": {"overallStatus": "RECRUITING"},
-        "designModule": {"phases": ["PHASE2"]},
-        "descriptionModule": {"briefSummary": "A combination study."},
-        "armsInterventionsModule": {
-            "interventions": [
-                {
-                    "type": "DRUG",
-                    "name": "Drug A",
-                    "description": "A targeted agent.",
-                    "otherNames": ["Agent A"],
-                },
-                {
-                    "type": "BIOLOGICAL",
-                    "name": "Drug B",
-                    "description": "An antibody.",
-                },
-                {"type": "DRUG", "name": "Placebo"},
-                {"type": "PROCEDURE", "name": "Tumor biopsy"},
+def _catalog() -> GoodOptionCatalog:
+    summary = DrugSummary(
+        drug_id="D1",
+        preferred_name="Novel Agent",
+        ncit_code="C1",
+        research_status="complete",
+        synthesis_status="ok",
+        structured_facts={},
+        good_option_summary="Novel Agent targets Marker A and has human evidence.",
+        help_me_choose_summary="Novel Agent mechanism, efficacy, and safety.",
+        evidence_count=3,
+    )
+    assignments = [
+        TrialDrugAssignment(
+            trial_id=trial_id,
+            drug_id="D1",
+            preferred_name="Novel Agent",
+            registry_name="Novel Agent",
+            intervention_type="DRUG",
+            role="investigational",
+            role_confidence="high",
+            scoreable=True,
+        )
+        for trial_id in ("NCT12345678", "NCT87654321")
+    ]
+    return GoodOptionCatalog(
+        path=Path("/tmp/catalog"),
+        manifest={"compatibility_id": "compat-v2"},
+        trial_registry=pd.DataFrame(
+            [
+                {"trial_id": trial_id, "registry_status": "ok"}
+                for trial_id in ("NCT12345678", "NCT87654321")
             ]
-        },
+        ),
+        trial_drug_index=pd.DataFrame([item.to_record() for item in assignments]),
+        drug_summaries=pd.DataFrame([summary.to_record()]),
+        drug_evidence=pd.DataFrame(),
+        drug_research_attempts=pd.DataFrame(),
+    )
+
+
+def _assessment(points: tuple[int, int, int, int]) -> dict[str, object]:
+    value: dict[str, object] = {
+        "drug_name": "Novel Agent",
+        "targeted_biomarkers": ["Marker A"],
     }
-}
+    for criterion, point in zip(RUBRIC_CRITERIA, points, strict=True):
+        value[criterion] = {
+            "point": point,
+            "rationale": f"Rationale for {criterion}.",
+        }
+    return value
 
 
-RCT_STUDY = {
-    "protocolSection": {
-        "identificationModule": {"briefTitle": "Novel-X versus standard therapy"},
-        "statusModule": {"overallStatus": "RECRUITING"},
-        "designModule": {"phases": ["PHASE3"]},
-        "descriptionModule": {"briefSummary": "A randomized treatment study."},
-        "armsInterventionsModule": {
-            "armGroups": [
-                {
-                    "label": "Experimental arm",
-                    "type": "EXPERIMENTAL",
-                    "description": "Participants receive Novel-X.",
-                    "interventionNames": ["DRUG: Novel-X"],
-                },
-                {
-                    "label": "Standard-of-care arm",
-                    "type": "ACTIVE_COMPARATOR",
-                    "description": "Participants receive Standard-Y.",
-                    "interventionNames": ["DRUG: Standard-Y"],
-                },
-            ],
-            "interventions": [
-                {
-                    "type": "DRUG",
-                    "name": "Novel-X tablets",
-                    "description": "Novel-X is administered orally.",
-                    "armGroupLabels": ["Experimental arm"],
-                },
-                {
-                    "type": "DRUG",
-                    "name": "Standard-Y",
-                    "description": "Standard systemic therapy.",
-                    "armGroupLabels": ["Standard-of-care arm"],
-                },
-            ],
-        },
-    }
-}
-
-
-def _candidate_frame(*, duplicate: bool = False) -> pd.DataFrame:
+def _labels(*, conflicting: bool = False) -> pd.DataFrame:
     rows = [
         {
-            "patient_summary": "Synthetic patient with cancer A.",
+            "candidate_id": "C1",
+            "patient_id": "P1",
+            "patient_group_id": "PG1",
+            "patient_summary": "Synthetic patient with Marker A.",
             "nct_id": "NCT12345678",
-            "this_space": "1. Cancer A treated with Drug A.",
-            "split": "train",
+            "good_option_status": "ok",
+            "drug_assessments_json": json.dumps([_assessment((1, 1, 1, 0))]),
+            "catalog_compatibility_id": "compat-v2",
+            "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
+            "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
         },
         {
-            "patient_summary": "Synthetic patient with cancer B.",
+            "candidate_id": "C2",
+            "patient_id": "P2",
+            "patient_group_id": "PG2",
+            "patient_summary": "Second synthetic patient.",
             "nct_id": "NCT87654321",
-            "this_space": "Cancer B treated with Drug B.",
-            "split": "train",
+            "good_option_status": "ok",
+            "drug_assessments_json": json.dumps([_assessment((0, 0, 0, 0))]),
+            "catalog_compatibility_id": "compat-v2",
+            "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
+            "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
         },
     ]
-    if duplicate:
-        rows.append(dict(rows[0]))
+    if conflicting:
+        rows.append(
+            {
+                **rows[0],
+                "candidate_id": "C3",
+                "nct_id": "NCT87654321",
+                "drug_assessments_json": json.dumps([_assessment((0, 0, 0, 0))]),
+            }
+        )
     return pd.DataFrame(rows)
 
 
-def _rubric_response() -> dict[str, object]:
-    return {
-        "patient_disease_type": "Cancer A",
-        "drug_assessments": [
-            {
-                "drug_name": "Drug A",
-                "targeted_biomarkers": ["Marker A"],
-                "disease_type_benefit": {
-                    "point": 1,
-                    "rationale": "Human benefit was reported in Cancer A.",
-                    "evidence_labels": ["S1"],
-                },
-                "common_biomarker_in_disease": {
-                    "point": 1,
-                    "rationale": "Marker A is common in Cancer A.",
-                    "evidence_labels": ["S2", "INVENTED"],
-                },
-                "patient_biomarker_targeted": {
-                    "point": 1,
-                    "rationale": "The tumor documents Marker A and Drug A targets it.",
-                    "evidence_labels": ["PATIENT", "CT"],
-                },
-                "biomarker_targeted_benefit": {
-                    "point": 0,
-                    "rationale": (
-                        "No human biomarker-directed benefit evidence was supplied."
-                    ),
-                    "evidence_labels": [],
-                },
-            }
-        ],
-        "key_uncertainties": ["Small study"],
-    }
-
-
-def _label_research_provenance(nct_id: str) -> dict[str, str]:
-    return {
-        "nct_id": nct_id,
-        "research_fetched_at_utc": "2026-08-24T00:00:00+00:00",
-        "research_implementation_sha256": "implementation-sha",
-        "biomarker_expression_query_version": "query-version",
-        "drug_name_normalization_prompt_version": "normalization-version",
-    }
-
-
-def _label_research_key(nct_id: str) -> good_option.ResearchSnapshotKey:
-    return good_option.research_snapshot_key(
-        nct_id=nct_id,
-        fetched_at_utc="2026-08-24T00:00:00+00:00",
-        implementation_sha256="implementation-sha",
-        biomarker_expression_query_version="query-version",
-        drug_name_normalization_prompt_version="normalization-version",
-    )
-
-
-def test_drug_query_api_structurally_excludes_patient_context() -> None:
-    query_parameters = inspect.signature(
-        good_option.build_drug_search_queries
-    ).parameters
-    experimental_query_parameters = inspect.signature(
-        good_option.build_experimental_drug_search_queries
-    ).parameters
-    normalization_parameters = inspect.signature(
-        good_option.build_drug_name_normalization_messages
-    ).parameters
-    expression_parameters = inspect.signature(
-        good_option.build_biomarker_expression_search_queries
-    ).parameters
-    research_parameters = inspect.signature(good_option.research_trials).parameters
-    enrichment_parameters = inspect.signature(
-        good_option.enrich_trial_with_biomarker_expression_research
-    ).parameters
-
-    assert list(query_parameters) == ["interventions"]
-    assert list(experimental_query_parameters) == ["interventions"]
-    assert list(normalization_parameters) == ["interventions"]
-    assert list(expression_parameters) == ["interventions"]
-    assert "patient_summary" not in research_parameters
-    assert "patient_history" not in research_parameters
-    assert "patient_summary" not in enrichment_parameters
-    assert "clinical_space_summary" not in enrichment_parameters
-    assert good_option.research_trials.__module__ == "matchminer_ai.help_me_choose"
-
-
-def test_teacher_canonicalizes_registry_qualifiers_without_inventing_names() -> None:
-    interventions = (
-        good_option.DrugIntervention(
-            name="Dose-Escalation (Part One) Agent-X capsule",
-            intervention_type="DRUG",
-            description="Participants receive Agent-X orally.",
-        ),
-        good_option.DrugIntervention(
-            name="Dose-Expansion (Part Two) Agent-X capsule",
-            intervention_type="DRUG",
-        ),
-        good_option.DrugIntervention(
-            name="Combination cohort: Agent-Y plus Agent-Z infusion",
-            intervention_type="DRUG",
-        ),
-    )
-    response = {
-        "interventions": [
-                {
-                    "source_index": 0,
-                    "experimental_role": "investigational",
-                    "canonical_drug_names": ["Agent-X"],
-                "rationale": "Agent-X appears in the registry name.",
-            },
-                {
-                    "source_index": 1,
-                    "experimental_role": "investigational",
-                    "canonical_drug_names": ["Agent-X"],
-                "rationale": "Agent-X appears in the registry name.",
-            },
-                {
-                    "source_index": 2,
-                    "experimental_role": "investigational",
-                    "canonical_drug_names": ["Agent-Y", "Agent-Z"],
-                "rationale": "Both names appear in the registry name.",
-            },
-        ]
-    }
-
-    parsed = good_option.parse_drug_name_normalization_response(
-        json.dumps(response),
-        nct_id="NCT12345678",
-        interventions=interventions,
-    )
-
-    assert parsed.status == "ok"
-    assert [item.name for item in parsed.canonical_interventions] == [
-        "Agent-X",
-        "Agent-Y",
-        "Agent-Z",
-    ]
-    assert all("Dose-" not in item.name for item in parsed.canonical_interventions)
-    assert json.loads(parsed.mappings_json)[1]["canonical_drug_names"] == ["Agent-X"]
-
-
-def test_registry_arm_context_forces_comparator_only_drug_exclusion() -> None:
-    interventions = good_option.extract_registry_drug_interventions(RCT_STUDY)
-
-    assert good_option._registry_arm_types(interventions[0]) == {"EXPERIMENTAL"}
-    assert good_option._registry_arm_types(interventions[1]) == {
-        "ACTIVE_COMPARATOR"
-    }
-    prompt = good_option.build_drug_name_normalization_messages(interventions)
-    assert "Standard-of-care arm" in prompt[1]["content"]
-
-    response = {
-        "interventions": [
-            {
-                "source_index": 0,
-                "experimental_role": "investigational",
-                "canonical_drug_names": ["Novel-X"],
-                "rationale": "Novel-X is assigned to the experimental arm.",
-            },
-            {
-                "source_index": 1,
-                "experimental_role": "investigational",
-                "canonical_drug_names": ["Standard-Y"],
-                "rationale": "Incorrectly selected.",
-            },
-        ]
-    }
-
-    parsed = good_option.parse_drug_name_normalization_response(
-        json.dumps(response),
-        nct_id="NCT12345678",
-        interventions=interventions,
-    )
-
-    assert [item.name for item in parsed.canonical_interventions] == ["Novel-X"]
-    mappings = json.loads(parsed.mappings_json)
-    assert mappings[1]["experimental_role"] == "not_investigational"
-    assert mappings[1]["control_only_exclusion"] is True
-    assert mappings[1]["canonical_drug_names"] == []
-
-
-def test_registry_fetch_retains_public_arm_context_without_web_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    requested_ids: list[str] = []
-
-    async def fake_fetch(nct_id: str, *, client: object):
-        del client
-        requested_ids.append(nct_id)
-        return RCT_STUDY
-
-    monkeypatch.setattr(good_option.help_me_choose, "fetch_trial_study", fake_fetch)
-    records = asyncio.run(
-        good_option.fetch_trial_registry_research(
-            ["NCT12345678"],
-            max_concurrency=1,
-            request_timeout=1,
-        )
-    )
-
-    assert requested_ids == ["NCT12345678"]
-    assert len(records) == 1
-    assert good_option._registry_arm_types(records[0].interventions[0]) == {
-        "EXPERIMENTAL"
-    }
-    assert good_option._registry_arm_types(records[0].interventions[1]) == {
-        "ACTIVE_COMPARATOR"
-    }
-    assert records[0].search_results == ()
-
-
-def test_registry_fetch_retries_http_429_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts = 0
-
-    async def fake_fetch(nct_id: str, *, client: object):
-        nonlocal attempts
-        del client
-        attempts += 1
-        if attempts == 1:
-            request = good_option.httpx.Request(
-                "GET",
-                f"https://clinicaltrials.gov/api/v2/studies/{nct_id}",
-            )
-            response = good_option.httpx.Response(
-                429,
-                headers={"Retry-After": "0"},
-                request=request,
-            )
-            raise good_option.httpx.HTTPStatusError(
-                "Too Many Requests",
-                request=request,
-                response=response,
-            )
-        return RCT_STUDY
-
-    monkeypatch.setattr(good_option.help_me_choose, "fetch_trial_study", fake_fetch)
-    records = asyncio.run(
-        good_option.fetch_trial_registry_research(
-            ["NCT12345678"],
-            max_concurrency=1,
-            request_timeout=1,
-            max_attempts=2,
-            minimum_request_interval=0,
-            initial_backoff=0,
-            maximum_backoff=0,
-        )
-    )
-
-    assert attempts == 2
-    assert good_option.research_status(records[0]) != "registry_lookup_failed"
-    assert records[0].title == "Novel-X versus standard therapy"
-
-
-def test_registry_fetch_does_not_retry_nontransient_http_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts = 0
-
-    async def fake_fetch(nct_id: str, *, client: object):
-        nonlocal attempts
-        del client
-        attempts += 1
-        request = good_option.httpx.Request(
-            "GET",
-            f"https://clinicaltrials.gov/api/v2/studies/{nct_id}",
-        )
-        response = good_option.httpx.Response(404, request=request)
-        raise good_option.httpx.HTTPStatusError(
-            "Not Found",
-            request=request,
-            response=response,
-        )
-
-    monkeypatch.setattr(good_option.help_me_choose, "fetch_trial_study", fake_fetch)
-    records = asyncio.run(
-        good_option.fetch_trial_registry_research(
-            ["NCT12345678"],
-            max_concurrency=1,
-            request_timeout=1,
-            max_attempts=10,
-            minimum_request_interval=0,
-        )
-    )
-
-    assert attempts == 1
-    assert good_option.research_status(records[0]) == "registry_lookup_failed"
-
-
-@pytest.mark.parametrize("reasoning_parser", ["qwen3", "gemma4"])
-def test_drug_normalization_enables_thinking_for_all_teacher_parsers(
-    monkeypatch: pytest.MonkeyPatch,
-    reasoning_parser: str,
-) -> None:
-    thinking_values: list[bool] = []
-
-    class FakeTokenizer:
-        def apply_chat_template(
-            self,
-            conversation,
-            *,
-            add_generation_prompt,
-            tokenize,
-            enable_thinking,
-        ):
-            del conversation, add_generation_prompt, tokenize
-            thinking_values.append(enable_thinking)
-            return "rendered prompt"
-
-    response = {
-        "interventions": [
-            {
-                "source_index": 0,
-                "experimental_role": "investigational",
-                "canonical_drug_names": ["Novel-X"],
-                "rationale": "The registry assigns Novel-X to the experimental arm.",
-            },
-            {
-                "source_index": 1,
-                "experimental_role": "not_investigational",
-                "canonical_drug_names": [],
-                "rationale": "Standard-Y is an active comparator.",
-            },
-        ]
-    }
-
-    async def fake_run_pool(*, work_items, shard_writer, **_kwargs):
-        shard_writer(
-            [(work_items[0][0], ("private reasoning", json.dumps(response)))],
-            0,
-        )
-        return 1
-
-    monkeypatch.setattr("remote_vllm_pool.run_pool", fake_run_pool)
-    registry_item = good_option.trial_registry_research_from_study(
-        "NCT12345678",
-        RCT_STUDY,
-    )
-    runtime = good_option.TeacherRuntime(
-        tokenizer=FakeTokenizer(),
-        registry=object(),
-        work_fn=object(),
-        local_servers=[],
-        reasoning_parser=reasoning_parser,
-    )
-
-    parsed = asyncio.run(
-        good_option.canonicalize_trial_interventions_with_teacher(
-            [registry_item],
-            runtime=runtime,
-            max_new_tokens=8000,
-            max_attempts=2,
-        )
-    )
-
-    assert thinking_values == [True]
-    assert parsed["NCT12345678"].status == "ok"
-    assert [item.name for item in parsed["NCT12345678"].canonical_interventions] == [
-        "Novel-X"
-    ]
-
-
-def test_good_option_prompt_explicitly_enables_thinking() -> None:
-    thinking_values: list[bool] = []
-
-    class FakeTokenizer:
-        def apply_chat_template(
-            self,
-            conversation,
-            *,
-            add_generation_prompt,
-            tokenize,
-            enable_thinking,
-        ):
-            del conversation, add_generation_prompt, tokenize
-            thinking_values.append(enable_thinking)
-            return "rendered prompt"
-
-    rendered = good_option.render_good_option_prompt(
-        FakeTokenizer(),
-        [{"role": "user", "content": "Synthetic patient-trial prompt"}],
-    )
-
-    assert rendered == "rendered prompt"
-    assert thinking_values == [True]
-
-
-def test_qwen_normalization_repairs_empty_final_answer_with_larger_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    thinking_values: list[bool] = []
-    rendered_conversations: list[list[dict[str, str]]] = []
-    requested_tokens: list[int] = []
-
-    class FakeTokenizer:
-        def apply_chat_template(
-            self,
-            conversation,
-            *,
-            add_generation_prompt,
-            tokenize,
-            enable_thinking,
-        ):
-            del add_generation_prompt, tokenize
-            thinking_values.append(enable_thinking)
-            rendered_conversations.append(conversation)
-            return "rendered prompt"
-
-    response = {
-        "interventions": [
-            {
-                "source_index": 0,
-                "experimental_role": "investigational",
-                "canonical_drug_names": ["Novel-X"],
-                "rationale": "Novel-X is assigned to the experimental arm.",
-            },
-            {
-                "source_index": 1,
-                "experimental_role": "not_investigational",
-                "canonical_drug_names": [],
-                "rationale": "Standard-Y is the active comparator.",
-            },
-        ]
-    }
-    pool_calls = 0
-
-    async def fake_run_pool(*, work_items, shard_writer, **_kwargs):
-        nonlocal pool_calls
-        pool_calls += 1
-        requested_tokens.append(work_items[0][1]["max_tokens"])
-        if pool_calls == 1:
-            result = (
-                "r" * 8_000,
-                "",
-                {"finish_reason": "length", "raw_text_char_count": 8_000},
-            )
-        else:
-            result = (
-                "concise reasoning",
-                json.dumps(response),
-                {"finish_reason": "stop", "raw_text_char_count": 900},
-            )
-        shard_writer([(work_items[0][0], result)], 0)
-        return 1
-
-    monkeypatch.setattr("remote_vllm_pool.run_pool", fake_run_pool)
-    registry_item = good_option.trial_registry_research_from_study(
-        "NCT12345678",
-        RCT_STUDY,
-    )
-    runtime = good_option.TeacherRuntime(
-        tokenizer=FakeTokenizer(),
-        registry=object(),
-        work_fn=object(),
-        local_servers=[],
-        reasoning_parser="qwen3",
-    )
-
-    parsed = asyncio.run(
-        good_option.canonicalize_trial_interventions_with_teacher(
-            [registry_item],
-            runtime=runtime,
-            max_new_tokens=8_000,
-            retry_max_new_tokens=24_000,
-            parse_retries=1,
-            max_attempts=2,
-        )
-    )["NCT12345678"]
-
-    assert thinking_values == [True, True]
-    assert requested_tokens == [8_000, 24_000]
-    assert "previous attempt produced no final answer" in str(
-        rendered_conversations[1]
-    ).lower()
-    assert parsed.status == "ok"
-    assert parsed.attempt_count == 2
-    assert parsed.finish_reason == "stop"
-    attempts = json.loads(parsed.attempts_json)
-    assert [item["status"] for item in attempts] == ["parse_failed", "ok"]
-    assert attempts[0]["finish_reason"] == "length"
-    assert attempts[0]["reasoning_char_count"] == 8_000
-
-
-def test_experimental_arm_drug_is_preserved_after_many_comparators() -> None:
-    study = json.loads(json.dumps(RCT_STUDY))
-    module = study["protocolSection"]["armsInterventionsModule"]
-    controls = [
-        {
-            "type": "DRUG",
-            "name": f"Standard-{index}",
-            "armGroupLabels": ["Standard-of-care arm"],
-        }
-        for index in range(8)
-    ]
-    novel = module["interventions"][0]
-    module["interventions"] = [*controls, novel]
-
-    interventions = good_option.extract_registry_drug_interventions(study)
-
-    assert interventions[0].name == "Novel-X tablets"
-    assert "Novel-X tablets" in {item.name for item in interventions}
-
-
-def test_noninvestigational_standard_background_drug_is_not_searched(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    interventions = good_option.extract_registry_drug_interventions(RCT_STUDY)
-    registry = good_option.trial_registry_research_from_study(
-        "NCT12345678",
-        RCT_STUDY,
-    )
-    normalization = good_option.parse_drug_name_normalization_response(
-        json.dumps(
-            {
-                "interventions": [
-                    {
-                        "source_index": 0,
-                        "experimental_role": "investigational",
-                        "canonical_drug_names": ["Novel-X"],
-                        "rationale": "Experimental arm agent.",
-                    },
-                    {
-                        "source_index": 1,
-                        "experimental_role": "not_investigational",
-                        "canonical_drug_names": [],
-                        "rationale": "Active comparator only.",
-                    },
-                ]
-            }
-        ),
-        nct_id=registry.nct_id,
-        interventions=interventions,
-    )
-    captured_queries: list[str] = []
-
-    def fake_search(queries):
-        captured_queries.extend(queries)
-        return (), ()
-
-    async def run_inline(function, *args):
-        return function(*args)
-
-    monkeypatch.setattr(good_option.asyncio, "to_thread", run_inline)
-    researched = asyncio.run(
-        good_option.research_canonical_drug_names(
-            registry,
-            normalization,
-            search_function=fake_search,
-        )
-    )
-
-    assert [item.name for item in researched.interventions] == ["Novel-X"]
-    assert captured_queries == [
-        '"Novel-X" oncology mechanism efficacy safety clinical trial'
-    ]
-    assert all("Standard-Y" not in query for query in captured_queries)
-
-
-def test_control_only_trial_is_terminal_without_web_search() -> None:
-    comparator = good_option.extract_registry_drug_interventions(RCT_STUDY)[1]
-    registry = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        interventions=(comparator,),
-    )
-    normalization = good_option.parse_drug_name_normalization_response(
-        json.dumps(
-            {
-                "interventions": [
-                    {
-                        "source_index": 0,
-                        "experimental_role": "investigational",
-                        "canonical_drug_names": ["Standard-Y"],
-                        "rationale": "Incorrect teacher selection.",
-                    }
-                ]
-            }
-        ),
-        nct_id=registry.nct_id,
-        interventions=registry.interventions,
-    )
-    captured_queries: list[str] = []
-
-    def fake_search(queries):
-        captured_queries.extend(queries)
-        return (), ()
-
-    researched = asyncio.run(
-        good_option.research_canonical_drug_names(
-            registry,
-            normalization,
-            search_function=fake_search,
-        )
-    )
-
-    assert normalization.status == "no_experimental_interventions"
-    assert researched.interventions == ()
-    assert captured_queries == []
-    assert good_option.research_status(researched) == (
-        "no_experimental_drug_intervention"
-    )
-
-
-def test_valid_all_uncertain_answer_is_terminal_not_a_quality_failure() -> None:
-    intervention = good_option.DrugIntervention(
-        name="HSCT with conditioning regimen",
-        intervention_type="BIOLOGICAL",
-    )
-    registry = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        interventions=(intervention,),
-    )
-    normalization = good_option.parse_drug_name_normalization_response(
-        json.dumps(
-            {
-                "interventions": [
-                    {
-                        "source_index": 0,
-                        "experimental_role": "uncertain",
-                        "canonical_drug_names": [],
-                        "rationale": (
-                            "The registry does not identify a named experimental "
-                            "drug in this regimen."
-                        ),
-                    }
-                ]
-            }
-        ),
-        nct_id=registry.nct_id,
-        interventions=registry.interventions,
-    )
-    captured_queries: list[str] = []
-
-    def fake_search(queries):
-        captured_queries.extend(queries)
-        return (), ()
-
-    good_option.validate_normalization_batch(
-        [registry],
-        {registry.nct_id: normalization},
-        maximum_failure_fraction=0.0,
-        context="all-uncertain test",
-    )
-    researched = asyncio.run(
-        good_option.research_canonical_drug_names(
-            registry,
-            normalization,
-            search_function=fake_search,
-        )
-    )
-    record = good_option.research_to_record(
-        researched,
-        normalization=normalization,
-    )
-    summary = good_option.validate_research_quality(
-        [record],
-        maximum_registry_failure_fraction=0.0,
-        maximum_normalization_failure_fraction=0.0,
-        context="all-uncertain test",
-    )
-
-    assert normalization.status == "no_identifiable_experimental_drug"
-    assert captured_queries == []
-    assert good_option.research_status(researched) == (
-        "no_experimental_drug_intervention"
-    )
-    assert summary.normalization_failures == 0
-
-
-def test_trial_without_structured_drug_is_terminal_without_web_search() -> None:
-    registry = good_option.TrialDrugResearch(nct_id="NCT12345678")
-    normalization = good_option.parse_drug_name_normalization_response(
-        "",
-        nct_id=registry.nct_id,
-        interventions=(),
-    )
-
-    def unexpected_search(_queries):
-        raise AssertionError("A no-drug trial must not issue a web search.")
-
-    researched = asyncio.run(
-        good_option.research_canonical_drug_names(
-            registry,
-            normalization,
-            search_function=unexpected_search,
-        )
-    )
-
-    assert normalization.status == "no_interventions"
-    assert researched.interventions == ()
-    assert good_option.research_status(researched) == (
-        "no_experimental_drug_intervention"
-    )
-
-
-def test_teacher_name_not_supported_by_registry_text_falls_back() -> None:
-    intervention = good_option.DrugIntervention(
-        name="Dose cohort: Agent-X tablet",
-        intervention_type="DRUG",
-    )
-    response = {
-        "interventions": [
-            {
-                "source_index": 0,
-                "experimental_role": "investigational",
-                "canonical_drug_names": ["Invented-Y"],
-                "rationale": "Unsupported guess.",
-            }
-        ]
-    }
-
-    parsed = good_option.parse_drug_name_normalization_response(
-        json.dumps(response),
-        nct_id="NCT12345678",
-        interventions=(intervention,),
-    )
-
-    assert parsed.status == "partial_fallback"
-    assert parsed.canonical_interventions == (intervention,)
-    assert "unsupported name" in parsed.parse_error
-    assert json.loads(parsed.mappings_json)[0]["used_fallback"] is True
-
-
-def test_canonical_drug_names_become_literal_search_terms(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registry_intervention = good_option.DrugIntervention(
-        name="Dose-Escalation (Part One) Agent-X capsule",
-        intervention_type="DRUG",
-    )
-    registry = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        interventions=(registry_intervention,),
-    )
-    normalization = good_option.parse_drug_name_normalization_response(
-        json.dumps(
-            {
-                "interventions": [
-                    {
-                        "source_index": 0,
-                        "experimental_role": "investigational",
-                        "canonical_drug_names": ["Agent-X"],
-                        "rationale": "Supported by the registry name.",
-                    }
-                ]
-            }
-        ),
-        nct_id=registry.nct_id,
-        interventions=registry.interventions,
-    )
-    captured_queries: list[str] = []
-
-    def fake_search(queries):
-        captured_queries.extend(queries)
-        return (), ()
-
-    async def run_inline(function, *args):
-        return function(*args)
-
-    monkeypatch.setattr(good_option.asyncio, "to_thread", run_inline)
-
-    researched = asyncio.run(
-        good_option.research_canonical_drug_names(
-            registry,
-            normalization,
-            search_function=fake_search,
-        )
-    )
-
-    assert captured_queries == [
-        '"Agent-X" oncology mechanism efficacy safety clinical trial'
-    ]
-    assert [item.name for item in researched.interventions] == ["Agent-X"]
-    assert all("Dose-Escalation" not in query for query in captured_queries)
-
-
-def test_biomarker_expression_queries_use_only_drug_names() -> None:
-    queries = good_option.build_biomarker_expression_search_queries(
-        good_option.extract_drug_interventions(STUDY)
-    )
-
-    assert queries == (
-        '"Drug A" oncology molecular target biomarker expression prevalence '
-        "across cancer types",
-        '"Drug B" oncology molecular target biomarker expression prevalence '
-        "across cancer types",
-    )
-
-
-def test_web_queries_are_chunked_so_later_drugs_are_not_starved() -> None:
-    calls: list[tuple[str, ...]] = []
-
-    def fake_search(queries):
-        calls.append(tuple(queries))
-        return (
-            tuple(
-                good_option.DrugSearchResult(
-                    query=query,
-                    title=query,
-                    snippet="Evidence",
-                    url=f"https://example.org/{index}-{len(calls)}",
-                )
-                for index, query in enumerate(queries)
-            ),
-            (),
-        )
-
-    queries = tuple(f"drug-{index}" for index in range(7))
-    results, notices = good_option._search_query_chunks(fake_search, queries)
-
-    assert [len(call) for call in calls] == [3, 3, 1]
-    assert [item.query for item in results] == list(queries)
-    assert notices == ()
-
-
-def test_training_queries_preserve_every_selected_canonical_drug() -> None:
-    interventions = tuple(
-        good_option.DrugIntervention(f"Experimental-{index}", "DRUG")
-        for index in range(10)
-    )
-
-    baseline = good_option.build_experimental_drug_search_queries(interventions)
-    expression = good_option.build_biomarker_expression_search_queries(interventions)
-
-    assert len(baseline) == 10
-    assert len(expression) == 10
-    assert "Experimental-9" in baseline[-1]
-    assert "Experimental-9" in expression[-1]
-
-
-def test_extracts_only_non_placebo_drug_interventions() -> None:
-    interventions = good_option.extract_drug_interventions(STUDY)
-
-    assert [item.name for item in interventions] == ["Drug A", "Drug B"]
-    assert [item.intervention_type for item in interventions] == [
-        "DRUG",
-        "BIOLOGICAL",
-    ]
-
-
-def test_patient_text_enters_after_drug_only_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured_queries: list[str] = []
-
-    async def fake_fetch(_nct_id: str, *, client: object):
-        del client
-        return STUDY
-
-    def fake_search(queries):
-        captured_queries.extend(queries)
-        return (
-            (
-                good_option.DrugSearchResult(
-                    query=queries[0],
-                    title="Drug A results",
-                    snippet="Reported findings.",
-                    url="https://example.org/drug-a",
-                ),
-            ),
-            (),
-        )
-
-    async def run_inline(function, *args):
-        return function(*args)
-
-    monkeypatch.setattr(good_option.help_me_choose, "fetch_trial_study", fake_fetch)
-    monkeypatch.setattr(good_option.asyncio, "to_thread", run_inline)
-    research = asyncio.run(
-        good_option.research_trial_drugs(
-            "NCT12345678",
-            client=object(),
-            search_function=fake_search,
-        )
-    )
-    research = asyncio.run(
-        good_option.enrich_trial_with_biomarker_expression_research(
-            research,
-            search_function=fake_search,
-        )
-    )
-    marker = "PRIVATE_PATIENT_MARKER"
-    messages = good_option.build_good_option_messages(
-        patient_summary=f"Synthetic patient {marker}",
-        research=research,
-    )
-    prompt_text = messages[1]["content"].lower()
-
-    assert captured_queries
-    assert all(marker not in query for query in captured_queries)
-    assert any("biomarker expression prevalence" in query for query in captured_queries)
-    assert marker in messages[1]["content"]
-    assert "four-criterion evidence rubric" in messages[0]["content"].lower()
-    assert "do not score eligibility" in messages[0]["content"].lower()
-    assert "untrusted" in messages[0]["content"].lower()
-    assert "patient_disease_type" in messages[1]["content"]
-    assert "full relevant disease and histology population" in prompt_text
-    assert "defined independently of the biomarker being scored" in prompt_text
-    assert (
-        "common within a biomarker-positive subgroup does not establish" in prompt_text
-    )
-    assert "state the population and denominator in the rationale" in prompt_text
-
-
-def test_good_option_response_parser_derives_four_point_score() -> None:
-    parsed = good_option.parse_good_option_response(
-        json.dumps(_rubric_response()),
-        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
-        biomarker_expression_evidence_labels={"S2"},
-    )
-
-    assert parsed.status == "ok"
-    assert parsed.drug_count == 1
-    assert parsed.total_points == 3
-    assert parsed.max_points == 4
-    assert parsed.score_0_1 == pytest.approx(0.75)
-    assert parsed.point_disease_type_benefit == 1
-    assert parsed.point_common_biomarker_in_disease == 1
-    assert parsed.point_patient_biomarker_targeted == 1
-    assert parsed.point_biomarker_targeted_benefit == 0
-    assert json.loads(parsed.uncertainties_json) == ["Small study"]
-    assert json.loads(parsed.evidence_common_biomarker_in_disease_json) == [
-        {"drug_name": "Drug A", "evidence_labels": ["S2"]}
-    ]
-
-
-def test_multidrug_response_is_normalized_by_four_times_drug_count() -> None:
-    response = _rubric_response()
-    second = json.loads(json.dumps(response["drug_assessments"][0]))  # type: ignore[index]
-    second["drug_name"] = "Drug B"
-    second["targeted_biomarkers"] = ["Marker B"]
-    second["common_biomarker_in_disease"]["point"] = 0
-    second["common_biomarker_in_disease"]["evidence_labels"] = []
-    second["patient_biomarker_targeted"]["point"] = 0
-    second["patient_biomarker_targeted"]["evidence_labels"] = []
-    response["drug_assessments"].append(second)  # type: ignore[union-attr]
-
-    parsed = good_option.parse_good_option_response(
-        json.dumps(response),
-        expected_drug_names=["Drug A", "Drug B"],
-        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
-        biomarker_expression_evidence_labels={"S2"},
-    )
-
-    assert parsed.status == "ok"
-    assert parsed.drug_count == 2
-    assert parsed.total_points == 4
-    assert parsed.max_points == 8
-    assert parsed.score_0_1 == pytest.approx(0.5)
-    assert len(json.loads(parsed.drug_assessments_json)) == 2
-
-
-def test_multidrug_response_requires_exactly_one_assessment_per_drug() -> None:
-    parsed = good_option.parse_good_option_response(
-        json.dumps(_rubric_response()),
-        expected_drug_names=["Drug A", "Drug B"],
-    )
-
-    assert parsed.status == "parse_failed"
-    assert "missing=['Drug B']" in parsed.parse_error
-
-
-def test_label_stage_transport_batches_independent_single_patient_prompts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    candidates = pd.DataFrame(
-        [
-            {
-                "patient_summary": "Synthetic patient A with Cancer A.",
-                "nct_id": "NCT12345678",
-                "this_space": "1. First matching space.",
-                "split": "train",
-            },
-            {
-                "patient_summary": "Synthetic patient A with Cancer A.",
-                "nct_id": "NCT12345678",
-                "this_space": "2. Duplicate trial through another space.",
-                "split": "train",
-            },
-            {
-                "patient_summary": "Synthetic patient B with Cancer B.",
-                "nct_id": "NCT12345678",
-                "this_space": "3. Third matching space.",
-                "split": "train",
-            },
-        ]
-    )
-    candidate_path = tmp_path / "top_patients_tocheck_round1.parquet"
-    candidates.to_parquet(candidate_path, index=False)
-    research = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        title="Drug A trial",
-        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
-        search_results=(
-            good_option.DrugSearchResult(
-                query='"Drug A" oncology mechanism efficacy safety clinical trial',
-                title="Benefit",
-                snippet="Human benefit in Cancer A.",
-                url="https://example.org/benefit",
-            ),
-            good_option.DrugSearchResult(
-                query=(
-                    '"Drug A" oncology molecular target biomarker expression '
-                    "prevalence across cancer types"
-                ),
-                title="Expression",
-                snippet="Marker A prevalence.",
-                url="https://example.org/expression",
-            ),
-        ),
-    )
-    research_output = tmp_path / "research.parquet"
-    pd.DataFrame([good_option.research_to_record(research)]).to_parquet(
-        research_output,
-        index=False,
-    )
-
-    class FakeTokenizer:
-        def apply_chat_template(self, conversation, **_kwargs):
-            return conversation[-1]["content"]
-
-    submitted_request_count = 0
-    submitted_prompts: list[str] = []
-    submitted_max_tokens: list[int] = []
-    submitted_timeouts: list[float] = []
-
-    async def fake_run_pool(*, work_items, shard_writer, starting_shard_idx, **_kwargs):
-        nonlocal submitted_request_count
-        payload = []
-        for request_id, request in work_items:
-            submitted_request_count += 1
-            assert isinstance(request["prompt"], list)
-            submitted_prompts.extend(request["prompt"])
-            submitted_max_tokens.append(request["max_tokens"])
-            submitted_timeouts.append(request["request_timeout"])
-            completion_results = []
-            for prompt in request["prompt"]:
-                _instructions, prompt_json = prompt.split("\n\n", 1)
-                prompt_payload = json.loads(prompt_json)
-                assert "patient_context_private_to_configured_llm" in prompt_payload
-                assert "patient_trials_private_to_configured_llm" not in prompt_payload
-                response = _rubric_response()
-                if "Synthetic patient B" in prompt:
-                    response["patient_disease_type"] = "Cancer B"
-                completion_results.append(
-                    ("", json.dumps(response))
-                )
-            payload.append((request_id, completion_results))
-        shard_writer(payload, starting_shard_idx)
-        return len(payload)
-
-    monkeypatch.setattr("remote_vllm_pool.run_pool", fake_run_pool)
-    args = SimpleNamespace(
-        research_output=str(research_output),
-        research_shards_dir=str(tmp_path / "research_shards"),
-        label_output=str(tmp_path / "labels.parquet"),
-        label_shards_dir=str(tmp_path / "label_shards"),
-        scan_batch_size=10,
-        submission_batch_size=10,
-        max_candidates=None,
-        prompts_per_vllm_request=4,
-        max_new_tokens=100_000,
-        label_request_timeout=7_200.0,
-        results_per_shard=200,
-        max_attempts=2,
-        store_reasoning=False,
-        model="teacher-model",
-    )
-    runtime = good_option.TeacherRuntime(
-        tokenizer=FakeTokenizer(),
-        registry=object(),
-        work_fn=object(),
-        local_servers=[],
-    )
-
-    output = asyncio.run(
-        good_option.run_label_stage(args, [candidate_path], runtime=runtime)
-    )
-    labels = pd.read_parquet(output)
-
-    assert submitted_request_count == 1
-    assert len(submitted_prompts) == 2
-    assert all(
-        not (
-            "Synthetic patient A" in prompt and "Synthetic patient B" in prompt
-        )
-        for prompt in submitted_prompts
-    )
-    assert submitted_max_tokens == [100_000]
-    assert submitted_timeouts == [7_200.0]
-    assert len(labels) == 2
-    assert labels["candidate_id"].is_unique
-    assert "this_space" not in labels.columns
-    assert labels["good_option_label_status"].eq("ok").all()
-
-
-def test_label_stage_refuses_research_failure_as_patient_label(
-    tmp_path: Path,
-) -> None:
-    candidates = pd.DataFrame(
-        [
-            {
-                "patient_summary": "Synthetic patient A.",
-                "nct_id": "NCT12345678",
-                "this_space": "Synthetic space A.",
-                "split": "train",
-            },
-            {
-                "patient_summary": "Synthetic patient B.",
-                "nct_id": "NCT87654321",
-                "this_space": "Synthetic space B.",
-                "split": "train",
-            },
-        ]
-    )
-    candidate_path = tmp_path / "top_patients_tocheck_round1.parquet"
-    candidates.to_parquet(candidate_path, index=False)
-    intervention = good_option.DrugIntervention("Experimental-X", "DRUG")
-    good_normalization = good_option.DrugNameNormalization(
-        nct_id="NCT12345678",
-        registry_interventions=(intervention,),
-        canonical_interventions=(intervention,),
-        status="ok",
-    )
-    failed_normalization = good_option.DrugNameNormalization(
-        nct_id="NCT87654321",
-        registry_interventions=(intervention,),
-        canonical_interventions=(),
-        status="parse_failed",
-        parse_error="Empty teacher answer.",
-    )
-    research_output = tmp_path / "research.parquet"
+def test_candidate_loading_ignores_space_text_and_deduplicates(tmp_path: Path) -> None:
+    path = tmp_path / "candidates.parquet"
     pd.DataFrame(
         [
-            good_option.research_to_record(
-                good_option.TrialDrugResearch(
-                    nct_id="NCT12345678",
-                    interventions=(intervention,),
-                ),
-                normalization=good_normalization,
-            ),
-            good_option.research_to_record(
-                good_option.TrialDrugResearch(nct_id="NCT87654321"),
-                normalization=failed_normalization,
-            ),
+            {
+                "pseudo_mrn": "P1",
+                "patient_summary": "Synthetic patient",
+                "nct_id": "nct12345678",
+                "this_space": "MUST_NOT_ENTER_GOOD_OPTION",
+                "split": "train",
+            },
+            {
+                "pseudo_mrn": "P1",
+                "patient_summary": "Synthetic patient",
+                "nct_id": "NCT12345678",
+                "this_space": "Different space",
+                "split": "train",
+            },
         ]
-    ).to_parquet(research_output, index=False)
-    args = SimpleNamespace(
-        prompts_per_vllm_request=1,
-        max_new_tokens=100_000,
-        label_request_timeout=7_200.0,
-        research_output=str(research_output),
-        research_shards_dir=str(tmp_path / "research_shards"),
-        scan_batch_size=10,
-        max_registry_failure_fraction=1.0,
-        max_drug_normalization_failure_fraction=1.0,
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match="Infrastructure/teacher failures are not patient labels",
-    ):
-        asyncio.run(good_option.run_label_stage(args, [candidate_path]))
-
-    assert not (tmp_path / "label_shards").exists()
-
-
-def test_old_holistic_score_response_is_rejected() -> None:
-    parsed = good_option.parse_good_option_response('{"score": 72}')
-
-    assert parsed.status == "parse_failed"
-    assert pd.isna(parsed.score_0_1)
-
-
-@pytest.mark.parametrize("point", [-1, 2, "unknown", True])
-def test_good_option_response_parser_rejects_invalid_points(point: object) -> None:
-    response = _rubric_response()
-    response["drug_assessments"][0]["disease_type_benefit"]["point"] = point  # type: ignore[index]
-    parsed = good_option.parse_good_option_response(json.dumps(response))
-
-    assert parsed.status == "parse_failed"
-    assert pd.isna(parsed.score_0_1)
-
-
-def test_awarded_point_requires_criterion_specific_evidence() -> None:
-    response = _rubric_response()
-    response["drug_assessments"][0]["common_biomarker_in_disease"][  # type: ignore[index]
-        "evidence_labels"
-    ] = ["PATIENT"]
-
-    parsed = good_option.parse_good_option_response(json.dumps(response))
-
-    assert parsed.status == "ok"
-    assert parsed.point_common_biomarker_in_disease == 0
-    assessments = json.loads(parsed.drug_assessments_json)
-    assert (
-        "Validator reset this point to 0"
-        in assessments[0]["common_biomarker_in_disease"]["rationale"]
-    )
-
-
-def test_common_biomarker_point_requires_expression_research_source() -> None:
-    parsed = good_option.parse_good_option_response(
-        json.dumps(_rubric_response()),
-        allowed_evidence_labels={"PATIENT", "CT", "S1", "S2"},
-        biomarker_expression_evidence_labels={"S3"},
-    )
-
-    assert parsed.status == "ok"
-    assert parsed.point_common_biomarker_in_disease == 0
-    assessments = json.loads(parsed.drug_assessments_json)
-    assert (
-        "target-expression research source"
-        in assessments[0]["common_biomarker_in_disease"]["rationale"]
-    )
-
-
-def test_candidate_stream_deduplicates_across_top_files(tmp_path: Path) -> None:
-    first = tmp_path / "top_cohorts_tocheck_round1.parquet"
-    second = tmp_path / "top_patients_tocheck_round1.parquet"
-    _candidate_frame(duplicate=True).to_parquet(first, index=False)
-    second_frame = _candidate_frame().iloc[[0]].copy()
-    second_frame["this_space"] = "2. A second space for the same patient and trial."
-    second_frame.to_parquet(second, index=False)
-
-    batches = list(
-        good_option.iter_unique_candidate_batches(
-            [first, second],
-            scan_batch_size=2,
-            submission_batch_size=2,
-        )
-    )
-    combined = pd.concat(batches, ignore_index=True)
-
-    assert len(combined) == 2
-    assert combined["candidate_id"].is_unique
-    assert combined.loc[0, "this_space"] == "Cancer A treated with Drug A."
-
-
-def test_custom_candidate_path_requires_non_phi_confirmation(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data" / "no_phi"
-    data_dir.mkdir(parents=True)
-    outside = tmp_path / "possibly_sensitive.parquet"
-    _candidate_frame().to_parquet(outside, index=False)
+    ).to_parquet(path, index=False)
 
     with pytest.raises(ValueError, match="confirm-inputs-are-non-phi"):
-        good_option.resolve_candidate_paths(
-            data_dir,
-            [str(outside)],
-            confirm_inputs_are_non_phi=False,
-        )
-
-
-def test_research_record_round_trip() -> None:
-    research = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        title="Synthetic trial",
-        phases=("PHASE2",),
-        interventions=(good_option.DrugIntervention("Drug A", "DRUG", "Description"),),
-        search_results=(
-            good_option.DrugSearchResult(
-                query='"Drug A" oncology mechanism efficacy safety clinical trial',
-                title="Result",
-                snippet="Snippet",
-                url="https://example.org/result",
-            ),
-        ),
+        good_option.load_candidates([path])
+    loaded = good_option.load_candidates(
+        [path], confirm_inputs_are_non_phi=True
     )
 
-    record = good_option.research_to_record(
-        research,
-        fetched_at_utc="2026-08-19T00:00:00+00:00",
-    )
-    restored = good_option.research_from_record(record)
-
-    assert restored == research
-    assert record["fetched_at_utc"] == "2026-08-19T00:00:00+00:00"
-    assert len(record["research_implementation_sha256"]) == 64
-    assert (
-        record["biomarker_expression_query_version"]
-        == good_option.BIOMARKER_EXPRESSION_QUERY_VERSION
-    )
-    assert (
-        record["drug_name_normalization_prompt_version"]
-        == good_option.DRUG_NAME_NORMALIZATION_PROMPT_VERSION
-    )
+    assert len(loaded) == 1
+    assert loaded.loc[0, "nct_id"] == "NCT12345678"
+    assert "this_space" not in loaded.columns
 
 
-def test_research_record_preserves_registry_and_canonical_names() -> None:
-    registry_intervention = good_option.DrugIntervention(
-        name="Dose-Escalation Agent-X capsule",
-        intervention_type="DRUG",
-    )
-    canonical_intervention = good_option.DrugIntervention(
-        name="Agent-X",
-        intervention_type="DRUG",
-    )
-    normalization = good_option.DrugNameNormalization(
-        nct_id="NCT12345678",
-        registry_interventions=(registry_intervention,),
-        canonical_interventions=(canonical_intervention,),
-        mappings_json=json.dumps(
-            [
-                {
-                    "source_index": 0,
-                    "registry_name": registry_intervention.name,
-                    "canonical_drug_names": [canonical_intervention.name],
-                    "used_fallback": False,
-                }
-            ]
-        ),
-        status="ok",
-        raw_response='{"interventions": []}',
-    )
-    research = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        interventions=(canonical_intervention,),
-    )
+def test_nct_id_file_accepts_text_csv_and_parquet(tmp_path: Path) -> None:
+    text = tmp_path / "ids.txt"
+    text.write_text("NCT12345678\n# comment\nNCT87654321\n", encoding="utf-8")
+    csv = tmp_path / "ids.csv"
+    pd.DataFrame({"trial_id": ["NCT12345678"]}).to_csv(csv, index=False)
+    parquet = tmp_path / "ids.parquet"
+    pd.DataFrame({"nct_id": ["NCT87654321"]}).to_parquet(parquet, index=False)
 
-    record = good_option.research_to_record(
-        research,
-        normalization=normalization,
-        teacher_model="teacher-model",
-    )
-
-    assert json.loads(record["registry_interventions_json"])[0]["name"] == (
-        registry_intervention.name
-    )
-    assert json.loads(record["interventions_json"])[0]["name"] == "Agent-X"
-    assert record["drug_name_normalization_status"] == "ok"
-    assert record["drug_name_normalization_teacher_model"] == "teacher-model"
-
-
-def test_research_quality_gate_rejects_registry_outage() -> None:
-    records = []
-    for index in range(10):
-        research = good_option.TrialDrugResearch(
-            nct_id=f"NCT{index:08d}",
-            notices=("ClinicalTrials.gov lookup failed: HTTP 429",),
-        )
-        records.append(good_option.research_to_record(research))
-
-    with pytest.raises(RuntimeError, match="registry failure fraction 100.0%"):
-        good_option.validate_research_quality(
-            records,
-            maximum_registry_failure_fraction=0.05,
-            maximum_normalization_failure_fraction=0.10,
-            context="test outage",
-        )
-
-
-def test_research_quality_gate_rejects_empty_teacher_answers() -> None:
-    registry_intervention = good_option.DrugIntervention(
-        "Experimental-X",
-        "DRUG",
-    )
-    records = []
-    for index in range(10):
-        nct_id = f"NCT{index:08d}"
-        normalization = good_option.DrugNameNormalization(
-            nct_id=nct_id,
-            registry_interventions=(registry_intervention,),
-            canonical_interventions=(),
-            status="parse_failed",
-            parse_error="No valid interventions JSON object was found.",
-        )
-        records.append(
-            good_option.research_to_record(
-                good_option.TrialDrugResearch(nct_id=nct_id),
-                normalization=normalization,
-            )
-        )
-
-    with pytest.raises(
-        RuntimeError,
-        match="technical drug-normalization failure fraction 100.0%",
-    ):
-        good_option.validate_research_quality(
-            records,
-            maximum_registry_failure_fraction=0.05,
-            maximum_normalization_failure_fraction=0.10,
-            context="test empty answers",
-        )
-
-
-def test_technical_normalization_diagnostics_are_persisted(
-    tmp_path: Path,
-) -> None:
-    intervention = good_option.DrugIntervention("Experimental-X", "DRUG")
-    registry = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        title="Experimental-X trial",
-        interventions=(intervention,),
-    )
-    attempts = [
-        {
-            "attempt": 1,
-            "max_tokens": 8_000,
-            "status": "parse_failed",
-            "finish_reason": "length",
-        }
+    assert good_option._read_nct_ids_file(text) == [
+        "NCT12345678",
+        "NCT87654321",
     ]
-    normalization = good_option.DrugNameNormalization(
-        nct_id=registry.nct_id,
-        registry_interventions=(intervention,),
-        canonical_interventions=(),
-        status="parse_failed",
-        raw_response="",
-        parse_error="No valid interventions JSON object was found.",
-        attempt_count=1,
-        attempts_json=json.dumps(attempts),
-        finish_reason="length",
-        reasoning_char_count=8_000,
+    assert good_option._read_nct_ids_file(csv) == ["NCT12345678"]
+    assert good_option._read_nct_ids_file(parquet) == ["NCT87654321"]
+
+
+def test_catalog_id_derivation_reads_candidate_nct_column_only(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate_ids.parquet"
+    pd.DataFrame({"nct_id": ["nct12345678", "NCT87654321"]}).to_parquet(
+        candidate, index=False
+    )
+    args = good_option.build_parser().parse_args(
+        ["catalog", "--candidate-files", str(candidate)]
     )
 
-    output = good_option.write_normalization_failure_diagnostics(
-        registry_items=[registry],
-        normalizations={registry.nct_id: normalization},
-        research_shards_dir=tmp_path / "research_shards",
-        teacher_model="teacher-model",
-        batch_number=1,
+    assert good_option.resolve_nct_ids(args) == (
+        "NCT12345678",
+        "NCT87654321",
     )
 
-    assert output is not None
-    frame = pd.read_parquet(output)
-    assert frame.loc[0, "nct_id"] == "NCT12345678"
-    assert frame.loc[0, "normalization_finish_reason"] == "length"
-    assert frame.loc[0, "normalization_attempt_count"] == 1
-    assert json.loads(frame.loc[0, "normalization_attempts_json"]) == attempts
-    assert "patient" not in " ".join(frame.columns).lower()
 
+def test_flattening_creates_one_four_target_row_per_patient_drug() -> None:
+    flattened = good_option.flatten_patient_drug_labels(_labels(), _catalog())
 
-def test_research_quality_gate_allows_confirmed_control_only_trial() -> None:
-    registry_intervention = good_option.DrugIntervention("Standard-Y", "DRUG")
-    normalization = good_option.DrugNameNormalization(
-        nct_id="NCT12345678",
-        registry_interventions=(registry_intervention,),
-        canonical_interventions=(),
-        status="no_experimental_interventions",
-    )
-    research = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        notices=(
-            "No investigational drug or biological agent was identified; "
-            "comparator/background interventions were not searched.",
-        ),
-    )
-    record = good_option.research_to_record(
-        research,
-        normalization=normalization,
+    assert len(flattened) == 2
+    assert flattened.loc[0, "drug_id"] == "D1"
+    assert all(len(value) == 4 for value in flattened["labels"])
+    assert "NCT12345678" not in flattened.loc[0, "checker_text"]
+    assert "http" not in flattened.loc[0, "checker_text"]
+    assert flattened.loc[0, "checker_text"].index(
+        "Patient cancer history"
+    ) < flattened.loc[0, "checker_text"].index(
+        "Investigational drug evidence summary"
     )
 
-    summary = good_option.validate_research_quality(
-        [record],
-        maximum_registry_failure_fraction=0.05,
-        maximum_normalization_failure_fraction=0.10,
-        context="test control-only trial",
-    )
 
-    assert summary.confirmed_no_experimental_drug_trials == 1
-    assert summary.normalization_failures == 0
-
-
-def test_research_map_rejects_stale_expression_query_cache(tmp_path: Path) -> None:
-    research = good_option.TrialDrugResearch(nct_id="NCT12345678")
-    record = good_option.research_to_record(research)
-    record["biomarker_expression_query_version"] = "stale-version"
-    output = tmp_path / "research.parquet"
-    pd.DataFrame([record]).to_parquet(output, index=False)
-
-    loaded = good_option._research_map(output, tmp_path / "missing-shards")
-
-    assert loaded == {}
-
-
-def test_research_map_rejects_stale_name_normalization_cache(tmp_path: Path) -> None:
-    research = good_option.TrialDrugResearch(nct_id="NCT12345678")
-    record = good_option.research_to_record(research)
-    record["drug_name_normalization_prompt_version"] = "stale-version"
-    output = tmp_path / "research.parquet"
-    pd.DataFrame([record]).to_parquet(output, index=False)
-
-    loaded = good_option._research_map(output, tmp_path / "missing-shards")
-
-    assert loaded == {}
-
-
-def test_label_resume_uses_only_current_successful_schema(tmp_path: Path) -> None:
-    output = tmp_path / "labels.parquet"
-    pd.DataFrame(
-        [
-            {
-                "candidate_id": "current",
-                "good_option_label_status": "ok",
-                "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
-                "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
-            },
-            {
-                "candidate_id": "failed",
-                "good_option_label_status": "parse_failed",
-                "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
-                "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
-            },
-            {
-                "candidate_id": "old",
-                "good_option_label_status": "ok",
-                "prompt_version": "old-prompt",
-                "label_schema_version": "1",
-            },
-            {
-                "candidate_id": "no-experimental-drug",
-                "good_option_label_status": "no_experimental_drug_intervention",
-                "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
-                "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
-            },
-        ]
-    ).to_parquet(output, index=False)
-
-    done = good_option.load_done_candidate_ids(output, tmp_path / "missing-shards")
-
-    assert done == {"current", "no-experimental-drug"}
-
-
-def test_checker_drug_context_excludes_teacher_web_snippets() -> None:
-    research = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        title="Drug A study",
-        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
-        search_results=(
-            good_option.DrugSearchResult(
-                query="drug-only query",
-                title="Result",
-                snippet="TEACHER_ONLY_SNIPPET",
-                url="https://example.org/result",
-            ),
-        ),
-    )
-
-    context = good_option.build_trial_drug_context(research)
-
-    assert "Drug A" in context
-    assert "TEACHER_ONLY_SNIPPET" not in context
-
-
-def test_checker_research_context_contains_drug_only_web_extracts() -> None:
-    research = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        title="Metadata that is not the research extract",
-        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
-        search_results=(
-            good_option.DrugSearchResult(
-                query='"Drug A" oncology mechanism efficacy safety clinical trial',
-                title="Human evidence result",
-                snippet="TEACHER_ONLY_SNIPPET",
-                url="https://example.org/result",
-            ),
-            good_option.DrugSearchResult(
-                query=(
-                    '"Drug A" oncology molecular target biomarker expression '
-                    "prevalence across cancer types"
-                ),
-                title="Prevalence result",
-                snippet="Marker A occurs in 35% of the full disease population.",
-                url="https://example.org/prevalence",
-            ),
-        ),
-        notices=("One additional query timed out.",),
-    )
-
-    context = good_option.build_trial_drug_research_context(research)
-
-    assert "DRUG: Drug A" in context
-    assert "TEACHER_ONLY_SNIPPET" in context
-    assert "drug mechanism, efficacy, and safety" in context
-    assert "target and biomarker prevalence across cancer types" in context
-    assert "https://example.org/prevalence" in context
-    assert "One additional query timed out." in context
-    assert "patient" not in inspect.signature(
-        good_option.build_trial_drug_research_context
-    ).parameters
-
-
-def test_research_snapshot_context_loader_preserves_exact_dated_evidence(
-    tmp_path: Path,
-) -> None:
-    research = good_option.TrialDrugResearch(
-        nct_id="NCT12345678",
-        interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
-        search_results=(
-            good_option.DrugSearchResult(
-                query="drug-only query",
-                title="Result",
-                snippet="Exact dated extract",
-                url="https://example.org/result",
-            ),
-        ),
-    )
-    older_record = good_option.research_to_record(
-        research,
-        fetched_at_utc="2026-08-24T00:00:00+00:00",
-    )
-    newer_record = good_option.research_to_record(
-        good_option.TrialDrugResearch(
-            nct_id="NCT12345678",
-            interventions=(good_option.DrugIntervention("Drug A", "DRUG"),),
-            search_results=(
-                good_option.DrugSearchResult(
-                    query="drug-only query",
-                    title="Updated result",
-                    snippet="Newer exact extract",
-                    url="https://example.org/updated-result",
-                ),
-            ),
-        ),
-        fetched_at_utc="2026-08-25T00:00:00+00:00",
-    )
-    output = tmp_path / "research.parquet"
-    pd.DataFrame([older_record, newer_record]).to_parquet(output, index=False)
-
-    contexts = good_option.load_research_snapshot_contexts(
-        output,
-        tmp_path / "missing-shards",
-    )
-    older_key = good_option.research_snapshot_key(
-        nct_id=older_record["nct_id"],
-        fetched_at_utc=older_record["fetched_at_utc"],
-        implementation_sha256=older_record["research_implementation_sha256"],
-        biomarker_expression_query_version=older_record[
-            "biomarker_expression_query_version"
-        ],
-        drug_name_normalization_prompt_version=older_record[
-            "drug_name_normalization_prompt_version"
-        ],
-    )
-    newer_key = good_option.research_snapshot_key(
-        nct_id=newer_record["nct_id"],
-        fetched_at_utc=newer_record["fetched_at_utc"],
-        implementation_sha256=newer_record["research_implementation_sha256"],
-        biomarker_expression_query_version=newer_record[
-            "biomarker_expression_query_version"
-        ],
-        drug_name_normalization_prompt_version=newer_record[
-            "drug_name_normalization_prompt_version"
-        ],
-    )
-
-    assert list(contexts) == [older_key, newer_key]
-    assert "Exact dated extract" in contexts[older_key]
-    assert "Newer exact extract" not in contexts[older_key]
-    assert "Newer exact extract" in contexts[newer_key]
-    assert "2026-08-24T00:00:00+00:00" not in contexts[older_key]
-
-
-def test_training_frame_filters_labels_and_builds_checker_input() -> None:
-    labels = pd.DataFrame(
-        [
-            {
-                "candidate_id": "a",
-                "patient_summary": "Same synthetic patient",
-                **_label_research_provenance("NCT00000001"),
-                "this_space": "Space A",
-                "trial_drug_context": "DRUG: Drug A",
-                "split": "train",
-                "drug_count": 1,
-                "good_option_points": 1,
-                "good_option_max_points": 4,
-                "good_option_score": 0.25,
-                "good_option_label_status": "ok",
-                "point_disease_type_benefit": 1,
-                "point_common_biomarker_in_disease": 0,
-                "point_patient_biomarker_targeted": 0,
-                "point_biomarker_targeted_benefit": 0,
-            },
-            {
-                "candidate_id": "b",
-                "patient_summary": "Same synthetic patient",
-                **_label_research_provenance("NCT00000002"),
-                "this_space": "Space B",
-                "trial_drug_context": "DRUG: Drug B",
-                "split": "train",
-                "drug_count": 2,
-                "good_option_points": 6,
-                "good_option_max_points": 8,
-                "good_option_score": 0.75,
-                "good_option_label_status": "ok",
-                "point_disease_type_benefit": 2,
-                "point_common_biomarker_in_disease": 1,
-                "point_patient_biomarker_targeted": 2,
-                "point_biomarker_targeted_benefit": 1,
-            },
-            {
-                "candidate_id": "bad",
-                "patient_summary": "Another synthetic patient",
-                **_label_research_provenance("NCT00000003"),
-                "this_space": "Space C",
-                "trial_drug_context": "DRUG: Drug C",
-                "split": "train",
-                "drug_count": 0,
-                "good_option_points": -1,
-                "good_option_max_points": -1,
-                "good_option_score": float("nan"),
-                "good_option_label_status": "parse_failed",
-                "point_disease_type_benefit": -1,
-                "point_common_biomarker_in_disease": -1,
-                "point_patient_biomarker_targeted": -1,
-                "point_biomarker_targeted_benefit": -1,
-            },
-            {
-                "candidate_id": "inconsistent",
-                "patient_summary": "Third synthetic patient",
-                **_label_research_provenance("NCT00000004"),
-                "this_space": "Space D",
-                "trial_drug_context": "DRUG: Drug D",
-                "split": "train",
-                "drug_count": 1,
-                "good_option_points": 2,
-                "good_option_max_points": 4,
-                "good_option_score": 0.75,
-                "good_option_label_status": "ok",
-                "point_disease_type_benefit": 1,
-                "point_common_biomarker_in_disease": 1,
-                "point_patient_biomarker_targeted": 0,
-                "point_biomarker_targeted_benefit": 0,
-            },
-        ]
-    )
-
-    prepared = good_option.prepare_training_frame(
-        labels,
-        research_contexts={
-            _label_research_key("NCT00000001"): "WEB RESEARCH FOR DRUG A",
-            _label_research_key("NCT00000002"): "WEB RESEARCH FOR DRUG B",
-        },
-        patient_validation_fraction=0.0,
-        trial_validation_fraction=0.0,
-        auroc_positive_threshold=0.5,
-        seed=42,
-    )
-
-    assert len(prepared) == 2
-    assert prepared["partition"].nunique() == 1
-    assert prepared["partition"].eq(good_option.TRAIN_PARTITION).all()
-    assert prepared["label"].tolist() == pytest.approx([0.25, 0.75])
-    assert not prepared["text"].str.contains("Clinical trial space:").any()
-    assert prepared["text"].str.contains(
-        "Registry investigational-drug context:"
-    ).all()
-    assert prepared["text"].str.contains(
-        "Investigational-drug public research evidence:"
-    ).all()
-    assert prepared["text"].str.contains("WEB RESEARCH FOR DRUG").all()
-    first_text = prepared.iloc[0]["text"]
-    assert first_text.index("Patient cancer history:") < first_text.index(
-        "Investigational-drug public research evidence:"
-    ) < first_text.index("Registry investigational-drug context:")
-
-    with pytest.raises(ValueError, match="exact research snapshots"):
-        good_option.prepare_training_frame(
-            labels.iloc[:1],
-            research_contexts={},
-            patient_validation_fraction=0.0,
-            trial_validation_fraction=0.0,
-            auroc_positive_threshold=0.5,
-            seed=42,
+def test_conflicting_patient_drug_duplicates_fail() -> None:
+    with pytest.raises(ValueError, match="Conflicting duplicate"):
+        good_option.flatten_patient_drug_labels(
+            _labels(conflicting=True), _catalog()
         )
 
 
-def test_patient_and_trial_group_folds_create_three_validation_cohorts() -> None:
-    frame = pd.DataFrame(
-        [
-            {
-                "candidate_id": f"candidate-{patient_index}-{trial_index}",
-                "patient_summary": f"Synthetic patient {patient_index}",
-                "nct_id": f"NCT{trial_index:08d}",
-                "split": "train",
-                "label": (
-                    0.75 if (patient_index * 3 + trial_index) % 11 == 0 else 0.0
-                ),
-            }
-            for patient_index in range(25)
-            for trial_index in range(20)
-        ]
-    )
+def test_catalog_compatibility_is_required_for_training_labels() -> None:
+    labels = _labels()
+    labels["catalog_compatibility_id"] = "old"
+    with pytest.raises(ValueError, match="different compatibility"):
+        good_option.flatten_patient_drug_labels(labels, _catalog())
 
-    frame["partition"] = good_option.assign_good_option_partitions(
+
+def test_existing_label_shards_must_match_catalog_and_schema(tmp_path: Path) -> None:
+    shard = tmp_path / "labels_000000.parquet"
+    _labels().to_parquet(shard, index=False)
+
+    assert good_option._existing_label_ids(
+        tmp_path, catalog=_catalog()
+    ) == {"C1", "C2"}
+
+    incompatible = _labels()
+    incompatible["prompt_version"] = "old"
+    incompatible.to_parquet(shard, index=False)
+    with pytest.raises(ValueError, match="incompatible prompt_version"):
+        good_option._existing_label_ids(tmp_path, catalog=_catalog())
+
+
+def test_split_strategy_none_uses_every_row_for_training() -> None:
+    frame = pd.DataFrame(
+        {
+            "patient_group_id": ["P1", "P2"],
+            "drug_id": ["D1", "D2"],
+        }
+    )
+    partitions = good_option.assign_partitions(
         frame,
+        strategy="none",
         patient_validation_fraction=0.2,
-        trial_validation_fraction=0.2,
-        auroc_positive_threshold=0.5,
+        drug_validation_fraction=0.2,
         seed=42,
     )
-
-    assert set(frame["partition"]) == {
-        good_option.TRAIN_PARTITION,
-        good_option.UNSEEN_PATIENT_PARTITION,
-        good_option.UNSEEN_TRIAL_PARTITION,
-        good_option.STRICT_VALIDATION_PARTITION,
-    }
-    patient_is_held_out = frame["partition"].isin(
-        {
-            good_option.UNSEEN_PATIENT_PARTITION,
-            good_option.STRICT_VALIDATION_PARTITION,
-        }
-    )
-    trial_is_held_out = frame["partition"].isin(
-        {
-            good_option.UNSEEN_TRIAL_PARTITION,
-            good_option.STRICT_VALIDATION_PARTITION,
-        }
-    )
-    assert (
-        pd.DataFrame(
-            {
-                "patient": frame["patient_summary"],
-                "held_out": patient_is_held_out,
-            }
-        )
-        .groupby("patient")["held_out"]
-        .nunique()
-        .max()
-        == 1
-    )
-    assert (
-        pd.DataFrame(
-            {"trial": frame["nct_id"], "held_out": trial_is_held_out}
-        )
-        .groupby("trial")["held_out"]
-        .nunique()
-        .max()
-        == 1
-    )
-    assert frame.loc[patient_is_held_out, "patient_summary"].nunique() == 5
-    assert frame.loc[trial_is_held_out, "nct_id"].nunique() == 4
+    assert partitions.tolist() == ["train", "train"]
 
 
-def test_explicit_validation_row_holds_out_both_entities_everywhere() -> None:
+def test_patient_and_drug_holdouts_do_not_leak_into_training() -> None:
     frame = pd.DataFrame(
         [
             {
-                "candidate_id": f"candidate-{patient_index}-{trial_index}",
-                "patient_summary": f"Synthetic patient {patient_index}",
-                "nct_id": f"NCT{trial_index:08d}",
-                "split": (
-                    "validation"
-                    if patient_index == 0 and trial_index == 0
-                    else "train"
-                ),
-                "label": float((patient_index + trial_index) % 2),
+                "patient_group_id": f"P{patient}",
+                "drug_id": f"D{drug}",
             }
-            for patient_index in range(3)
-            for trial_index in range(3)
+            for patient in range(20)
+            for drug in range(10)
         ]
     )
-
-    frame["partition"] = good_option.assign_good_option_partitions(
+    frame["partition"] = good_option.assign_partitions(
         frame,
-        patient_validation_fraction=0.0,
-        trial_validation_fraction=0.0,
-        auroc_positive_threshold=0.5,
-        seed=42,
+        strategy="patient_drug",
+        patient_validation_fraction=0.35,
+        drug_validation_fraction=0.35,
+        seed=7,
     )
-
-    assert frame.loc[
-        frame["patient_summary"].eq("Synthetic patient 0"), "partition"
-    ].isin(
-        {
-            good_option.UNSEEN_PATIENT_PARTITION,
-            good_option.STRICT_VALIDATION_PARTITION,
-        }
-    ).all()
-    assert frame.loc[frame["nct_id"].eq("NCT00000000"), "partition"].isin(
-        {
-            good_option.UNSEEN_TRIAL_PARTITION,
-            good_option.STRICT_VALIDATION_PARTITION,
-        }
-    ).all()
-
-
-def test_split_manifest_omits_patient_text_and_resume_requires_same_split(
-    tmp_path: Path,
-) -> None:
-    frame = pd.DataFrame(
-        [
-            {
-                "candidate_id": "candidate-a",
-                "patient_group_id": "patient-hash-a",
-                "nct_id": "NCT00000001",
-                "label": 0.0,
-                "partition": good_option.TRAIN_PARTITION,
-            },
-            {
-                "candidate_id": "candidate-b",
-                "patient_group_id": "patient-hash-b",
-                "nct_id": "NCT00000002",
-                "label": 1.0,
-                "partition": good_option.STRICT_VALIDATION_PARTITION,
-            },
+    assert set(frame["partition"]).issubset(
+        {"train", "unseen_patient", "unseen_drug", "strict_validation"}
+    )
+    train_patients = set(
+        frame.loc[frame["partition"].eq("train"), "patient_group_id"]
+    )
+    held_patients = set(
+        frame.loc[
+            frame["partition"].isin({"unseen_patient", "strict_validation"}),
+            "patient_group_id",
         ]
     )
-    manifest = good_option.build_good_option_split_manifest(
-        frame,
-        patient_validation_fraction=0.2,
-        trial_validation_fraction=0.2,
-        auroc_positive_threshold=0.5,
-        seed=42,
+    train_drugs = set(frame.loc[frame["partition"].eq("train"), "drug_id"])
+    held_drugs = set(
+        frame.loc[
+            frame["partition"].isin({"unseen_drug", "strict_validation"}),
+            "drug_id",
+        ]
     )
-    serialized = json.dumps(manifest)
-    assert "patient-hash-a" not in serialized
-    assert manifest["held_out_trial_ids"] == ["NCT00000002"]
+    assert train_patients.isdisjoint(held_patients)
+    assert train_drugs.isdisjoint(held_drugs)
 
-    checkpoint = tmp_path / "checkpoint-1"
+
+def test_four_logit_metrics_report_per_criterion_and_macro_auc() -> None:
+    evaluation = SimpleNamespace(
+        predictions=np.asarray(
+            [[5.0, 5.0, -5.0, -5.0], [-5.0, -5.0, 5.0, 5.0]]
+        ),
+        label_ids=np.asarray([[1, 1, 0, 0], [0, 0, 1, 1]]),
+    )
+    metrics = good_option.compute_metrics(evaluation)
+
+    assert metrics["binary_accuracy"] == 1.0
+    assert metrics["auroc_macro"] == 1.0
+    assert all(f"auroc_{criterion}" in metrics for criterion in RUBRIC_CRITERIA)
+
+
+def test_resume_checkpoint_must_match_catalog_and_split(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint-10"
     checkpoint.mkdir()
-    metadata = good_option._split_checkpoint_metadata(manifest)
-    (checkpoint / "config.json").write_text(json.dumps(metadata))
-    good_option.validate_resume_checkpoint_split(
-        checkpoint,
-        expected_metadata=metadata,
+    split_manifest = {"split_fingerprint_sha256": "split-v2"}
+    compatible = {
+        "matchminer_catalog_compatibility_id": "compat-v2",
+        "matchminer_checker_input_version": good_option.GOOD_OPTION_INPUT_VERSION,
+        "matchminer_label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
+        "matchminer_split_fingerprint_sha256": "split-v2",
+    }
+    (checkpoint / "config.json").write_text(
+        json.dumps(compatible), encoding="utf-8"
     )
-    incompatible = dict(metadata)
-    incompatible["matchminer_split_fingerprint_sha256"] = "different"
+
+    good_option.validate_resume_checkpoint(
+        checkpoint, catalog=_catalog(), split_manifest=split_manifest
+    )
+
+    incompatible = {**compatible, "matchminer_split_fingerprint_sha256": "old"}
+    (checkpoint / "config.json").write_text(
+        json.dumps(incompatible), encoding="utf-8"
+    )
     with pytest.raises(ValueError, match="incompatible"):
-        good_option.validate_resume_checkpoint_split(
-            checkpoint,
-            expected_metadata=incompatible,
+        good_option.validate_resume_checkpoint(
+            checkpoint, catalog=_catalog(), split_manifest=split_manifest
         )
 
 
-def test_split_fraction_must_map_to_whole_group_folds() -> None:
-    with pytest.raises(ValueError, match="reciprocal"):
-        good_option._validation_fold_count(
-            0.15,
-            argument_name="trial_validation_fraction",
-        )
+def test_cli_exposes_only_hard_boundary_v2_stages() -> None:
+    parser = good_option.build_parser()
+
+    catalog = parser.parse_args(["catalog", "--nct-id", "NCT12345678"])
+    validate = parser.parse_args(["validate-catalog"])
+    label = parser.parse_args(["label", "--max-candidates", "5"])
+    train = parser.parse_args(["train", "--split-strategy", "none"])
+
+    assert catalog.catalog.endswith("good_option_catalog_v2")
+    assert validate.command == "validate-catalog"
+    assert label.label_output.endswith("good_option_four_point_labels_v2.parquet")
+    assert train.output_dir.endswith("goodoptionchecker_four_point_v2")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["generate"])
 
 
-def test_checker_metrics_report_soft_regression_and_thresholded_auroc() -> None:
-    probabilities = np.asarray([0.1, 0.2, 0.8, 0.9])
-    logits = np.log(probabilities / (1.0 - probabilities))
-    labels = np.asarray([0.0, 0.25, 0.5, 1.0])
-
-    metrics = good_option.compute_good_option_checker_metrics(
-        logits,
-        labels,
-        auroc_positive_threshold=0.5,
-    )
-
-    assert metrics["mae"] == pytest.approx(0.1375)
-    assert metrics["rmse"] == pytest.approx(np.sqrt(0.028125))
-    assert metrics["auroc"] == pytest.approx(1.0)
-    assert metrics["auroc_positive_threshold"] == pytest.approx(0.5)
-    assert metrics["auroc_positive_fraction"] == pytest.approx(0.5)
-
-
-def test_checker_metrics_return_nan_auroc_for_single_class() -> None:
-    metrics = good_option.compute_good_option_checker_metrics(
-        [0.0, 1.0],
-        [0.0, 0.25],
-        auroc_positive_threshold=0.5,
-    )
-
-    assert np.isnan(metrics["auroc"])
-
-
-def test_local_vllm_command_uses_openai_server_and_requested_parser() -> None:
-    command = good_option.build_vllm_server_command(
-        model="example/model",
-        download_dir="/models",
-        tensor_parallel_size=2,
-        max_model_len=50_000,
-        max_num_seqs=128,
-        gpu_memory_utilization=0.9,
-        port=8100,
-        reasoning_parser="gemma4",
-    )
-
-    assert command[:3] == [
-        good_option.sys.executable,
-        "-m",
-        "vllm.entrypoints.openai.api_server",
-    ]
-    assert command[command.index("--reasoning-parser") + 1] == "gemma4"
-    assert command[command.index("--tensor-parallel-size") + 1] == "2"
-
-
-def test_remote_registry_accepts_api_key_without_exposing_it() -> None:
-    registry = DynamicServerRegistry(
-        max_concurrent_per_server=1,
-        request_timeout=10,
-        static_urls=["http://localhost:8000/v1"],
-        api_key="secret-test-value",
-    )
-
-    assert registry._api_key == "secret-test-value"
-    assert "secret-test-value" not in repr(registry)
-
-
-def test_completion_work_fn_optionally_returns_finish_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "vllm_reasoning_utils.parse_reasoning_output",
-        lambda text, parser_name, tokenizer: (
-            f"reasoning:{parser_name}",
-            f"answer:{text}:{tokenizer}",
-        ),
-    )
-
-    requests: list[dict[str, object]] = []
-
-    class FakeCompletions:
-        async def create(self, **kwargs):
-            requests.append(kwargs)
-            return SimpleNamespace(
-                choices=[SimpleNamespace(text="raw", finish_reason="length")]
-            )
-
-    client = SimpleNamespace(completions=FakeCompletions())
-    work_fn = make_completion_work_fn(
-        CompletionSampling(model="teacher", request_timeout=1),
-        "qwen3",
-        "tokenizer",
-    )
-
-    result = asyncio.run(
-        work_fn(
-            client,
+def test_server_file_configures_shared_remote_teacher(tmp_path: Path) -> None:
+    servers = tmp_path / "servers.json"
+    servers.write_text(
+        json.dumps(
             {
-                "prompt": "prompt",
-                "max_tokens": 100,
-                "include_completion_metadata": True,
-            },
-        )
-    )
-
-    assert result == (
-        "reasoning:qwen3",
-        "answer:raw:tokenizer",
-        {"finish_reason": "length", "raw_text_char_count": 3},
-    )
-    assert requests[0]["extra_body"]["repetition_penalty"] == 1.1
-
-
-def test_completion_work_fn_transport_batches_prompts_in_choice_index_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "vllm_reasoning_utils.parse_reasoning_output",
-        lambda text, parser_name, tokenizer: (
-            f"reasoning:{text}",
-            f"answer:{text}",
-        ),
-    )
-    requests: list[dict[str, object]] = []
-
-    class FakeCompletions:
-        async def create(self, **kwargs):
-            requests.append(kwargs)
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(index=1, text="second", finish_reason="stop"),
-                    SimpleNamespace(index=0, text="first", finish_reason="length"),
+                "servers": [
+                    {"url": "http://host-a:8000/v1"},
+                    {"url": "http://host-b:8000/v1"},
                 ]
-            )
-
-    work_fn = make_completion_work_fn(
-        CompletionSampling(model="teacher", request_timeout=1),
-        "qwen3",
-        "tokenizer",
-    )
-    result = asyncio.run(
-        work_fn(
-            SimpleNamespace(completions=FakeCompletions()),
-            {
-                "prompt": ["patient-a prompt", "patient-b prompt"],
-                "max_tokens": 100_000,
-                "request_timeout": 7_200.0,
-                "include_completion_metadata": True,
-            },
-        )
-    )
-
-    assert requests[0]["prompt"] == ["patient-a prompt", "patient-b prompt"]
-    assert requests[0]["max_tokens"] == 100_000
-    assert requests[0]["timeout"] == 7_200.0
-    assert result == [
-        (
-            "reasoning:first",
-            "answer:first",
-            {"finish_reason": "length", "raw_text_char_count": 5},
+            }
         ),
-        (
-            "reasoning:second",
-            "answer:second",
-            {"finish_reason": "stop", "raw_text_char_count": 6},
-        ),
+        encoding="utf-8",
+    )
+    args = good_option.build_parser().parse_args(
+        [
+            "label",
+            "--server-urls-file",
+            str(servers),
+            "--model",
+            "teacher/model",
+        ]
+    )
+    config = good_option.configure_teacher(args)
+
+    assert config.remote["enabled"] is True
+    assert config.remote["server_urls"] == [
+        "http://host-a:8000/v1",
+        "http://host-b:8000/v1",
     ]
-
-
-def test_good_option_cli_defaults_repetition_penalty_to_1_1() -> None:
-    args = good_option.build_parser().parse_args(["generate"])
-    train_args = good_option.build_parser().parse_args(["train"])
-
-    assert args.repetition_penalty == 1.1
-    assert args.max_new_tokens == 100_000
-    assert args.prompts_per_vllm_request == 8
-    assert args.label_request_timeout == 7_200.0
-    assert args.max_model_len == 131_072
-    assert not hasattr(args, "patients_per_request")
-    assert train_args.max_length == 8192
-    assert train_args.auroc_positive_threshold == pytest.approx(0.5)
-    assert train_args.patient_validation_fraction == pytest.approx(0.2)
-    assert train_args.trial_validation_fraction == pytest.approx(0.2)
-    assert train_args.gradient_accumulation_steps == 1
-    assert train_args.bf16 is False
-    assert train_args.gradient_checkpointing is False
-    assert train_args.group_by_length is False
-    assert Path(train_args.research_output).name == "good_option_drug_research.parquet"
-    assert (
-        Path(train_args.research_shards_dir).name
-        == "good_option_drug_research_shards"
-    )
+    assert config.llm_good_option["remote"]["model_name"] == "teacher/model"
