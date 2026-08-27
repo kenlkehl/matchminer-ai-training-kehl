@@ -317,20 +317,90 @@ def test_resume_checkpoint_must_match_catalog_and_split(tmp_path: Path) -> None:
         )
 
 
-def test_cli_exposes_only_hard_boundary_v2_stages() -> None:
+def test_cli_exposes_hard_boundary_v2_stages_and_all_orchestration() -> None:
     parser = good_option.build_parser()
 
     catalog = parser.parse_args(["catalog", "--nct-id", "NCT12345678"])
     validate = parser.parse_args(["validate-catalog"])
     label = parser.parse_args(["label", "--max-candidates", "5"])
     train = parser.parse_args(["train", "--split-strategy", "none"])
+    all_steps = parser.parse_args(["all", "--num-processes", "4"])
 
     assert catalog.catalog.endswith("good_option_catalog_v2")
     assert validate.command == "validate-catalog"
     assert label.label_output.endswith("good_option_four_point_labels_v2.parquet")
     assert train.output_dir.endswith("goodoptionchecker_four_point_v2")
+    assert all_steps.num_processes == 4
+    assert all_steps.handler is good_option.run_all
     with pytest.raises(SystemExit):
         parser.parse_args(["generate"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["all", "--num-processes", "0"])
+
+
+def test_all_runs_isolated_stages_in_order_and_forwards_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = good_option.build_parser().parse_args(
+        [
+            "all",
+            "--nct-id",
+            "NCT12345678",
+            "--server-urls-file",
+            "servers.json",
+            "--max-candidates",
+            "5",
+            "--num-processes",
+            "4",
+            "--resume-from-checkpoint",
+            "checkpoint-10",
+            "--no-bf16",
+        ]
+    )
+    expected = good_option._build_all_stage_commands(args)
+    calls: list[tuple[list[str], bool]] = []
+
+    def fake_run(command: list[str], *, check: bool) -> None:
+        calls.append((command, check))
+
+    monkeypatch.setattr(good_option.subprocess, "run", fake_run)
+    good_option.run_all(args)
+
+    assert calls == [(command, True) for _stage, command in expected]
+    assert [stage for stage, _command in expected] == [
+        "catalog",
+        "validate-catalog",
+        "label",
+        "train",
+    ]
+    catalog, _validate, label, train = [command for _stage, command in expected]
+    script = str(Path(good_option.__file__).resolve())
+    for stage, command in expected:
+        script_index = command.index(script)
+        assert (
+            good_option.build_parser().parse_args(command[script_index + 1 :]).command
+            == stage
+        )
+    assert ["--nct-id", "NCT12345678"] == catalog[
+        catalog.index("--nct-id") : catalog.index("--nct-id") + 2
+    ]
+    assert ["--server-urls-file", "servers.json"] == label[
+        label.index("--server-urls-file") : label.index("--server-urls-file") + 2
+    ]
+    assert ["--max-candidates", "5"] == label[
+        label.index("--max-candidates") : label.index("--max-candidates") + 2
+    ]
+    assert train[1:3] == ["-m", "accelerate.commands.launch"]
+    assert ["--num_processes", "4"] == train[
+        train.index("--num_processes") : train.index("--num_processes") + 2
+    ]
+    assert "--no-bf16" in train
+    assert ["--resume-from-checkpoint", "checkpoint-10"] == train[
+        train.index("--resume-from-checkpoint") : train.index(
+            "--resume-from-checkpoint"
+        )
+        + 2
+    ]
 
 
 def test_server_file_configures_shared_remote_teacher(tmp_path: Path) -> None:

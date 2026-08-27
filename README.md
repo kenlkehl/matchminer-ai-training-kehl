@@ -50,6 +50,22 @@ The unchanged criteria are:
 
 ### Commands
 
+Run the complete workflow in sequence with one command. Each stage runs in an
+isolated process, validation must succeed before labeling starts, and training
+is launched through Accelerate:
+
+```bash
+python train_good_option_checker.py all \
+  --model nvidia/Gemma-4-31B-IT-NVFP4 \
+  --tensor-parallel-size 8 \
+  --num-processes 8
+```
+
+All stage-specific options are accepted by `all`, including explicit NCT input,
+research limits, remote teacher servers, label-shard settings, and training
+checkpoint resumption. The individual commands remain available for inspecting
+or operating stages separately.
+
 Build and validate all patient-free evidence first:
 
 ```bash

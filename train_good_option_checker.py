@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -849,12 +851,176 @@ def run_train(args: argparse.Namespace) -> None:
     print(f"Saved four-logit GoodOptionChecker to {output_dir}.")
 
 
-def add_candidate_arguments(parser: argparse.ArgumentParser) -> None:
+def _teacher_cli_arguments(args: argparse.Namespace) -> list[str]:
+    return [
+        "--config",
+        str(args.config),
+        "--model",
+        str(args.model),
+        "--server-urls",
+        str(args.server_urls),
+        "--server-urls-file",
+        str(args.server_urls_file),
+        "--llm-request-timeout",
+        str(args.llm_request_timeout),
+        "--max-concurrent-requests",
+        str(args.max_concurrent_requests),
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
+    ]
+
+
+def _build_all_stage_commands(
+    args: argparse.Namespace,
+) -> list[tuple[str, list[str]]]:
+    """Build isolated catalog, validation, labeling, and training commands."""
+
+    python = sys.executable
+    script = str(Path(__file__).resolve())
+
+    catalog = [
+        python,
+        script,
+        "catalog",
+        "--catalog",
+        str(args.catalog),
+        "--candidate-files",
+        *(str(path) for path in args.candidate_files),
+    ]
+    for nct_id in args.nct_id:
+        catalog.extend(("--nct-id", str(nct_id)))
+    if args.nct_ids_file:
+        catalog.extend(("--nct-ids-file", str(args.nct_ids_file)))
+    if args.overwrite:
+        catalog.append("--overwrite")
+    catalog.extend(_teacher_cli_arguments(args))
+    for flag, value in (
+        ("--research-request-timeout", args.research_request_timeout),
+        ("--max-source-attempts", args.max_source_attempts),
+        ("--registry-max-attempts", args.registry_max_attempts),
+        ("--initial-backoff", args.initial_backoff),
+        ("--maximum-backoff", args.maximum_backoff),
+        ("--research-concurrency", args.research_concurrency),
+        ("--web-results-per-query", args.web_results_per_query),
+        ("--max-web-results-per-drug", args.max_web_results_per_drug),
+        ("--max-web-documents-per-drug", args.max_web_documents_per_drug),
+        ("--max-pubmed-records", args.max_pubmed_records),
+        ("--max-registry-studies", args.max_registry_studies),
+        ("--max-civic-records", args.max_civic_records),
+        ("--max-europe-pmc-records", args.max_europe_pmc_records),
+        ("--max-regulatory-records", args.max_regulatory_records),
+        ("--max-passage-chars", args.max_passage_chars),
+    ):
+        catalog.extend((flag, str(value)))
+
+    validate = [
+        python,
+        script,
+        "validate-catalog",
+        "--catalog",
+        str(args.catalog),
+    ]
+
+    label = [
+        python,
+        script,
+        "label",
+        "--catalog",
+        str(args.catalog),
+        "--label-output",
+        str(args.label_output),
+        "--label-shards-dir",
+        str(args.label_shards_dir),
+        "--submission-batch-size",
+        str(args.submission_batch_size),
+        "--label-parse-attempts",
+        str(args.label_parse_attempts),
+        "--candidate-files",
+        *(str(path) for path in args.candidate_files),
+    ]
+    if args.max_candidates is not None:
+        label.extend(("--max-candidates", str(args.max_candidates)))
+    if args.confirm_inputs_are_non_phi:
+        label.append("--confirm-inputs-are-non-phi")
+    label.extend(_teacher_cli_arguments(args))
+
+    train = [
+        python,
+        "-m",
+        "accelerate.commands.launch",
+        "--num_processes",
+        str(args.num_processes),
+        script,
+        "train",
+        "--catalog",
+        str(args.catalog),
+        "--label-output",
+        str(args.label_output),
+        "--base-model",
+        str(args.base_model),
+        "--output-dir",
+        str(args.output_dir),
+        "--checkpoint-dir",
+        str(args.checkpoint_dir),
+        "--split-strategy",
+        str(args.split_strategy),
+        "--patient-validation-fraction",
+        str(args.patient_validation_fraction),
+        "--drug-validation-fraction",
+        str(args.drug_validation_fraction),
+        "--seed",
+        str(args.seed),
+        "--max-length",
+        str(args.max_length),
+        "--learning-rate",
+        str(args.learning_rate),
+        "--per-device-train-batch-size",
+        str(args.per_device_train_batch_size),
+        "--per-device-eval-batch-size",
+        str(args.per_device_eval_batch_size),
+        "--gradient-accumulation-steps",
+        str(args.gradient_accumulation_steps),
+        "--num-train-epochs",
+        str(args.num_train_epochs),
+        "--weight-decay",
+        str(args.weight_decay),
+        "--warmup-ratio",
+        str(args.warmup_ratio),
+        "--logging-steps",
+        str(args.logging_steps),
+        "--bf16" if args.bf16 else "--no-bf16",
+    ]
+    if args.resume_from_checkpoint:
+        train.extend(("--resume-from-checkpoint", str(args.resume_from_checkpoint)))
+
+    return [
+        ("catalog", catalog),
+        ("validate-catalog", validate),
+        ("label", label),
+        ("train", train),
+    ]
+
+
+def run_all(args: argparse.Namespace) -> None:
+    """Run the complete workflow in isolated, fail-fast subprocesses."""
+
+    commands = _build_all_stage_commands(args)
+    for index, (stage, command) in enumerate(commands, start=1):
+        print(f"[all] {index}/{len(commands)}: {stage}", flush=True)
+        subprocess.run(command, check=True)
+    print("[all] GoodOptionChecker workflow complete.", flush=True)
+
+
+def add_candidate_files_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--candidate-files",
         nargs="+",
         default=[str(path) for path in DEFAULT_CANDIDATE_FILES],
     )
+
+
+def add_candidate_arguments(parser: argparse.ArgumentParser) -> None:
+    add_candidate_files_argument(parser)
     parser.add_argument("--confirm-inputs-are-non-phi", action="store_true")
 
 
@@ -868,36 +1034,92 @@ def add_teacher_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tensor-parallel-size", type=int, default=8)
 
 
+def add_research_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--research-request-timeout", type=float, default=30.0)
+    parser.add_argument("--max-source-attempts", type=int, default=5)
+    parser.add_argument("--registry-max-attempts", type=int, default=10)
+    parser.add_argument("--initial-backoff", type=float, default=1.0)
+    parser.add_argument("--maximum-backoff", type=float, default=60.0)
+    parser.add_argument("--research-concurrency", type=int, default=6)
+    parser.add_argument("--web-results-per-query", type=int, default=10)
+    parser.add_argument("--max-web-results-per-drug", type=int, default=60)
+    parser.add_argument("--max-web-documents-per-drug", type=int, default=24)
+    parser.add_argument("--max-pubmed-records", type=int, default=40)
+    parser.add_argument("--max-registry-studies", type=int, default=25)
+    parser.add_argument("--max-civic-records", type=int, default=40)
+    parser.add_argument("--max-europe-pmc-records", type=int, default=12)
+    parser.add_argument("--max-regulatory-records", type=int, default=8)
+    parser.add_argument("--max-passage-chars", type=int, default=5000)
+
+
+def add_catalog_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--catalog", default=str(DEFAULT_CATALOG_DIR))
+    parser.add_argument("--nct-id", action="append", default=[])
+    parser.add_argument("--nct-ids-file", default="")
+    parser.add_argument("--overwrite", action="store_true")
+    add_candidate_files_argument(parser)
+    add_teacher_arguments(parser)
+    add_research_arguments(parser)
+
+
+def add_label_arguments(
+    parser: argparse.ArgumentParser, *, shared_catalog_arguments: bool = False
+) -> None:
+    if not shared_catalog_arguments:
+        parser.add_argument("--catalog", default=str(DEFAULT_CATALOG_DIR))
+    parser.add_argument("--label-output", default=str(DEFAULT_LABEL_OUTPUT))
+    parser.add_argument("--label-shards-dir", default=str(DEFAULT_LABEL_SHARDS))
+    parser.add_argument("--submission-batch-size", type=int, default=256)
+    parser.add_argument("--label-parse-attempts", type=int, default=2)
+    parser.add_argument("--max-candidates", type=int, default=None)
+    if shared_catalog_arguments:
+        parser.add_argument("--confirm-inputs-are-non-phi", action="store_true")
+    else:
+        add_candidate_arguments(parser)
+        add_teacher_arguments(parser)
+
+
+def add_train_arguments(
+    parser: argparse.ArgumentParser, *, shared_catalog_arguments: bool = False
+) -> None:
+    if not shared_catalog_arguments:
+        parser.add_argument("--catalog", default=str(DEFAULT_CATALOG_DIR))
+        parser.add_argument("--label-output", default=str(DEFAULT_LABEL_OUTPUT))
+    parser.add_argument("--base-model", default="answerdotai/ModernBERT-large")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--checkpoint-dir", default=str(DEFAULT_CHECKPOINT_DIR))
+    parser.add_argument("--resume-from-checkpoint", default="")
+    parser.add_argument(
+        "--split-strategy", choices=("patient_drug", "none"), default="patient_drug"
+    )
+    parser.add_argument("--patient-validation-fraction", type=float, default=0.20)
+    parser.add_argument("--drug-validation-fraction", type=float, default=0.20)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-length", type=int, default=8192)
+    parser.add_argument("--learning-rate", type=float, default=2e-5)
+    parser.add_argument("--per-device-train-batch-size", type=int, default=8)
+    parser.add_argument("--per-device-eval-batch-size", type=int, default=16)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument("--num-train-epochs", type=float, default=3.0)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--warmup-ratio", type=float, default=0.05)
+    parser.add_argument("--logging-steps", type=int, default=20)
+    parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=True)
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     catalog = subparsers.add_parser("catalog", help="Build all patient-free research.")
-    catalog.add_argument("--catalog", default=str(DEFAULT_CATALOG_DIR))
-    catalog.add_argument("--nct-id", action="append", default=[])
-    catalog.add_argument("--nct-ids-file", default="")
-    catalog.add_argument("--overwrite", action="store_true")
-    catalog.add_argument(
-        "--candidate-files",
-        nargs="+",
-        default=[str(path) for path in DEFAULT_CANDIDATE_FILES],
-    )
-    add_teacher_arguments(catalog)
-    catalog.add_argument("--research-request-timeout", type=float, default=30.0)
-    catalog.add_argument("--max-source-attempts", type=int, default=5)
-    catalog.add_argument("--registry-max-attempts", type=int, default=10)
-    catalog.add_argument("--initial-backoff", type=float, default=1.0)
-    catalog.add_argument("--maximum-backoff", type=float, default=60.0)
-    catalog.add_argument("--research-concurrency", type=int, default=6)
-    catalog.add_argument("--web-results-per-query", type=int, default=10)
-    catalog.add_argument("--max-web-results-per-drug", type=int, default=60)
-    catalog.add_argument("--max-web-documents-per-drug", type=int, default=24)
-    catalog.add_argument("--max-pubmed-records", type=int, default=40)
-    catalog.add_argument("--max-registry-studies", type=int, default=25)
-    catalog.add_argument("--max-civic-records", type=int, default=40)
-    catalog.add_argument("--max-europe-pmc-records", type=int, default=12)
-    catalog.add_argument("--max-regulatory-records", type=int, default=8)
-    catalog.add_argument("--max-passage-chars", type=int, default=5000)
+    add_catalog_arguments(catalog)
     catalog.set_defaults(handler=run_catalog)
 
     validate = subparsers.add_parser("validate-catalog")
@@ -905,42 +1127,21 @@ def build_parser() -> argparse.ArgumentParser:
     validate.set_defaults(handler=run_validate_catalog)
 
     label = subparsers.add_parser("label")
-    label.add_argument("--catalog", default=str(DEFAULT_CATALOG_DIR))
-    label.add_argument("--label-output", default=str(DEFAULT_LABEL_OUTPUT))
-    label.add_argument("--label-shards-dir", default=str(DEFAULT_LABEL_SHARDS))
-    label.add_argument("--submission-batch-size", type=int, default=256)
-    label.add_argument("--label-parse-attempts", type=int, default=2)
-    label.add_argument("--max-candidates", type=int, default=None)
-    add_candidate_arguments(label)
-    add_teacher_arguments(label)
+    add_label_arguments(label)
     label.set_defaults(handler=run_label)
 
     train = subparsers.add_parser("train")
-    train.add_argument("--catalog", default=str(DEFAULT_CATALOG_DIR))
-    train.add_argument("--label-output", default=str(DEFAULT_LABEL_OUTPUT))
-    train.add_argument("--base-model", default="answerdotai/ModernBERT-large")
-    train.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
-    train.add_argument("--checkpoint-dir", default=str(DEFAULT_CHECKPOINT_DIR))
-    train.add_argument("--resume-from-checkpoint", default="")
-    train.add_argument(
-        "--split-strategy", choices=("patient_drug", "none"), default="patient_drug"
-    )
-    train.add_argument("--patient-validation-fraction", type=float, default=0.20)
-    train.add_argument("--drug-validation-fraction", type=float, default=0.20)
-    train.add_argument("--seed", type=int, default=42)
-    train.add_argument("--max-length", type=int, default=8192)
-    train.add_argument("--learning-rate", type=float, default=2e-5)
-    train.add_argument("--per-device-train-batch-size", type=int, default=8)
-    train.add_argument("--per-device-eval-batch-size", type=int, default=16)
-    train.add_argument("--gradient-accumulation-steps", type=int, default=4)
-    train.add_argument("--num-train-epochs", type=float, default=3.0)
-    train.add_argument("--weight-decay", type=float, default=0.01)
-    train.add_argument("--warmup-ratio", type=float, default=0.05)
-    train.add_argument("--logging-steps", type=int, default=20)
-    train.add_argument(
-        "--bf16", action=argparse.BooleanOptionalAction, default=True
-    )
+    add_train_arguments(train)
     train.set_defaults(handler=run_train)
+
+    all_steps = subparsers.add_parser(
+        "all", help="Run catalog, validation, labeling, and training in sequence."
+    )
+    add_catalog_arguments(all_steps)
+    add_label_arguments(all_steps, shared_catalog_arguments=True)
+    add_train_arguments(all_steps, shared_catalog_arguments=True)
+    all_steps.add_argument("--num-processes", type=positive_int, default=8)
+    all_steps.set_defaults(handler=run_all)
     return parser
 
 

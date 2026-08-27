@@ -423,17 +423,10 @@ if skip_if_done \
   "step 17 good option checker"; then
   echo 17 skipped
 else
-  python train_good_option_checker.py catalog \
+  python train_good_option_checker.py all \
     --model "$MODEL" \
-    --tensor-parallel-size 8
-
-  python train_good_option_checker.py validate-catalog
-
-  python train_good_option_checker.py label \
-    --model "$MODEL" \
-    --tensor-parallel-size 8
-
-  accelerate launch --num_processes 8 train_good_option_checker.py train \
+    --tensor-parallel-size 8 \
+    --num-processes 8 \
     --patient-validation-fraction 0.20 \
     --drug-validation-fraction 0.20
   echo 17 done

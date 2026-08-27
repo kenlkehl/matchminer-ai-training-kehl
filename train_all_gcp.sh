@@ -518,13 +518,13 @@ else
   # Catalog construction is patient-free and must validate before labeling.
   start_vllm_cluster 100000 256 0.95 1
   python train_good_option_checker.py catalog \
-    --server_urls_file "$SERVERS_FILE" \
+    --server-urls-file "$SERVERS_FILE" \
     --model "$MODEL"
 
   python train_good_option_checker.py validate-catalog
 
   python train_good_option_checker.py label \
-    --server_urls_file "$SERVERS_FILE" \
+    --server-urls-file "$SERVERS_FILE" \
     --model "$MODEL"
   stop_vllm_cluster
 
