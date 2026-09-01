@@ -516,7 +516,8 @@ if skip_if_done \
   echo 17 skipped
 else
   # Catalog construction is patient-free and must validate before labeling.
-  start_vllm_cluster 100000 256 0.95 1
+  # Leave room for the prompt in addition to the 100k GoodOption output budget.
+  start_vllm_cluster 131072 256 0.95 1
   python train_good_option_checker.py catalog \
     --server-urls-file "$SERVERS_FILE" \
     --model "$MODEL"

@@ -14,6 +14,7 @@ from matchminer_ai.good_options import (
     DrugSummary,
     GoodOptionCatalog,
     TrialDrugAssignment,
+    build_good_option_messages,
 )
 
 
@@ -173,6 +174,165 @@ def test_catalog_id_derivation_reads_candidate_nct_column_only(tmp_path: Path) -
     )
 
 
+def test_catalog_cli_passes_checkpoint_resume_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_build(nct_ids, output_path, **kwargs):
+        captured.update(
+            {
+                "nct_ids": nct_ids,
+                "output_path": output_path,
+                **kwargs,
+            }
+        )
+        return SimpleNamespace(
+            path=Path(output_path),
+            trial_registry=pd.DataFrame({"trial_id": list(nct_ids)}),
+            drug_summaries=pd.DataFrame(),
+        )
+
+    monkeypatch.setattr(good_option, "build_good_option_catalog", fake_build)
+    checkpoints = tmp_path / "checkpoints"
+    args = good_option.build_parser().parse_args(
+        [
+            "catalog",
+            "--nct-id",
+            "NCT12345678",
+            "--catalog",
+            str(tmp_path / "catalog"),
+            "--catalog-checkpoint-dir",
+            str(checkpoints),
+            "--reset-catalog-checkpoints",
+        ]
+    )
+
+    good_option.run_catalog(args)
+
+    assert captured["nct_ids"] == ("NCT12345678",)
+    assert captured["checkpoint_path"] == str(checkpoints)
+    assert captured["reset_checkpoint"] is True
+
+
+def test_label_serialization_preserves_llm_inputs_and_outputs() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "candidate_id": "C1",
+                "patient_id": "P1",
+                "patient_group_id": "PG1",
+                "patient_summary": "Synthetic patient with Marker A.",
+                "nct_id": "NCT12345678",
+                "split": "train",
+            }
+        ]
+    )
+    scored = pd.DataFrame(
+        [
+            {
+                "patient_id": "P1",
+                "trial_id": "NCT12345678",
+                "good_option_status": "ok",
+                "good_option_answer_text": '{"drug_assessments": []}',
+                "good_option_reasoning_text": "Reasoning trace from the teacher.",
+                "good_option_finish_reason": "stop",
+            }
+        ]
+    )
+
+    serialized = good_option._serialize_label_frame(
+        source, scored, catalog=_catalog()
+    )
+
+    assert serialized.loc[0, "llm_response"] == '{"drug_assessments": []}'
+    assert serialized.loc[0, "llm_reasoning"] == "Reasoning trace from the teacher."
+    assert serialized.loc[0, "llm_finish_reason"] == "stop"
+    assert serialized.loc[0, "llm_invocation_status"] == "called"
+    assert serialized.loc[0, "llm_drug_information"] == (
+        "Novel Agent targets Marker A and has human evidence."
+    )
+    rendered_user_prompt = build_good_option_messages(
+        patient_summary=source.loc[0, "patient_summary"],
+        drug_summaries=_catalog().scoreable_summaries_for_trial("NCT12345678"),
+    )[1]["content"]
+    assert (
+        "SCOREABLE DRUG SUMMARIES\n"
+        f"{serialized.loc[0, 'llm_drug_information']}\n\n"
+        "RUBRIC\n"
+    ) in rendered_user_prompt
+
+
+def test_llm_invocation_status_distinguishes_intentional_skips() -> None:
+    assert good_option._llm_invocation_status("ok") == "called"
+    assert good_option._llm_invocation_status("parse_failed") == "called"
+    assert (
+        good_option._llm_invocation_status("no_scoreable_drug")
+        == "not_called:no_scoreable_drug"
+    )
+
+
+def test_label_batch_delegates_feedback_retries_and_reasoning_off_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_score(pairs, **kwargs):
+        captured["pairs"] = pairs
+        captured.update(kwargs)
+        return pd.DataFrame(
+            [{"patient_id": "P1", "trial_id": "NCT12345678"}]
+        )
+
+    monkeypatch.setattr(good_option, "score_good_options_with_llm", fake_score)
+    config = good_option.configure_teacher(
+        good_option.build_parser().parse_args(["label"])
+    )
+    result = good_option._label_batch_with_retries(
+        pd.DataFrame(
+            [
+                {
+                    "patient_id": "P1",
+                    "nct_id": "NCT12345678",
+                    "patient_summary": "Synthetic patient.",
+                }
+            ]
+        ),
+        catalog=_catalog(),
+        config=config,
+        max_attempts=3,
+    )
+
+    assert result.loc[0, "trial_id"] == "NCT12345678"
+    assert captured["max_parse_attempts"] == 3
+    assert captured["reasoning_off_fallback"] is True
+    assert list(captured["pairs"].columns) == [
+        "patient_id",
+        "trial_id",
+        "cancer_history_summary",
+    ]
+
+
+def test_existing_label_shards_backfill_llm_drug_information(tmp_path: Path) -> None:
+    shard = tmp_path / "labels_000000.parquet"
+    _labels().to_parquet(shard, index=False)
+
+    assert (
+        good_option._backfill_label_shard_drug_information(tmp_path, catalog=_catalog())
+        == 1
+    )
+    backfilled = pd.read_parquet(shard)
+    assert backfilled["llm_drug_information"].tolist() == [
+        "Novel Agent targets Marker A and has human evidence.",
+        "Novel Agent targets Marker A and has human evidence.",
+    ]
+    assert backfilled["llm_invocation_status"].tolist() == ["called", "called"]
+    assert (
+        good_option._backfill_label_shard_drug_information(tmp_path, catalog=_catalog())
+        == 0
+    )
+
+
 def test_flattening_creates_one_four_target_row_per_patient_drug() -> None:
     flattened = good_option.flatten_patient_drug_labels(_labels(), _catalog())
 
@@ -215,6 +375,16 @@ def test_existing_label_shards_must_match_catalog_and_schema(tmp_path: Path) -> 
     incompatible.to_parquet(shard, index=False)
     with pytest.raises(ValueError, match="incompatible prompt_version"):
         good_option._existing_label_ids(tmp_path, catalog=_catalog())
+
+
+def test_existing_parse_failures_are_requeued_on_resume(tmp_path: Path) -> None:
+    labels = _labels()
+    labels.loc[labels["candidate_id"].eq("C2"), "good_option_status"] = "parse_failed"
+    labels.to_parquet(tmp_path / "labels_000000.parquet", index=False)
+
+    assert good_option._existing_label_ids(
+        tmp_path, catalog=_catalog()
+    ) == {"C1"}
 
 
 def test_split_strategy_none_uses_every_row_for_training() -> None:
@@ -326,9 +496,10 @@ def test_cli_exposes_hard_boundary_v2_stages_and_all_orchestration() -> None:
     train = parser.parse_args(["train", "--split-strategy", "none"])
     all_steps = parser.parse_args(["all", "--num-processes", "4"])
 
-    assert catalog.catalog.endswith("good_option_catalog_v2")
+    assert catalog.catalog.endswith("good_option_catalog_v3")
     assert validate.command == "validate-catalog"
     assert label.label_output.endswith("good_option_four_point_labels_v2.parquet")
+    assert label.label_parse_attempts == 3
     assert train.output_dir.endswith("goodoptionchecker_four_point_v2")
     assert all_steps.num_processes == 4
     assert all_steps.handler is good_option.run_all
@@ -339,11 +510,18 @@ def test_cli_exposes_hard_boundary_v2_stages_and_all_orchestration() -> None:
 
 
 def test_all_runs_isolated_stages_in_order_and_forwards_options(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    catalog_path = tmp_path / "catalog"
+    catalog_checkpoints = tmp_path / "catalog-checkpoints"
     args = good_option.build_parser().parse_args(
         [
             "all",
+            "--catalog",
+            str(catalog_path),
+            "--catalog-checkpoint-dir",
+            str(catalog_checkpoints),
+            "--reset-catalog-checkpoints",
             "--nct-id",
             "NCT12345678",
             "--server-urls-file",
@@ -384,6 +562,11 @@ def test_all_runs_isolated_stages_in_order_and_forwards_options(
     assert ["--nct-id", "NCT12345678"] == catalog[
         catalog.index("--nct-id") : catalog.index("--nct-id") + 2
     ]
+    assert ["--catalog-checkpoint-dir", str(catalog_checkpoints)] == catalog[
+        catalog.index("--catalog-checkpoint-dir") :
+        catalog.index("--catalog-checkpoint-dir") + 2
+    ]
+    assert "--reset-catalog-checkpoints" in catalog
     assert ["--server-urls-file", "servers.json"] == label[
         label.index("--server-urls-file") : label.index("--server-urls-file") + 2
     ]
@@ -401,6 +584,70 @@ def test_all_runs_isolated_stages_in_order_and_forwards_options(
         )
         + 2
     ]
+
+
+def test_all_reuses_matching_completed_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = tmp_path / "catalog"
+    catalog_path.mkdir()
+    args = good_option.build_parser().parse_args(
+        [
+            "all",
+            "--catalog",
+            str(catalog_path),
+            "--nct-id",
+            "NCT12345678",
+        ]
+    )
+    monkeypatch.setattr(
+        good_option,
+        "load_good_option_catalog",
+        lambda _path: SimpleNamespace(
+            trial_registry=pd.DataFrame({"trial_id": ["NCT12345678"]})
+        ),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        good_option.subprocess,
+        "run",
+        lambda command, *, check: calls.append(command) if check else None,
+    )
+
+    good_option.run_all(args)
+
+    script = str(Path(good_option.__file__).resolve())
+    assert [command[command.index(script) + 1] for command in calls] == [
+        "validate-catalog",
+        "label",
+        "train",
+    ]
+
+
+def test_all_rejects_completed_catalog_for_different_trials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = tmp_path / "catalog"
+    catalog_path.mkdir()
+    args = good_option.build_parser().parse_args(
+        [
+            "all",
+            "--catalog",
+            str(catalog_path),
+            "--nct-id",
+            "NCT12345678",
+        ]
+    )
+    monkeypatch.setattr(
+        good_option,
+        "load_good_option_catalog",
+        lambda _path: SimpleNamespace(
+            trial_registry=pd.DataFrame({"trial_id": ["NCT87654321"]})
+        ),
+    )
+
+    with pytest.raises(ValueError, match="trial IDs do not match"):
+        good_option.run_all(args)
 
 
 def test_server_file_configures_shared_remote_teacher(tmp_path: Path) -> None:
@@ -433,3 +680,8 @@ def test_server_file_configures_shared_remote_teacher(tmp_path: Path) -> None:
         "http://host-b:8000/v1",
     ]
     assert config.llm_good_option["remote"]["model_name"] == "teacher/model"
+    assert (
+        good_option._active_good_option_output_tokens(config)
+        == good_option.MIN_GOOD_OPTION_OUTPUT_TOKENS
+        == 100_000
+    )

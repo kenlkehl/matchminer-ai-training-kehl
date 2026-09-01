@@ -17,26 +17,34 @@ GoodOption is an evidence-counting signal for whether a trial's experimental
 drug options have support relevant to a synthetic patient's cancer. It is not
 an eligibility result, response probability, or treatment recommendation.
 
-The v2 workflow has a hard patient-free research boundary:
+The v3 catalog workflow has a hard patient-free research boundary:
 
 1. Collect unique NCT IDs from the configured candidate tables or an explicit
    ID list.
-2. Fetch each ClinicalTrials.gov record, classify every active drug's trial
-   role, normalize active entities to NCIt where possible, and deduplicate drugs
-   across trials.
+2. Fetch each ClinicalTrials.gov record and LLM-screen every `DRUG` or
+   `BIOLOGICAL` entry for a concrete named agent with direct anticancer treatment
+   intent. Audit and drop supportive/procedural medicines, diagnostic tracers,
+   schedule/cohort labels, and unnamed standard-of-care placeholders; classify
+   retained agents' trial roles, normalize them to NCIt where possible, and
+   deduplicate them across trials.
 3. Research each unique drug through authoritative oncology sources and a
    pluggable general-web provider. Fetch bounded document passages rather than
-   relying only on result snippets.
+   relying only on result snippets; general-web queries explicitly include
+   `cancer treatment` to reduce unrelated name collisions.
 4. Synthesize structured facts and clean GoodOption/Help Me Choose summaries.
+   Retain passage-supported early and immature evidence with its limitations,
+   and materialize matched NCIt definitions as citable ledger passages.
 5. Validate the complete catalog before any patient-bearing LLM request.
 6. Label every scoreable patient-drug pair on four independent binary criteria.
 7. Train a four-logit ModernBERT checker and aggregate all drug-by-criterion
    probabilities when producing a patient-trial score.
 
-Control, background, and supportive drugs are researched for catalog coverage
-but omitted from GoodOption prompts and denominators. A role that remains
-uncertain is marked and scored. A completed search with no evidence is a valid
-result; an unresolved technical research failure blocks affected labels.
+Genuine named anticancer control and background drugs remain available for
+catalog coverage but are omitted from GoodOption prompts and denominators.
+Supportive/procedural drugs are excluded before research. A retained agent whose
+role remains uncertain is marked and scored. A completed search with no evidence
+is a valid result; an unresolved technical research failure blocks affected
+labels.
 
 The unchanged criteria are:
 
@@ -65,6 +73,22 @@ All stage-specific options are accepted by `all`, including explicit NCT input,
 research limits, remote teacher servers, label-shard settings, and training
 checkpoint resumption. The individual commands remain available for inspecting
 or operating stages separately.
+
+Catalog construction checkpoints public-only state after every completed trial
+fetch, LLM intervention screen, drug research operation, and drug synthesis.
+Rerun the same `all` command after an interruption; compatible checkpoints in
+`../data/no_phi/good_option_catalog_v3_checkpoints/` are reused automatically.
+If the final catalog was already published, `all` validates it, verifies that
+its trial IDs match the current inputs, and continues with labeling. Technically
+blocked retrievals are retried when resuming an unpublished catalog.
+
+Checkpoint manifests fingerprint the NCT list, sources and research settings,
+ontology and prompt/schema versions, and teacher configuration. A changed run
+fails rather than mixing incompatible evidence. To intentionally research from
+scratch, use both `--overwrite` and `--reset-catalog-checkpoints` with the same
+catalog paths. A catalog prompt/schema change also requires fresh label-shard,
+aggregate-label, model-output, and model-checkpoint paths; label shards from a
+different catalog compatibility ID are deliberately rejected.
 
 Build and validate all patient-free evidence first:
 
@@ -96,6 +120,16 @@ accelerate launch --num_processes 8 train_good_option_checker.py train \
   --drug-validation-fraction 0.20
 ```
 
+GoodOption labeling requests up to 100,000 output tokens. The GCP orchestration
+serves a 131,072-token model context so that budget remains available after the
+patient-and-drug prompt. Custom configs with a smaller active output budget are
+rejected. For code-validation failures, only failed rows are retried: the next
+turn includes the prior answer, exact parser error, and finish reason. The
+default is three reasoning-enabled attempts followed by one final attempt with
+thinking disabled. Rows that still have `parse_failed` status are intentionally
+requeued when labeling resumes; later shards replace their failed predecessors
+in the aggregate.
+
 Use `--split-strategy none` to train on all valid synthetic rows when evaluation
 will be performed on a separately governed real dataset.
 
@@ -108,12 +142,23 @@ reach the configured teacher endpoint. The `catalog` command reads only the
 
 ### Artifacts
 
-- `../data/no_phi/good_option_catalog_v2/`: versioned Parquet catalog, source
-  ledger, retry audit, clean drug summaries, trial-drug index, and manifest.
+- `../data/no_phi/good_option_catalog_v3/`: versioned Parquet catalog,
+  intervention-screen audit, source ledger, retry audit, clean drug summaries,
+  trial-drug index, and manifest.
+- `../data/no_phi/good_option_catalog_v3_checkpoints/`: resumable, atomic,
+  patient-free registry, intervention-screening, drug-evidence, and synthesis
+  JSON.
 - `../data/no_phi/good_option_four_point_label_shards_v2/`: resumable
-  patient-trial labeling shards.
+  patient-trial labeling shards retaining the patient summary, exact clean drug
+  information supplied to the teacher, and separate teacher final-response and
+  reasoning/finish-reason columns. `llm_invocation_status` distinguishes a
+  teacher call from an intentional skip such as `no_scoreable_drug`, so skipped
+  rows do not look like unexplained blank generations. Resuming labeling
+  backfills reconstructible drug-input and invocation-status columns in
+  compatible earlier shards without relabeling them.
 - `../data/no_phi/good_option_four_point_labels_v2.parquet`: validated label
-  aggregate with per-drug rationales and catalog compatibility ID.
+  aggregate retaining the same teacher-input/output audit fields plus per-drug
+  rationales and the catalog compatibility ID.
 - `../models/goodoptionchecker_four_point_v2/`: four-logit checker and split/
   evaluation metadata.
 

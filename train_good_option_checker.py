@@ -43,7 +43,10 @@ REPOSITORY_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = REPOSITORY_DIR.parent
 DEFAULT_DATA_DIR = WORKSPACE_DIR / "data" / "no_phi"
 DEFAULT_MODEL_DIR = WORKSPACE_DIR / "models"
-DEFAULT_CATALOG_DIR = DEFAULT_DATA_DIR / "good_option_catalog_v2"
+DEFAULT_CATALOG_DIR = DEFAULT_DATA_DIR / "good_option_catalog_v3"
+DEFAULT_CATALOG_CHECKPOINT_DIR = (
+    DEFAULT_DATA_DIR / "good_option_catalog_v3_checkpoints"
+)
 DEFAULT_LABEL_OUTPUT = DEFAULT_DATA_DIR / "good_option_four_point_labels_v2.parquet"
 DEFAULT_LABEL_SHARDS = DEFAULT_DATA_DIR / "good_option_four_point_label_shards_v2"
 DEFAULT_OUTPUT_DIR = DEFAULT_MODEL_DIR / "goodoptionchecker_four_point_v2"
@@ -56,6 +59,15 @@ DEFAULT_CANDIDATE_FILES = tuple(
     for direction in ("cohorts", "patients")
 )
 SPLIT_STRATEGY_VERSION = "patient-and-canonical-drug-holdout-v2"
+MIN_GOOD_OPTION_OUTPUT_TOKENS = 100_000
+_NON_LLM_GOOD_OPTION_STATUSES = {
+    "no_scoreable_drug",
+    "drug_research_blocked",
+    "trial_registry_blocked",
+    "missing_catalog_trial",
+    "missing_drug_summary",
+}
+_COMPLETED_GOOD_OPTION_STATUSES = {"ok", *_NON_LLM_GOOD_OPTION_STATUSES}
 
 
 def _hash_text(prefix: bytes, *values: Any) -> str:
@@ -248,6 +260,24 @@ def configure_teacher(args: argparse.Namespace) -> MMAIConfig:
     return config
 
 
+def _active_good_option_output_tokens(config: MMAIConfig) -> int:
+    """Return the completion budget used by the active GoodOption backend."""
+
+    if bool(config.remote.get("enabled", False)):
+        sampling = config.llm_good_option.get("remote", {}).get(
+            "request_params", {}
+        )
+    else:
+        sampling = config.llm_good_option.get("local", {}).get("generation", {})
+    value = sampling.get("max_completion_tokens", sampling.get("max_tokens"))
+    if value is None:
+        raise ValueError(
+            "GoodOption labeling config must define max_tokens or "
+            "max_completion_tokens."
+        )
+    return int(value)
+
+
 def _research_settings(args: argparse.Namespace) -> ResearchSettings:
     return ResearchSettings(
         request_timeout=args.research_request_timeout,
@@ -271,6 +301,11 @@ def _research_settings(args: argparse.Namespace) -> ResearchSettings:
 def run_catalog(args: argparse.Namespace) -> None:
     nct_ids = resolve_nct_ids(args)
     config = configure_teacher(args)
+    print(
+        f"Catalog checkpoints: "
+        f"{Path(args.catalog_checkpoint_dir).expanduser().resolve()}",
+        flush=True,
+    )
 
     def progress(stage: str, completed: int, total: int, label: str) -> None:
         print(f"[{stage}] {completed}/{total}: {label}", flush=True)
@@ -281,13 +316,20 @@ def run_catalog(args: argparse.Namespace) -> None:
             args.catalog,
             config=config,
             settings=_research_settings(args),
+            checkpoint_path=args.catalog_checkpoint_dir,
+            reset_checkpoint=args.reset_catalog_checkpoints,
             overwrite=args.overwrite,
             progress_callback=progress,
         )
     )
+    screening = getattr(catalog, "trial_intervention_screening", pd.DataFrame())
+    excluded = int(
+        (~screening.get("included", pd.Series(dtype=bool)).astype(bool)).sum()
+    )
     print(
         f"Saved catalog {catalog.path} ({len(catalog.trial_registry)} trials, "
-        f"{len(catalog.drug_summaries)} unique drugs)."
+        f"{len(screening)} screened interventions, {excluded} excluded, "
+        f"{len(catalog.drug_summaries)} unique cancer-treatment drugs)."
     )
 
 
@@ -307,6 +349,7 @@ def _existing_label_ids(
         frame = pd.read_parquet(shard)
         required = {
             "candidate_id",
+            "good_option_status",
             "catalog_compatibility_id",
             "prompt_version",
             "label_schema_version",
@@ -325,7 +368,10 @@ def _existing_label_ids(
                     f"Existing label shard {shard} has incompatible {column}; "
                     "use a fresh v2 shard directory."
                 )
-        ids.update(frame["candidate_id"].astype(str))
+        completed = frame["good_option_status"].astype(str).isin(
+            _COMPLETED_GOOD_OPTION_STATUSES
+        )
+        ids.update(frame.loc[completed, "candidate_id"].astype(str))
     return ids
 
 
@@ -334,6 +380,82 @@ def _write_parquet_atomic(frame: pd.DataFrame, path: Path) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     frame.to_parquet(temporary, index=False)
     os.replace(temporary, path)
+
+
+def _llm_drug_information(catalog: GoodOptionCatalog, trial_id: str) -> str:
+    """Return the exact drug-summary section sent to the GoodOption teacher."""
+
+    if catalog.trial_status(trial_id) != "ok":
+        return ""
+    return "\n\n".join(
+        summary.good_option_summary
+        for summary in catalog.scoreable_summaries_for_trial(trial_id)
+    )
+
+
+def _llm_invocation_status(good_option_status: Any) -> str:
+    status = str(good_option_status or "").strip()
+    return (
+        f"not_called:{status}" if status in _NON_LLM_GOOD_OPTION_STATUSES else "called"
+    )
+
+
+def _backfill_label_shard_drug_information(
+    shards_dir: Path, *, catalog: GoodOptionCatalog
+) -> int:
+    """Add reconstructible teacher drug input and call status to older shards."""
+
+    updated = 0
+    information_by_trial: dict[str, str] = {}
+
+    def resolve(trial_id: Any) -> str:
+        normalized = str(trial_id).strip().upper()
+        if normalized not in information_by_trial:
+            information_by_trial[normalized] = _llm_drug_information(
+                catalog, normalized
+            )
+        return information_by_trial[normalized]
+
+    for shard in sorted(shards_dir.glob("labels_*.parquet")):
+        frame = pd.read_parquet(shard)
+        if "nct_id" not in frame:
+            raise ValueError(f"Existing label shard {shard} is missing nct_id.")
+        expected = frame["nct_id"].map(resolve)
+        changed = False
+        if "llm_drug_information" not in frame:
+            insert_at = (
+                frame.columns.get_loc("patient_summary") + 1
+                if "patient_summary" in frame
+                else len(frame.columns)
+            )
+            frame.insert(insert_at, "llm_drug_information", expected)
+            changed = True
+        else:
+            existing = frame["llm_drug_information"].fillna("").astype(str)
+            incompatible = existing.ne("") & existing.ne(expected)
+            if incompatible.any():
+                raise ValueError(
+                    f"Existing label shard {shard} has incompatible "
+                    "llm_drug_information."
+                )
+            missing = existing.eq("") & expected.ne("")
+            if missing.any():
+                frame.loc[missing, "llm_drug_information"] = expected.loc[missing]
+                changed = True
+        if "llm_invocation_status" not in frame:
+            if "good_option_status" not in frame:
+                raise ValueError(
+                    f"Existing label shard {shard} is missing good_option_status."
+                )
+            frame["llm_invocation_status"] = frame["good_option_status"].map(
+                _llm_invocation_status
+            )
+            changed = True
+        if not changed:
+            continue
+        _write_parquet_atomic(frame, shard)
+        updated += 1
+    return updated
 
 
 def _serialize_label_frame(
@@ -346,6 +468,10 @@ def _serialize_label_frame(
         (str(row.patient_id), str(row.trial_id)): row._asdict()
         for row in scored.itertuples(index=False)
     }
+    information_by_trial = {
+        str(trial_id): _llm_drug_information(catalog, str(trial_id))
+        for trial_id in source["nct_id"].unique()
+    }
     records: list[dict[str, Any]] = []
     for row in source.to_dict(orient="records"):
         result = by_key[(str(row["patient_id"]), str(row["nct_id"]))]
@@ -355,6 +481,7 @@ def _serialize_label_frame(
                 "patient_id": row["patient_id"],
                 "patient_group_id": row["patient_group_id"],
                 "patient_summary": row["patient_summary"],
+                "llm_drug_information": information_by_trial[str(row["nct_id"])],
                 "nct_id": row["nct_id"],
                 "split": row.get("split", ""),
                 "good_option_score": result.get("good_option_score"),
@@ -375,6 +502,11 @@ def _serialize_label_frame(
                     ensure_ascii=False,
                 ),
                 "llm_response": result.get("good_option_answer_text", ""),
+                "llm_reasoning": result.get("good_option_reasoning_text", ""),
+                "llm_finish_reason": result.get("good_option_finish_reason", ""),
+                "llm_invocation_status": _llm_invocation_status(
+                    result.get("good_option_status")
+                ),
                 "parse_error": result.get("good_option_parse_error", ""),
                 "catalog_compatibility_id": catalog.compatibility_id,
                 "prompt_version": GOOD_OPTION_PROMPT_VERSION,
@@ -391,56 +523,19 @@ def _label_batch_with_retries(
     config: MMAIConfig,
     max_attempts: int,
 ) -> pd.DataFrame:
-    pending = batch.copy()
-    resolved: list[pd.DataFrame] = []
-    last: pd.DataFrame | None = None
-    terminal_statuses = {
-        "ok",
-        "no_scoreable_drug",
-        "drug_research_blocked",
-        "trial_registry_blocked",
-        "missing_catalog_trial",
-        "missing_drug_summary",
-    }
-    for _attempt in range(1, max(1, max_attempts) + 1):
-        pairs = pending.rename(
-            columns={
-                "nct_id": "trial_id",
-                "patient_summary": "cancer_history_summary",
-            }
-        )[["patient_id", "trial_id", "cancer_history_summary"]]
-        scored = score_good_options_with_llm(pairs, catalog=catalog, config=config)
-        last = scored
-        valid = scored["good_option_status"].isin(terminal_statuses)
-        if valid.any():
-            resolved.append(scored.loc[valid].copy())
-        invalid_keys = {
-            (str(row.patient_id), str(row.trial_id))
-            for row in scored.loc[~valid].itertuples(index=False)
+    pairs = batch.rename(
+        columns={
+            "nct_id": "trial_id",
+            "patient_summary": "cancer_history_summary",
         }
-        if not invalid_keys:
-            break
-        pending = pending.loc[
-            [
-                (str(row.patient_id), str(row.nct_id)) in invalid_keys
-                for row in pending.itertuples(index=False)
-            ]
-        ].copy()
-    if last is not None:
-        resolved_keys = {
-            (str(row.patient_id), str(row.trial_id))
-            for frame in resolved
-            for row in frame.itertuples(index=False)
-        }
-        final_unresolved = last.loc[
-            [
-                (str(row.patient_id), str(row.trial_id)) not in resolved_keys
-                for row in last.itertuples(index=False)
-            ]
-        ]
-        if not final_unresolved.empty:
-            resolved.append(final_unresolved)
-    return pd.concat(resolved, ignore_index=True) if resolved else pd.DataFrame()
+    )[["patient_id", "trial_id", "cancer_history_summary"]]
+    return score_good_options_with_llm(
+        pairs,
+        catalog=catalog,
+        config=config,
+        max_parse_attempts=max(1, int(max_attempts)),
+        reasoning_off_fallback=True,
+    )
 
 
 def run_label(args: argparse.Namespace) -> None:
@@ -453,9 +548,29 @@ def run_label(args: argparse.Namespace) -> None:
     shards_dir = Path(args.label_shards_dir).expanduser().resolve()
     shards_dir.mkdir(parents=True, exist_ok=True)
     completed = _existing_label_ids(shards_dir, catalog=catalog)
+    backfilled = _backfill_label_shard_drug_information(shards_dir, catalog=catalog)
+    if backfilled:
+        print(
+            f"[label] Backfilled drug prompt and LLM call status in {backfilled} "
+            "shards.",
+            flush=True,
+        )
     pending = candidates.loc[~candidates["candidate_id"].isin(completed)].copy()
     config = configure_teacher(args)
     config.debug_mode = True
+    output_tokens = _active_good_option_output_tokens(config)
+    if output_tokens < MIN_GOOD_OPTION_OUTPUT_TOKENS:
+        raise ValueError(
+            "GoodOption labeling requires an output-token budget of at least "
+            f"{MIN_GOOD_OPTION_OUTPUT_TOKENS:,}; active config provides "
+            f"{output_tokens:,}."
+        )
+    print(
+        f"[label] GoodOption teacher max output tokens: {output_tokens:,}; "
+        f"reasoning-enabled parse attempts: {args.label_parse_attempts}; "
+        "reasoning-off fallback attempts: 1.",
+        flush=True,
+    )
     next_index = len(list(shards_dir.glob("labels_*.parquet")))
     for start in range(0, len(pending), args.submission_batch_size):
         batch = pending.iloc[start : start + args.submission_batch_size].copy()
@@ -884,6 +999,8 @@ def _build_all_stage_commands(
         "catalog",
         "--catalog",
         str(args.catalog),
+        "--catalog-checkpoint-dir",
+        str(args.catalog_checkpoint_dir),
         "--candidate-files",
         *(str(path) for path in args.candidate_files),
     ]
@@ -893,6 +1010,8 @@ def _build_all_stage_commands(
         catalog.extend(("--nct-ids-file", str(args.nct_ids_file)))
     if args.overwrite:
         catalog.append("--overwrite")
+    if args.reset_catalog_checkpoints:
+        catalog.append("--reset-catalog-checkpoints")
     catalog.extend(_teacher_cli_arguments(args))
     for flag, value in (
         ("--research-request-timeout", args.research_request_timeout),
@@ -1005,7 +1124,30 @@ def run_all(args: argparse.Namespace) -> None:
     """Run the complete workflow in isolated, fail-fast subprocesses."""
 
     commands = _build_all_stage_commands(args)
+    catalog_path = Path(args.catalog).expanduser().resolve()
+    if catalog_path.exists() and args.reset_catalog_checkpoints and not args.overwrite:
+        raise ValueError(
+            "--reset-catalog-checkpoints with an existing catalog also requires "
+            "--overwrite."
+        )
+    skip_catalog = catalog_path.exists() and not args.overwrite
+    if skip_catalog:
+        existing = load_good_option_catalog(catalog_path)
+        requested_trial_ids = set(resolve_nct_ids(args))
+        existing_trial_ids = set(existing.trial_registry["trial_id"].astype(str))
+        if existing_trial_ids != requested_trial_ids:
+            raise ValueError(
+                "Existing catalog trial IDs do not match this run. Rebuild with "
+                "--overwrite --reset-catalog-checkpoints, or use distinct catalog "
+                "and checkpoint paths."
+            )
+        print(
+            f"[all] 1/{len(commands)}: catalog (existing valid catalog reused)",
+            flush=True,
+        )
     for index, (stage, command) in enumerate(commands, start=1):
+        if stage == "catalog" and skip_catalog:
+            continue
         print(f"[all] {index}/{len(commands)}: {stage}", flush=True)
         subprocess.run(command, check=True)
     print("[all] GoodOptionChecker workflow complete.", flush=True)
@@ -1054,9 +1196,13 @@ def add_research_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_catalog_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--catalog", default=str(DEFAULT_CATALOG_DIR))
+    parser.add_argument(
+        "--catalog-checkpoint-dir", default=str(DEFAULT_CATALOG_CHECKPOINT_DIR)
+    )
     parser.add_argument("--nct-id", action="append", default=[])
     parser.add_argument("--nct-ids-file", default="")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--reset-catalog-checkpoints", action="store_true")
     add_candidate_files_argument(parser)
     add_teacher_arguments(parser)
     add_research_arguments(parser)
@@ -1070,7 +1216,15 @@ def add_label_arguments(
     parser.add_argument("--label-output", default=str(DEFAULT_LABEL_OUTPUT))
     parser.add_argument("--label-shards-dir", default=str(DEFAULT_LABEL_SHARDS))
     parser.add_argument("--submission-batch-size", type=int, default=256)
-    parser.add_argument("--label-parse-attempts", type=int, default=2)
+    parser.add_argument(
+        "--label-parse-attempts",
+        type=int,
+        default=3,
+        help=(
+            "Reasoning-enabled attempts for an invalid LLM label (initial call "
+            "plus retries). One additional reasoning-disabled fallback follows."
+        ),
+    )
     parser.add_argument("--max-candidates", type=int, default=None)
     if shared_catalog_arguments:
         parser.add_argument("--confirm-inputs-are-non-phi", action="store_true")
