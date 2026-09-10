@@ -9,12 +9,14 @@ import pandas as pd
 import pytest
 
 import train_good_option_checker as good_option
-from matchminer_ai.good_options import (
+from matchminer_ai.matching import (
     RUBRIC_CRITERIA,
+    build_good_option_messages,
+)
+from matchminer_ai.trials import (
     DrugSummary,
     GoodOptionCatalog,
     TrialDrugAssignment,
-    build_good_option_messages,
 )
 
 

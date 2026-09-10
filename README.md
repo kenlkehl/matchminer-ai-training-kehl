@@ -58,6 +58,24 @@ The unchanged criteria are:
 
 ### Commands
 
+The distillation scripts use the inference package's public stage APIs:
+`matchminer_ai.trials` owns catalog construction/loading/validation, and
+`matchminer_ai.matching` owns LLM labeling, classifier-input formatting, and
+rubric versions. Both the regular and co-split trainers use those shared
+contracts. Prompt text is maintained in the inference package's `prompts/`
+folder, not copied into training scripts.
+
+For this unpublished workspace refactor, select the sibling checkout when
+running either script (or install that checkout into your environment):
+
+```bash
+export PYTHONPATH="$(pwd)/../matchminer-ai-inference-kehl/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+The API/prompt relocation preserves rendered teacher prompts, classifier
+inputs, catalog compatibility IDs, and resumable checkpoints. Existing
+compatible catalogs and label shards can be reused with the same CLI commands.
+
 Run the complete workflow in sequence with one command. Each stage runs in an
 isolated process, validation must succeed before labeling starts, and training
 is launched through Accelerate:

@@ -24,17 +24,19 @@ import numpy as np
 import pandas as pd
 
 from matchminer_ai.config import MMAIConfig, load_config, load_default_preset
-from matchminer_ai.good_options import (
+from matchminer_ai.matching import (
     GOOD_OPTION_INPUT_VERSION,
     GOOD_OPTION_LABEL_SCHEMA_VERSION,
     GOOD_OPTION_PROMPT_VERSION,
     RUBRIC_CRITERIA,
+    build_good_option_checker_text,
+    score_good_options_with_llm,
+)
+from matchminer_ai.trials import (
     GoodOptionCatalog,
     ResearchSettings,
     build_good_option_catalog,
-    build_good_option_checker_text,
     load_good_option_catalog,
-    score_good_options_with_llm,
     validate_good_option_catalog,
 )
 

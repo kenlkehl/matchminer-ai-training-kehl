@@ -77,7 +77,7 @@ def test_all_labels_prepare_has_no_holdout_or_split_source_reads(tmp_path, monke
     shards.mkdir()
     _labels().to_parquet(shards / "labels_000000.parquet", index=False)
     monkeypatch.setattr(core, "_inside_no_phi", lambda path: True)
-    monkeypatch.setattr(core, "load_good_option_catalog", lambda path: _catalog())
+    monkeypatch.setattr(runner, "load_good_option_catalog", lambda path: _catalog())
     args = argparse.Namespace(run_dir=tmp_path / "run", shards=shards,
         catalog=tmp_path / "catalog", patients=tmp_path / "does-not-exist.parquet",
         trials=tmp_path / "does-not-exist.csv", all_labels=True)

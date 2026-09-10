@@ -9,8 +9,14 @@ import hashlib
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
+
+from matchminer_ai.matching import (
+    GOOD_OPTION_INPUT_VERSION,
+    GOOD_OPTION_LABEL_SCHEMA_VERSION,
+    RUBRIC_CRITERIA,
+)
+from matchminer_ai.trials import load_good_option_catalog
 
 import train_good_option_checker as core
 
@@ -93,7 +99,7 @@ def finalize(args):
     run = args.run_dir
     labels = pd.read_parquet(run / "labels_snapshot.parquet")
     metadata = json.loads((run / "snapshot_manifest.json").read_text())
-    catalog = core.load_good_option_catalog(args.catalog)
+    catalog = load_good_option_catalog(args.catalog)
     parts = []
     audits = {}
     all_labels = metadata.get("all_labels", False)
@@ -135,16 +141,16 @@ def train(args):
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, local_files_only=True)
     model = AutoModelForSequenceClassification.from_pretrained(args.base_model,
         local_files_only=True, num_labels=4, problem_type="multi_label_classification",
-        id2label=dict(enumerate(core.RUBRIC_CRITERIA)),
-        label2id={v:k for k,v in enumerate(core.RUBRIC_CRITERIA)},
+        id2label=dict(enumerate(RUBRIC_CRITERIA)),
+        label2id={v:k for k,v in enumerate(RUBRIC_CRITERIA)},
         attn_implementation="sdpa")
     # ModernBERT returns mean BCE and ignores num_items_in_batch despite **kwargs.
     # Tell Trainer to normalize it across gradient accumulation steps.
     core.configure_mean_bce_accumulation(model)
     for key, value in {
         "matchminer_catalog_compatibility_id": manifest["catalog_compatibility_id"],
-        "matchminer_checker_input_version": core.GOOD_OPTION_INPUT_VERSION,
-        "matchminer_label_schema_version": core.GOOD_OPTION_LABEL_SCHEMA_VERSION,
+        "matchminer_checker_input_version": GOOD_OPTION_INPUT_VERSION,
+        "matchminer_label_schema_version": GOOD_OPTION_LABEL_SCHEMA_VERSION,
         "matchminer_split_fingerprint_sha256": manifest["split_fingerprint_sha256"],
     }.items():
         setattr(model.config, key, value)
@@ -179,7 +185,7 @@ def train(args):
         metrics = prediction.metrics
         from sklearn.metrics import average_precision_score, precision_recall_fscore_support
         probabilities = core._sigmoid(prediction.predictions)
-        for index, criterion in enumerate(core.RUBRIC_CRITERIA):
+        for index, criterion in enumerate(RUBRIC_CRITERIA):
             truth = prediction.label_ids[:, index]
             pred = probabilities[:, index] >= 0.5
             precision, recall, f1, _ = precision_recall_fscore_support(truth, pred, average="binary", zero_division=0)
@@ -192,7 +198,7 @@ def train(args):
         metrics["checkpoint_policy"] = f"Final epoch after {args.num_train_epochs} fixed epochs; Val/val used only for final evaluation"
         (run / "evaluation_metrics.json").write_text(json.dumps(metrics, indent=2))
         result = frame.loc[frame.partition.eq("validation"), ["patient_drug_id", "patient_group_id", "drug_id"]].reset_index(drop=True)
-        for i, criterion in enumerate(core.RUBRIC_CRITERIA):
+        for i, criterion in enumerate(RUBRIC_CRITERIA):
             result[f"label_{criterion}"] = prediction.label_ids[:,i]
             result[f"probability_{criterion}"] = probabilities[:,i]
         result.to_parquet(run / "validation_predictions.parquet", index=False)
