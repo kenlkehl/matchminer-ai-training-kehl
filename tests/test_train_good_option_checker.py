@@ -339,6 +339,11 @@ def test_flattening_creates_one_four_target_row_per_patient_drug() -> None:
     assert len(flattened) == 2
     assert flattened.loc[0, "drug_id"] == "D1"
     assert all(len(value) == 4 for value in flattened["labels"])
+    assert all(
+        isinstance(point, float)
+        for values in flattened["labels"]
+        for point in values
+    )
     assert "NCT12345678" not in flattened.loc[0, "checker_text"]
     assert "http" not in flattened.loc[0, "checker_text"]
     assert flattened.loc[0, "checker_text"].index(
@@ -496,7 +501,7 @@ def test_cli_exposes_hard_boundary_v2_stages_and_all_orchestration() -> None:
     train = parser.parse_args(["train", "--split-strategy", "none"])
     all_steps = parser.parse_args(["all", "--num-processes", "4"])
 
-    assert catalog.catalog.endswith("good_option_catalog_v3")
+    assert catalog.catalog.endswith("good_option_catalog")
     assert validate.command == "validate-catalog"
     assert label.label_output.endswith("good_option_four_point_labels_v2.parquet")
     assert label.label_parse_attempts == 3
@@ -624,6 +629,47 @@ def test_all_reuses_matching_completed_catalog(
     ]
 
 
+def test_all_reuses_catalog_that_covers_more_trials_than_this_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalog shared across corpora may hold trials this run does not need."""
+    catalog_path = tmp_path / "catalog"
+    catalog_path.mkdir()
+    args = good_option.build_parser().parse_args(
+        [
+            "all",
+            "--catalog",
+            str(catalog_path),
+            "--nct-id",
+            "NCT12345678",
+        ]
+    )
+    monkeypatch.setattr(
+        good_option,
+        "load_good_option_catalog",
+        lambda _path: SimpleNamespace(
+            trial_registry=pd.DataFrame(
+                {"trial_id": ["NCT12345678", "NCT87654321"]}
+            )
+        ),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        good_option.subprocess,
+        "run",
+        lambda command, *, check: calls.append(command) if check else None,
+    )
+
+    good_option.run_all(args)
+
+    script = str(Path(good_option.__file__).resolve())
+    assert [command[command.index(script) + 1] for command in calls] == [
+        "validate-catalog",
+        "label",
+        "train",
+    ]
+
+
 def test_all_rejects_completed_catalog_for_different_trials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -646,7 +692,7 @@ def test_all_rejects_completed_catalog_for_different_trials(
         ),
     )
 
-    with pytest.raises(ValueError, match="trial IDs do not match"):
+    with pytest.raises(ValueError, match="missing 1 trial ID"):
         good_option.run_all(args)
 
 

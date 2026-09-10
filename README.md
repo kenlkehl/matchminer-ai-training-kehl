@@ -133,6 +133,27 @@ in the aggregate.
 Use `--split-strategy none` to train on all valid synthetic rows when evaluation
 will be performed on a separately governed real dataset.
 
+For an interim run using completed label shards and the original synthetic
+summary/trial co-splits, use `train_good_option_cosplit.py prepare --run-dir PATH`,
+then launch `train_good_option_cosplit.py train --run-dir PATH` through torchrun.
+Preparation freezes the available shards, reconstructs splits from
+`patient_summaries_with_spaces.parquet` and `trial_space_lineitems.csv`, and keeps
+only train/train for fitting and val/val for evaluation. Mixed and test splits
+are excluded; the mining tables' constant `train` field is not used. Missing or
+conflicting source assignments fail validation. Canonical drugs may overlap
+between these original patient/trial co-splits.
+Conflicting duplicate patient/drug targets are excluded in their entirety from
+each partition and recorded in `conflict_audit.json`; the ordinary trainer's
+default remains to reject conflicts. `finalize --run-dir PATH` repeats this
+preparation from the frozen snapshot without reading newly generated shards.
+
+This runner uses three fixed epochs and evaluates Val/val only at the end,
+without checkpoint selection on that set. It saves the snapshot, split manifest,
+model, per-criterion metrics, and validation probabilities under the run directory.
+Its two-GPU defaults use an effective batch size of 64 (8 examples per GPU with
+4 accumulation steps), BF16, and the locally cached ModernBERT-large base model.
+ModernBERT's mean binary loss is explicitly normalized across accumulation steps.
+
 The catalog command also accepts repeated `--nct-id` values or
 `--nct-ids-file`. Text files contain one NCT ID per line; CSV/Parquet files use
 `nct_id` or `trial_id`. Custom candidate inputs outside `../data/no_phi` require
@@ -166,3 +187,12 @@ Patient context is never accepted by catalog retrieval or included in public
 queries. The patient labeling prompt contains only the patient summary followed
 by clean summaries for scoreable drugs; it omits URLs, queries, source IDs,
 trial metadata, controls, fetch notices, and raw evidence passages.
+
+To repeat the prototype on all currently completed synthetic label shards without
+patient, trial, or drug holdouts, snapshot with `train_good_option_cosplit.py
+prepare --all-labels --run-dir <new-run-directory>`, then run its `train` stage
+under torchrun with `--num-train-epochs 2`. The prepared manifest records zero
+holdouts; invalid statuses and conflicting patient-drug targets retain the
+prototype's filtering and audit policy. All label and catalog sources must be
+inside `data/no_phi`. Training uses the immutable prepared snapshot, saves the
+final epoch, and skips validation when none was reserved.

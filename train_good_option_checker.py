@@ -43,9 +43,9 @@ REPOSITORY_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = REPOSITORY_DIR.parent
 DEFAULT_DATA_DIR = WORKSPACE_DIR / "data" / "no_phi"
 DEFAULT_MODEL_DIR = WORKSPACE_DIR / "models"
-DEFAULT_CATALOG_DIR = DEFAULT_DATA_DIR / "good_option_catalog_v3"
+DEFAULT_CATALOG_DIR = DEFAULT_DATA_DIR / "good_option_catalog"
 DEFAULT_CATALOG_CHECKPOINT_DIR = (
-    DEFAULT_DATA_DIR / "good_option_catalog_v3_checkpoints"
+    DEFAULT_DATA_DIR / "good_option_catalog_checkpoints"
 )
 DEFAULT_LABEL_OUTPUT = DEFAULT_DATA_DIR / "good_option_four_point_labels_v2.parquet"
 DEFAULT_LABEL_SHARDS = DEFAULT_DATA_DIR / "good_option_four_point_label_shards_v2"
@@ -600,10 +600,12 @@ def run_label(args: argparse.Namespace) -> None:
 
 
 def flatten_patient_drug_labels(
-    labels: pd.DataFrame, catalog: GoodOptionCatalog
+    labels: pd.DataFrame, catalog: GoodOptionCatalog, *, conflict_policy: str = "error"
 ) -> pd.DataFrame:
     """Explode valid trial labels to unique patient-drug four-target rows."""
 
+    if conflict_policy not in {"error", "drop"}:
+        raise ValueError("conflict_policy must be error or drop")
     required = {
         "candidate_id",
         "patient_id",
@@ -631,12 +633,17 @@ def flatten_patient_drug_labels(
     ).all():
         raise ValueError("Labels use an incompatible GoodOption label schema.")
     records: list[dict[str, Any]] = []
+    assignments_cache = {}
+    summaries_cache = {}
     for row in labels.loc[labels["good_option_status"].eq("ok")].to_dict(
         orient="records"
     ):
-        assignments = catalog.assignments_for_trial(
-            str(row["nct_id"]), scoreable_only=True
-        )
+        trial_id = str(row["nct_id"])
+        if trial_id not in assignments_cache:
+            assignments_cache[trial_id] = catalog.assignments_for_trial(
+                trial_id, scoreable_only=True
+            )
+        assignments = assignments_cache[trial_id]
         by_name = {item.preferred_name.casefold(): item for item in assignments}
         assessments = json.loads(str(row["drug_assessments_json"] or "[]"))
         if len(assessments) != len(assignments):
@@ -650,7 +657,9 @@ def flatten_patient_drug_labels(
                 raise ValueError(
                     f"{row['candidate_id']}: unknown scoreable drug {drug_name!r}."
                 )
-            summary = catalog.summary_for_drug(assignment.drug_id)
+            if assignment.drug_id not in summaries_cache:
+                summaries_cache[assignment.drug_id] = catalog.summary_for_drug(assignment.drug_id)
+            summary = summaries_cache[assignment.drug_id]
             if summary is None or summary.synthesis_status != "ok":
                 raise ValueError(f"Missing completed summary for {assignment.drug_id}.")
             target = []
@@ -661,7 +670,10 @@ def flatten_patient_drug_labels(
                     raise ValueError(
                         f"{row['candidate_id']} {drug_name}: invalid {criterion}."
                     )
-                target.append(int(value["point"]))
+                # Keep multi-label targets floating point from the moment the
+                # Dataset schema is inferred. Otherwise Arrow preserves these
+                # lists as int64 and BCEWithLogitsLoss fails on the first step.
+                target.append(float(value["point"]))
                 rationales[criterion] = str(value.get("rationale") or "")
             patient_drug_id = _hash_text(
                 b"GoodOption patient drug v2",
@@ -689,14 +701,23 @@ def flatten_patient_drug_labels(
     if frame.empty:
         raise ValueError("No valid patient-drug labels remain.")
     conflicts = frame.groupby("patient_drug_id", sort=False)["labels_json"].nunique().gt(1)
-    if conflicts.any():
-        ids = conflicts[conflicts].index.tolist()
+    ids = conflicts[conflicts].index.tolist()
+    if ids and conflict_policy == "error":
         raise ValueError(f"Conflicting duplicate patient-drug labels: {ids[:10]}")
-    return (
+    conflicting_rows = int(frame.patient_drug_id.isin(ids).sum())
+    frame = frame.loc[~frame.patient_drug_id.isin(ids)]
+    if frame.empty:
+        raise ValueError("No unambiguous patient-drug labels remain")
+    result = (
         frame.sort_values("patient_drug_id", kind="stable")
         .drop_duplicates("patient_drug_id", keep="first")
         .reset_index(drop=True)
     )
+    result.attrs["conflict_audit"] = {
+        "policy": conflict_policy, "excluded_patient_drug_ids": ids,
+        "excluded_patient_drug_pairs": len(ids), "excluded_assessments": conflicting_rows,
+    }
+    return result
 
 
 def _held_out(value: str, *, seed: int, fraction: float, namespace: bytes) -> bool:
@@ -842,6 +863,11 @@ def validate_resume_checkpoint(
         )
 
 
+def configure_mean_bce_accumulation(model: Any) -> None:
+    """ModernBERT returns mean BCE and does not consume num_items_in_batch."""
+    model.accepts_loss_kwargs = False
+
+
 def run_train(args: argparse.Namespace) -> None:
     from datasets import Dataset
     from transformers import (
@@ -894,6 +920,7 @@ def run_train(args: argparse.Namespace) -> None:
         trust_remote_code=True,
     )
     model.config.matchminer_catalog_compatibility_id = catalog.compatibility_id
+    configure_mean_bce_accumulation(model)
     model.config.matchminer_checker_input_version = GOOD_OPTION_INPUT_VERSION
     model.config.matchminer_label_schema_version = GOOD_OPTION_LABEL_SCHEMA_VERSION
     model.config.matchminer_split_fingerprint_sha256 = manifest[
@@ -1135,14 +1162,21 @@ def run_all(args: argparse.Namespace) -> None:
         existing = load_good_option_catalog(catalog_path)
         requested_trial_ids = set(resolve_nct_ids(args))
         existing_trial_ids = set(existing.trial_registry["trial_id"].astype(str))
-        if existing_trial_ids != requested_trial_ids:
+        # A catalog shared across corpora legitimately holds more trials than any
+        # one run needs, so require coverage rather than an exact match.
+        missing_trial_ids = sorted(requested_trial_ids - existing_trial_ids)
+        if missing_trial_ids:
             raise ValueError(
-                "Existing catalog trial IDs do not match this run. Rebuild with "
+                f"Existing catalog is missing {len(missing_trial_ids)} trial ID(s) "
+                f"this run needs, for example {missing_trial_ids[:5]}. Rebuild with "
                 "--overwrite --reset-catalog-checkpoints, or use distinct catalog "
                 "and checkpoint paths."
             )
+        unused = len(existing_trial_ids - requested_trial_ids)
+        detail = f"; {unused} further catalog trials are unused here" if unused else ""
         print(
-            f"[all] 1/{len(commands)}: catalog (existing valid catalog reused)",
+            f"[all] 1/{len(commands)}: catalog (existing valid catalog reused, "
+            f"covering all {len(requested_trial_ids)} requested trials{detail})",
             flush=True,
         )
     for index, (stage, command) in enumerate(commands, start=1):
