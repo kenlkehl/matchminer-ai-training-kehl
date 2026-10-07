@@ -128,7 +128,7 @@ def teacher_command(args, index):
         "--quantization", "modelopt", "--reasoning-parser", "gemma4",
         "--language-model-only", "--max-model-len", str(args.teacher_max_context),
         "--max-num-seqs", "32", "--gpu-memory-utilization", "0.90",
-        "--disable-log-requests"]
+        "--no-enable-log-requests"]
 
 
 @contextmanager

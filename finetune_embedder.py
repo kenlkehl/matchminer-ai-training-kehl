@@ -146,9 +146,9 @@ def main():
         losses, SentenceTransformerTrainer, SentenceTransformerTrainingArguments
     )
     from datasets import Dataset
-    from transformers.trainer_utils import get_last_checkpoint
+    from training_checkpoints import latest_complete_checkpoint
 
-    checkpoint = get_last_checkpoint(args.ckpt_dir) if os.path.isdir(args.ckpt_dir) else None
+    checkpoint = latest_complete_checkpoint(args.ckpt_dir)
     if checkpoint:
         validate_resume_checkpoint(checkpoint)
 

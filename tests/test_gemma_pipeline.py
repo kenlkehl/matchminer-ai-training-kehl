@@ -13,6 +13,17 @@ from oncoreasoning_training.teacher import DEFAULT_TEACHER, TeacherPool, server_
 import train_from_summaries as runner
 
 
+def test_resume_ignores_checkpoint_interrupted_during_save(tmp_path):
+    from training_checkpoints import latest_complete_checkpoint
+    complete, partial = tmp_path / "checkpoint-100", tmp_path / "checkpoint-200"
+    complete.mkdir(); partial.mkdir()
+    (complete / "trainer_state.json").write_text('{"global_step": 100}')
+    (partial / "trainer_state.json").write_text('{"global_step":')
+    assert latest_complete_checkpoint(tmp_path) == str(complete)
+    (partial / "trainer_state.json").write_text('{"global_step": 200}')
+    assert latest_complete_checkpoint(tmp_path) == str(partial)
+
+
 def test_mining_preserves_identity_and_split_and_samples_distinct_trials(tmp_path):
     patients = tmp_path / "patients.parquet"
     trials = tmp_path / "trials.csv"

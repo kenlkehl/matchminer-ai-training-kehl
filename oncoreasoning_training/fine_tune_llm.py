@@ -107,10 +107,10 @@ def main():
     run_path = args.output_dir / "oncoreasoning_training_run.json"
     restarting = args.resume_from_checkpoint == "auto"
     if restarting:
-        from transformers.trainer_utils import get_last_checkpoint
+        from training_checkpoints import latest_complete_checkpoint
         if run_path.exists() and read_json(run_path) != run:
             raise ValueError("Automatic resume requires the identical training manifest and settings")
-        args.resume_from_checkpoint = get_last_checkpoint(str(args.output_dir)) if args.output_dir.is_dir() else None
+        args.resume_from_checkpoint = latest_complete_checkpoint(args.output_dir)
     if args.resume_from_checkpoint:
         if not run_path.exists() or read_json(run_path) != run:
             raise ValueError("Checkpoint resume requires the identical training manifest and settings")
