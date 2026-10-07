@@ -24,6 +24,17 @@ def test_resume_ignores_checkpoint_interrupted_during_save(tmp_path):
     assert latest_complete_checkpoint(tmp_path) == str(partial)
 
 
+def test_teacher_discovers_its_own_pip_cuda_toolkit(monkeypatch):
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
+    monkeypatch.setattr(runner.subprocess, "check_output", lambda command, **_: (
+        "/teacher/lib/python3.13/site-packages/nvidia/cu13\n"
+        if command[0] == "/teacher/bin/python" else pytest.fail("Wrong teacher environment")))
+    env = runner.teacher_environment(SimpleNamespace(vllm="/teacher/bin/vllm"))
+    assert env["CUDA_HOME"] == "/teacher/lib/python3.13/site-packages/nvidia/cu13"
+    assert env["PATH"].startswith(env["CUDA_HOME"] + "/bin:")
+
+
 def test_mining_preserves_identity_and_split_and_samples_distinct_trials(tmp_path):
     patients = tmp_path / "patients.parquet"
     trials = tmp_path / "trials.csv"

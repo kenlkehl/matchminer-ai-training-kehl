@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -131,17 +132,37 @@ def teacher_command(args, index):
         "--no-enable-log-requests"]
 
 
+def teacher_environment(args):
+    """Expose the pip CUDA toolkit when using a driver-only accelerator image."""
+    env = dict(os.environ)
+    if not env.get("CUDA_HOME") and not shutil.which("nvcc"):
+        executable = Path(shutil.which(args.vllm) or args.vllm).expanduser()
+        python = executable.parent / "python"
+        probe = (
+            "import sysconfig; from pathlib import Path; "
+            "root=Path(sysconfig.get_paths()['purelib'])/'nvidia'; "
+            "print(next((str(p) for p in sorted(root.glob('cu*'), reverse=True) "
+            "if (p/'bin/nvcc').is_file()), ''))"
+        )
+        cuda_home = subprocess.check_output([str(python), "-c", probe], text=True).strip()
+        if cuda_home:
+            env["CUDA_HOME"] = cuda_home
+            env["PATH"] = str(Path(cuda_home) / "bin") + os.pathsep + env.get("PATH", "")
+    return env
+
+
 @contextmanager
 def teacher_pool(args):
     processes, handles, servers = [], [], []
     server_file = args.run_dir / "teacher_servers.json"
     atomic_json(server_file, {"ready": False, "servers": []})
     try:
+        environment = teacher_environment(args)
         for index, gpu in enumerate(args.gpus.split(',')):
             port = args.teacher_port + index
             handle = (args.run_dir / "logs" / f"teacher-{index}.log").open("a")
             handles.append(handle)
-            env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu}
+            env = {**environment, "CUDA_VISIBLE_DEVICES": gpu}
             processes.append(subprocess.Popen(teacher_command(args, index), env=env,
                              stdout=handle, stderr=subprocess.STDOUT, start_new_session=True))
             servers.append({"url": f"http://127.0.0.1:{port}/v1", "gpus": [int(gpu)], "kind": "local"})
