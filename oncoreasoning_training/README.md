@@ -4,7 +4,9 @@ The student defaults to `google/gemma-4-E4B-it`, with only the text model loaded
 Select a future base using `prepare --model-name`; the trainer reads that choice
 from the prepared manifest. Use a new data and model directory when changing it.
 The two training categories are patient summarization and clinical question
-answering. The integrated `train_all*.sh` pipeline runs both categories after TrialSpace and catalog construction.
+answering. Each has its own LoRA adapter on the same frozen base. The integrated
+`train_all*.sh` pipeline trains them sequentially after TrialSpace and catalog
+construction; QA includes all three checker families.
 
 Google documents Gemma's [model and chat format](https://huggingface.co/google/gemma-4-E4B-it)
 and [thinking control](https://huggingface.co/docs/transformers/model_doc/gemma4).
@@ -107,10 +109,11 @@ $PY oncoreasoning_training/create_all_training_data.py generate \
 $PY oncoreasoning_training/create_all_training_data.py build \
   --output-dir "$RUN" --max-seq-length 98304
 
-~/thisenv/bin/accelerate launch oncoreasoning_training/fine_tune_llm.py \
+$PY -m torch.distributed.run --standalone --nproc_per_node=8 \
+  oncoreasoning_training/fine_tune_llm.py \
   --data-dir "$RUN" \
   --output-dir ../models/oncoreasoning_gemma4_e4b_answer_first_v2 \
-  --lora-rank 64
+  --fsdp --resume-from-checkpoint auto
 ```
 
 `prepare` and `build` are local data work. `generate` sends patient-bearing
@@ -132,10 +135,12 @@ Missing assignments inherit the patient's known split or default to train;
 conflicting assignments fail. Test patients are excluded. The integrated miner
 preserves the original patient/trial co-splits. Older external mining tables
 with a constant train field must first have their original splits restored.
-Training and validation retain their observed category proportions, recorded in
-`training_manifest.json`; examples are shuffled without oversampling. Use
-`--tasks summarization` or `--tasks clinical_qa` for a single category, and
-`--max-patients` / `--max-pairs` for small preparation checks.
+Preparation records both categories in `training_manifest.json`. Training then
+filters each adapter's train and validation splits strictly to its task before
+removing metadata. There is no cross-task mixture ratio or oversampling. Use
+`prepare --tasks summarization` or `--tasks clinical_qa` to prepare one category,
+and `fine_tune_llm.py --task summarization` or `--task clinical_qa` to train it.
+Use `--max-patients` / `--max-pairs` for small preparation checks.
 
 Generation is resumable: rerun the identical command. Each successful final
 answer is saved atomically. A dependent summary waits for its completed parent.
@@ -146,11 +151,44 @@ on by default and can be disabled with `--no-teacher-thinking`.
 
 The trainer preserves prepared labels, uses gradient checkpointing and BF16
 mixed precision where available, and projects only supervised positions to
-vocabulary logits. Full fine-tuning is the default (`--lora-rank 0`); the example
-uses LoRA to reduce trainable memory. Long-context training still needs suitable
-GPU memory and, for full tuning, distributed sharding configured in Accelerate.
-It is not launched by dataset preparation. Resume training only with the same
-settings and an explicit `--resume-from-checkpoint PATH`.
+vocabulary logits. Full-parameter fine-tuning is disabled. LoRA defaults:
+
+| Setting | Default |
+| --- | --- |
+| Rank / alpha | 64 / 128 |
+| Targets | All linear layers in the extracted text model; frozen embeddings and output head |
+| Dropout / bias | 0.05 / none |
+| Learning rate | 5e-5, AdamW, cosine decay |
+| Warmup | First 3% of optimizer steps; positive `--warmup-steps` overrides |
+| Weight decay / gradient clipping | 0.01 / maximum norm 1.0 |
+| Epochs | One per adapter |
+| Batch | One example per GPU, eight accumulation steps: 64 examples on eight GPUs |
+| Checkpoint/evaluation interval | Every 100 optimizer steps |
+| Validation selection | Fixed seeded subset of at most 256 examples per task |
+
+These are conservative starting settings, not a guarantee of output quality.
+The final artifact uses the checkpoint with the lowest measured task-specific
+validation loss when evaluation checkpoints exist, and saves final validation
+metrics. Non-finite loss stops training. Full validation data remain available
+for downstream evaluation. The [PEFT LoRA documentation](https://huggingface.co/docs/peft/en/package_reference/lora)
+describes all-linear targeting and the default initialization, which leaves the
+base model's initial outputs unchanged. The base is never merged or updated.
+On the current Gemma 4 E4B text configuration, rank 64 targets **155,516,928
+trainable parameters per adapter** (about 1.9% of base plus adapter parameters).
+Each adapter's contract records its actual trainable parameter count.
+
+With `--task both` (the default), the output directory contains `summarization/`
+and `clinical_qa/`, plus an `oncoreasoning_contract.json` collection index written
+only after both succeed. Both adapters start independently from the original
+base, with separate optimizers, schedules, checkpoints, and validation results.
+Choose the corresponding adapter at inference time. `--resume-from-checkpoint
+auto` skips completed adapters and restores the latest complete checkpoint for
+an unfinished one. For an explicit checkpoint path, select one `--task` and its
+adapter directory as `--output-dir`. Resume requires identical training settings.
+
+The existing integrated pipeline command remains valid, so a running pipeline
+loads this trainer when it reaches `train-oncoreasoning`. Follow the root
+README's scoped upgrade registration after pulling; do not restart active work.
 
 ## One-token preview
 
@@ -163,7 +201,7 @@ For a local smoke test, choose a clinical QA request ID from `requests.jsonl`:
 
 ```bash
 CUDA_VISIBLE_DEVICES=3 ~/thisenv/bin/python oncoreasoning_training/preview_model.py \
-  --model ../models/oncoreasoning_gemma4_e4b_answer_first_v2 \
+  --model ../models/oncoreasoning_gemma4_e4b_answer_first_v2/clinical_qa \
   --requests ../data/no_phi/oncoreasoning_answer_first_v2/requests.jsonl \
   --request-id REQUEST_ID --quick
 ```
@@ -171,5 +209,5 @@ CUDA_VISIBLE_DEVICES=3 ~/thisenv/bin/python oncoreasoning_training/preview_model
 Omit `--quick` and set `--max-new-tokens 1024` for an explanation. Both modes use
 the identical prompt, disable thinking, decode greedily, and restrict the first
 generated token to `A` or `B`. The preview loads either a full text checkpoint or
-the saved LoRA adapter. Runtime integration into the public inference package
+the saved QA LoRA adapter (or selects it from a collection directory). Runtime integration into the public inference package
 and model publication are separate from this training workflow.

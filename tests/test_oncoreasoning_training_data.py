@@ -294,8 +294,8 @@ def test_tiny_gemma_text_loading_loss_gradient_and_save(tmp_path):
     torch.testing.assert_close(student(ids).logits, reloaded(ids).logits)
 
 
-@pytest.mark.parametrize("lora_rank", [0, 2])
-def test_training_entrypoint_saves_and_resumes_text_artifact(tmp_path, monkeypatch, lora_rank):
+@pytest.mark.parametrize("task", ["clinical_qa", "both"])
+def test_training_entrypoint_saves_and_resumes_text_artifact(tmp_path, monkeypatch, task):
     import torch
     from datasets import Dataset, DatasetDict
     from tokenizers import Tokenizer, models, pre_tokenizers
@@ -320,7 +320,12 @@ def test_training_entrypoint_saves_and_resumes_text_artifact(tmp_path, monkeypat
     tokenizer.save_pretrained(data / "tokenizer")
     messages = [{"role": "user", "content": "Question A Yes B No"}]
     row = c.tokenize_example(tokenizer, messages, "A\nExplanation", "clinical_qa", 128)
-    DatasetDict({"train": Dataset.from_list([row, row])}).save_to_disk(str(data / "tokenized_dataset"))
+    rows = [{**row, "category": category} for category in c.TASKS for _ in range(2)]
+    # Different summary targets let us verify that the adapters learn different weights.
+    for item in rows[:2]:
+        item["input_ids"] = item["input_ids"][:-2] + [12, 1]
+        item["labels"] = item["labels"][:-2] + [12, 1]
+    DatasetDict({split: Dataset.from_list(rows) for split in ("train", "validation")}).save_to_disk(str(data / "tokenized_dataset"))
     pipeline.atomic_json(data / "training_manifest.json", {"student_model": str(base), "format_version": c.FORMAT_VERSION,
         "tokenizer_fingerprint": c.tokenizer_fingerprint(tokenizer), "max_seq_length": 128})
     def cpu_args(**kwargs):
@@ -328,16 +333,36 @@ def test_training_entrypoint_saves_and_resumes_text_artifact(tmp_path, monkeypat
         return TrainingArguments(**kwargs)
     monkeypatch.setattr("transformers.TrainingArguments", cpu_args)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    argv = ["fine_tune_llm.py", "--data-dir", str(data), "--output-dir", str(output), "--save-steps", "1", "--gradient-accumulation-steps", "1", "--warmup-steps", "0", "--lora-rank", str(lora_rank)]
+    argv = ["fine_tune_llm.py", "--data-dir", str(data), "--output-dir", str(output),
+            "--task", task, "--save-steps", "1", "--gradient-accumulation-steps", "1",
+            "--warmup-ratio", "0", "--lora-rank", "2", "--max-eval-examples", "1"]
     monkeypatch.setattr("sys.argv", argv)
     training.main()
     assert (output / "oncoreasoning_contract.json").is_file()
-    monkeypatch.setattr("sys.argv", argv + ["--resume-from-checkpoint", str(output / "checkpoint-2")])
+    adapter = output / "clinical_qa" if task == "both" else output
+    before = (adapter / "adapter_model.safetensors").read_bytes()
+    if task == "both":
+        collection = pipeline.read_json(output / "oncoreasoning_contract.json")
+        assert collection["artifact_type"] == "adapter_collection"
+        summary = output / "summarization"
+        assert (summary / "adapter_model.safetensors").read_bytes() != before
+        assert pipeline.read_json(summary / "oncoreasoning_contract.json")["tasks"] == ["summarization"]
+    contract = pipeline.read_json(adapter / "oncoreasoning_contract.json")
+    assert contract["tasks"] == ["clinical_qa"]
+    assert contract["task_counts"] == {"train": 2, "validation": 2}
+    assert contract["metrics"]["eval_loss"] > 0
+    # Both skips its finished adapters; a single task can restore a real checkpoint.
+    monkeypatch.setattr("sys.argv", argv + ["--resume-from-checkpoint", "auto" if task == "both" else str(adapter / "checkpoint-2")])
     training.main()
-    model, _ = training.load_student(base if lora_rank else output, dtype=torch.float32)
-    if lora_rank:
-        from peft import PeftModel
-        model = PeftModel.from_pretrained(model, output)
+    assert (adapter / "adapter_model.safetensors").read_bytes() == before
+    model, _ = training.load_student(base, dtype=torch.float32)
+    frozen = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    from peft import PeftModel
+    model = PeftModel.from_pretrained(model, adapter)
+    for name, parameter in model.get_base_model().named_parameters():
+        if "lora_" not in name:
+            torch.testing.assert_close(parameter, frozen[name.replace(".base_layer", "")], rtol=0, atol=0)
+    assert any(torch.count_nonzero(p).item() for name, p in model.named_parameters() if "lora_B" in name)
     model.eval()
     prompt = tokenizer(c.render_prompt(tokenizer, messages), return_tensors="pt", add_special_tokens=False)
     with torch.inference_mode():
@@ -346,3 +371,23 @@ def test_training_entrypoint_saves_and_resumes_text_artifact(tmp_path, monkeypat
     assert quick.shape[1] == prompt.input_ids.shape[1] + 1
     assert quick[0, -1].item() in c.letter_token_ids(tokenizer).values()
     assert quick[0, -1].item() == verbose[0, prompt.input_ids.shape[1]].item()
+
+
+def test_adapter_dataset_filter_keeps_tasks_and_splits_separate():
+    from datasets import Dataset, DatasetDict
+    from oncoreasoning_training.fine_tune_llm import select_task_dataset
+    rows = [{"input_ids": [i], "attention_mask": [1], "labels": [i], "category": category}
+            for i, category in enumerate(["summarization", "clinical_qa", "clinical_qa"])]
+    data = DatasetDict({split: Dataset.from_list(rows) for split in ("train", "validation", "test")})
+    summary, counts = select_task_dataset(data, "summarization", max_eval_examples=1)
+    qa, qa_counts = select_task_dataset(data, "clinical_qa", max_eval_examples=1)
+    assert summary["train"]["input_ids"] == [[0]]
+    assert qa["train"]["input_ids"] == [[1], [2]]
+    assert counts == {"train": 1, "validation": 1}
+    assert qa_counts == {"train": 2, "validation": 2}
+    assert len(qa["validation"]) == 1 and "test" not in qa
+    assert qa["validation"]["input_ids"] == select_task_dataset(data, "clinical_qa", max_eval_examples=1)[0]["validation"]["input_ids"]
+    with pytest.raises(ValueError, match="category"):
+        select_task_dataset(data.remove_columns("category"), "clinical_qa")
+    with pytest.raises(ValueError, match="No training"):
+        select_task_dataset(DatasetDict(train=Dataset.from_list(rows[:1])), "clinical_qa")

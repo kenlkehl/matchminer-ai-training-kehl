@@ -33,8 +33,13 @@ def main():
     p.add_argument("--device", default="cuda:0")
     args = p.parse_args()
     metadata = read_json(args.model / "oncoreasoning_contract.json")
+    if metadata.get("artifact_type") == "adapter_collection":
+        args.model = args.model / metadata["adapters"]["clinical_qa"]
+        metadata = read_json(args.model / "oncoreasoning_contract.json")
     if metadata["format_version"] != c.FORMAT_VERSION:
         raise ValueError("Unsupported artifact format")
+    if "clinical_qa" not in metadata["tasks"]:
+        raise ValueError("Select the clinical_qa adapter for answer-first previews")
     task = next((row for row in jsonl(args.requests) if row["id"] == args.request_id), None)
     if task is None or task["category"] != "clinical_qa":
         raise ValueError("Select a prepared clinical QA request")

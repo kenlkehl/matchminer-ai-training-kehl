@@ -1,8 +1,9 @@
 # matchminer-ai-training
 
-The active pipeline trains two models: text-only GemmaEmbedding 2 TrialSpace,
-then Gemma 4 E4B OncoReasoning. OncoReasoning combines patient summarization
-with individual TrialChecker, BoilerplateChecker, and GoodOption questions.
+The active pipeline trains text-only GemmaEmbedding 2 TrialSpace,
+then two OncoReasoning LoRA adapters on the same frozen Gemma 4 E4B text model:
+one for patient summarization and one for individual TrialChecker,
+BoilerplateChecker, and GoodOption questions.
 The separate ModernBERT TrialChecker and BoilerplateChecker trainers have been
 removed. GoodOption catalog construction remains part of training.
 
@@ -37,8 +38,14 @@ The pipeline then builds and validates fresh drug and class evidence, extracts
 individual exclusions, and distills summarization from `all_synthetic_notes.parquet`
 plus all three QA families. Catalog web research receives public trial/drug
 information only. All patient-bearing teacher requests stay on the VM.
-OncoReasoning uses full fine-tuning with FSDP2 across eight GPUs, variable
-10K–50K-token summary chunks, and final answers without teacher reasoning.
+OncoReasoning trains the adapters sequentially with FSDP2 across eight GPUs.
+Each starts from the original base and trains only on its own task category;
+their data volumes do not compete in a mixed training objective. Defaults are
+rank 64, alpha 128, all text-model linear layers, dropout 0.05, learning rate
+5e-5 with 3% warmup and cosine decay, gradient clipping at 1.0, and one epoch.
+Variable 10K–50K-token summary chunks and final answers without teacher
+reasoning are unchanged. Outputs are `oncoreasoning/summarization` and
+`oncoreasoning/clinical_qa`, each with its own checkpoints and validation metrics.
 See the [OncoReasoning instructions](oncoreasoning_training/README.md) for the
 answer-first contract and configurable student model.
 
@@ -49,6 +56,21 @@ resume after interruption: completed stages are checked, teacher outputs resume,
 and student trainers restore their latest checkpoints. Source hashes, code
 revisions, and settings must match. Keep these directories on persistent disk
 on Spot VMs. A new run or changed inputs require fresh output directories.
+
+For an already-running pre-adapter pipeline, pull this update without restarting
+the service, then run:
+
+```bash
+~/thisenv/bin/python scripts/register_oncoreasoning_upgrade.py \
+  --run-dir ../data/no_phi/gemma_pipeline_v2
+```
+
+The pending training entrypoint
+automatically trains both adapters when reached. The explicit upgrade receipt
+also permits restart after a Spot interruption while preserving the original
+manifest and completion fingerprints. Registration rejects changes outside the
+adapter update and changes to the earlier stage plan; it must happen before
+OncoReasoning training begins.
 
 ## TrialSpace embedding model
 

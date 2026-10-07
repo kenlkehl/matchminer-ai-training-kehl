@@ -232,8 +232,9 @@ def main():
                 "training_commit": git_revision(ROOT), "inference_commit": INFERENCE_COMMIT,
                 "inputs": [source_record(path) for path in files]}
     manifest_path = args.run_dir / "pipeline_manifest.json"
-    if manifest_path.exists() and json.loads(manifest_path.read_text()) != identity:
-        raise ValueError("Pipeline inputs/code/settings changed; use a fresh run directory")
+    if manifest_path.exists():
+        from oncoreasoning_training.pipeline_upgrade import compatible_identity
+        identity = compatible_identity(json.loads(manifest_path.read_text()), identity, args.run_dir, ROOT)
     atomic_json(manifest_path, identity)
     fingerprint = digest(identity)
     os.environ["PYTHONPATH"] = str(args.inference_repo / "src") + os.pathsep + str(ROOT)

@@ -112,3 +112,46 @@ def test_integrated_plan_starts_with_base_mining_and_trains_only_two_models():
     assert "--boilerplate-components" in prepare.command and "--catalog" in prepare.command
     command = runner.teacher_command(args, 0)
     assert "127.0.0.1" in command and "modelopt" in command and "--language-model-only" in command
+
+
+def test_adapter_upgrade_preserves_original_fingerprint_and_rejects_changed_inputs(tmp_path, monkeypatch):
+    from oncoreasoning_training import pipeline_upgrade as upgrade
+    previous = {"args": {"student_model": "gemma"}, "training_commit": "old", "inputs": ["source-hash"]}
+    current = {**previous, "training_commit": "new"}
+    with pytest.raises(ValueError, match="changed"):
+        upgrade.compatible_identity(previous, current, tmp_path, tmp_path)
+    receipt = {"kind": "separate-oncoreasoning-lora-v1", "original_identity_sha256": c.digest(previous),
+               "approved_identity_sha256": c.digest(current)}
+    (tmp_path / "oncoreasoning_code_upgrade.json").write_text(json.dumps(receipt))
+    calls = []
+    monkeypatch.setattr(upgrade, "validate_code_scope", lambda *args: calls.append(args))
+    assert upgrade.compatible_identity(previous, current, tmp_path, tmp_path) == previous
+    assert calls == [(tmp_path, "old", "new")]
+    for invalid in ({**current, "inputs": ["changed"]}, {**current, "training_commit": "other"}):
+        with pytest.raises(ValueError, match="changed"):
+            upgrade.compatible_identity(previous, invalid, tmp_path, tmp_path)
+
+
+def test_adapter_upgrade_rejects_upstream_code_or_plan_changes(monkeypatch):
+    from oncoreasoning_training import pipeline_upgrade as upgrade
+    old = "def stages(args):\n    return ['mine', 'train']\n\ndef main():\n    pass\n"
+    def git(repo, *args):
+        if args[:2] == ("diff", "--name-only"):
+            return "train_from_summaries.py"
+        if args[0] == "show":
+            return old if args[1].startswith("old:") else old.replace("'mine'", "'changed'")
+        return ""
+    monkeypatch.setattr(upgrade, "git", git)
+    with pytest.raises(ValueError, match="stage plan"):
+        upgrade.validate_code_scope("repo", "old", "new")
+    monkeypatch.setattr(upgrade, "git", lambda *_: "make_top_matches.py")
+    with pytest.raises(ValueError, match="outside"):
+        upgrade.validate_code_scope("repo", "old", "new")
+
+
+def test_adapter_upgrade_refuses_started_training(tmp_path):
+    from oncoreasoning_training.pipeline_upgrade import register_upgrade
+    (tmp_path / "pipeline_manifest.json").write_text(json.dumps({"args": {"models_dir": str(tmp_path / "models")}}))
+    (tmp_path / "status.json").write_text('{"stage":"train-oncoreasoning","status":"running"}')
+    with pytest.raises(ValueError, match="before"):
+        register_upgrade(tmp_path, tmp_path)
