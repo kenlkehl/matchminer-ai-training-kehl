@@ -24,6 +24,10 @@ label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
 they are stopped before student training. A separate vLLM executable can be
 selected with `--vllm` when serving dependencies need their own environment.
+TrialSpace labeling allows up to 64 concurrent requests per teacher GPU
+(512 total), and each vLLM worker permits 64 active sequences. The labeler's
+adaptive limiter ramps up after successful requests and backs off on errors.
+Catalog and long-context distillation retain their separate global concurrency.
 
 The run starts from `../data/no_phi/patient_summaries_with_spaces.parquet` and
 `trial_space_lineitems.csv`, mines candidates with the base embedding model,
@@ -69,8 +73,10 @@ The pending training entrypoint
 automatically trains both adapters when reached. The explicit upgrade receipt
 also permits restart after a Spot interruption while preserving the original
 manifest and completion fingerprints. Registration rejects changes outside the
-adapter update and changes to the earlier stage plan; it must happen before
-OncoReasoning training begins.
+adapter update and changes to the earlier stage semantics; only the two teacher
+batching limits may change. Registration must happen before OncoReasoning
+training begins. Applying new batching limits requires draining and restarting
+the teacher/labeling processes; saved label shards are reused.
 
 ## TrialSpace embedding model
 

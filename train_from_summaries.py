@@ -81,7 +81,7 @@ def stages(args):
                 "--input_parquet", str(candidate), "--out_dir", str(directory),
                 "--final_output", "labels.parquet", "--server_urls_file", str(servers),
                 "--model", args.teacher_model, "--reasoning-parser", "gemma4",
-                "--max_concurrent_per_server", "4", "--max_attempts", "5"], [output], True))
+                "--max_concurrent_per_server", "64", "--max_attempts", "5"], [output], True))
             labels.append(output)
         embedding = models / f"trialspace_round{iteration}"
         command = launch + ["finetune_embedder.py", "--base-model", args.embedding_model,
@@ -128,7 +128,7 @@ def teacher_command(args, index):
         "--port", str(args.teacher_port + index), "--tensor-parallel-size", "1",
         "--quantization", "modelopt", "--reasoning-parser", "gemma4",
         "--language-model-only", "--max-model-len", str(args.teacher_max_context),
-        "--max-num-seqs", "32", "--gpu-memory-utilization", "0.90",
+        "--max-num-seqs", "64", "--gpu-memory-utilization", "0.90",
         "--no-enable-log-requests"]
 
 

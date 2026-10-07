@@ -112,6 +112,10 @@ def test_integrated_plan_starts_with_base_mining_and_trains_only_two_models():
     assert "--boilerplate-components" in prepare.command and "--catalog" in prepare.command
     command = runner.teacher_command(args, 0)
     assert "127.0.0.1" in command and "modelopt" in command and "--language-model-only" in command
+    assert command[command.index("--max-num-seqs") + 1] == "64"
+    for stage in plan:
+        if stage.name.startswith("label-"):
+            assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "64"
 
 
 def test_adapter_upgrade_preserves_original_fingerprint_and_rejects_changed_inputs(tmp_path, monkeypatch):
@@ -155,3 +159,15 @@ def test_adapter_upgrade_refuses_started_training(tmp_path):
     (tmp_path / "status.json").write_text('{"stage":"train-oncoreasoning","status":"running"}')
     with pytest.raises(ValueError, match="before"):
         register_upgrade(tmp_path, tmp_path)
+
+
+def test_execution_upgrade_only_normalizes_positive_scheduling_limits():
+    import ast
+    from oncoreasoning_training.pipeline_upgrade import SchedulingNormalizer
+    def normalize(source):
+        return ast.dump(SchedulingNormalizer().visit(ast.parse(source)))
+    before = "['--max_concurrent_per_server', '4', '--max-num-seqs', '32', '--model', 'teacher']"
+    after = before.replace("'4'", "'64'").replace("'32'", "'64'")
+    assert normalize(before) == normalize(after)
+    assert normalize(before) != normalize(after.replace("'teacher'", "'different'"))
+    assert normalize(before) != normalize(after.replace("'64'", "'0'"))

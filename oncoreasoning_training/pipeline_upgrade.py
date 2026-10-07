@@ -1,8 +1,9 @@
-"""Explicit approval records for changing only the pending adapter trainer.
+"""Explicit approval records for adapter and teacher scheduling updates.
 
 The live parent keeps its original plan and manifest fingerprint. Preserve that
 fingerprint on restart so its completion markers remain valid; require a receipt
-for the exact new commit and prove that earlier stage commands are unchanged.
+for the exact new commit and prove that earlier stage semantics are unchanged.
+Only label concurrency and vLLM's sequence capacity may change in those commands.
 """
 from __future__ import annotations
 
@@ -30,14 +31,28 @@ def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
 
 
+class SchedulingNormalizer(ast.NodeTransformer):
+    """Ignore only two positive integer scheduling limits in command lists."""
+    def visit_List(self, node):
+        self.generic_visit(node)
+        for index, flag in enumerate(node.elts[:-1]):
+            if isinstance(flag, ast.Constant) and flag.value in (
+                    "--max_concurrent_per_server", "--max-num-seqs"):
+                value = node.elts[index + 1]
+                if (isinstance(value, ast.Constant) and isinstance(value.value, str)
+                        and value.value.isdigit() and 1 <= int(value.value) <= 1024):
+                    node.elts[index + 1] = ast.Constant(value="SCHEDULING_LIMIT")
+        return node
+
+
 def validate_code_scope(repo, old_commit, new_commit):
     changed = git(repo, "diff", "--name-only", old_commit, new_commit).splitlines()
     if not changed or set(changed) - ALLOWED_PATHS:
         raise ValueError("Upgrade changes files outside the pending adapter training scope")
-    # The parser, stage plan and teacher lifecycle must be literally unchanged
-    # as Python syntax. Only the runner's manifest/resume integration can change.
+    # Prompts, models, inputs, context lengths, sampling, stage order and teacher
+    # lifecycle remain identical; only the two throughput limits are normalized.
     def protected_functions(commit):
-        tree = ast.parse(git(repo, "show", f"{commit}:train_from_summaries.py"))
+        tree = SchedulingNormalizer().visit(ast.parse(git(repo, "show", f"{commit}:train_from_summaries.py")))
         return {node.name: ast.dump(node, include_attributes=False) for node in tree.body
                 if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name != "main"}
     if protected_functions(old_commit) != protected_functions(new_commit):
@@ -57,7 +72,7 @@ def register_upgrade(repo, run_dir):
         raise ValueError("Register the adapter upgrade before OncoReasoning training begins")
     current = {**manifest, "training_commit": git(repo, "rev-parse", "HEAD")}
     changed = validate_code_scope(repo, manifest["training_commit"], current["training_commit"])
-    receipt = {"kind": "separate-oncoreasoning-lora-v1", "original_identity_sha256": digest(manifest),
+    receipt = {"kind": "oncoreasoning-and-teacher-execution-v2", "original_identity_sha256": digest(manifest),
         "approved_identity_sha256": digest(current), "from_commit": manifest["training_commit"],
         "to_commit": current["training_commit"], "changed_paths": changed,
         "registered_at": dt.datetime.now(dt.timezone.utc).isoformat()}
@@ -71,11 +86,11 @@ def compatible_identity(previous, current, run_dir, repo):
     receipt_path = Path(run_dir) / "oncoreasoning_code_upgrade.json"
     if receipt_path.exists():
         receipt = json.loads(receipt_path.read_text())
-        if (receipt.get("kind") == "separate-oncoreasoning-lora-v1"
+        if (receipt.get("kind") in ("separate-oncoreasoning-lora-v1", "oncoreasoning-and-teacher-execution-v2")
                 and receipt.get("original_identity_sha256") == digest(previous)
                 and receipt.get("approved_identity_sha256") == digest(current)
                 and {**previous, "training_commit": current["training_commit"]} == current):
             validate_code_scope(repo, previous["training_commit"], current["training_commit"])
-            print("Using registered OncoReasoning adapter upgrade; preserving completed stages", flush=True)
+            print("Using registered adapter/teacher execution upgrade; preserving completed stages", flush=True)
             return previous
     raise ValueError("Pipeline inputs/code/settings changed; use a fresh run directory or register the scoped adapter upgrade")
