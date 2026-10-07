@@ -43,6 +43,17 @@ Regenerate both patient and trial embeddings for the new model: older vectors
 and indexes are incompatible. External inference consumers must likewise use
 the saved prefix and the matching regenerated index before adopting this model.
 
+## OncoReasoning distillation
+
+The optional [OncoReasoning workflow](oncoreasoning_training/README.md) defaults
+to the text model from `google/gemma-4-E4B-it`. It distills serial patient
+summarization with variable 10K–50K-token chunks and individual TrialChecker /
+GoodOption component questions. Student targets contain final answers only;
+binary QA outputs begin with a single answer letter followed by an explanation,
+supporting either one-token or explanatory inference. The documented stages
+prepare requests, generate resumable teacher outputs, build masked datasets,
+and fine-tune a configurable student.
+
 ## GoodOption evidence catalog
 
 GoodOption is an evidence-counting signal for whether a trial's experimental
