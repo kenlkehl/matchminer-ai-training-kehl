@@ -112,10 +112,10 @@ def test_integrated_plan_starts_with_base_mining_and_trains_only_two_models():
     assert "--boilerplate-components" in prepare.command and "--catalog" in prepare.command
     command = runner.teacher_command(args, 0)
     assert "127.0.0.1" in command and "modelopt" in command and "--language-model-only" in command
-    assert command[command.index("--max-num-seqs") + 1] == "64"
+    assert command[command.index("--max-num-seqs") + 1] == "96"
     for stage in plan:
         if stage.name.startswith("label-"):
-            assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "64"
+            assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "96"
 
 
 def test_adapter_upgrade_preserves_original_fingerprint_and_rejects_changed_inputs(tmp_path, monkeypatch):

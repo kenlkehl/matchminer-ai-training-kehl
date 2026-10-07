@@ -24,8 +24,8 @@ label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
 they are stopped before student training. A separate vLLM executable can be
 selected with `--vllm` when serving dependencies need their own environment.
-TrialSpace labeling allows up to 64 concurrent requests per teacher GPU
-(512 total), and each vLLM worker permits 64 active sequences. The labeler's
+TrialSpace labeling allows up to 96 concurrent requests per teacher GPU
+(768 total), and each vLLM worker permits 96 active sequences. The labeler's
 adaptive limiter ramps up after successful requests and backs off on errors.
 Catalog and long-context distillation retain their separate global concurrency.
 
