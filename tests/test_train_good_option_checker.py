@@ -259,9 +259,8 @@ def test_label_serialization_preserves_llm_inputs_and_outputs() -> None:
         drug_summaries=_catalog().scoreable_summaries_for_trial("NCT12345678"),
     )[1]["content"]
     assert (
-        "SCOREABLE DRUG SUMMARIES\n"
-        f"{serialized.loc[0, 'llm_drug_information']}\n\n"
-        "RUBRIC\n"
+        f"\n\n{serialized.loc[0, 'llm_drug_information']}\n\n"
+        "HOW TO SCORE\n"
     ) in rendered_user_prompt
 
 
@@ -514,6 +513,40 @@ def test_cli_exposes_hard_boundary_v2_stages_and_all_orchestration() -> None:
         parser.parse_args(["generate"])
     with pytest.raises(SystemExit):
         parser.parse_args(["all", "--num-processes", "0"])
+
+
+def test_checker_commands_warn_and_catalog_commands_do_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import warnings
+
+    calls: list[str] = []
+    for name in ("run_label", "run_train", "run_all", "run_validate_catalog"):
+        monkeypatch.setattr(
+            good_option, name, lambda args, name=name: calls.append(name)
+        )
+
+    for command in ("label", "train", "all"):
+        with pytest.warns(FutureWarning, match="deprecated GoodOptionChecker"):
+            good_option.main([command])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        good_option.main(["validate-catalog"])
+
+    assert calls == ["run_label", "run_train", "run_all", "run_validate_catalog"]
+
+
+def test_orchestrators_build_the_catalog_without_training_the_checker() -> None:
+    root = Path(good_option.__file__).resolve().parent
+    for script in ("train_all.sh", "train_all_gcp.sh"):
+        text = (root / script).read_text(encoding="utf-8")
+        step = text[text.index("Step 17") :]
+        assert "train_good_option_checker.py catalog" in step
+        assert "train_good_option_checker.py validate-catalog" in step
+        for retired in (" label", " train", " all"):
+            assert f"train_good_option_checker.py{retired}" not in step
+        assert "goodoptionchecker_four_point" not in step
+        assert "good_option_catalog/manifest.json" in step
 
 
 def test_all_runs_isolated_stages_in_order_and_forwards_options(

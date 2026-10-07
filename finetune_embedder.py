@@ -2,17 +2,14 @@
 import argparse
 import os
 import glob
+import json
 import pandas as pd
-import numpy as np
 import torch
-import torch.nn.functional as F  # noqa: F401  (kept to match your original deps)
 
-PROMPT_PREFIX = (
-    "Instruct: Given a cancer patient summary, retrieve clinical trial options that are "
-    "reasonable for that patient; or, given a clinical trial option, retrieve cancer "
-    "patients who are reasonable candidates for that trial. "
-)
-DEFAULT_BASE_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+# Google's symmetric similarity format: either side can be the retrieval query.
+# https://huggingface.co/google/embeddinggemma-2#best-practices
+PROMPT_PREFIX = "task: sentence similarity | query: "
+DEFAULT_BASE_MODEL = "google/embeddinggemma-2"
 DEFAULT_INPUT = "space_specific_eligibility_checks.parquet"
 MAX_TOKENS = 2500
 
@@ -31,18 +28,18 @@ def parse_args():
     )
     parser.add_argument(
         "-c", "--ckpt-dir",
-        default="./initial_embedder_training",
+        default="./initial_embeddinggemma2_training",
         help="Checkpoint/output directory for the SentenceTransformer trainer."
     )
     parser.add_argument(
         "-o", "--output-model",
-        default="pt_trial_summary_pertrial_finetuned.model",
+        default="pt_trial_summary_pertrial_embeddinggemma2_finetuned.model",
         help="Directory name to save the final fine-tuned model (directory will be created)."
     )
     parser.add_argument(
         "-m", "--base-model",
         default=DEFAULT_BASE_MODEL,
-        help="Starting model name or local path for tokenizer and SentenceTransformer."
+        help="EmbeddingGemma 2 model ID or a local TrialSpace checkpoint from this model family."
     )
     return parser.parse_args()
 
@@ -83,6 +80,57 @@ def load_and_concat(parquet_files):
     return concat_df
 
 
+def load_text_model(base_model, device):
+    """Keep Google's mean pooling/normalization, loading only the text encoder."""
+    from sentence_transformers import SentenceTransformer
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(base_model)
+    if config.model_type != "embedding_gemma2":
+        raise ValueError(
+            "TrialSpace now requires google/embeddinggemma-2 or a checkpoint "
+            "fine-tuned from it. Use fresh model/checkpoint directories for this run."
+        )
+    model = SentenceTransformer(
+        base_model,
+        device=device,
+        config_kwargs={"vision_config": None, "audio_config": None},
+        # FP32 master weights; the trainer uses BF16 autocast on supported GPUs.
+        # EmbeddingGemma 2 does not support FP16.
+        model_kwargs={"dtype": torch.float32},
+    )
+    model.max_seq_length = MAX_TOKENS
+    model.prompts.update({
+        "SentenceSimilarity": PROMPT_PREFIX,
+        "query": PROMPT_PREFIX,
+        "document": PROMPT_PREFIX,
+    })
+    model.default_prompt_name = "SentenceSimilarity"
+    model.set_pooling_include_prompt(True)
+    return model
+
+
+def validate_resume_checkpoint(checkpoint):
+    """Do not silently resume old Qwen or differently formatted training runs."""
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(checkpoint)
+    with open(os.path.join(checkpoint, "config_sentence_transformers.json")) as handle:
+        saved = json.load(handle)
+    if (
+        config.model_type != "embedding_gemma2"
+        or config.vision_config is not None
+        or config.audio_config is not None
+        or saved.get("default_prompt_name") != "SentenceSimilarity"
+        or any(saved.get("prompts", {}).get(name) != PROMPT_PREFIX
+               for name in ("SentenceSimilarity", "query", "document"))
+    ):
+        raise ValueError(
+            f"Incompatible TrialSpace checkpoint: {checkpoint}. "
+            "Choose a fresh --ckpt-dir for text-only EmbeddingGemma 2 training."
+        )
+
+
 def main():
     args = parse_args()
     input_files = expand_inputs(args.input_parquet)
@@ -95,10 +143,14 @@ def main():
 
     # Deferred imports
     from sentence_transformers import (
-        SentenceTransformer, losses, SentenceTransformerTrainer, SentenceTransformerTrainingArguments
+        losses, SentenceTransformerTrainer, SentenceTransformerTrainingArguments
     )
     from datasets import Dataset
-    from transformers import AutoTokenizer
+    from transformers.trainer_utils import get_last_checkpoint
+
+    checkpoint = get_last_checkpoint(args.ckpt_dir) if os.path.isdir(args.ckpt_dir) else None
+    if checkpoint:
+        validate_resume_checkpoint(checkpoint)
 
     # --- Load & filter data ---
     trial_checks = load_and_concat(input_files)
@@ -138,22 +190,10 @@ def main():
     print("\n[INFO] eligibility_label (normalized) distribution:")
     print(trial_checks.eligibility_label.describe())
 
-    # --- Tokenizer & truncation (from the base model) ---
-    try:
-        tok = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
-    except Exception:
-        tok = AutoTokenizer.from_pretrained(args.base_model)
-
-    def truncate(text: str, max_tokens: int = MAX_TOKENS) -> str:
-        if not isinstance(text, str):
-            text = "" if pd.isna(text) else str(text)
-        return tok.decode(
-            tok.encode(text, add_special_tokens=True, truncation=True, max_length=max_tokens),
-            skip_special_tokens=True
-        )
-
-    trial_checks["patient_summary_trunc"] = PROMPT_PREFIX + trial_checks["patient_summary"].map(truncate)
-    trial_checks["this_space_trunc"] = PROMPT_PREFIX + trial_checks["this_space"].map(truncate)
+    # Keep raw text in the datasets. The trainer applies the prefix once, then
+    # the model tokenizer truncates the complete input, including special tokens.
+    for column in ("patient_summary", "this_space"):
+        trial_checks[column] = trial_checks[column].fillna("").astype(str)
 
     eligible = trial_checks[trial_checks.eligibility_result >= 1]
     print("\n[INFO] Eligible subset info:")
@@ -162,21 +202,15 @@ def main():
     # --- Model (from the base model) ---
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\n[INFO] Using device: {device}")
-    model = SentenceTransformer(args.base_model, device=device)
-
-    # Set prompt hook if supported (Qwen embedders expose `prompts`)
-    if hasattr(model, "prompts") and isinstance(getattr(model, "prompts"), dict):
-        model.prompts["query"] = PROMPT_PREFIX
-
-    model.max_seq_length = MAX_TOKENS
+    model = load_text_model(args.base_model, device)
 
     # --- Datasets ---
     mnri_dataset = Dataset.from_pandas(
-        eligible[["patient_summary_trunc", "this_space_trunc"]],
+        eligible[["patient_summary", "this_space"]],
         preserve_index=False
     )
     contrastive_dataset = Dataset.from_pandas(
-        trial_checks[["patient_summary_trunc", "this_space_trunc", "eligibility_label"]]
+        trial_checks[["patient_summary", "this_space", "eligibility_label"]]
         .rename(columns={"eligibility_label": "label"}),
         preserve_index=False
     )
@@ -205,7 +239,9 @@ def main():
         save_total_limit=2,
         logging_steps=100,
         num_train_epochs=3,
-        bf16=True if torch.cuda.is_available() else False,
+        prompts=PROMPT_PREFIX,
+        bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+        fp16=False,
     )
 
     trainer = SentenceTransformerTrainer(
@@ -215,16 +251,10 @@ def main():
         loss=losses_map,
     )
 
-    # Check if checkpoint directory exists and has checkpoints
-    checkpoint_exists = False
-    if os.path.exists(args.ckpt_dir):
-        checkpoints = [d for d in os.listdir(args.ckpt_dir) if d.startswith("checkpoint-")]
-        checkpoint_exists = len(checkpoints) > 0
-    
     print("\n[INFO] Starting training...")
-    if checkpoint_exists:
-        print(f"[INFO] Resuming from checkpoint in {args.ckpt_dir}")
-        trainer.train(resume_from_checkpoint=True)
+    if checkpoint:
+        print(f"[INFO] Resuming from {checkpoint}")
+        trainer.train(resume_from_checkpoint=checkpoint)
     else:
         print("[INFO] Starting fresh training")
         trainer.train()

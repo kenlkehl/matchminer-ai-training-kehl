@@ -270,7 +270,7 @@ def main():
     print(f"Loading embedding model from {args.model_dir} on {device} ...")
     model = SentenceTransformer(args.model_dir, trust_remote_code=True, device=device)
     model.max_seq_length = args.max_seq_length
-    model.prompts["query"] = QUERY_PROMPT
+    model.prompts.setdefault("query", QUERY_PROMPT)
 
     # --- Trial checker model (optional) ------------------------------------
     tc_model = None
@@ -289,7 +289,7 @@ def main():
             [patient_summary],
             convert_to_tensor=True,
             normalize_embeddings=True,
-            prompt="query",
+            prompt_name="query",
         )
 
     print(f"Encoding {len(space_texts)} trial spaces ...")
@@ -299,7 +299,7 @@ def main():
             batch_size=12,
             convert_to_tensor=True,
             normalize_embeddings=True,
-            prompt="query",
+            prompt_name="query",
             show_progress_bar=True,
         )
 

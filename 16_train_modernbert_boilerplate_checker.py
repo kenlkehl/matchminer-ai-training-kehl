@@ -17,9 +17,10 @@ from datasets import Dataset, DatasetDict
 from transformers import AutoModelForSequenceClassification, TrainingArguments, Trainer
 
 
-def main(checkpoint_dir: str, output_dir: str):
+def main(checkpoint_dir: str, output_dir: str,
+         input_parquet: str = "../data/no_phi/boilerplate_checks/final_boilerplate_checks.parquet"):
     
-    boilerplate_checks = pd.read_parquet("../data/no_phi/boilerplate_checks/final_boilerplate_checks.parquet")
+    boilerplate_checks = pd.read_parquet(input_parquet)
     
     
     
@@ -125,5 +126,7 @@ if __name__ == '__main__':
                         help="Directory to save training checkpoints (default: ../models/boilerplatechecker_checkpoints)")
     parser.add_argument("--output_dir", type=str, default="../models/boilerplatechecker",
                         help="Directory to save final model (default: ../models/boilerplatechecker)")
+    parser.add_argument("--input-parquet", default="../data/no_phi/boilerplate_checks/final_boilerplate_checks.parquet",
+                        help="Labeled boilerplate pairs from the current retrieval run")
     args = parser.parse_args()
-    main(checkpoint_dir=args.checkpoint_dir, output_dir=args.output_dir)
+    main(checkpoint_dir=args.checkpoint_dir, output_dir=args.output_dir, input_parquet=args.input_parquet)

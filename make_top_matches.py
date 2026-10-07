@@ -86,11 +86,8 @@ def parse_args():
     ap.add_argument("--max_seq_length", type=int, default=1500)
     ap.add_argument(
         "--query_prompt",
-        default=(
-            "Instruct: Given a cancer patient summary, retrieve clinical trial options "
-            "that are reasonable for that patient; or, given a clinical trial option, "
-            "retrieve cancer patients who are reasonable candidates for that trial."
-        ),
+        default=None,
+        help="Optional literal prefix override; otherwise use the model's saved query prompt.",
     )
     ap.add_argument(
         "--random_seed",
@@ -130,15 +127,10 @@ def _encode_worker(texts, device_str, model_path, encode_batch_size, max_seq_len
     """Runs in a subprocess on one GPU; returns a float32 numpy (N, D)."""
     torch.cuda.set_device(int(device_str.split(":")[-1]))
     model = SentenceTransformer(model_path, trust_remote_code=True, device=device_str)
-    # Apply same prompt / length as original
-    try:
+    # Fine-tuning persists the same prefix for both matching directions.
+    if query_prompt is not None:
         model.prompts["query"] = query_prompt
-    except Exception:
-        pass
-    try:
-        model.max_seq_length = max_seq_length
-    except Exception:
-        pass
+    model.max_seq_length = max_seq_length
 
     with torch.no_grad():
         embs = model.encode(
@@ -147,7 +139,7 @@ def _encode_worker(texts, device_str, model_path, encode_batch_size, max_seq_len
             convert_to_tensor=True,
             normalize_embeddings=True,  # makes dot product == cosine similarity
             show_progress_bar=False,
-            prompt="query",
+            prompt_name="query",
         ).cpu().to(dtype=torch.float32).numpy()
     return embs
 

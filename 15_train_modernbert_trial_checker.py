@@ -8,20 +8,20 @@ torch.compile.disable = True
 torch.set_float32_matmul_precision('high')
 
 
-def main(checkpoint_dir: str, output_dir: str):
+def main(checkpoint_dir: str, output_dir: str, mining_data_dir: str = "../data/no_phi"):
 
     enrollments = pd.read_parquet('../data/no_phi/space_specific_eligibility_checks.parquet')
     enrollments.info()
 
-    round1_patient = pd.read_parquet('../data/no_phi/round1_patientcentric_checks/top_cohorts_checked_round1.parquet')
-    round2_patient = pd.read_parquet('../data/no_phi/round2_patientcentric_checks/top_cohorts_checked_round2.parquet')
-    round3_patient = pd.read_parquet('../data/no_phi/round3_patientcentric_checks/top_cohorts_checked_round3.parquet')
+    round1_patient = pd.read_parquet(os.path.join(mining_data_dir, 'round1_patientcentric_checks/top_cohorts_checked_round1.parquet'))
+    round2_patient = pd.read_parquet(os.path.join(mining_data_dir, 'round2_patientcentric_checks/top_cohorts_checked_round2.parquet'))
+    round3_patient = pd.read_parquet(os.path.join(mining_data_dir, 'round3_patientcentric_checks/top_cohorts_checked_round3.parquet'))
     patient = pd.concat([round1_patient, round2_patient, round3_patient], ignore_index=True, axis=0)
     patient.info()
 
-    round1_space = pd.read_parquet('../data/no_phi/round1_trialcentric_checks/top_patients_checked_round1.parquet')
-    round2_space = pd.read_parquet('../data/no_phi/round2_trialcentric_checks/top_patients_checked_round2.parquet')
-    round3_space = pd.read_parquet('../data/no_phi/round3_trialcentric_checks/top_patients_checked_round3.parquet')
+    round1_space = pd.read_parquet(os.path.join(mining_data_dir, 'round1_trialcentric_checks/top_patients_checked_round1.parquet'))
+    round2_space = pd.read_parquet(os.path.join(mining_data_dir, 'round2_trialcentric_checks/top_patients_checked_round2.parquet'))
+    round3_space = pd.read_parquet(os.path.join(mining_data_dir, 'round3_trialcentric_checks/top_patients_checked_round3.parquet'))
 
     space = pd.concat([round1_space, round2_space, round3_space], axis=0, ignore_index=True)
     space.info()
@@ -127,9 +127,11 @@ if __name__ == "__main__":
                         help="Directory to save training checkpoints")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Directory to save final model")
+    parser.add_argument("--mining-data-dir", default="../data/no_phi",
+                        help="Directory containing the three rounds of labeled retrieval candidates")
     args = parser.parse_args()
 
     checkpoint_dir = args.checkpoint_dir or "../models/trialchecker_regression_checkpoints"
     output_dir = args.output_dir or "../models/modernbert-trial-checker-regression"
 
-    main(checkpoint_dir=checkpoint_dir, output_dir=output_dir)
+    main(checkpoint_dir=checkpoint_dir, output_dir=output_dir, mining_data_dir=args.mining_data_dir)

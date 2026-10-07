@@ -145,7 +145,7 @@ def main():
     print(f"Loading embedding model from {args.model_dir} on {device} ...")
     model = SentenceTransformer(args.model_dir, trust_remote_code=True, device=device)
     model.max_seq_length = args.max_seq_length
-    model.prompts["query"] = QUERY_PROMPT
+    model.prompts.setdefault("query", QUERY_PROMPT)
 
     # --- Encode patient summary --------------------------------------------
     print("Encoding patient summary ...")
@@ -154,7 +154,7 @@ def main():
             [patient_summary],
             convert_to_tensor=False,
             normalize_embeddings=True,
-            prompt="query",
+            prompt_name="query",
         )
 
     assert patient_emb.shape[1] == space_embs_np.shape[1], (

@@ -173,11 +173,11 @@ def main():
     embedding_model = SentenceTransformer(
         args.embedding_model, trust_remote_code=True, device='cuda'
     )
-    embedding_model.prompts['query'] = (
+    embedding_model.prompts.setdefault('query', (
         "Instruct: Given a cancer patient summary, retrieve clinical trial options "
         "that are reasonable for that patient; or, given a clinical trial option, "
         "retrieve cancer patients who are reasonable candidates for that trial. "
-    )
+    ))
     embedding_model.max_seq_length = 2500
 
     # Compute embeddings
@@ -186,7 +186,7 @@ def main():
         patient_embeddings = embedding_model.encode(
             patient_summaries.patient_summary.tolist(),
             convert_to_tensor=True,
-            prompt='query'
+            prompt_name='query'
         )
 
     print("Computing space embeddings...")
@@ -194,7 +194,7 @@ def main():
         space_embeddings = embedding_model.encode(
             spaces.this_space.tolist(),
             convert_to_tensor=True,
-            prompt='query'
+            prompt_name='query'
         )
 
     # Process patients with sharding

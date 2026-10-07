@@ -286,7 +286,7 @@ def _encode_worker(texts, device_str, model_path, encode_batch_size,
     model = SentenceTransformer(model_path, trust_remote_code=True,
                                 device=device_str)
     model.max_seq_length = max_seq_length
-    model.prompts["query"] = query_prompt
+    model.prompts.setdefault("query", query_prompt)
     with torch.no_grad():
         embs = model.encode(
             texts,
@@ -294,7 +294,7 @@ def _encode_worker(texts, device_str, model_path, encode_batch_size,
             convert_to_tensor=False,
             normalize_embeddings=True,
             show_progress_bar=False,
-            prompt="query",
+            prompt_name="query",
         )
     return embs
 

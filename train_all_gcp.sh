@@ -7,7 +7,7 @@
 # brought up before every vLLM step and torn down again (full instance
 # stop) before each non-vLLM step listed by the user (make_top_matches,
 # finetune_embedder, 15_train_modernbert_trial_checker,
-# 16_train_modernbert_boilerplate_checker, and GoodOptionChecker training).
+# and 16_train_modernbert_boilerplate_checker).
 # When the script exits
 # (success, failure, or Ctrl-C), all worker instances are stopped.
 #
@@ -318,12 +318,14 @@ mv ../data/no_phi/initial_trialcheck_outputs/space_specific_eligibility_checks.p
 # Step 8 — finetune_embedder (no vLLM) → stop workers
 # ---------------------------------------------------------------------------
 stop_workers_fully
-skip_if_done ../models/pt_trial_summary_perspace_finetuned.model "step 8 embedder" || \
+# Keep this model family and its mined labels separate from earlier Qwen runs.
+mkdir -p ../models/trialspace_embeddinggemma2 ../data/no_phi/trialspace_embeddinggemma2
+skip_if_done ../models/trialspace_embeddinggemma2/pt_trial_summary_perspace_finetuned.model "step 8 embedder" || \
 accelerate launch finetune_embedder.py \
   -i ../data/no_phi/space_specific_eligibility_checks.parquet \
-  -c ~/models/initial_embedder_training \
-  -m Qwen/Qwen3-Embedding-0.6B \
-  -o ../models/pt_trial_summary_perspace_finetuned.model
+  -c ~/models/initial_embeddinggemma2_training \
+  -m google/embeddinggemma-2 \
+  -o ../models/trialspace_embeddinggemma2/pt_trial_summary_perspace_finetuned.model
 echo 8 done
 
 # ---------------------------------------------------------------------------
@@ -331,15 +333,15 @@ echo 8 done
 # ---------------------------------------------------------------------------
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ../models/pt_trial_summary_perspace_finetuned.model \
+  --model ../models/trialspace_embeddinggemma2/pt_trial_summary_perspace_finetuned.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
   --top_k_spaces 20 --top_k_patients 40 \
   --encode_batch_size 128 --score_batch_size 2048 \
   --max_seq_length 2500 \
-  --out_cohorts_parquet ../data/no_phi/top_cohorts_tocheck_round1.parquet \
-  --out_patients_parquet ../data/no_phi/top_patients_tocheck_round1.parquet
+  --out_cohorts_parquet ../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round1.parquet \
+  --out_patients_parquet ../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round1.parquet
 echo 9a done
 
 # ---------------------------------------------------------------------------
@@ -347,8 +349,8 @@ echo 9a done
 # ---------------------------------------------------------------------------
 start_vllm_cluster 50000 900 0.95 1
 python llm_check_trials.py \
-  --input_parquet ../data/no_phi/top_cohorts_tocheck_round1.parquet \
-  --out_dir ../data/no_phi/round1_patientcentric_checks \
+  --input_parquet ../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round1.parquet \
+  --out_dir ../data/no_phi/trialspace_embeddinggemma2/round1_patientcentric_checks \
   --final_output top_cohorts_checked_round1.parquet \
   --server_urls_file "$SERVERS_FILE" \
   --prompt_batch_size 2000 \
@@ -358,8 +360,8 @@ python llm_check_trials.py \
 echo 9b done
 
 python llm_check_trials.py \
-  --input_parquet ../data/no_phi/top_patients_tocheck_round1.parquet \
-  --out_dir ../data/no_phi/round1_trialcentric_checks \
+  --input_parquet ../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round1.parquet \
+  --out_dir ../data/no_phi/trialspace_embeddinggemma2/round1_trialcentric_checks \
   --final_output top_patients_checked_round1.parquet \
   --server_urls_file "$SERVERS_FILE" \
   --prompt_batch_size 2000 \
@@ -373,13 +375,13 @@ stop_vllm_cluster
 # Step 10 — finetune_embedder (no vLLM) → stop workers
 # ---------------------------------------------------------------------------
 stop_workers_fully
-skip_if_done ../models/reranker_round1.model "step 10 reranker_round1" || \
+skip_if_done ../models/trialspace_embeddinggemma2/reranker_round1.model "step 10 reranker_round1" || \
 accelerate launch finetune_embedder.py \
-   -i ../data/no_phi/round1_trialcentric_checks/top_patients_checked_round1.parquet \
-   -i ../data/no_phi/round1_patientcentric_checks/top_cohorts_checked_round1.parquet \
-   -c ../models/reranker1_training \
-   -m ../models/pt_trial_summary_perspace_finetuned.model \
-   -o ../models/reranker_round1.model
+   -i ../data/no_phi/trialspace_embeddinggemma2/round1_trialcentric_checks/top_patients_checked_round1.parquet \
+   -i ../data/no_phi/trialspace_embeddinggemma2/round1_patientcentric_checks/top_cohorts_checked_round1.parquet \
+   -c ../models/trialspace_embeddinggemma2/reranker1_training \
+   -m ../models/trialspace_embeddinggemma2/pt_trial_summary_perspace_finetuned.model \
+   -o ../models/trialspace_embeddinggemma2/reranker_round1.model
 echo 10 done
 
 # ---------------------------------------------------------------------------
@@ -387,15 +389,15 @@ echo 10 done
 # ---------------------------------------------------------------------------
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ../models/reranker_round1.model \
+  --model ../models/trialspace_embeddinggemma2/reranker_round1.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
   --top_k_spaces 20 --top_k_patients 40 \
   --encode_batch_size 128 --score_batch_size 2048 \
   --max_seq_length 2500 \
-  --out_cohorts_parquet ../data/no_phi/top_cohorts_tocheck_round2.parquet \
-  --out_patients_parquet ../data/no_phi/top_patients_tocheck_round2.parquet
+  --out_cohorts_parquet ../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round2.parquet \
+  --out_patients_parquet ../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round2.parquet
 echo 11a done
 
 # ---------------------------------------------------------------------------
@@ -403,8 +405,8 @@ echo 11a done
 # ---------------------------------------------------------------------------
 start_vllm_cluster 50000 900 0.95 1
 python llm_check_trials.py \
-  --input_parquet ../data/no_phi/top_cohorts_tocheck_round2.parquet \
-  --out_dir ../data/no_phi/round2_patientcentric_checks \
+  --input_parquet ../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round2.parquet \
+  --out_dir ../data/no_phi/trialspace_embeddinggemma2/round2_patientcentric_checks \
   --final_output top_cohorts_checked_round2.parquet \
   --server_urls_file "$SERVERS_FILE" \
   --prompt_batch_size 2000 \
@@ -414,8 +416,8 @@ python llm_check_trials.py \
 echo 11b done
 
 python llm_check_trials.py \
-  --input_parquet ../data/no_phi/top_patients_tocheck_round2.parquet \
-  --out_dir ../data/no_phi/round2_trialcentric_checks \
+  --input_parquet ../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round2.parquet \
+  --out_dir ../data/no_phi/trialspace_embeddinggemma2/round2_trialcentric_checks \
   --final_output top_patients_checked_round2.parquet \
   --server_urls_file "$SERVERS_FILE" \
   --prompt_batch_size 2000 \
@@ -429,13 +431,13 @@ stop_vllm_cluster
 # Step 12 — finetune_embedder (no vLLM) → stop workers
 # ---------------------------------------------------------------------------
 stop_workers_fully
-skip_if_done ../models/reranker_round2.model "step 12 reranker_round2" || \
+skip_if_done ../models/trialspace_embeddinggemma2/reranker_round2.model "step 12 reranker_round2" || \
 accelerate launch finetune_embedder.py \
-   -i ../data/no_phi/round2_trialcentric_checks/top_patients_checked_round2.parquet \
-   -i ../data/no_phi/round2_patientcentric_checks/top_cohorts_checked_round2.parquet \
-   -c ../models/reranker2_training \
-   -m ../models/reranker_round1.model \
-   -o ../models/reranker_round2.model
+   -i ../data/no_phi/trialspace_embeddinggemma2/round2_trialcentric_checks/top_patients_checked_round2.parquet \
+   -i ../data/no_phi/trialspace_embeddinggemma2/round2_patientcentric_checks/top_cohorts_checked_round2.parquet \
+   -c ../models/trialspace_embeddinggemma2/reranker2_training \
+   -m ../models/trialspace_embeddinggemma2/reranker_round1.model \
+   -o ../models/trialspace_embeddinggemma2/reranker_round2.model
 echo 12 done
 
 # ---------------------------------------------------------------------------
@@ -443,15 +445,15 @@ echo 12 done
 # ---------------------------------------------------------------------------
 python make_top_matches.py \
   --parquet ../data/no_phi/space_specific_eligibility_checks.parquet \
-  --model ../models/reranker_round2.model \
+  --model ../models/trialspace_embeddinggemma2/reranker_round2.model \
   --gpus 0,1,2,3,4,5,6,7 \
   --sample_trials_per_patient 500 \
   --sample_patients_per_trial 20000 \
   --top_k_spaces 20 --top_k_patients 40 \
   --encode_batch_size 128 --score_batch_size 2048 \
   --max_seq_length 2500 \
-  --out_cohorts_parquet ../data/no_phi/top_cohorts_tocheck_round3.parquet \
-  --out_patients_parquet ../data/no_phi/top_patients_tocheck_round3.parquet
+  --out_cohorts_parquet ../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round3.parquet \
+  --out_patients_parquet ../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round3.parquet
 echo 13a done
 
 # ---------------------------------------------------------------------------
@@ -459,8 +461,8 @@ echo 13a done
 # ---------------------------------------------------------------------------
 start_vllm_cluster 50000 900 0.95 1
 python llm_check_trials.py \
-  --input_parquet ../data/no_phi/top_cohorts_tocheck_round3.parquet \
-  --out_dir ../data/no_phi/round3_patientcentric_checks \
+  --input_parquet ../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round3.parquet \
+  --out_dir ../data/no_phi/trialspace_embeddinggemma2/round3_patientcentric_checks \
   --final_output top_cohorts_checked_round3.parquet \
   --server_urls_file "$SERVERS_FILE" \
   --prompt_batch_size 2000 \
@@ -470,8 +472,8 @@ python llm_check_trials.py \
 echo 13b done
 
 python llm_check_trials.py \
-  --input_parquet ../data/no_phi/top_patients_tocheck_round3.parquet \
-  --out_dir ../data/no_phi/round3_trialcentric_checks \
+  --input_parquet ../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round3.parquet \
+  --out_dir ../data/no_phi/trialspace_embeddinggemma2/round3_trialcentric_checks \
   --final_output top_patients_checked_round3.parquet \
   --server_urls_file "$SERVERS_FILE" \
   --prompt_batch_size 2000 \
@@ -491,7 +493,9 @@ python 14_check_boilerplate.py \
   --prompt_batch_size 1000 \
   --max_model_len 50000 --max_new_tokens 20000 \
   --gpu_memory_utilization 0.95 \
-  --out_dir ../data/no_phi/boilerplate_checks
+  --patients_rounds ../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round1.parquet,../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round2.parquet,../data/no_phi/trialspace_embeddinggemma2/top_cohorts_tocheck_round3.parquet \
+  --trials_rounds ../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round1.parquet,../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round2.parquet,../data/no_phi/trialspace_embeddinggemma2/top_patients_tocheck_round3.parquet \
+  --out_dir ../data/no_phi/trialspace_embeddinggemma2/boilerplate_checks
 echo 14 done
 stop_vllm_cluster
 
@@ -499,41 +503,38 @@ stop_vllm_cluster
 # Steps 15 / 16 — modernbert training (no vLLM) → stop workers
 # ---------------------------------------------------------------------------
 stop_workers_fully
-skip_if_done ../models/modernbert-trial-checker-regression "step 15 trial checker" || \
-accelerate launch --num_processes 8 15_train_modernbert_trial_checker.py
+skip_if_done ../models/trialspace_embeddinggemma2/modernbert-trial-checker-regression "step 15 trial checker" || \
+accelerate launch --num_processes 8 15_train_modernbert_trial_checker.py \
+  --mining-data-dir ../data/no_phi/trialspace_embeddinggemma2 \
+  --checkpoint_dir ../models/trialspace_embeddinggemma2/trialchecker_regression_checkpoints \
+  --output_dir ../models/trialspace_embeddinggemma2/modernbert-trial-checker-regression
 echo 15 done
 
-skip_if_done ../models/boilerplatechecker "step 16 boilerplate checker" || \
-accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py
+skip_if_done ../models/trialspace_embeddinggemma2/boilerplatechecker "step 16 boilerplate checker" || \
+accelerate launch --num_processes 8 16_train_modernbert_boilerplate_checker.py \
+  --input-parquet ../data/no_phi/trialspace_embeddinggemma2/boilerplate_checks/final_boilerplate_checks.parquet \
+  --checkpoint_dir ../models/trialspace_embeddinggemma2/boilerplatechecker_checkpoints \
+  --output_dir ../models/trialspace_embeddinggemma2/boilerplatechecker
 echo 16 done
 
 # ---------------------------------------------------------------------------
-# Step 17 — canonical drug research, per-drug evidence labels, and training
+# Step 17 — build and validate the patient-free global drug evidence catalog.
+# Help Me Choose scores it with the LLM rubric at inference time; the trained
+# GoodOptionChecker classifier is deprecated and no longer labeled or trained.
 # ---------------------------------------------------------------------------
-if skip_if_done \
-  ../models/goodoptionchecker_four_point_v2 \
-  "step 17 good option checker"; then
-  echo 17 skipped
+if [[ -f ../data/no_phi/good_option_catalog/manifest.json ]]; then
+  echo "[skip] step 17 good option catalog: manifest already exists"
 else
-  # Catalog construction is patient-free and must validate before labeling.
-  # Leave room for the prompt in addition to the 100k GoodOption output budget.
+  # Catalog construction is patient-free. Leave room for the prompt in
+  # addition to the 100k GoodOption output budget.
   start_vllm_cluster 131072 256 0.95 1
   python train_good_option_checker.py catalog \
-    --server-urls-file "$SERVERS_FILE" \
-    --model "$MODEL"
-
-  python train_good_option_checker.py validate-catalog
-
-  python train_good_option_checker.py label \
+    --candidate-files ../data/no_phi/trialspace_embeddinggemma2/top_{cohorts,patients}_tocheck_round{1,2,3}.parquet \
     --server-urls-file "$SERVERS_FILE" \
     --model "$MODEL"
   stop_vllm_cluster
-
-  stop_workers_fully
-  accelerate launch --num_processes 8 train_good_option_checker.py train \
-    --patient-validation-fraction 0.20 \
-    --drug-validation-fraction 0.20
-  echo 17 done
 fi
+python train_good_option_checker.py validate-catalog
+echo 17 done
 
 echo "[train_all_gcp] all 17 steps complete."

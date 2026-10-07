@@ -4,6 +4,11 @@
 Public research is completed and validated before any patient-bearing LLM call.
 The student receives one patient summary and one clean drug summary and predicts
 the four unchanged GoodOption criteria as independent logits.
+
+The trained GoodOptionChecker is deprecated: GoodOption scoring uses the LLM
+rubric over drug and drug-class evidence. `catalog` and `validate-catalog`
+remain the supported subcommands; `label`, `train`, and `all` are kept only to
+reproduce earlier checkers.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -1316,16 +1322,24 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--catalog", default=str(DEFAULT_CATALOG_DIR))
     validate.set_defaults(handler=run_validate_catalog)
 
-    label = subparsers.add_parser("label")
+    label = subparsers.add_parser(
+        "label", help="Deprecated: label GoodOptionChecker examples."
+    )
     add_label_arguments(label)
     label.set_defaults(handler=run_label)
 
-    train = subparsers.add_parser("train")
+    train = subparsers.add_parser(
+        "train", help="Deprecated: train the GoodOptionChecker."
+    )
     add_train_arguments(train)
     train.set_defaults(handler=run_train)
 
     all_steps = subparsers.add_parser(
-        "all", help="Run catalog, validation, labeling, and training in sequence."
+        "all",
+        help=(
+            "Deprecated: run catalog, validation, labeling, and GoodOptionChecker "
+            "training in sequence."
+        ),
     )
     add_catalog_arguments(all_steps)
     add_label_arguments(all_steps, shared_catalog_arguments=True)
@@ -1335,8 +1349,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+DEPRECATED_COMMANDS = frozenset({"label", "train", "all"})
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.command in DEPRECATED_COMMANDS:
+        warnings.warn(
+            f"`{args.command}` trains or labels the deprecated GoodOptionChecker "
+            "classifier, which saw only drug evidence. GoodOption scoring now "
+            "uses the LLM rubric over drug and class evidence; build the catalog "
+            "with `catalog` and `validate-catalog` instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
     args.handler(args)
 
 

@@ -11,11 +11,52 @@ bash train_all.sh
 Training uses vLLM heavily. Restart an interrupted workflow from the last
 completed orchestration step rather than rerunning completed stages.
 
-## GoodOptionChecker
+## TrialSpace embedding model
+
+TrialSpace fine-tunes `google/embeddinggemma-2` with only its text encoder
+(`vision_config=None`, `audio_config=None`). Google documents these settings and
+the input prefixes in its [Hugging Face model card](https://huggingface.co/google/embeddinggemma-2#best-practices).
+Use `sentence-transformers>=6.1` and `transformers>=5.19` (`uv sync --group training`).
+
+Patient summaries and trial spaces both receive
+`task: sentence similarity | query: `, Google's symmetric similarity prefix,
+because either side can be the retrieval query. The trainer adds the prefix once
+to raw text before tokenization. The 2,500-token limit includes that prefix and
+special tokens. Google's mean pooling (including prompt tokens), normalization,
+and full 768-dimensional output are retained. Training uses float32 weights
+with bfloat16 mixed precision on supported CUDA devices; float16 is disabled.
+
+The saved SentenceTransformer sets `SentenceSimilarity` as its default prompt
+and saves the same prefix under `query` and `document`. Encode raw summaries
+with `model.encode(texts)` or `model.encode(texts, prompt_name="query")`.
+`prompt="query"` would prepend the literal word, so it must not be used to
+select a named prompt. Evaluation and mining scripts honor the saved prefix.
+
+The orchestrators place new models and mined/relabeled data under
+`../models/trialspace_embeddinggemma2/` and
+`../data/no_phi/trialspace_embeddinggemma2/`; the initial checkpoint directory
+is `~/models/initial_embeddinggemma2_training`. This avoids reusing Qwen models,
+training checkpoints, or candidate-label shards. The final TrialSpace model is
+`../models/trialspace_embeddinggemma2/reranker_round2.model`.
+An existing run can restart at step 8 using its initial eligibility labels.
+Regenerate both patient and trial embeddings for the new model: older vectors
+and indexes are incompatible. External inference consumers must likewise use
+the saved prefix and the matching regenerated index before adopting this model.
+
+## GoodOption evidence catalog
 
 GoodOption is an evidence-counting signal for whether a trial's experimental
 drug options have support relevant to a synthetic patient's cancer. It is not
 an eligibility result, response probability, or treatment recommendation.
+
+The trained four-logit GoodOptionChecker is deprecated. It read one patient and
+one drug summary and never saw drug-class evidence, and no trained model was
+published. GoodOption scoring now uses the inference package's LLM rubric
+(`score_good_options_with_llm`), whose prompt packs drug and class evidence to
+the teacher's context. Step 17 of `train_all.sh` and `train_all_gcp.sh`
+therefore builds and validates the patient-free catalog only. The `label`,
+`train`, and `all` subcommands still work, with a `FutureWarning`, for
+reproducing earlier checkers.
 
 The v3 catalog workflow has a hard patient-free research boundary:
 
@@ -35,9 +76,10 @@ The v3 catalog workflow has a hard patient-free research boundary:
    Retain passage-supported early and immature evidence with its limitations,
    and materialize matched NCIt definitions as citable ledger passages.
 5. Validate the complete catalog before any patient-bearing LLM request.
-6. Label every scoreable patient-drug pair on four independent binary criteria.
-7. Train a four-logit ModernBERT checker and aggregate all drug-by-criterion
-   probabilities when producing a patient-trial score.
+6. (Deprecated) Label every scoreable patient-drug pair on four independent
+   binary criteria.
+7. (Deprecated) Train a four-logit ModernBERT checker and aggregate all
+   drug-by-criterion probabilities when producing a patient-trial score.
 
 Genuine named anticancer control and background drugs remain available for
 catalog coverage but are omitted from GoodOption prompts and denominators.
@@ -76,9 +118,10 @@ The API/prompt relocation preserves rendered teacher prompts, classifier
 inputs, catalog compatibility IDs, and resumable checkpoints. Existing
 compatible catalogs and label shards can be reused with the same CLI commands.
 
-Run the complete workflow in sequence with one command. Each stage runs in an
-isolated process, validation must succeed before labeling starts, and training
-is launched through Accelerate:
+Deprecated: to reproduce an earlier checker, run the complete workflow in
+sequence with one command. Each stage runs in an isolated process, validation
+must succeed before labeling starts, and training is launched through
+Accelerate:
 
 ```bash
 python train_good_option_checker.py all \
@@ -108,7 +151,8 @@ catalog paths. A catalog prompt/schema change also requires fresh label-shard,
 aggregate-label, model-output, and model-checkpoint paths; label shards from a
 different catalog compatibility ID are deliberately rejected.
 
-Build and validate all patient-free evidence first:
+Build and validate all patient-free evidence (the supported workflow, and what
+step 17 of the orchestrators runs):
 
 ```bash
 python train_good_option_checker.py catalog \
@@ -126,7 +170,7 @@ python train_good_option_checker.py catalog \
   --model nvidia/Gemma-4-31B-IT-NVFP4
 ```
 
-After validation, label and train:
+Deprecated: after validation, label and train a checker:
 
 ```bash
 python train_good_option_checker.py label \
@@ -198,8 +242,8 @@ reach the configured teacher endpoint. The `catalog` command reads only the
 - `../data/no_phi/good_option_four_point_labels_v2.parquet`: validated label
   aggregate retaining the same teacher-input/output audit fields plus per-drug
   rationales and the catalog compatibility ID.
-- `../models/goodoptionchecker_four_point_v2/`: four-logit checker and split/
-  evaluation metadata.
+- `../models/goodoptionchecker_four_point_v2/`: deprecated four-logit checker
+  and split/evaluation metadata (written only by the deprecated `train`).
 
 Patient context is never accepted by catalog retrieval or included in public
 queries. The patient labeling prompt contains only the patient summary followed

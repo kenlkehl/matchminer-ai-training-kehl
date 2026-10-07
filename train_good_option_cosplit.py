@@ -1,12 +1,16 @@
 """Snapshot completed synthetic labels and distill on the original co-splits.
 
 Run `prepare` once, then `train` with torchrun. No teacher requests are made.
+
+Deprecated with the GoodOptionChecker it trains; GoodOption scoring uses the
+LLM rubric over drug and class evidence. Kept to reproduce earlier checkers.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -206,6 +210,12 @@ def train(args):
 
 
 if __name__ == "__main__":
+    warnings.warn(
+        "train_good_option_cosplit.py trains the deprecated GoodOptionChecker; "
+        "GoodOption scoring now uses the LLM rubric over drug and class evidence.",
+        FutureWarning,
+        stacklevel=1,
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=["prepare", "finalize", "train"])
     parser.add_argument("--all-labels", action="store_true", help="Use all valid labels without holdouts")
