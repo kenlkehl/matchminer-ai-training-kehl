@@ -182,7 +182,7 @@ def test_teacher_ignores_separate_reasoning_and_retries_truncation():
 
 def test_summary_target_and_serial_input_never_contain_teacher_reasoning(tokenizer, sources, tmp_path):
     parent = {"answer": "<think>private planning</think>Completed running summary"}
-    pipeline.atomic_json(tmp_path / "parent.json", parent)
+    pipeline.atomic_json(pipeline.response_path(tmp_path, "parent"), parent)
     task = {"category": "summarization", "parent_id": "parent", "first_date": "2020-01-01",
             "last_date": "2020-01-02", "chunk_text": "New fabricated note"}
     messages = pipeline.task_messages(task, sources, tmp_path)
@@ -236,7 +236,7 @@ def test_prepare_generate_build_and_safe_resume(tmp_path, tokenizer, monkeypatch
             target = tokenizer.decode([x for x in row["labels"] if x != -100])
             assert target.startswith("A\n" if row["category"] == "clinical_qa" else "Updated fabricated summary")
     # A missing response must not silently remove a task from the student set.
-    (directory / "responses" / f"{tasks[-1]['id']}.json").unlink()
+    pipeline.response_path(directory / "responses", tasks[-1]['id']).unlink()
     with pytest.raises(ValueError, match="Missing teacher response"):
         list(pipeline.training_rows(directory, tokenizer, 20000))
     (directory / "requests.jsonl").write_text("{}\n")

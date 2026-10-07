@@ -154,6 +154,11 @@ def main():
 
     # --- Load & filter data ---
     trial_checks = load_and_concat(input_files)
+    if "split" in trial_checks:
+        # Mining includes held-out co-splits for evaluation/distillation.
+        # Retrieval optimization must never learn from those pairs.
+        from make_top_matches import _normalized_split
+        trial_checks = trial_checks[_normalized_split(trial_checks["split"]).eq("train")].copy()
 
     # Optional filter if present
     if "patient_long_text" in trial_checks.columns:

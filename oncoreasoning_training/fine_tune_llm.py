@@ -68,8 +68,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-dir", type=Path, default=c.DEFAULT_OUTPUT_DIR)
     p.add_argument("--model-name", help="Defaults to the prepared manifest's model; changing it requires re-preparation")
-    p.add_argument("--output-dir", type=Path, default=c.REPO_ROOT.parent / "models" / "oncoreasoning_gemma4_e4b_answer_first_v1")
-    p.add_argument("--resume-from-checkpoint", help="Explicit checkpoint path; never resume a different run automatically")
+    p.add_argument("--output-dir", type=Path, default=c.REPO_ROOT.parent / "models" / "oncoreasoning_gemma4_e4b_answer_first_v2")
+    p.add_argument("--resume-from-checkpoint", help="Checkpoint path, or auto to restart this identical run after interruption")
     p.add_argument("--num-train-epochs", type=float, default=1)
     p.add_argument("--learning-rate", type=float, default=5e-6)
     p.add_argument("--batch-size", type=int, default=1)
@@ -79,6 +79,7 @@ def parser():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--attention", default="sdpa", choices=("sdpa", "flash_attention_2", "eager"))
     p.add_argument("--lora-rank", type=int, default=0, help="0 for full fine-tuning; e.g. 64 for LoRA")
+    p.add_argument("--fsdp", action="store_true", help="Shard full training across GPUs with FSDP2")
     return p
 
 
@@ -101,16 +102,22 @@ def main():
     dataset = dataset.select_columns(list(columns))
     settings = {key: getattr(args, key) for key in (
         "num_train_epochs", "learning_rate", "batch_size", "gradient_accumulation_steps",
-        "warmup_steps", "save_steps", "seed", "attention", "lora_rank")}
+        "warmup_steps", "save_steps", "seed", "attention", "lora_rank", "fsdp")}
     run = {"training_manifest": manifest, "model_name": model_name, "settings": settings}
     run_path = args.output_dir / "oncoreasoning_training_run.json"
+    restarting = args.resume_from_checkpoint == "auto"
+    if restarting:
+        from transformers.trainer_utils import get_last_checkpoint
+        if run_path.exists() and read_json(run_path) != run:
+            raise ValueError("Automatic resume requires the identical training manifest and settings")
+        args.resume_from_checkpoint = get_last_checkpoint(str(args.output_dir)) if args.output_dir.is_dir() else None
     if args.resume_from_checkpoint:
         if not run_path.exists() or read_json(run_path) != run:
             raise ValueError("Checkpoint resume requires the identical training manifest and settings")
         checkpoint = Path(args.resume_from_checkpoint).resolve()
         if not checkpoint.is_dir() or checkpoint.parent != args.output_dir.resolve():
             raise ValueError("Resume checkpoint must belong to this output directory")
-    elif int(os.environ.get("RANK", "0")) == 0 and args.output_dir.exists() and any(args.output_dir.iterdir()):
+    elif not (restarting and run_path.exists()) and int(os.environ.get("RANK", "0")) == 0 and args.output_dir.exists() and any(args.output_dir.iterdir()):
         # Only rank zero checks a fresh destination. Another rank may arrive
         # here after rank zero has created the run manifest or Trainer folder.
         raise ValueError("Output directory is not empty; resume explicitly or select a fresh directory")
@@ -126,15 +133,24 @@ def main():
             lora_dropout=0.05, target_modules="all-linear", task_type="CAUSAL_LM"))
         model.enable_input_require_grads()
     model.config.use_cache = False
+    distributed = {}
+    if args.fsdp:
+        if text_config.model_type != "gemma4_text":
+            raise ValueError("Review the FSDP wrapping policy when changing the student architecture")
+        distributed = dict(fsdp="full_shard auto_wrap", fsdp_config={
+            "version": 2, "transformer_layer_cls_to_wrap": ["Gemma4TextDecoderLayer"],
+            "activation_checkpointing": True,
+        })
     training_args = TrainingArguments(
         output_dir=str(args.output_dir), num_train_epochs=args.num_train_epochs,
         learning_rate=args.learning_rate, per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=1, gradient_accumulation_steps=args.gradient_accumulation_steps,
-        gradient_checkpointing=True, gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=not args.fsdp, gradient_checkpointing_kwargs={"use_reentrant": False},
         bf16=bf16, optim="adamw_torch", lr_scheduler_type="cosine", warmup_steps=args.warmup_steps,
         save_steps=args.save_steps, save_total_limit=2, logging_steps=10, report_to="none",
         eval_strategy="epoch" if "validation" in dataset else "no", prediction_loss_only=True,
         seed=args.seed, data_seed=args.seed, ddp_find_unused_parameters=False,
+        **distributed,
     )
     trainer = AnswerOnlyTrainer(model=model, args=training_args, processing_class=tokenizer,
         train_dataset=dataset["train"], eval_dataset=dataset.get("validation"),

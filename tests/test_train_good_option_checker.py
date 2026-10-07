@@ -537,16 +537,15 @@ def test_checker_commands_warn_and_catalog_commands_do_not(
 
 
 def test_orchestrators_build_the_catalog_without_training_the_checker() -> None:
+    import train_from_summaries as pipeline
     root = Path(good_option.__file__).resolve().parent
     for script in ("train_all.sh", "train_all_gcp.sh"):
         text = (root / script).read_text(encoding="utf-8")
-        step = text[text.index("Step 17") :]
-        assert "train_good_option_checker.py catalog" in step
-        assert "train_good_option_checker.py validate-catalog" in step
-        for retired in (" label", " train", " all"):
-            assert f"train_good_option_checker.py{retired}" not in step
-        assert "goodoptionchecker_four_point" not in step
-        assert "good_option_catalog/manifest.json" in step
+        assert "train_from_summaries.py" in text
+    plan = pipeline.stages(pipeline.parser().parse_args([]))
+    modes = [stage.command[stage.command.index("train_good_option_checker.py") + 1]
+             for stage in plan if "train_good_option_checker.py" in stage.command]
+    assert modes == ["catalog", "validate-catalog"]
 
 
 def test_all_runs_isolated_stages_in_order_and_forwards_options(
@@ -761,6 +760,8 @@ def test_server_file_configures_shared_remote_teacher(tmp_path: Path) -> None:
         "http://host-b:8000/v1",
     ]
     assert config.llm_good_option["remote"]["model_name"] == "teacher/model"
+    assert all(config.good_option_catalog[f"{stage}_llm"][backend]["model_name"] == "teacher/model"
+               for stage in ("screening", "synthesis", "class") for backend in ("local", "remote"))
     assert (
         good_option._active_good_option_output_tokens(config)
         == good_option.MIN_GOOD_OPTION_OUTPUT_TOKENS

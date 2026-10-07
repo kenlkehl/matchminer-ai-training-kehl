@@ -4,7 +4,7 @@ The student defaults to `google/gemma-4-E4B-it`, with only the text model loaded
 Select a future base using `prepare --model-name`; the trainer reads that choice
 from the prepared manifest. Use a new data and model directory when changing it.
 The two training categories are patient summarization and clinical question
-answering. This optional workflow is separate from `train_all*.sh`.
+answering. The integrated `train_all*.sh` pipeline runs both categories after TrialSpace and catalog construction.
 
 Google documents Gemma's [model and chat format](https://huggingface.co/google/gemma-4-E4B-it)
 and [thinking control](https://huggingface.co/docs/transformers/model_doc/gemma4).
@@ -40,6 +40,13 @@ asked in these component examples. To reconstruct the old trial score, all six
 matching answers must be Yes; otherwise the score is zero. When they are all
 Yes, the score is one plus the four specificity points.
 
+BoilerplateChecker supplies one question per trial exclusion: does this specific
+exclusion clearly apply? Unknown or uncertain evidence gives **B. No**. A
+patient-free teacher stage extracts verbatim rules, preserving all thresholds,
+exceptions, and AND/OR clauses; extraction rejects omitted source text. General
+exclusion evidence accompanies the patient summary. The original aggregate
+exclusion flag can be reconstructed as Yes when any individual answer is Yes.
+
 GoodOption supplies four questions **per scoreable drug**: disease-type benefit,
 common biomarker in the disease, the patient's documented biomarker, and human
 benefit from targeting that patient biomarker. Prompts use the current inference
@@ -71,18 +78,23 @@ Use the existing environment on this machine, outside the network-mounted repo:
 
 ```bash
 PY=~/thisenv/bin/python
-RUN=../data/no_phi/oncoreasoning_answer_first_v1
+RUN=../data/no_phi/oncoreasoning_answer_first_v2
+MINING=../data/no_phi/gemma_pipeline_v2
+
+$PY oncoreasoning_training/prepare_boilerplate.py \
+  --candidates "$MINING"/top_{cohorts,patients}_tocheck_round3.parquet \
+  --output-dir "$MINING/boilerplate_components" \
+  --server-urls-file "$MINING/teacher_servers.json"
 
 $PY oncoreasoning_training/create_all_training_data.py prepare \
   --output-dir "$RUN" \
   --model-name google/gemma-4-E4B-it \
   --inference-repo ../matchminer-ai-inference-kehl \
   --notes ../data/no_phi/all_synthetic_notes.parquet \
-  --catalog ../data/no_phi/good_option_catalog_v3 \
+  --catalog "$MINING/good_option_catalog" \
+  --boilerplate-components "$MINING/boilerplate_components" \
   --candidates \
-    ../data/no_phi/space_specific_eligibility_checks.parquet \
-    ../data/no_phi/trialspace_embeddinggemma2/round3_patientcentric_checks/top_cohorts_checked_round3.parquet \
-    ../data/no_phi/trialspace_embeddinggemma2/round3_trialcentric_checks/top_patients_checked_round3.parquet
+    "$MINING"/top_{cohorts,patients}_tocheck_round3.parquet
 
 $PY oncoreasoning_training/create_all_training_data.py generate \
   --output-dir "$RUN" \
@@ -97,7 +109,7 @@ $PY oncoreasoning_training/create_all_training_data.py build \
 
 ~/thisenv/bin/accelerate launch oncoreasoning_training/fine_tune_llm.py \
   --data-dir "$RUN" \
-  --output-dir ../models/oncoreasoning_gemma4_e4b_answer_first_v1 \
+  --output-dir ../models/oncoreasoning_gemma4_e4b_answer_first_v2 \
   --lora-rank 64
 ```
 
@@ -117,10 +129,9 @@ question is generated once across multiple trial spaces.
 
 Explicit patient split assignments are shared across both task categories.
 Missing assignments inherit the patient's known split or default to train;
-conflicting assignments fail. Test patients are excluded. **Mining tables may
-have a constant train field:** reconcile their splits with authoritative source
-assignments before preparation if you need the original patient/trial holdouts.
-The workflow does not reconstruct a trial co-split or create a new holdout.
+conflicting assignments fail. Test patients are excluded. The integrated miner
+preserves the original patient/trial co-splits. Older external mining tables
+with a constant train field must first have their original splits restored.
 Training and validation retain their observed category proportions, recorded in
 `training_manifest.json`; examples are shuffled without oversampling. Use
 `--tasks summarization` or `--tasks clinical_qa` for a single category, and
@@ -152,8 +163,8 @@ For a local smoke test, choose a clinical QA request ID from `requests.jsonl`:
 
 ```bash
 CUDA_VISIBLE_DEVICES=3 ~/thisenv/bin/python oncoreasoning_training/preview_model.py \
-  --model ../models/oncoreasoning_gemma4_e4b_answer_first_v1 \
-  --requests ../data/no_phi/oncoreasoning_answer_first_v1/requests.jsonl \
+  --model ../models/oncoreasoning_gemma4_e4b_answer_first_v2 \
+  --requests ../data/no_phi/oncoreasoning_answer_first_v2/requests.jsonl \
   --request-id REQUEST_ID --quick
 ```
 

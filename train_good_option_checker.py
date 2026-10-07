@@ -239,7 +239,7 @@ def _server_urls_from_file(path: str | Path) -> list[str]:
 
 
 def configure_teacher(args: argparse.Namespace) -> MMAIConfig:
-    """Apply shared model/endpoint defaults, allowing per-config stage overrides."""
+    """Use the requested teacher for every catalog stage and labeling call."""
 
     config = load_config(args.config) if args.config else load_default_preset()
     urls = [
@@ -251,6 +251,11 @@ def configure_teacher(args: argparse.Namespace) -> MMAIConfig:
         urls.extend(_server_urls_from_file(args.server_urls_file))
     urls = list(dict.fromkeys(urls))
     model = str(getattr(args, "model", "") or "").strip()
+    if model:
+        for stage in ("screening", "synthesis", "class"):
+            override = config.good_option_catalog.setdefault(f"{stage}_llm", {})
+            for backend in ("local", "remote"):
+                override.setdefault(backend, {})["model_name"] = model
     if urls:
         config.remote["enabled"] = True
         config.remote["server_urls"] = urls

@@ -23,6 +23,7 @@ import tempfile
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from oncoreasoning_training import contracts as c
+from oncoreasoning_training.teacher import TeacherPool, server_urls
 
 
 def file_digest(path):
@@ -152,6 +153,12 @@ def component_tasks(pair, sources, catalog=None, pack_evidence=None):
                 "trial_id": pair["trial_id"], "trial_summary": pair["trial_summary"]}
         task["messages"] = c.build_question_messages(task, sources)
         yield task
+    for criterion in pair.get("exclusion_criteria", []):
+        task = {**base, "family": "boilerplatechecking", "component": "exclusion_" + c.digest(criterion)[:16],
+                "trial_id": pair["trial_id"], "criterion": criterion,
+                "patient_boilerplate": pair.get("patient_boilerplate", "")}
+        task["messages"] = c.build_question_messages(task, sources)
+        yield task
     if catalog is None:
         return
     status = catalog.trial_status(pair["trial_id"])
@@ -227,15 +234,30 @@ def prepare(args, tokenizer=None):
             pairs.append({"patient_id": patient,
                           "patient_summary": required_text(row, "patient_summary", "cancer_history_summary"),
                           "trial_id": required_text(row, "nct_id", "trial_id").upper(),
-                          "trial_summary": required_text(row, "this_space", "clinical_space_summary")})
+                          "trial_summary": required_text(row, "this_space", "clinical_space_summary"),
+                          "patient_boilerplate": str(row.get("patient_boilerplate_text") or ""),
+                          "trial_boilerplate": str(row.get("trial_boilerplate_text") or "").strip()})
     if args.max_pairs:
         pairs = pairs[:args.max_pairs]
+    boilerplate_sources = {}
+    if args.boilerplate_components:
+        from oncoreasoning_training.prepare_boilerplate import validate_criteria
+        for pair in pairs:
+            source = pair["trial_boilerplate"]
+            if source and source.lower() != "nan":
+                key = c.digest([pair["trial_id"], source])
+                record = read_json(Path(args.boilerplate_components) / f"{key}.json")
+                if record["source"] != source:
+                    raise ValueError("Boilerplate component source mismatch")
+                pair["exclusion_criteria"] = validate_criteria(source, record["criteria"])
+                boilerplate_sources[key] = c.digest(record)
     manifest = {"format_version": c.FORMAT_VERSION, "student_model": args.model_name,
                 "tokenizer_fingerprint": c.tokenizer_fingerprint(tokenizer),
                 "contract_sha256": file_digest(c.__file__), "sources": sources,
                 "inputs": [source_record(path) for path in paths],
                 "inputs_confirmed_non_phi": non_phi or args.confirm_inputs_are_non_phi,
                 "catalog_id": catalog.compatibility_id if catalog else None,
+                "boilerplate_sources": boilerplate_sources,
                 "settings": {key: getattr(args, key) for key in (
                     "tasks", "chunk_min_tokens", "chunk_max_tokens", "chunk_overlap", "seed",
                     "max_patients", "max_pairs", "patient_id_column", "date_column", "note_column", "splits")}}
@@ -298,12 +320,17 @@ def load_prepared(directory):
     return manifest, prepared
 
 
+def response_path(response_dir, task_id):
+    # Millions of component outputs must not share one filesystem directory.
+    return Path(response_dir) / task_id[:2] / f"{task_id}.json"
+
+
 def task_messages(task, sources, response_dir):
     if task["category"] == "clinical_qa":
         return task["messages"]
     prior = ""
     if task["parent_id"]:
-        parent = read_json(Path(response_dir) / f"{task['parent_id']}.json")
+        parent = read_json(response_path(response_dir, task['parent_id']))
         prior = c.validate_answer(parent["answer"], "summarization")
     return c.build_summarization_messages(task, sources, prior)
 
@@ -335,7 +362,8 @@ def generate(args, tokenizer=None, call=None):
     if not manifest["inputs_confirmed_non_phi"]:
         raise ValueError("Teacher requests must have confirmed non-PHI inputs")
     tokenizer = tokenizer or c.load_chat_tokenizer(args.teacher_tokenizer or args.teacher_model)
-    config = {"prepared": prepared, "teacher_model": args.teacher_model, "server_url": args.server_url,
+    urls = server_urls(args.server_url, args.server_urls_file)
+    config = {"prepared": prepared, "teacher_model": args.teacher_model, "server_urls": urls,
               "teacher_tokenizer": args.teacher_tokenizer or args.teacher_model,
               "tokenizer_fingerprint": c.tokenizer_fingerprint(tokenizer),
               "enable_thinking": args.teacher_thinking, "max_tokens": args.teacher_max_tokens,
@@ -344,15 +372,11 @@ def generate(args, tokenizer=None, call=None):
     response_dir = directory / "responses"
     response_dir.mkdir(exist_ok=True)
     if call is None:
-        from openai import OpenAI
-        client = OpenAI(base_url=args.server_url, api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"), timeout=args.timeout, max_retries=0)
-        def call(messages):
-            return client.chat.completions.create(model=args.teacher_model, messages=messages,
-                temperature=args.temperature, max_tokens=args.teacher_max_tokens,
-                extra_body={"chat_template_kwargs": {"enable_thinking": args.teacher_thinking}})
+        call = TeacherPool(urls, args.teacher_model, max_tokens=args.teacher_max_tokens,
+                           thinking=args.teacher_thinking, temperature=args.temperature, timeout=args.timeout)
     def worker(task):
         messages = task_messages(task, manifest["sources"], response_dir)
-        path = response_dir / f"{task['id']}.json"
+        path = response_path(response_dir, task['id'])
         if path.exists():
             record = read_json(path)
             if record["id"] != task["id"] or record["messages"] != messages:
@@ -389,7 +413,7 @@ def training_rows(directory, tokenizer, max_seq_length):
     manifest, _ = load_prepared(directory)
     directory = Path(directory)
     for task in jsonl(directory / "requests.jsonl"):
-        path = directory / "responses" / f"{task['id']}.json"
+        path = response_path(directory / "responses", task['id'])
         if not path.exists():
             raise ValueError(f"Missing teacher response {task['id']}; finish generation before building")
         record = read_json(path)
@@ -413,11 +437,22 @@ def build(args, tokenizer=None):
     if args.max_seq_length > tokenizer.model_max_length:
         raise ValueError("Requested training context exceeds the tokenizer context limit")
     destination = directory / "tokenized_dataset"
-    if destination.exists():
-        raise ValueError("Tokenized dataset already exists; use a fresh directory for a new build")
     generation = read_json(directory / "generation_manifest.json")
     if generation["prepared"] != prepared:
         raise ValueError("Teacher generation belongs to a different prepared run")
+    metadata_path = directory / "training_manifest.json"
+    if destination.exists():
+        if metadata_path.exists():
+            previous = read_json(metadata_path)
+            if (previous["prepared"] == prepared and previous["generation"] == generation
+                    and previous["max_seq_length"] == args.max_seq_length and previous["shuffle_seed"] == args.seed):
+                print("Student dataset already built for this exact run")
+                return
+            raise ValueError("Existing student dataset belongs to different build settings; use a fresh directory")
+        # Dataset installation is atomic. A preemption between installation and
+        # manifest creation leaves a recoverable derived output, never source data.
+        import shutil
+        shutil.rmtree(destination)
     # Arrow-backed generator keeps long-context tensors off the Python heap.
     # A private cache prevents reusing data after any response shard changes.
     with tempfile.TemporaryDirectory(prefix="oncoreasoning-build-", dir=directory) as cache:
@@ -429,7 +464,9 @@ def build(args, tokenizer=None):
         if "train" not in splits:
             raise ValueError("No training examples")
         counts = {split: dict(Counter(data["category"])) for split, data in splits.items()}
-        splits.save_to_disk(str(destination))
+        pending_dataset = Path(cache) / "completed_dataset"
+        splits.save_to_disk(str(pending_dataset))
+        pending_dataset.replace(destination)
         # Close Arrow memory maps before removing their cache on an NFS mount.
         del splits, dataset
         gc.collect()
@@ -453,6 +490,7 @@ def parser():
     prepare_parser.add_argument("--notes", type=Path, default=c.DEFAULT_DATA_DIR / "all_synthetic_notes.parquet")
     prepare_parser.add_argument("--candidates", type=Path, nargs="+", default=[])
     prepare_parser.add_argument("--catalog", type=Path, default=c.DEFAULT_DATA_DIR / "good_option_catalog_v3")
+    prepare_parser.add_argument("--boilerplate-components", type=Path, help="Validated patient-free exclusion extraction directory")
     prepare_parser.add_argument("--tasks", choices=c.TASKS, nargs="+", default=list(c.TASKS))
     prepare_parser.add_argument("--splits", choices=("train", "validation"), nargs="+", default=["train", "validation"])
     prepare_parser.add_argument("--patient-id-column", default="pseudo_mrn")
@@ -466,7 +504,9 @@ def parser():
     prepare_parser.add_argument("--max-pairs", type=int)
     prepare_parser.add_argument("--confirm-inputs-are-non-phi", action="store_true")
     generate_parser = stages.add_parser("generate", help="Generate full final teacher outputs, resumably")
-    generate_parser.add_argument("--server-url", required=True, help="Explicit OpenAI-compatible /v1 endpoint")
+    endpoints = generate_parser.add_mutually_exclusive_group(required=True)
+    endpoints.add_argument("--server-url", help="Explicit OpenAI-compatible /v1 endpoint")
+    endpoints.add_argument("--server-urls-file", type=Path, help="Ready local teacher pool")
     generate_parser.add_argument("--teacher-model", required=True)
     generate_parser.add_argument("--teacher-tokenizer", help="HF tokenizer ID when teacher model is a server alias")
     generate_parser.add_argument("--teacher-thinking", action=argparse.BooleanOptionalAction, default=True)

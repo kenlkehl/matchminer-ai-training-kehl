@@ -135,7 +135,7 @@ class TrialSpaceEmbeddingTests(unittest.TestCase):
 
         model = self.load_model()
         texts = ["lung cancer patient", "lung cancer trial"]
-        with patch.object(make_top_matches, "SentenceTransformer", return_value=model), \
+        with patch.object(make_top_matches, "load_text_model", return_value=model), \
              patch.object(torch.cuda, "set_device"):
             for prompt in (None, "task: sentence similarity | query: ", ""):
                 actual = make_top_matches._encode_worker(

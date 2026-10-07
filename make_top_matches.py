@@ -29,11 +29,13 @@ python make_top_matches.py \
 
 import os
 import argparse
+import multiprocessing as mp
+import hashlib
 import numpy as np
 import pandas as pd
 import torch
 from concurrent.futures import ProcessPoolExecutor
-from sentence_transformers import SentenceTransformer
+from finetune_embedder import load_text_model
 
 # -------------------------
 # Helpers
@@ -46,7 +48,10 @@ def parse_args():
         default="trial_specific_eligibility_checks.parquet",
         help="Input parquet containing columns: patient_summary, patient_boilerplate_text, this_space, nct_id, eligibility_result",
     )
-    ap.add_argument("--model", default="pt_trial_summary_pertrial_finetuned.model")
+    ap.add_argument("--patients-parquet", help="Independent synthetic patient summary table, including IDs and splits")
+    ap.add_argument("--trials-file", help="Independent trial-space CSV or parquet")
+    ap.add_argument("--splits", nargs="+", default=["train", "val"], choices=["train", "val", "test"])
+    ap.add_argument("--model", default="google/embeddinggemma-2")
     ap.add_argument(
         "--gpus", default="0", help="Comma-separated CUDA device indices, e.g. '0,1,2,3'"
     )
@@ -126,13 +131,14 @@ def chunk_ranges(n_items: int, n_chunks: int):
 def _encode_worker(texts, device_str, model_path, encode_batch_size, max_seq_length, query_prompt):
     """Runs in a subprocess on one GPU; returns a float32 numpy (N, D)."""
     torch.cuda.set_device(int(device_str.split(":")[-1]))
-    model = SentenceTransformer(model_path, trust_remote_code=True, device=device_str)
+    model = load_text_model(model_path, device_str)
     # Fine-tuning persists the same prefix for both matching directions.
     if query_prompt is not None:
         model.prompts["query"] = query_prompt
     model.max_seq_length = max_seq_length
 
-    with torch.no_grad():
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16,
+            enabled=torch.cuda.is_available() and torch.cuda.is_bf16_supported()):
         embs = model.encode(
             texts,
             batch_size=encode_batch_size,
@@ -153,7 +159,7 @@ def parallel_encode(all_texts, gpu_ids, model_path, encode_batch_size, max_seq_l
     shards = chunk_ranges(n, len(gpu_ids))
     futures = []
     outputs = [None] * len(shards)
-    with ProcessPoolExecutor(max_workers=len(gpu_ids)) as ex:
+    with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=mp.get_context("spawn")) as ex:
         for wi, (s, e) in enumerate(shards):
             if s == e:
                 outputs[wi] = np.zeros((0, 0), dtype=np.float32)
@@ -248,7 +254,7 @@ def parallel_topk_with_sampling(all_query_embs, all_ref_embs, sample_indices_per
             e = min(s + bsz, end)
             yield s, e
 
-    with ProcessPoolExecutor(max_workers=len(gpu_ids)) as ex:
+    with ProcessPoolExecutor(max_workers=len(gpu_ids), mp_context=mp.get_context("spawn")) as ex:
         futs = []
         for wi, (rg_s, rg_e) in enumerate(ranges):
             if rg_s == rg_e:
@@ -277,6 +283,79 @@ def parallel_topk_with_sampling(all_query_embs, all_ref_embs, sample_indices_per
 # Main
 # -------------------------
 
+def _normalized_split(series):
+    result = series.fillna("train").astype(str).str.lower().replace({"validation": "val", "valid": "val", "training": "train"})
+    if not result.isin(["train", "val", "test"]).all():
+        raise ValueError("Unknown source split")
+    return result
+
+
+def load_retrieval_tables(args):
+    """Keep identity and source splits without needing old checker labels."""
+    def read_table(path, wanted):
+        if str(path).endswith('.csv'):
+            return pd.read_csv(path, usecols=lambda name: name in wanted)
+        import pyarrow.parquet as pq
+        available = pq.read_schema(path).names
+        return pd.read_parquet(path, columns=[name for name in wanted if name in available])
+    patient_columns = ["pseudo_mrn", "patient_summary", "patient_boilerplate_text", "split"]
+    trial_columns = ["nct_id", "this_space", "trial_boilerplate_text", "split"]
+    if bool(args.patients_parquet) != bool(args.trials_file):
+        raise ValueError("Supply both --patients-parquet and --trials-file")
+    if args.patients_parquet:
+        patient_source = read_table(args.patients_parquet, patient_columns)
+        trial_source = read_table(args.trials_file, trial_columns)
+    else:
+        patient_source = trial_source = read_table(args.parquet, list(dict.fromkeys(patient_columns + trial_columns)))
+    patients = patient_source.dropna(subset=["patient_summary"]).copy()
+    trials = trial_source.dropna(subset=["nct_id", "this_space"]).copy()
+    for frame in (patients, trials):
+        frame["split"] = _normalized_split(frame["split"]) if "split" in frame else "train"
+    if "pseudo_mrn" not in patients:
+        patients["pseudo_mrn"] = patients.patient_summary.map(lambda text: hashlib.sha256(str(text).encode()).hexdigest())
+    if patients.pseudo_mrn.isna().any():
+        raise ValueError("Missing patient identifiers")
+    if pd.api.types.is_float_dtype(patients.pseudo_mrn):
+        if not patients.pseudo_mrn.mod(1).eq(0).all():
+            raise ValueError("Noninteger numeric patient identifiers")
+        patients["pseudo_mrn"] = patients.pseudo_mrn.astype('int64')
+    patients["pseudo_mrn"] = patients.pseudo_mrn.astype(str)
+    for frame, identity in ((patients, "pseudo_mrn"), (trials, "nct_id")):
+        if frame.groupby(identity).split.nunique().gt(1).any():
+            raise ValueError("Conflicting source split assignments")
+    if patients.groupby("pseudo_mrn").patient_summary.nunique().gt(1).any():
+        raise ValueError("Multiple summaries per patient; select the final summary first")
+    for frame, column in ((patients, "patient_boilerplate_text"), (trials, "trial_boilerplate_text")):
+        if column not in frame:
+            frame[column] = ""
+        frame[column] = frame[column].fillna("")
+    patients = patients[patients.split.isin(args.splits)].drop_duplicates("pseudo_mrn")
+    trials = trials[trials.split.isin(args.splits)].copy()
+    trials["this_space"] = trials.this_space.str.replace(r'^\s*\d+\.', '', regex=True).str.strip()
+    trials = trials.drop_duplicates(["nct_id", "this_space"])
+    if patients.empty or trials.empty:
+        raise ValueError("No patients or trial spaces in the requested splits")
+    return (patients[["pseudo_mrn", "patient_summary", "patient_boilerplate_text", "split"]].reset_index(drop=True),
+            trials[["nct_id", "this_space", "trial_boilerplate_text", "split"]].reset_index(drop=True))
+
+
+def sample_candidates(patients, spaces, trials_per_patient, patients_per_space, seed):
+    """Sample distinct NCT IDs, then expand their spaces; preserve co-splits."""
+    rng = np.random.default_rng(seed)
+    by_trial = {key: group.index.to_numpy() for key, group in spaces.groupby(["split", "nct_id"], sort=True)}
+    trial_ids = {split: group.nct_id.unique() for split, group in spaces.groupby("split")}
+    patient_indices = {split: group.index.to_numpy() for split, group in patients.groupby("split")}
+    p_to_s, s_to_p = [], []
+    for split in patients.split:
+        available = trial_ids.get(split, np.array([], dtype=str))
+        selected = rng.choice(available, size=min(trials_per_patient, len(available)), replace=False)
+        p_to_s.append(np.concatenate([by_trial[(split, trial)] for trial in selected]) if len(selected) else np.array([], dtype=int))
+    for split in spaces.split:
+        available = patient_indices.get(split, np.array([], dtype=int))
+        s_to_p.append(rng.choice(available, size=min(patients_per_space, len(available)), replace=False))
+    return p_to_s, s_to_p
+
+
 def main():
     args = parse_args()
     gpu_ids = [int(x.strip()) for x in args.gpus.split(",") if x.strip() != ""]
@@ -292,25 +371,11 @@ def main():
         if out_dir and not os.path.exists(out_dir):
             os.makedirs(out_dir, exist_ok=True)
 
-    # Load & filter
-    df = pd.read_parquet(args.parquet)
-    df = df[~df.patient_summary.isnull()]
-    df = df[~df.this_space.isnull()]
-    df = df[~df.nct_id.isnull()]
-
-    df['this_space'] = df['this_space'].str.replace(r'^\s*\d+\.', '', regex=True)
-
-
-    # Deduplicate to get unique patients
-    patients = df.groupby("patient_summary", as_index=False).first()[
-        ["patient_summary", "patient_boilerplate_text"]
-    ].copy()
-    
-    # Get all unique trials (with their spaces)
-    trials_full = df[["nct_id", "this_space","trial_boilerplate_text"]].drop_duplicates().copy()
-    
-    # Get unique trial spaces for encoding
-    trials_spaces = df.groupby("this_space", as_index=False).first()[["nct_id", "this_space", "trial_boilerplate_text"]].copy()
+    patients, trials_spaces = load_retrieval_tables(args)
+    sample_space_indices_per_patient, sample_patient_indices_per_space = sample_candidates(
+        patients, trials_spaces, args.sample_trials_per_patient,
+        args.sample_patients_per_trial, args.random_seed,
+    )
 
     # Encode patients and trial spaces across GPUs
     patient_texts = patients["patient_summary"].astype(str).tolist()
@@ -336,34 +401,6 @@ def main():
         query_prompt=args.query_prompt,
     )  # (S, D)
 
-    # Build mapping from space to space_index
-    space_to_idx = {space: idx for idx, space in enumerate(trials_spaces["this_space"])}
-
-    # -------------------------
-    # Patients -> Trials (sample trials, rank spaces, return top spaces)
-    # -------------------------
-    print(f"\nProcessing patients -> spaces...")
-    print(f"  Sampling {args.sample_trials_per_patient} trials per patient")
-    print(f"  Ranking their unique spaces and returning top {args.top_k_spaces} spaces")
-    
-    # For each patient, sample trials and get their unique spaces
-    sample_space_indices_per_patient = []
-    n_patients = len(patients)
-    n_all_trials = len(trials_full)
-    
-    for p_idx in range(n_patients):
-        # Randomly sample trial indices
-        sample_size = min(args.sample_trials_per_patient, n_all_trials)
-        sampled_trial_indices = np.random.choice(n_all_trials, size=sample_size, replace=False)
-        
-        # Get the unique spaces for these sampled trials
-        sampled_trials = trials_full.iloc[sampled_trial_indices]
-        sampled_spaces = sampled_trials["this_space"].unique()
-        
-        # Convert to space indices
-        space_indices = np.array([space_to_idx[space] for space in sampled_spaces])
-        sample_space_indices_per_patient.append(space_indices)
-    
     # Run parallel topk with sampling
     pts_to_spaces_results = parallel_topk_with_sampling(
         all_query_embs=patient_embs,
@@ -386,6 +423,9 @@ def main():
         for space_idx in top_space_indices:
             space_row = trials_spaces.iloc[space_idx]
             out_rows.append({
+                "pseudo_mrn": patient_row["pseudo_mrn"],
+                "split": patient_row["split"],
+                "trial_split": space_row["split"],
                 "patient_summary": patient_row["patient_summary"],
                 "patient_boilerplate_text": patient_row["patient_boilerplate_text"],
                 "nct_id": space_row["nct_id"],
@@ -396,7 +436,6 @@ def main():
     pts_to_spaces_df = pd.DataFrame(out_rows) if out_rows else pd.DataFrame()
     if not pts_to_spaces_df.empty:
         pts_to_spaces_df["patient_summary"] = pts_to_spaces_df["patient_summary"].str.strip()
-        pts_to_spaces_df["split"] = "train"
     pts_to_spaces_df.to_parquet(args.out_cohorts_parquet, index=False)
 
     # -------------------------
@@ -405,17 +444,6 @@ def main():
     print(f"\nProcessing trial spaces -> patients...")
     print(f"  Sampling {args.sample_patients_per_trial} patients per trial space")
     print(f"  Ranking them and returning top {args.top_k_patients} patients")
-    
-    # For each trial space, sample patients
-    sample_patient_indices_per_space = []
-    n_spaces = len(trials_spaces)
-    n_all_patients = len(patients)
-    
-    for s_idx in range(n_spaces):
-        # Randomly sample patient indices
-        sample_size = min(args.sample_patients_per_trial, n_all_patients)
-        sampled_patient_indices = np.random.choice(n_all_patients, size=sample_size, replace=False)
-        sample_patient_indices_per_space.append(sampled_patient_indices)
     
     # Run parallel topk with sampling
     spaces_to_pts_results = parallel_topk_with_sampling(
@@ -439,6 +467,9 @@ def main():
         for p_idx in top_patient_indices:
             patient_row = patients.iloc[p_idx]
             out_rows.append({
+                "pseudo_mrn": patient_row["pseudo_mrn"],
+                "split": patient_row["split"],
+                "trial_split": space_row["split"],
                 "patient_summary": patient_row["patient_summary"],
                 "patient_boilerplate_text": patient_row["patient_boilerplate_text"],
                 "nct_id": space_row["nct_id"],
@@ -449,7 +480,6 @@ def main():
     spaces_to_pts_df = pd.DataFrame(out_rows) if out_rows else pd.DataFrame()
     if not spaces_to_pts_df.empty:
         spaces_to_pts_df["patient_summary"] = spaces_to_pts_df["patient_summary"].str.strip()
-        spaces_to_pts_df["split"] = "train"
     spaces_to_pts_df.to_parquet(args.out_patients_parquet, index=False)
 
     print("\nWrote:")

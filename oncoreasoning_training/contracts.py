@@ -7,10 +7,10 @@ from pathlib import Path
 import re
 
 DEFAULT_MODEL_NAME = "google/gemma-4-E4B-it"
-FORMAT_VERSION = "oncoreasoning-answer-first-v1"
+FORMAT_VERSION = "oncoreasoning-answer-first-v2"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
-DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_answer_first_v1"
+DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_answer_first_v2"
 DEFAULT_INFERENCE_REPO = next(
     (p for p in (REPO_ROOT.parent / "matchminer-ai-inference",
                  REPO_ROOT.parent / "matchminer-ai-inference-kehl") if p.is_dir()),
@@ -98,7 +98,7 @@ GOOD_OPTION_COMPONENTS = (
 )
 PROMPT_FILES = (
     "patient.serial.user.primer.txt", "patient.serial.user.question.txt",
-    "llm_match_quality.user.txt", "llm_good_option.rubric.txt",
+    "llm_match_quality.user.txt", "llm_good_option.rubric.txt", "llm_exclusion_criteria.user.txt",
 )
 
 
@@ -150,6 +150,19 @@ def build_question_messages(task, sources):
             "case at the most recent date in the patient summary, ignoring today's date. "
             "Ignore ethical judgments and resource constraints."
         )
+    elif task["family"] == "boilerplatechecking":
+        question = "Does the patient clearly meet this specific trial exclusion criterion?"
+        rule = (
+            "Answer Yes only when the patient clearly meets the supplied exclusion. If it is "
+            "not completely clear, give the patient the benefit of the doubt and answer No. "
+            "Mild, low-grade, resolved, absent, or uncertain conditions do not automatically "
+            "satisfy an exclusion. Apply all thresholds and exceptions as written. A mention "
+            "in the patient extract can discuss whether a condition exists; it does not "
+            "establish that the patient has it. Assess no other exclusion."
+        )
+        context = (f"PATIENT HISTORY AND EXCLUSION EVIDENCE\n{task['patient_summary']}\n"
+                   f"{task['patient_boilerplate']}\n\nSINGLE TRIAL EXCLUSION\n{task['criterion']}")
+        scope = "Yes means this one exclusion clearly applies; No includes insufficient evidence."
     elif task["family"] == "goodoptionschecking":
         question, rule = good_option_rules(sources)[component]
         context = (

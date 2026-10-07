@@ -1,15 +1,54 @@
 # matchminer-ai-training
 
-Code for training the MatchMiner-AI pipeline. A full reproduction is intended
-for a Linux system with eight H100-class GPUs and takes roughly a week.
+The active pipeline trains two models: text-only GemmaEmbedding 2 TrialSpace,
+then Gemma 4 E4B OncoReasoning. OncoReasoning combines patient summarization
+with individual TrialChecker, BoilerplateChecker, and GoodOption questions.
+The separate ModernBERT TrialChecker and BoilerplateChecker trainers have been
+removed. GoodOption catalog construction remains part of training.
+
+Use a venv on local disk (`~/thisenv` on the development machine), never inside
+this network-mounted checkout. On the training VM, install the project and the
+sibling inference repository into a uv venv, then run:
 
 ```bash
-uv sync --group training
-bash train_all.sh
+~/thisenv/bin/python train_from_summaries.py --dry-run
+PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 ```
 
-Training uses vLLM heavily. Restart an interrupted workflow from the last
-completed orchestration step rather than rerunning completed stages.
+All three shell entrypoints use this same runner. It expects eight GPUs and a
+sibling `matchminer-ai-inference-kehl` checkout pinned to
+`6e38839e46a61d2583dc6c72dd6c672a19cd6a94`. Review the pin and prompt contracts
+before adopting changes in that dependency. The default teacher for every
+label, catalog stage, exclusion extraction, and distillation request is
+`nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
+they are stopped before student training. A separate vLLM executable can be
+selected with `--vllm` when serving dependencies need their own environment.
+
+The run starts from `../data/no_phi/patient_summaries_with_spaces.parquet` and
+`trial_space_lineitems.csv`, mines candidates with the base embedding model,
+labels them, and trains TrialSpace. A second mining/label/training round uses
+cumulative labels; a third mining round supplies OncoReasoning candidates.
+For each patient, mining samples 500 **distinct NCT IDs**, expands all their
+spaces, and keeps 20 spaces. For each trial space it samples up to 20,000
+patients and keeps 40. Sampling is within original train/validation co-splits;
+test rows are excluded and TrialSpace trains only on the train split.
+
+The pipeline then builds and validates fresh drug and class evidence, extracts
+individual exclusions, and distills summarization from `all_synthetic_notes.parquet`
+plus all three QA families. Catalog web research receives public trial/drug
+information only. All patient-bearing teacher requests stay on the VM.
+OncoReasoning uses full fine-tuning with FSDP2 across eight GPUs, variable
+10K–50K-token summary chunks, and final answers without teacher reasoning.
+See the [OncoReasoning instructions](oncoreasoning_training/README.md) for the
+answer-first contract and configurable student model.
+
+Outputs default to `../data/no_phi/gemma_pipeline_v2` and
+`../models/gemma_pipeline_v2`. `status.json`, per-stage logs, manifests, and
+completion markers live in the run directory. Rerun the identical command to
+resume after interruption: completed stages are checked, teacher outputs resume,
+and student trainers restore their latest checkpoints. Source hashes, code
+revisions, and settings must match. Keep these directories on persistent disk
+on Spot VMs. A new run or changed inputs require fresh output directories.
 
 ## TrialSpace embedding model
 
@@ -32,27 +71,9 @@ with `model.encode(texts)` or `model.encode(texts, prompt_name="query")`.
 `prompt="query"` would prepend the literal word, so it must not be used to
 select a named prompt. Evaluation and mining scripts honor the saved prefix.
 
-The orchestrators place new models and mined/relabeled data under
-`../models/trialspace_embeddinggemma2/` and
-`../data/no_phi/trialspace_embeddinggemma2/`; the initial checkpoint directory
-is `~/models/initial_embeddinggemma2_training`. This avoids reusing Qwen models,
-training checkpoints, or candidate-label shards. The final TrialSpace model is
-`../models/trialspace_embeddinggemma2/reranker_round2.model`.
-An existing run can restart at step 8 using its initial eligibility labels.
-Regenerate both patient and trial embeddings for the new model: older vectors
-and indexes are incompatible. External inference consumers must likewise use
-the saved prefix and the matching regenerated index before adopting this model.
-
-## OncoReasoning distillation
-
-The optional [OncoReasoning workflow](oncoreasoning_training/README.md) defaults
-to the text model from `google/gemma-4-E4B-it`. It distills serial patient
-summarization with variable 10K–50K-token chunks and individual TrialChecker /
-GoodOption component questions. Student targets contain final answers only;
-binary QA outputs begin with a single answer letter followed by an explanation,
-supporting either one-token or explanatory inference. The documented stages
-prepare requests, generate resumable teacher outputs, build masked datasets,
-and fine-tune a configurable student.
+The integrated runner saves the final TrialSpace artifact as
+`../models/gemma_pipeline_v2/trialspace_round2`. Regenerate patient and trial
+embeddings for the new model; older vectors and indexes are incompatible.
 
 ## GoodOption evidence catalog
 
@@ -64,8 +85,8 @@ The trained four-logit GoodOptionChecker is deprecated. It read one patient and
 one drug summary and never saw drug-class evidence, and no trained model was
 published. GoodOption scoring now uses the inference package's LLM rubric
 (`score_good_options_with_llm`), whose prompt packs drug and class evidence to
-the teacher's context. Step 17 of `train_all.sh` and `train_all_gcp.sh`
-therefore builds and validates the patient-free catalog only. The `label`,
+the teacher's context. The active pipeline builds that patient-free catalog,
+then distills each rubric component into OncoReasoning. The `label`,
 `train`, and `all` subcommands still work, with a `FutureWarning`, for
 reproducing earlier checkers.
 
