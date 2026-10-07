@@ -135,8 +135,9 @@ def teacher_command(args, index):
 def teacher_environment(args):
     """Expose the pip CUDA toolkit when using a driver-only accelerator image."""
     env = dict(os.environ)
+    executable = Path(shutil.which(args.vllm) or args.vllm).expanduser()
+    env["PATH"] = str(executable.parent) + os.pathsep + env.get("PATH", "")
     if not env.get("CUDA_HOME") and not shutil.which("nvcc"):
-        executable = Path(shutil.which(args.vllm) or args.vllm).expanduser()
         python = executable.parent / "python"
         probe = (
             "import sysconfig; from pathlib import Path; "
