@@ -15,11 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from matchminer_ai.matching import (
-    GOOD_OPTION_INPUT_VERSION,
-    GOOD_OPTION_LABEL_SCHEMA_VERSION,
-    RUBRIC_CRITERIA,
-)
+from matchminer_ai.matching import RUBRIC_CRITERIA
 from matchminer_ai.trials import load_good_option_catalog
 
 import train_good_option_checker as core
@@ -63,7 +59,7 @@ def prepare(args):
     shards = sorted(args.shards.glob("labels_*.parquet"))
     columns = ["candidate_id", "patient_id", "patient_group_id", "patient_summary",
                "nct_id", "good_option_status", "drug_assessments_json",
-               "catalog_compatibility_id", "prompt_version", "label_schema_version"]
+               "catalog_compatibility_id"]
     inventory = []
     frames = []
     for path in shards:
@@ -123,7 +119,6 @@ def finalize(args):
     data.to_parquet(run / "prepared.parquet", index=False)
     manifest = core.build_split_manifest(data, strategy="none" if all_labels else "original_patient_trial_cosplit", seed=42,
         patient_validation_fraction=0, drug_validation_fraction=0, catalog=catalog)
-    manifest["split_strategy_version"] = "all-labels-no-holdout-v1" if all_labels else "original-summary-trial-train-train-val-val-v1"
     manifest["source_label_counts"] = metadata["label_counts"]
     manifest["prepared_sha256"] = hashlib.sha256((run / "prepared.parquet").read_bytes()).hexdigest()
     manifest["shared_drugs"] = 0 if all_labels else len(set(parts[0].drug_id) & set(parts[1].drug_id))
@@ -153,8 +148,6 @@ def train(args):
     core.configure_mean_bce_accumulation(model)
     for key, value in {
         "matchminer_catalog_compatibility_id": manifest["catalog_compatibility_id"],
-        "matchminer_checker_input_version": GOOD_OPTION_INPUT_VERSION,
-        "matchminer_label_schema_version": GOOD_OPTION_LABEL_SCHEMA_VERSION,
         "matchminer_split_fingerprint_sha256": manifest["split_fingerprint_sha256"],
     }.items():
         setattr(model.config, key, value)

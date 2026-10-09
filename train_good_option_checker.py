@@ -31,9 +31,6 @@ import pandas as pd
 
 from matchminer_ai.config import MMAIConfig, load_config, load_default_preset
 from matchminer_ai.matching import (
-    GOOD_OPTION_INPUT_VERSION,
-    GOOD_OPTION_LABEL_SCHEMA_VERSION,
-    GOOD_OPTION_PROMPT_VERSION,
     RUBRIC_CRITERIA,
     build_good_option_checker_text,
     score_good_options_with_llm,
@@ -66,7 +63,6 @@ DEFAULT_CANDIDATE_FILES = tuple(
     for round_index in (1, 2, 3)
     for direction in ("cohorts", "patients")
 )
-SPLIT_STRATEGY_VERSION = "patient-and-canonical-drug-holdout-v2"
 MIN_GOOD_OPTION_OUTPUT_TOKENS = 100_000
 _NON_LLM_GOOD_OPTION_STATUSES = {
     "no_scoreable_drug",
@@ -364,23 +360,17 @@ def _existing_label_ids(
             "candidate_id",
             "good_option_status",
             "catalog_compatibility_id",
-            "prompt_version",
-            "label_schema_version",
         }
         missing = sorted(required - set(frame.columns))
         if missing:
             raise ValueError(f"Existing label shard {shard} is missing {missing}.")
-        expected = {
-            "catalog_compatibility_id": catalog.compatibility_id,
-            "prompt_version": GOOD_OPTION_PROMPT_VERSION,
-            "label_schema_version": GOOD_OPTION_LABEL_SCHEMA_VERSION,
-        }
-        for column, value in expected.items():
-            if not frame[column].astype(str).eq(value).all():
-                raise ValueError(
-                    f"Existing label shard {shard} has incompatible {column}; "
-                    "use a fresh v2 shard directory."
-                )
+        if not frame["catalog_compatibility_id"].astype(str).eq(
+            catalog.compatibility_id
+        ).all():
+            raise ValueError(
+                f"Existing label shard {shard} was labeled against a different "
+                "catalog; use a fresh shard directory."
+            )
         completed = frame["good_option_status"].astype(str).isin(
             _COMPLETED_GOOD_OPTION_STATUSES
         )
@@ -522,8 +512,6 @@ def _serialize_label_frame(
                 ),
                 "parse_error": result.get("good_option_parse_error", ""),
                 "catalog_compatibility_id": catalog.compatibility_id,
-                "prompt_version": GOOD_OPTION_PROMPT_VERSION,
-                "label_schema_version": GOOD_OPTION_LABEL_SCHEMA_VERSION,
             }
         )
     return pd.DataFrame(records)
@@ -628,8 +616,6 @@ def flatten_patient_drug_labels(
         "good_option_status",
         "drug_assessments_json",
         "catalog_compatibility_id",
-        "prompt_version",
-        "label_schema_version",
     }
     missing = sorted(required - set(labels.columns))
     if missing:
@@ -639,12 +625,6 @@ def flatten_patient_drug_labels(
     )
     if incompatible.any():
         raise ValueError("Labels and catalog have different compatibility IDs.")
-    if not labels["prompt_version"].astype(str).eq(GOOD_OPTION_PROMPT_VERSION).all():
-        raise ValueError("Labels use an incompatible GoodOption prompt version.")
-    if not labels["label_schema_version"].astype(str).eq(
-        GOOD_OPTION_LABEL_SCHEMA_VERSION
-    ).all():
-        raise ValueError("Labels use an incompatible GoodOption label schema.")
     records: list[dict[str, Any]] = []
     assignments_cache = {}
     summaries_cache = {}
@@ -799,7 +779,6 @@ def build_split_manifest(
         digest.update(f"{row.patient_drug_id}\0{row.partition}\n".encode())
     return {
         "split_strategy": strategy,
-        "split_strategy_version": SPLIT_STRATEGY_VERSION,
         "split_fingerprint_sha256": digest.hexdigest(),
         "seed": seed,
         "patient_validation_fraction": patient_validation_fraction,
@@ -858,8 +837,6 @@ def validate_resume_checkpoint(
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     expected = {
         "matchminer_catalog_compatibility_id": catalog.compatibility_id,
-        "matchminer_checker_input_version": GOOD_OPTION_INPUT_VERSION,
-        "matchminer_label_schema_version": GOOD_OPTION_LABEL_SCHEMA_VERSION,
         "matchminer_split_fingerprint_sha256": split_manifest[
             "split_fingerprint_sha256"
         ],
@@ -934,8 +911,6 @@ def run_train(args: argparse.Namespace) -> None:
     )
     model.config.matchminer_catalog_compatibility_id = catalog.compatibility_id
     configure_mean_bce_accumulation(model)
-    model.config.matchminer_checker_input_version = GOOD_OPTION_INPUT_VERSION
-    model.config.matchminer_label_schema_version = GOOD_OPTION_LABEL_SCHEMA_VERSION
     model.config.matchminer_split_fingerprint_sha256 = manifest[
         "split_fingerprint_sha256"
     ]

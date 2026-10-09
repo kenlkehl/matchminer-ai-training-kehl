@@ -85,8 +85,6 @@ def _labels(*, conflicting: bool = False) -> pd.DataFrame:
             "good_option_status": "ok",
             "drug_assessments_json": json.dumps([_assessment((1, 1, 1, 0))]),
             "catalog_compatibility_id": "compat-v2",
-            "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
-            "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
         },
         {
             "candidate_id": "C2",
@@ -97,8 +95,6 @@ def _labels(*, conflicting: bool = False) -> pd.DataFrame:
             "good_option_status": "ok",
             "drug_assessments_json": json.dumps([_assessment((0, 0, 0, 0))]),
             "catalog_compatibility_id": "compat-v2",
-            "prompt_version": good_option.GOOD_OPTION_PROMPT_VERSION,
-            "label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
         },
     ]
     if conflicting:
@@ -377,9 +373,9 @@ def test_existing_label_shards_must_match_catalog_and_schema(tmp_path: Path) -> 
     ) == {"C1", "C2"}
 
     incompatible = _labels()
-    incompatible["prompt_version"] = "old"
+    incompatible["catalog_compatibility_id"] = "old"
     incompatible.to_parquet(shard, index=False)
-    with pytest.raises(ValueError, match="incompatible prompt_version"):
+    with pytest.raises(ValueError, match="different catalog"):
         good_option._existing_label_ids(tmp_path, catalog=_catalog())
 
 
@@ -471,8 +467,6 @@ def test_resume_checkpoint_must_match_catalog_and_split(tmp_path: Path) -> None:
     split_manifest = {"split_fingerprint_sha256": "split-v2"}
     compatible = {
         "matchminer_catalog_compatibility_id": "compat-v2",
-        "matchminer_checker_input_version": good_option.GOOD_OPTION_INPUT_VERSION,
-        "matchminer_label_schema_version": good_option.GOOD_OPTION_LABEL_SCHEMA_VERSION,
         "matchminer_split_fingerprint_sha256": "split-v2",
     }
     (checkpoint / "config.json").write_text(
