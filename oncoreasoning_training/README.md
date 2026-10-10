@@ -42,6 +42,24 @@ asked in these component examples. To reconstruct the old trial score, all six
 matching answers must be Yes; otherwise the score is zero. When they are all
 Yes, the score is one plus the four specificity points.
 
+Treatment-history and burden questions explicitly assess required treatment
+responses and current disease status. They reuse the aggregate TrialChecker
+prompt's response rules verbatim: exposure or a treatment switch does not prove
+progression, the latest relevant status controls current-status requirements,
+and documented progression contradicts a non-progressive-disease requirement.
+Preserve regimen-specific outcomes, alternatives, exceptions, response duration,
+and relapse/progression timing; only treatment washout periods are ignored.
+Unknown response information alone does not make a reasonable-consideration
+answer No, but cannot earn specificity credit. These rules apply to both matching
+and specificity questions, each still asking just one component.
+
+The format version is `oncoreasoning-answer-first-v3-response`. Aggregate teacher
+labeling loads the same fingerprinted inference prompt in local and remote modes.
+Labels from the earlier rubric, TrialSpace weights trained on them, and candidates
+mined with those weights must not be resumed under this version. Start a fresh
+pipeline run from base EmbeddingGemma 2 after archiving the old run and model
+directories; keep the original source summaries, synthetic notes, and trial files.
+
 BoilerplateChecker supplies one question per trial exclusion: does this specific
 exclusion clearly apply? Unknown or uncertain evidence gives **B. No**. A
 patient-free teacher stage extracts verbatim rules, preserving all thresholds,

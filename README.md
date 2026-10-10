@@ -18,7 +18,7 @@ PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 
 All three shell entrypoints use this same runner. It expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`6e38839e46a61d2583dc6c72dd6c672a19cd6a94`. Review the pin and prompt contracts
+`f3ded1f2841542391a6b27bfdad92d3b47304e7c`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;

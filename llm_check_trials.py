@@ -35,6 +35,7 @@ import argparse
 import math
 import multiprocessing as mp
 from typing import List, Tuple
+from functools import lru_cache
 
 import pandas as pd
 import numpy as np
@@ -45,58 +46,25 @@ import numpy as np
 TRIAL_CHECK_SCORE_PATTERN = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")
 
 
+@lru_cache(maxsize=1)
+def trial_check_template() -> str:
+    """Use the same versioned rubric as runtime inference and binary distillation."""
+    from importlib import resources
+    from oncoreasoning_training.contracts import TRIAL_RUBRIC_DIGEST, digest
+
+    template = resources.files("matchminer_ai.prompts").joinpath(
+        "llm_match_quality.user.txt").read_text(encoding="utf-8")
+    if digest(template) != TRIAL_RUBRIC_DIGEST:
+        raise ValueError("TrialChecker rubric changed; use the pinned inference revision")
+    return template.strip()
+
+
 def build_trial_check_prompt(tokenizer, patient_summary: str, trial_summary: str) -> str:
-    """Render one trial-check chat prompt to a string via the model's
-    chat template. Behavior must match ask_about_trials_loosely() below."""
+    """Render the canonical scoring rubric identically for local and remote teachers."""
     messages = [
-        {'role': 'system', 'content': "Reasoning: high"},
-        {'role': 'user', 'content': (
-            "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
-            "Your job is to evaluate whether a given clinical trial is a reasonable consideration for a patient, "
-            "given a clinical trial summary and a patient summary, and then score how targeted the trial is for "
-            "this specific patient.\n\n"
-            f"Here is a summary of the clinical trial:\n{trial_summary}\n"
-            f"Here is a summary of the patient:\n{patient_summary}\n"
-            "Base your judgment on whether the patient generally fits the age requirements if any, sex requirements if any, cancer type(s), cancer burden, prior treatment(s), "
-            "and biomarker criteria specified for the trial.\n"
-            "You do not have to determine if the patient is actually eligible; instead please just evaluate whether it is reasonable "
-            "for the trial to be considered further by the patient's oncologist.\n"
-            "Biomarker criteria have to be considered carefully. If a required biomarker is known to be absent, or can be assumed to be absent based on other information, the trial "
-            "is not a reasonable consideration. For example, if a trial for lung cancer requires an EGFR mutation, documentation that there "
-            "is no EGFR mutation indicates the trial is not a reasonable consideration. Similarly, documentation of a KRAS mutation in the "
-            "patient indicates the trial is not a reasonable consideration, since, as you know, KRAS and EGFR driver mutations in lung cancer "
-            "are mutually exclusive.\n"
-            "Many trials describe required washout periods for prior treatments for eligibility. For example, the eligibility criteria might state "
-            "that patients may not have received radiation or chemotherapy in the last 14 days or 30 days. It is CRITICAL that you IGNORE these "
-            "eligibility criteria when considering prior treatment requirements. Assume that patients could wait for the washout period to enroll. "
-            "Also CRITICAL: Ignore your knowledge of today's current date. Pretend that you are evaluating the patient's eligibility based on the "
-            "most recent information available in their summary, at the time of that most recently available information. "
-            "Do not provide ethical judgments or comment on resource constraints with respect whether the trial is a reasonable clinical "
-            "consideration; just evaluate whether it is, given the available information.\n\n"
-            "SCORING INSTRUCTIONS:\n"
-            "After reasoning step by step, compute a score from 0 to 5 using the following rubric:\n\n"
-            "Start with 0 points.\n"
-            "1) REASONABLENESS (0 or 1 point): If the trial is at least a reasonable consideration for this patient "
-            "(i.e., the patient does not clearly meet an exclusion criterion such as wrong cancer type, wrong age group, "
-            "wrong sex, having an excluded biomarker, etc.), award 1 point. If the trial is NOT reasonable, the final score is 0 — "
-            "skip the remaining categories.\n"
-            "2) CANCER TYPE SPECIFICITY (+1 point): If the trial specifies the patient's cancer type (e.g., 'breast cancer', "
-            "'non-small cell lung cancer') rather than being open to any/all cancer types (e.g., 'solid tumors', 'advanced cancers'), "
-            "award +1 point.\n"
-            "3) CANCER BURDEN/STAGE SPECIFICITY (+1 point): If the trial specifies a particular disease stage or burden "
-            "(e.g., 'metastatic', 'locally advanced', 'stage III-IV') that matches the patient's disease status, award +1 point. "
-            "If the trial has no stage/burden requirements or is open to any stage, do not award a point.\n"
-            "4) PRIOR TREATMENT SPECIFICITY (+1 point): If the trial has specific prior treatment requirements "
-            "(e.g., 'must have progressed on platinum-based chemotherapy', 'prior immunotherapy required') "
-            "and the patient's treatment history matches those requirements, award +1 point. "
-            "If the trial has no specific prior treatment requirements, do not award a point.\n"
-            "5) BIOMARKER SPECIFICITY (+1 point): If the trial requires a specific biomarker (e.g., 'EGFR mutation', "
-            "'PD-L1 ≥ 50%', 'HER2-positive') AND the patient is known to have that biomarker, award +1 point. "
-            "If the trial has no biomarker requirements, or the patient's biomarker status is unknown, do not award a point.\n\n"
-            "Your response MUST end with the following line and nothing else after it:\n"
-            "Final score: X\n"
-            "where X is the total score (an integer from 0 to 5)."
-        )}
+        {"role": "system", "content": "Reasoning: high"},
+        {"role": "user", "content": trial_check_template().format(
+            patient_summary=patient_summary, trial_summary=trial_summary)},
     ]
     return tokenizer.apply_chat_template(
         conversation=messages,
@@ -134,67 +102,10 @@ def ask_about_trials_loosely(patient_summaries: List[str],
     (responses, response_reasonings, response_texts, eligibility_results, eligibility_verdicts)
     """
     tokenizer = llm_model.get_tokenizer()
-    prompts = []
-
-    for patient_summary, trial_summary in zip(patient_summaries, trial_summaries):
-        messages = [
-            {'role': 'system', 'content': "Reasoning: high"},
-            {'role': 'user', 'content': (
-                "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
-                "Your job is to evaluate whether a given clinical trial is a reasonable consideration for a patient, "
-                "given a clinical trial summary and a patient summary, and then score how targeted the trial is for "
-                "this specific patient.\n\n"
-                f"Here is a summary of the clinical trial:\n{trial_summary}\n"
-                f"Here is a summary of the patient:\n{patient_summary}\n"
-                "Base your judgment on whether the patient generally fits the age requirements if any, sex requirements if any, cancer type(s), cancer burden, prior treatment(s), "
-                "and biomarker criteria specified for the trial.\n"
-                "You do not have to determine if the patient is actually eligible; instead please just evaluate whether it is reasonable "
-                "for the trial to be considered further by the patient's oncologist.\n"
-                "Biomarker criteria have to be considered carefully. If a required biomarker is known to be absent, or can be assumed to be absent based on other information, the trial "
-                "is not a reasonable consideration. For example, if a trial for lung cancer requires an EGFR mutation, documentation that there "
-                "is no EGFR mutation indicates the trial is not a reasonable consideration. Similarly, documentation of a KRAS mutation in the "
-                "patient indicates the trial is not a reasonable consideration, since, as you know, KRAS and EGFR driver mutations in lung cancer "
-                "are mutually exclusive.\n"
-                "Many trials describe required washout periods for prior treatments for eligibility. For example, the eligibility criteria might state "
-                "that patients may not have received radiation or chemotherapy in the last 14 days or 30 days. It is CRITICAL that you IGNORE these "
-                "eligibility criteria when considering prior treatment requirements. Assume that patients could wait for the washout period to enroll. "
-                "Also CRITICAL: Ignore your knowledge of today's current date. Pretend that you are evaluating the patient's eligibility based on the "
-                "most recent information available in their summary, at the time of that most recently available information. "
-                "Do not provide ethical judgments or comment on resource constraints with respect whether the trial is a reasonable clinical "
-                "consideration; just evaluate whether it is, given the available information.\n\n"
-                "SCORING INSTRUCTIONS:\n"
-                "After reasoning step by step, compute a score from 0 to 5 using the following rubric:\n\n"
-                "Start with 0 points.\n"
-                "1) REASONABLENESS (0 or 1 point): If the trial is at least a reasonable consideration for this patient "
-                "(i.e., the patient does not clearly meet an exclusion criterion such as wrong cancer type, wrong age group, "
-                "wrong sex, having an excluded biomarker, etc.), award 1 point. If the trial is NOT reasonable, the final score is 0 — "
-                "skip the remaining categories.\n"
-                "2) CANCER TYPE SPECIFICITY (+1 point): If the trial specifies the patient's cancer type (e.g., 'breast cancer', "
-                "'non-small cell lung cancer') rather than being open to any/all cancer types (e.g., 'solid tumors', 'advanced cancers'), "
-                "award +1 point.\n"
-                "3) CANCER BURDEN/STAGE SPECIFICITY (+1 point): If the trial specifies a particular disease stage or burden "
-                "(e.g., 'metastatic', 'locally advanced', 'stage III-IV') that matches the patient's disease status, award +1 point. "
-                "If the trial has no stage/burden requirements or is open to any stage, do not award a point.\n"
-                "4) PRIOR TREATMENT SPECIFICITY (+1 point): If the trial has specific prior treatment requirements "
-                "(e.g., 'must have progressed on platinum-based chemotherapy', 'prior immunotherapy required') "
-                "and the patient's treatment history matches those requirements, award +1 point. "
-                "If the trial has no specific prior treatment requirements, do not award a point.\n"
-                "5) BIOMARKER SPECIFICITY (+1 point): If the trial requires a specific biomarker (e.g., 'EGFR mutation', "
-                "'PD-L1 ≥ 50%', 'HER2-positive') AND the patient is known to have that biomarker, award +1 point. "
-                "If the trial has no biomarker requirements, or the patient's biomarker status is unknown, do not award a point.\n\n"
-                "Your response MUST end with the following line and nothing else after it:\n"
-                "Final score: X\n"
-                "where X is the total score (an integer from 0 to 5)."
-            )}
-        ]
-
-        prompt = tokenizer.apply_chat_template(
-            conversation=messages,
-            add_generation_prompt=True,
-            tokenize=False,
-            enable_thinking=True,
-        )
-        prompts.append(prompt)
+    prompts = [
+        build_trial_check_prompt(tokenizer, patient_summary, trial_summary)
+        for patient_summary, trial_summary in zip(patient_summaries, trial_summaries)
+    ]
 
     from vllm import SamplingParams  # import locally inside function to keep worker footprint tidy
 

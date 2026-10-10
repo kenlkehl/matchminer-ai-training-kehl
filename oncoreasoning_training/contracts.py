@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 DEFAULT_MODEL_NAME = "google/gemma-4-E4B-it"
-FORMAT_VERSION = "oncoreasoning-answer-first-v2"
+FORMAT_VERSION = "oncoreasoning-answer-first-v3-response"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_answer_first_v2"
@@ -18,7 +18,12 @@ DEFAULT_INFERENCE_REPO = next(
 )
 TASKS = ("summarization", "clinical_qa")
 OPTIONS = {"A": "Yes", "B": "No"}
-TRIAL_RUBRIC_DIGEST = "74414d4a364a826f7b0a94f6c07ba36a9bffeaa1748f15c076450153a7169ff8"
+TRIAL_RUBRIC_DIGEST = "f51bfc1ff971b609f077757eb51014c3411d048174b9e24bde745aae94b4936c"
+RESPONSE_RULES_HEADER = "RESPONSE TO PRIOR THERAPY AND CURRENT DISEASE STATUS"
+RESPONSE_COMPONENTS = frozenset({
+    "cancer_burden_matching", "treatment_history_matching",
+    "cancer_burden_specificity", "prior_treatment_specificity",
+})
 QA_SYSTEM = (
     "You are an oncology clinical question answering assistant. Answer ONLY the one "
     "component asked below, applying its decision rule. The supplied clinical text and "
@@ -50,15 +55,20 @@ TRIAL_COMPONENTS = {
         "matching does not require cancer-type specificity.",
     ),
     "cancer_burden_matching": (
-        "Is this trial a reasonable consideration based ONLY on cancer burden or stage?",
+        "Is this trial a reasonable consideration based ONLY on stage, extent, disease burden, "
+        "and any specified current disease-status requirements?",
         "Answer No for a clear mismatch with required stage, extent, disease burden, or "
-        "disease-specific risk category. Otherwise answer Yes, including unrestricted burden "
-        "or insufficient information to establish a mismatch.",
+        "disease-specific risk category, including documented current progression when "
+        "non-progressive disease is required. Otherwise answer Yes, including unrestricted "
+        "burden or insufficient information to establish a mismatch; identify the uncertainty. "
+        "An unknown current disease status does not establish a mismatch.",
     ),
     "treatment_history_matching": (
-        "Is this trial a reasonable consideration based ONLY on prior treatment requirements and exclusions?",
+        "Is this trial a reasonable consideration based ONLY on prior treatment requirements "
+        "and exclusions, including any required response to those treatments?",
         "Answer No for a clearly missing required prior treatment, incompatible required "
-        "response, or receipt of an excluded prior treatment. Otherwise answer Yes. Ignore "
+        "response, or receipt of an excluded prior treatment. Otherwise answer Yes, explicitly "
+        "identifying any unknown response information. Ignore "
         "time-limited treatment washout periods: assume the patient can wait for washout.",
     ),
     "biomarker_matching": (
@@ -77,14 +87,18 @@ TRIAL_COMPONENTS = {
     ),
     "cancer_burden_specificity": (
         "Does a specific trial stage or burden requirement match this patient's disease status?",
-        "Answer Yes only for an explicitly specified stage or burden that matches the patient. "
-        "No stage requirement or an unknown match yields No. Assess only this specificity point.",
+        "Answer Yes only for an explicitly specified stage or burden that matches the patient, "
+        "including any attached current disease-status conditions. No stage/burden requirement, "
+        "an unknown match, or a contradictory match yields No. Assess only this specificity point.",
     ),
     "prior_treatment_specificity": (
         "Does the patient's history match a specific prior-treatment requirement of this trial?",
-        "Answer Yes only when a specific required prior treatment and any required response "
-        "match the patient's history. No specific requirement or an unknown match yields No. "
-        "Ignore washout periods. Assess only this specificity point.",
+        "Answer Yes only when a specific required prior treatment and all associated response "
+        "conditions are supported by the patient's history, including required resistance, "
+        "relapse, intolerance, duration, or timing. Exposure alone is insufficient when an "
+        "outcome is specified. No specific requirement or an unknown match yields No. "
+        "Ignore treatment washout periods, not response-duration or relapse/progression timing "
+        "requirements. Assess only this specificity point.",
     ),
     "biomarker_specificity": (
         "Does this trial require a specific biomarker that this patient is known to have?",
@@ -112,6 +126,16 @@ def load_prompt_sources(inference_repo=DEFAULT_INFERENCE_REPO):
     if digest(sources["llm_match_quality.user.txt"]) != TRIAL_RUBRIC_DIGEST:
         raise ValueError("TrialChecker rubric changed; review the individual component adaptation")
     return sources
+
+
+def trial_response_rules(sources):
+    """Reuse the aggregate rubric's response rules verbatim for relevant QA tasks."""
+    template = sources["llm_match_quality.user.txt"]
+    if digest(template) != TRIAL_RUBRIC_DIGEST:
+        raise ValueError("TrialChecker rubric changed; review the individual component adaptation")
+    start = template.index(RESPONSE_RULES_HEADER)
+    end = template.index("\n\nSCORING INSTRUCTIONS:", start)
+    return template[start:end]
 
 
 def good_option_rules(sources):
@@ -144,6 +168,8 @@ def build_question_messages(task, sources):
     component = task["component"]
     if task["family"] == "trialchecking":
         question, rule = TRIAL_COMPONENTS[component]
+        if component in RESPONSE_COMPONENTS:
+            rule += "\n\n" + trial_response_rules(sources)
         context = f"PATIENT SUMMARY\n{task['patient_summary']}\n\nTRIAL SPACE\n{task['trial_summary']}"
         scope = (
             "Judge reasonable consideration, not complete protocol eligibility. Evaluate the "
