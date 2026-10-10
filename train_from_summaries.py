@@ -42,6 +42,9 @@ def parser():
     p.add_argument("--models-dir", type=Path, default=ROOT.parent / "models/gemma_pipeline_v2")
     p.add_argument("--inference-repo", type=Path, default=ROOT.parent / "matchminer-ai-inference-kehl")
     p.add_argument("--teacher-model", default=DEFAULT_TEACHER)
+    p.add_argument("--teacher-served-model", help="API model alias; --teacher-model remains the underlying HF model")
+    p.add_argument("--teacher-url", action="append", default=[],
+                   help="Existing OpenAI-compatible teacher URL; repeat for a pool. Skips local vLLM startup.")
     p.add_argument("--student-model", default=DEFAULT_MODEL_NAME)
     p.add_argument("--embedding-model", default="google/embeddinggemma-2")
     p.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
@@ -59,6 +62,7 @@ def stages(args):
     py = sys.executable
     servers = run / "teacher_servers.json"
     gpu_count = len(args.gpus.split(','))
+    teacher_model = args.teacher_served_model or args.teacher_model
     launch = [py, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={gpu_count}"]
     result, labels = [], []
     embedding = args.embedding_model
@@ -80,7 +84,8 @@ def stages(args):
             result.append(Stage(f"label-{candidate.stem}", [py, "llm_check_trials.py",
                 "--input_parquet", str(candidate), "--out_dir", str(directory),
                 "--final_output", "labels.parquet", "--server_urls_file", str(servers),
-                "--model", args.teacher_model, "--reasoning-parser", "gemma4",
+                "--model", teacher_model, "--tokenizer-model", args.teacher_model,
+                "--reasoning-parser", "gemma4",
                 "--max_concurrent_per_server", "96", "--max_attempts", "5"], [output], True))
             labels.append(output)
         embedding = models / f"trialspace_round{iteration}"
@@ -93,7 +98,7 @@ def stages(args):
     catalog = run / "good_option_catalog"
     result.append(Stage("catalog", [py, "train_good_option_checker.py", "catalog",
         "--catalog", str(catalog), "--catalog-checkpoint-dir", str(run / "catalog_checkpoints"),
-        "--candidate-files", *map(str, candidates), "--model", args.teacher_model,
+        "--candidate-files", *map(str, candidates), "--model", teacher_model,
         "--server-urls-file", str(servers), "--max-concurrent-requests", str(args.teacher_concurrency)],
         [catalog / "manifest.json"], True))
     result.append(Stage("validate-catalog", [py, "train_good_option_checker.py", "validate-catalog",
@@ -101,7 +106,7 @@ def stages(args):
     exclusions = run / "boilerplate_components"
     result.append(Stage("prepare-exclusions", [py, "oncoreasoning_training/prepare_boilerplate.py",
         "--candidates", *map(str, candidates), "--output-dir", str(exclusions),
-        "--server-urls-file", str(servers), "--teacher-model", args.teacher_model,
+        "--server-urls-file", str(servers), "--teacher-model", teacher_model,
         "--concurrency", str(args.teacher_concurrency)], [exclusions / "manifest.json"], True))
     data = run / "oncoreasoning"
     program = [py, "oncoreasoning_training/create_all_training_data.py"]
@@ -111,14 +116,17 @@ def stages(args):
         "--boilerplate-components", str(exclusions), "--model-name", args.student_model,
         "--inference-repo", str(args.inference_repo)], [data / "prepared.json"]))
     result.append(Stage("distill-oncoreasoning", program + ["generate", "--output-dir", str(data),
-        "--server-urls-file", str(servers), "--teacher-model", args.teacher_model,
+        "--server-urls-file", str(servers), "--teacher-model", teacher_model,
+        "--teacher-tokenizer", args.teacher_model,
         "--teacher-context", str(args.teacher_max_context), "--teacher-thinking",
         "--concurrency", str(args.teacher_concurrency)], [data / "generation_manifest.json"], True))
     result.append(Stage("build-oncoreasoning", program + ["build", "--output-dir", str(data)],
                         [data / "training_manifest.json", data / "tokenized_dataset"]))
     student = models / "oncoreasoning"
     result.append(Stage("train-oncoreasoning", launch + ["oncoreasoning_training/fine_tune_llm.py",
-        "--data-dir", str(data), "--output-dir", str(student), "--fsdp", "--resume-from-checkpoint", "auto"],
+        "--data-dir", str(data), "--output-dir", str(student),
+        "--gradient-accumulation-steps", str(max(1, 64 // gpu_count)),
+        "--fsdp", "--resume-from-checkpoint", "auto"],
         [student / "oncoreasoning_contract.json"]))
     return result
 
@@ -206,6 +214,40 @@ def teacher_pool(args):
             handle.close()
 
 
+@contextmanager
+def external_teacher_pool(args):
+    """Publish validated external endpoints without owning their processes."""
+    from oncoreasoning_training.teacher import server_urls
+
+    registry = args.run_dir / "teacher_servers.json"
+    atomic_json(registry, {"ready": False, "servers": []})
+    servers = []
+    try:
+        for url in dict.fromkeys(args.teacher_url):
+            url = url.rstrip('/')
+            if not url.endswith('/v1'):
+                url += '/v1'
+            url = server_urls(url=url)[0]
+            with urllib.request.urlopen(url + '/models', timeout=15) as response:
+                models = json.load(response)['data']
+            served = args.teacher_served_model or args.teacher_model
+            matches = [model for model in models if model['id'] == served]
+            if not matches:
+                raise ValueError(f"Teacher {url} does not serve {served}")
+            if args.teacher_served_model and matches[0].get('root') != args.teacher_model:
+                raise ValueError(f"Teacher alias {served} does not identify {args.teacher_model} as its root")
+            context = matches[0].get('max_model_len')
+            if context and int(context) < args.teacher_max_context:
+                raise ValueError(f"Teacher {url} supports {context} tokens; lower --teacher-max-context")
+            servers.append({"url": url, "kind": "remote"})
+        if not servers:
+            raise ValueError("Supply at least one --teacher-url")
+        atomic_json(registry, {"ready": True, "servers": servers})
+        yield
+    finally:
+        atomic_json(registry, {"ready": False, "servers": []})
+
+
 def git_revision(directory):
     return subprocess.check_output(["git", "-C", str(directory), "rev-parse", "HEAD"], text=True).strip()
 
@@ -255,7 +297,7 @@ def main():
                 pool.__exit__(None, None, None)
                 pool = None
             if stage.teacher and not pool:
-                pool = teacher_pool(args)
+                pool = external_teacher_pool(args) if args.teacher_url else teacher_pool(args)
                 pool.__enter__()
             atomic_json(args.run_dir / "status.json", {"stage": stage.name, "status": "running"})
             print(f"[start] {stage.name}", flush=True)

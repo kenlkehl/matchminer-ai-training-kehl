@@ -118,6 +118,66 @@ def test_integrated_plan_starts_with_base_mining_and_trains_only_two_models():
             assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "96"
 
 
+def test_external_teacher_validates_model_and_leaves_server_running(tmp_path, monkeypatch):
+    import io
+    args = runner.parser().parse_args([
+        "--run-dir", str(tmp_path), "--teacher-url", "http://teacher:8001",
+    ])
+    urls = []
+
+    def discover(url, **kwargs):
+        urls.append(url)
+        return io.StringIO(json.dumps({"data": [{"id": DEFAULT_TEACHER, "max_model_len": 262144}]}))
+
+    monkeypatch.setattr(runner.urllib.request, "urlopen", discover)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **kw: pytest.fail("Must not start local vLLM"))
+    monkeypatch.setattr(runner.os, "killpg", lambda *a: pytest.fail("Must not stop external servers"))
+    with runner.external_teacher_pool(args):
+        assert json.loads((tmp_path / 'teacher_servers.json').read_text()) == {
+            "ready": True, "servers": [{"url": "http://teacher:8001/v1", "kind": "remote"}],
+        }
+    assert urls == ['http://teacher:8001/v1/models']
+    assert json.loads((tmp_path / 'teacher_servers.json').read_text()) == {"ready": False, "servers": []}
+
+
+@pytest.mark.parametrize('model,context,error', [
+    ('wrong-teacher', 262144, 'does not serve'),
+    (DEFAULT_TEACHER, 65536, 'lower --teacher-max-context'),
+])
+def test_external_teacher_rejects_incompatible_server(tmp_path, monkeypatch, model, context, error):
+    import io
+    args = runner.parser().parse_args(['--run-dir', str(tmp_path), '--teacher-url', 'http://teacher:8001/v1'])
+    monkeypatch.setattr(runner.urllib.request, 'urlopen', lambda *a, **kw: io.StringIO(json.dumps({
+        'data': [{'id': model, 'max_model_len': context}],
+    })))
+    with pytest.raises(ValueError, match=error), runner.external_teacher_pool(args):
+        pytest.fail('An incompatible teacher must not receive training requests')
+    assert not json.loads((tmp_path / 'teacher_servers.json').read_text())['ready']
+
+
+def test_external_alias_keeps_hf_tokenizers_and_two_gpu_batch(tmp_path, monkeypatch):
+    import io
+    args = runner.parser().parse_args(['--run-dir', str(tmp_path), '--teacher-url', 'http://teacher:8000',
+                                      '--teacher-served-model', 'gemma4-31b', '--gpus', '0,1'])
+    model = {'id': 'gemma4-31b', 'root': DEFAULT_TEACHER, 'max_model_len': 262144}
+    monkeypatch.setattr(runner.urllib.request, 'urlopen', lambda *a, **kw: io.StringIO(json.dumps({'data': [model]})))
+    with runner.external_teacher_pool(args):
+        pass
+    plan = runner.stages(args)
+    for stage in plan:
+        if stage.teacher:
+            assert 'gemma4-31b' in stage.command
+    label = next(stage for stage in plan if stage.name.startswith('label-')).command
+    assert label[label.index('--tokenizer-model') + 1] == DEFAULT_TEACHER
+    distill = next(stage for stage in plan if stage.name == 'distill-oncoreasoning').command
+    assert distill[distill.index('--teacher-tokenizer') + 1] == DEFAULT_TEACHER
+    train = plan[-1].command
+    assert train[train.index('--gradient-accumulation-steps') + 1] == '32'
+    model['root'] = 'wrong/model'
+    with pytest.raises(ValueError, match='as its root'), runner.external_teacher_pool(args):
+        pytest.fail('Must validate the underlying model when using a served alias')
+
+
 def test_adapter_upgrade_preserves_original_fingerprint_and_rejects_changed_inputs(tmp_path, monkeypatch):
     from oncoreasoning_training import pipeline_upgrade as upgrade
     previous = {"args": {"student_model": "gemma"}, "training_commit": "old", "inputs": ["source-hash"]}

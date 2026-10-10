@@ -345,7 +345,7 @@ def remote_main(args, df: pd.DataFrame) -> int:
 
     print(f"[remote] loading tokenizer for prompt building...")
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
+        args.tokenizer_model or args.model,
         cache_dir=args.download_dir or None,
         trust_remote_code=True,
     )
@@ -475,6 +475,7 @@ def main():
 
     parser.add_argument("--prompt_batch_size", type=int, default=2000, help="Rows per generation batch inside each kernel.")
     parser.add_argument("--model", default="openai/gpt-oss-120b", help="HF model id for vLLM.")
+    parser.add_argument("--tokenizer-model", help="HF tokenizer ID when --model is a remote served alias.")
     parser.add_argument("--download_dir", default="", help="vLLM/HF download cache dir.")
     parser.add_argument("--max_model_len", type=int, default=30000, help="vLLM max_model_len.")
     parser.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")

@@ -29,6 +29,25 @@ TrialSpace labeling allows up to 96 concurrent requests per teacher GPU
 adaptive limiter ramps up after successful requests and backs off on errors.
 Catalog and long-context distillation retain their separate global concurrency.
 
+To run the pipeline against an existing teacher, supply its OpenAI-compatible
+endpoint instead of starting local vLLM workers:
+
+```bash
+~/thisenv/bin/python train_from_summaries.py \
+  --teacher-url http://sn4622130540:8000/v1 \
+  --teacher-served-model gemma4-31b --gpus 0,1
+```
+
+Repeat `--teacher-url` for multiple servers. The runner verifies the served model
+and context capacity, writes the shared endpoint registry, and leaves external
+server processes running between stages. Mining and student fine-tuning still
+use the selected GPUs on the machine running the pipeline. If the teacher has a
+smaller context, set `--teacher-max-context` to its supported limit.
+For a served alias, the server must report `--teacher-model` as its underlying
+root; tokenizers still load from that HF model. OncoReasoning accumulation scales
+with GPU count (32 steps on two GPUs, 8 on eight) to retain a batch of 64 examples
+per optimizer step when the GPU count divides 64.
+
 The run starts from `../data/no_phi/patient_summaries_with_spaces.parquet` and
 `trial_space_lineitems.csv`, mines candidates with the base embedding model,
 labels them, and trains TrialSpace. A second mining/label/training round uses
@@ -41,7 +60,8 @@ test rows are excluded and TrialSpace trains only on the train split.
 The pipeline then builds and validates fresh drug and class evidence, extracts
 individual exclusions, and distills summarization from `all_synthetic_notes.parquet`
 plus all three QA families. Catalog web research receives public trial/drug
-information only. All patient-bearing teacher requests stay on the VM.
+information only. Patient-bearing teacher requests use the configured local
+workers or explicitly supplied teacher endpoints.
 OncoReasoning trains the adapters sequentially with FSDP2 across eight GPUs.
 Each starts from the original base and trains only on its own task category;
 their data volumes do not compete in a mixed training objective. Defaults are
