@@ -18,7 +18,7 @@ PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 
 All three shell entrypoints use this same runner. It expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`2a624446190d23c9db27505ecbdc063547e7d209`. Review the pin and prompt contracts
+`5b4099512afe0173c86f57d2a66b944ade61239d`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -50,9 +50,12 @@ teacher above has been measured at 288. Catalog and long-context distillation us
 the separate `--teacher-concurrency` setting. The run identity records the exact
 trial-scoring rubric digest; changing that rubric requires discarding old labels
 and resetting dependent stages rather than resuming mixed-prompt outputs.
-Unknown information may preserve reasonableness, but every specificity point
-requires documented support for the complete applicable requirement. The same
-evidence rules are reused verbatim in the binary TrialChecker specificity tasks.
+The scoring instructions precede both summaries to provide a reusable cache
+prefix. Required biomarkers follow the rubric's tested/standard-of-care inference
+rules and its exception for novel screening biomarkers. Specificity requires
+support for the complete applicable requirement. Binary TrialChecker questions
+reuse the relevant current reasonableness clauses and specificity guidance;
+their instructions and answer options also precede patient and trial context.
 For a served alias, the server must report `--teacher-model` as its underlying
 root; tokenizers still load from that HF model. OncoReasoning accumulation scales
 with GPU count (32 steps on two GPUs, 8 on eight) to retain a batch of 64 examples

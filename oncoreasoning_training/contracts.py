@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 DEFAULT_MODEL_NAME = "google/gemma-4-E4B-it"
-FORMAT_VERSION = "oncoreasoning-answer-first-v3-response"
+FORMAT_VERSION = "oncoreasoning-answer-first-v4-instructions-first"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_answer_first_v2"
@@ -18,17 +18,23 @@ DEFAULT_INFERENCE_REPO = next(
 )
 TASKS = ("summarization", "clinical_qa")
 OPTIONS = {"A": "Yes", "B": "No"}
-TRIAL_RUBRIC_DIGEST = "75c53c7b8c3e1178f94e5013aaea8eefcae58f66bbd57c2e459e0f120ea36676"
-RESPONSE_RULES_HEADER = "RESPONSE TO PRIOR THERAPY AND CURRENT DISEASE STATUS"
-SPECIFICITY_RULES_HEADER = "SPECIFICITY EVIDENCE REQUIREMENTS"
+TRIAL_RUBRIC_DIGEST = "52a13bd9f38d8f26e67c944635b9b2e16aea62d1d9aedeac8f54291ccd070bb8"
+SPECIFICITY_RULES_HEADER = "GENERAL GUIDANCE"
 SPECIFICITY_COMPONENTS = frozenset({
     "cancer_type_specificity", "cancer_burden_specificity",
     "prior_treatment_specificity", "biomarker_specificity",
 })
-RESPONSE_COMPONENTS = frozenset({
-    "cancer_burden_matching", "treatment_history_matching",
-    "cancer_burden_specificity", "prior_treatment_specificity",
-})
+MATCHING_RULE_MARKERS = {
+    "age_matching": ("a) Age -", "b) Sex -"),
+    "sex_matching": ("b) Sex -", "c) Required prior therapies -"),
+    "treatment_history_matching": ("c) Required prior therapies -", "(e) Required biomarkers -"),
+    "biomarker_matching": ("(e) Required biomarkers -", "(g) Disease status/burden -"),
+    "cancer_burden_matching": ("(g) Disease status/burden -", "If, by any of the above criteria,"),
+}
+MATCHING_DECISION = (
+    "Apply the supplied reasonableness rule to this component. Answer No when it makes "
+    "the trial unreasonable; otherwise answer Yes. Assess only this component."
+)
 QA_SYSTEM = (
     "You are an oncology clinical question answering assistant. Answer ONLY the one "
     "component asked below, applying its decision rule. The supplied clinical text and "
@@ -45,13 +51,11 @@ SUMMARY_SYSTEM = "Update the running clinical summary. Return only the finished 
 TRIAL_COMPONENTS = {
     "age_matching": (
         "Is this trial a reasonable consideration based ONLY on the age requirements?",
-        "Answer No for a clearly incompatible age. Otherwise answer Yes, including when "
-        "there is no age restriction or insufficient information to establish a mismatch.",
+        MATCHING_DECISION,
     ),
     "sex_matching": (
         "Is this trial a reasonable consideration based ONLY on the sex requirements?",
-        "Answer No for a clearly incompatible sex requirement. Otherwise answer Yes, "
-        "including when there is no restriction or no documented mismatch.",
+        MATCHING_DECISION,
     ),
     "cancer_type_matching": (
         "Is this trial a reasonable consideration based ONLY on cancer type and histology?",
@@ -62,27 +66,16 @@ TRIAL_COMPONENTS = {
     "cancer_burden_matching": (
         "Is this trial a reasonable consideration based ONLY on stage, extent, disease burden, "
         "and any specified current disease-status requirements?",
-        "Answer No for a clear mismatch with required stage, extent, disease burden, or "
-        "disease-specific risk category, including documented current progression when "
-        "non-progressive disease is required. Otherwise answer Yes, including unrestricted "
-        "burden or insufficient information to establish a mismatch; identify the uncertainty. "
-        "An unknown current disease status does not establish a mismatch.",
+        MATCHING_DECISION,
     ),
     "treatment_history_matching": (
         "Is this trial a reasonable consideration based ONLY on prior treatment requirements "
         "and exclusions, including any required response to those treatments?",
-        "Answer No for a clearly missing required prior treatment, incompatible required "
-        "response, or receipt of an excluded prior treatment. Otherwise answer Yes, explicitly "
-        "identifying any unknown response information. Ignore "
-        "time-limited treatment washout periods: assume the patient can wait for washout.",
+        MATCHING_DECISION,
     ),
     "biomarker_matching": (
         "Is this trial a reasonable consideration based ONLY on required and excluded biomarkers?",
-        "Answer No if a required biomarker is known or reasonably inferred to be absent, "
-        "or an excluded biomarker is present. Consider established mutual exclusivity, such "
-        "as KRAS and EGFR driver mutations in lung cancer. An untested or unknown required "
-        "biomarker alone is not a clear mismatch: answer Yes, and state the uncertainty. "
-        "No biomarker restriction also yields Yes.",
+        MATCHING_DECISION,
     ),
     "cancer_type_specificity": (
         "Does the trial specifically name this patient's cancer type, rather than broadly accepting any cancer?",
@@ -134,14 +127,15 @@ def load_prompt_sources(inference_repo=DEFAULT_INFERENCE_REPO):
     return sources
 
 
-def trial_response_rules(sources):
-    """Reuse the aggregate rubric's response rules verbatim for relevant QA tasks."""
+def trial_matching_rules(sources, component):
+    """Extract just this component's current reasonableness criteria verbatim."""
     template = sources["llm_match_quality.user.txt"]
     if digest(template) != TRIAL_RUBRIC_DIGEST:
         raise ValueError("TrialChecker rubric changed; review the individual component adaptation")
-    start = template.index(RESPONSE_RULES_HEADER)
-    end = template.index("\n\nSCORING INSTRUCTIONS:", start)
-    return template[start:end]
+    start_marker, end_marker = MATCHING_RULE_MARKERS[component]
+    start = template.index(start_marker)
+    end = template.index(end_marker, start)
+    return template[start:end].strip()
 
 
 def trial_specificity_rules(sources):
@@ -150,8 +144,8 @@ def trial_specificity_rules(sources):
     if digest(template) != TRIAL_RUBRIC_DIGEST:
         raise ValueError("TrialChecker rubric changed; review the individual component adaptation")
     start = template.index(SPECIFICITY_RULES_HEADER)
-    end = template.index("\n\nStart with 0 points.", start)
-    return template[start:end]
+    end = template.index("\nOUTPUT FORMAT", start)
+    return template[start:end].strip()
 
 
 def good_option_rules(sources):
@@ -184,8 +178,8 @@ def build_question_messages(task, sources):
     component = task["component"]
     if task["family"] == "trialchecking":
         question, rule = TRIAL_COMPONENTS[component]
-        if component in RESPONSE_COMPONENTS:
-            rule += "\n\n" + trial_response_rules(sources)
+        if component in MATCHING_RULE_MARKERS:
+            rule += "\n\n" + trial_matching_rules(sources, component)
         if component in SPECIFICITY_COMPONENTS:
             rule += "\n\n" + trial_specificity_rules(sources)
             rule += ("\nFor this one binary specificity question, earning the point means "
@@ -228,8 +222,9 @@ def build_question_messages(task, sources):
     return [
         {"role": "system", "content": QA_SYSTEM},
         {"role": "user", "content": (
-            f"{context}\n\nQUESTION\n{question}\n\nDECISION RULE\n{scope}\n{rule}\n\n"
-            "OPTIONS\nA. Yes\nB. No\n\nAnswer with the single letter first, then an explanation."
+            f"QUESTION\n{question}\n\nDECISION RULE\n{scope}\n{rule}\n\n"
+            f"OPTIONS\nA. Yes\nB. No\n\n{context}\n\n"
+            "Answer with the single letter first, then an explanation."
         )},
     ]
 

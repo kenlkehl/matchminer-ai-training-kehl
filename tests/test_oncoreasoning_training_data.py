@@ -118,7 +118,7 @@ def test_one_component_and_one_drug_per_question(sources):
     assert {x["component"] for x in tasks} == set(c.TRIAL_COMPONENTS) | set(c.GOOD_OPTION_COMPONENTS)
     for task in tasks:
         prompt = task["messages"][-1]["content"]
-        assert prompt.count("\nQUESTION\n") == 1
+        assert prompt.count("QUESTION\n") == 1
         assert "A. Yes\nB. No" in prompt
         assert "C. " not in prompt and "Final score:" not in prompt
         assert "criterion 3" not in prompt  # criterion 4 is self-contained
@@ -128,9 +128,10 @@ def test_one_component_and_one_drug_per_question(sources):
     assert "20%" in rules["common_biomarker_in_disease"][1]
     assert "Absent or untested scores 0" in rules["patient_biomarker_targeted"][1]
     assert "Preclinical and mechanistic support fall short" in rules["biomarker_targeted_benefit"][1]
-    assert "unknown required biomarker alone is not a clear mismatch" in c.TRIAL_COMPONENTS["biomarker_matching"][1]
+    assert "standard of care" in c.trial_matching_rules(sources, "biomarker_matching")
+    assert "novel biomarkers" in c.trial_matching_rules(sources, "biomarker_matching")
     assert "unknown/untested status yields No" in c.TRIAL_COMPONENTS["biomarker_specificity"][1]
-    assert "washout" in c.TRIAL_COMPONENTS["treatment_history_matching"][1]
+    assert "washout" in c.trial_matching_rules(sources, "treatment_history_matching")
 
 
 def test_changed_rubrics_fail_instead_of_silently_changing_semantics(sources, tmp_path):

@@ -1,4 +1,4 @@
-"""Keep aggregate labeling and individual response questions on one rubric."""
+"""Keep aggregate labeling and individual questions on the current cached rubric."""
 from types import SimpleNamespace
 import sys
 
@@ -38,7 +38,7 @@ def test_local_and_remote_scoring_render_the_canonical_prompt(monkeypatch):
 
 
 @pytest.mark.parametrize("component", c.TRIAL_COMPONENTS)
-def test_response_rules_are_shared_only_with_relevant_binary_components(component):
+def test_current_rules_are_scoped_to_one_binary_component_before_patient_data(component):
     sources = c.load_prompt_sources()
     messages = c.build_question_messages({
         "family": "trialchecking", "component": component,
@@ -46,18 +46,29 @@ def test_response_rules_are_shared_only_with_relevant_binary_components(componen
         "trial_summary": "Requires progression on chemotherapy or treatment intolerance.",
     }, sources)
     text = messages[-1]["content"]
-    shared = c.trial_response_rules(sources)
-    assert text.count(shared) == int(component in c.RESPONSE_COMPONENTS)
+    for owner in c.MATCHING_RULE_MARKERS:
+        shared = c.trial_matching_rules(sources, owner)
+        assert text.count(shared) == int(component == owner)
     specificity = c.trial_specificity_rules(sources)
     assert text.count(specificity) == int(component in c.SPECIFICITY_COMPONENTS)
-    assert c.SPECIFICITY_RULES_HEADER not in shared
-    assert text.count("\nQUESTION\n") == 1
+    assert text.count("QUESTION\n") == 1
     assert "A. Yes\nB. No" in text and "Final score:" not in text
     assert "very next token" in messages[0]["content"]
-    if component in c.RESPONSE_COMPONENTS:
-        assert "Missing response information is not proof of either response or progression" in text
-        assert "Changing or stopping treatment does not, by itself" in text
-        assert "Progression and intolerance are not interchangeable" in text
+    changed = c.build_question_messages({
+        "family": "trialchecking", "component": component,
+        "patient_summary": "Different fabricated patient",
+        "trial_summary": "Different fabricated trial",
+    }, sources)[-1]["content"]
+    prefix, _, context = text.partition("PATIENT SUMMARY\n")
+    assert prefix == changed.partition("PATIENT SUMMARY\n")[0]
+    assert "DECISION RULE" in prefix and "OPTIONS" in prefix
+    assert "Fabricated patient" in context and "TRIAL SPACE" in context
+    assert context.endswith("Answer with the single letter first, then an explanation.")
+    if component == "biomarker_matching":
+        assert "standard of care" in prefix and "novel biomarkers" in prefix
+        assert "unknown required biomarker alone is not a clear mismatch" not in prefix
+    if component == "treatment_history_matching":
+        assert "required response or progression" in prefix and "washout" in prefix
 
 
 def test_aggregate_labeling_rejects_an_unreviewed_rubric(monkeypatch):

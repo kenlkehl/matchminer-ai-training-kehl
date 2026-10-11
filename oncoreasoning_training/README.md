@@ -42,23 +42,21 @@ asked in these component examples. To reconstruct the old trial score, all six
 matching answers must be Yes; otherwise the score is zero. When they are all
 Yes, the score is one plus the four specificity points.
 
-Treatment-history and burden questions explicitly assess required treatment
-responses and current disease status. They reuse the aggregate TrialChecker
-prompt's response rules verbatim: exposure or a treatment switch does not prove
-progression, the latest relevant status controls current-status requirements,
-and documented progression contradicts a non-progressive-disease requirement.
-Preserve regimen-specific outcomes, alternatives, exceptions, response duration,
-and relapse/progression timing; only treatment washout periods are ignored.
-Unknown response information alone does not make a reasonable-consideration
-answer No, but cannot earn specificity credit. These rules apply to both matching
-and specificity questions, each still asking just one component.
+Matching questions reuse only the relevant reasonableness clauses from the
+current aggregate TrialChecker prompt. These include required/excluded prior
+therapies and responses, ignored washout periods, and the distinction between
+routine and novel screening biomarkers. Specificity questions require support
+for the complete criterion and reuse the current general guidance verbatim.
+Instructions, decision rules, and answer options precede variable context in
+every QA family so that repeated components share a cacheable prefix.
 
-The format version is `oncoreasoning-answer-first-v3-response`. Aggregate teacher
+The format version is `oncoreasoning-answer-first-v4-instructions-first`. Aggregate teacher
 labeling loads the same fingerprinted inference prompt in local and remote modes.
 Labels from the earlier rubric, TrialSpace weights trained on them, and candidates
-mined with those weights must not be resumed under this version. Start a fresh
-pipeline run from base EmbeddingGemma 2 after archiving the old run and model
-directories; keep the original source summaries, synthetic notes, and trial files.
+mined with those weights must not be resumed under this version. Regenerate
+labels and dependent artifacts, retaining the original source summaries,
+synthetic notes, and trial files. Base-model candidates can be retained when
+the embedding and mining settings have not changed.
 
 BoilerplateChecker supplies one question per trial exclusion: does this specific
 exclusion clearly apply? Unknown or uncertain evidence gives **B. No**. A
@@ -75,10 +73,12 @@ The fourth criterion states the patient-specific biomarker requirement within
 its own question, without depending on a previous answer. No old aggregate
 TrialChecker labels or deprecated GoodOption classifier labels are reused.
 
-Binary decisions preserve the current missing-information rules. For example,
-an unknown required biomarker is not itself a clear TrialChecker mismatch, but
-cannot earn a biomarker-specificity point; absent or untested patient biomarkers
-earn No for the patient-specific GoodOption criterion. GoodOption's prior receipt
+Binary decisions preserve each current rubric's missing-information rules.
+TrialChecker's required-biomarker rule considers tests known or assumed to have
+been performed as standard care, and allows uncertainty for novel markers only
+tested during trial screening when absence cannot be inferred. Unknown status
+cannot earn biomarker specificity. Absent or untested patient biomarkers earn
+No for the patient-specific GoodOption criterion. GoodOption's prior receipt
 of the named drug overrides disease-benefit literature, while prior receipt of
 a different drug in the class does not. The TrialChecker adaptation is pinned
 to its source rubric fingerprint and fails if that rubric changes before review.
