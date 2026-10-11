@@ -18,7 +18,7 @@ DEFAULT_INFERENCE_REPO = next(
 )
 TASKS = ("summarization", "clinical_qa")
 OPTIONS = {"A": "Yes", "B": "No"}
-TRIAL_RUBRIC_DIGEST = "e8f5609697feaed5e46574a7829e5b17c5c0db9bbf376b9e95c5163bc2e8f644"
+TRIAL_RUBRIC_DIGEST = "d700a809ef6b3eccbeb3fb2e91db6198559cef24a48af08b8bf5b2c17a94dac2"
 SPECIFICITY_RULES_HEADER = "GENERAL GUIDANCE"
 SPECIFICITY_COMPONENTS = frozenset({
     "cancer_type_specificity", "cancer_burden_specificity",
@@ -95,7 +95,8 @@ TRIAL_COMPONENTS = {
         "required therapy and all associated response conditions, is clearly documented as "
         "satisfied in the patient's history, including required resistance, "
         "relapse, intolerance, duration, or timing. Exposure alone is insufficient when an "
-        "outcome is a specified requirement for the trial. No specific requirement or an unknown match yields No. "
+        "outcome is a specified requirement for the trial. Exposure in a different line of therapy "
+        "is insufficient when a specific line is required. No specific requirement or an unknown match yields No. "
         "Ignore treatment washout periods, not response-duration or relapse/progression timing "
         "requirements. Assess only this specificity point.",
     ),
