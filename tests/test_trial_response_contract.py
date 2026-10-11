@@ -70,6 +70,7 @@ def test_current_rules_are_scoped_to_one_binary_component_before_patient_data(co
     if component == "treatment_history_matching":
         assert "required response or progression" in prefix and "washout" in prefix
         assert "but not during the specified line, the trial is not reasonable" in prefix
+        assert "patient received the treatment in that line, trial is not reasonable" in prefix
     if component == "prior_treatment_specificity":
         assert "Exposure in a different line of therapy is insufficient" in prefix
 

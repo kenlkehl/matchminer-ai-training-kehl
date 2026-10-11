@@ -18,7 +18,7 @@ DEFAULT_INFERENCE_REPO = next(
 )
 TASKS = ("summarization", "clinical_qa")
 OPTIONS = {"A": "Yes", "B": "No"}
-TRIAL_RUBRIC_DIGEST = "d700a809ef6b3eccbeb3fb2e91db6198559cef24a48af08b8bf5b2c17a94dac2"
+TRIAL_RUBRIC_DIGEST = "4a9ce0f1b3375f0cf92f66cce65cc2cb23bd240f237155d62c9ff9c770d8c1c0"
 SPECIFICITY_RULES_HEADER = "GENERAL GUIDANCE"
 SPECIFICITY_COMPONENTS = frozenset({
     "cancer_type_specificity", "cancer_burden_specificity",

@@ -24,7 +24,7 @@ from oncoreasoning_training.create_all_training_data import atomic_json, source_
 from oncoreasoning_training.teacher import DEFAULT_TEACHER
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "ac94c26ec4d892a2187b28ccde8421cf3cab9648"
+INFERENCE_COMMIT = "1370711f2038ebd140891ee759ca41e753e8b5bd"
 
 
 @dataclass
