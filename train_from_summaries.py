@@ -19,12 +19,12 @@ import sys
 import time
 import urllib.request
 
-from oncoreasoning_training.contracts import DEFAULT_MODEL_NAME, digest
+from oncoreasoning_training.contracts import DEFAULT_MODEL_NAME, TRIAL_RUBRIC_DIGEST, digest
 from oncoreasoning_training.create_all_training_data import atomic_json, source_record
 from oncoreasoning_training.teacher import DEFAULT_TEACHER
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "f3ded1f2841542391a6b27bfdad92d3b47304e7c"
+INFERENCE_COMMIT = "2a624446190d23c9db27505ecbdc063547e7d209"
 
 
 @dataclass
@@ -52,7 +52,12 @@ def parser():
     p.add_argument("--teacher-max-context", type=int, default=262144)
     p.add_argument("--teacher-port", type=int, default=8100)
     p.add_argument("--teacher-concurrency", type=int, default=32)
+    p.add_argument("--label-concurrency-per-server", type=int, choices=range(1, 1025),
+                   metavar="1..1024", default=96,
+                   help="TrialSpace labeling concurrency per endpoint; use 288 for the shared sn4622130540 teacher.")
     p.add_argument("--teacher-startup-timeout", type=int, default=1800)
+    p.add_argument("--skip-input-validation", action="store_true",
+                   help="Reuse source records from this run's existing manifest without reading or rehashing input files.")
     p.add_argument("--dry-run", action="store_true")
     return p
 
@@ -86,7 +91,8 @@ def stages(args):
                 "--final_output", "labels.parquet", "--server_urls_file", str(servers),
                 "--model", teacher_model, "--tokenizer-model", args.teacher_model,
                 "--reasoning-parser", "gemma4",
-                "--max_concurrent_per_server", "96", "--max_attempts", "5"], [output], True))
+                "--max_concurrent_per_server", str(args.label_concurrency_per_server),
+                "--max_attempts", "5"], [output], True))
             labels.append(output)
         embedding = models / f"trialspace_round{iteration}"
         command = launch + ["finetune_embedder.py", "--base-model", args.embedding_model,
@@ -252,6 +258,18 @@ def git_revision(directory):
     return subprocess.check_output(["git", "-C", str(directory), "rev-parse", "HEAD"], text=True).strip()
 
 
+def input_records(files, manifest_path, skip_validation=False):
+    if not skip_validation:
+        return [source_record(path) for path in files]
+    if not manifest_path.is_file():
+        raise ValueError("--skip-input-validation requires an existing run manifest")
+    records = json.loads(manifest_path.read_text())["inputs"]
+    if [record["path"] for record in records] != list(map(str, files)):
+        raise ValueError("Existing source records refer to different input paths")
+    print("[inputs] Reusing recorded input identities; input validation skipped", flush=True)
+    return records
+
+
 def main():
     args = parser().parse_args()
     for key in ("data_dir", "run_dir", "models_dir", "inference_repo"):
@@ -270,10 +288,12 @@ def main():
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     files = [args.data_dir / name for name in ("patient_summaries_with_spaces.parquet",
              "all_synthetic_notes.parquet", "trial_space_lineitems.csv")]
-    identity = {"args": {key: str(value) for key, value in vars(args).items() if key != "dry_run"},
-                "training_commit": git_revision(ROOT), "inference_commit": INFERENCE_COMMIT,
-                "inputs": [source_record(path) for path in files]}
     manifest_path = args.run_dir / "pipeline_manifest.json"
+    identity = {"args": {key: str(value) for key, value in vars(args).items()
+                         if key not in ("dry_run", "skip_input_validation")},
+                "training_commit": git_revision(ROOT), "inference_commit": INFERENCE_COMMIT,
+                "trial_rubric_digest": TRIAL_RUBRIC_DIGEST,
+                "inputs": input_records(files, manifest_path, args.skip_input_validation)}
     if manifest_path.exists():
         from oncoreasoning_training.pipeline_upgrade import compatible_identity
         identity = compatible_identity(json.loads(manifest_path.read_text()), identity, args.run_dir, ROOT)

@@ -24,6 +24,19 @@ def test_resume_ignores_checkpoint_interrupted_during_save(tmp_path):
     assert latest_complete_checkpoint(tmp_path) == str(partial)
 
 
+def test_skip_input_validation_reuses_manifest_without_reading_sources(tmp_path, monkeypatch):
+    files = [tmp_path / "not-opened.parquet"]
+    records = [{"path": str(files[0]), "sha256": "already-recorded"}]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"inputs": records}))
+    monkeypatch.setattr(runner, "source_record", lambda _: pytest.fail("Must not rehash inputs"))
+    assert runner.input_records(files, manifest, True) == records
+    with pytest.raises(ValueError, match="existing run manifest"):
+        runner.input_records(files, tmp_path / "missing.json", True)
+    with pytest.raises(ValueError, match="different input paths"):
+        runner.input_records([tmp_path / "different.parquet"], manifest, True)
+
+
 def test_teacher_discovers_its_own_pip_cuda_toolkit(monkeypatch):
     monkeypatch.delenv("CUDA_HOME", raising=False)
     monkeypatch.setattr(runner.shutil, "which", lambda name: None)
@@ -116,6 +129,19 @@ def test_integrated_plan_starts_with_base_mining_and_trains_only_two_models():
     for stage in plan:
         if stage.name.startswith("label-"):
             assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "96"
+
+
+def test_shared_teacher_label_concurrency_survives_both_labeling_rounds():
+    args = runner.parser().parse_args(["--label-concurrency-per-server", "288"])
+    plan = runner.stages(args)
+    labels = [stage for stage in plan if stage.name.startswith("label-")]
+    assert len(labels) == 4
+    for stage in labels:
+        assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "288"
+    assert args.teacher_concurrency == 32
+    for value in ("0", "-1", "1025"):
+        with pytest.raises(SystemExit):
+            runner.parser().parse_args(["--label-concurrency-per-server", value])
 
 
 def test_external_teacher_validates_model_and_leaves_server_running(tmp_path, monkeypatch):

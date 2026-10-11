@@ -48,12 +48,15 @@ def test_response_rules_are_shared_only_with_relevant_binary_components(componen
     text = messages[-1]["content"]
     shared = c.trial_response_rules(sources)
     assert text.count(shared) == int(component in c.RESPONSE_COMPONENTS)
+    specificity = c.trial_specificity_rules(sources)
+    assert text.count(specificity) == int(component in c.SPECIFICITY_COMPONENTS)
+    assert c.SPECIFICITY_RULES_HEADER not in shared
     assert text.count("\nQUESTION\n") == 1
     assert "A. Yes\nB. No" in text and "Final score:" not in text
     assert "very next token" in messages[0]["content"]
     if component in c.RESPONSE_COMPONENTS:
-        assert "unknown information alone is not a clear mismatch" in text
-        assert "cannot earn specificity credit" in text
+        assert "Missing response information is not proof of either response or progression" in text
+        assert "Changing or stopping treatment does not, by itself" in text
         assert "Progression and intolerance are not interchangeable" in text
 
 

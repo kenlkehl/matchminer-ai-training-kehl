@@ -18,7 +18,7 @@ PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 
 All three shell entrypoints use this same runner. It expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`f3ded1f2841542391a6b27bfdad92d3b47304e7c`. Review the pin and prompt contracts
+`2a624446190d23c9db27505ecbdc063547e7d209`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -35,7 +35,8 @@ endpoint instead of starting local vLLM workers:
 ```bash
 ~/thisenv/bin/python train_from_summaries.py \
   --teacher-url http://sn4622130540:8000/v1 \
-  --teacher-served-model gemma4-31b --gpus 0,1
+  --teacher-served-model gemma4-31b --gpus 0,1 \
+  --label-concurrency-per-server 288
 ```
 
 Repeat `--teacher-url` for multiple servers. The runner verifies the served model
@@ -43,6 +44,15 @@ and context capacity, writes the shared endpoint registry, and leaves external
 server processes running between stages. Mining and student fine-tuning still
 use the selected GPUs on the machine running the pipeline. If the teacher has a
 smaller context, set `--teacher-max-context` to its supported limit.
+`--label-concurrency-per-server` persists the TrialSpace labeling ceiling across
+stage transitions and restarts; the default remains 96 per endpoint. The shared
+teacher above has been measured at 288. Catalog and long-context distillation use
+the separate `--teacher-concurrency` setting. The run identity records the exact
+trial-scoring rubric digest; changing that rubric requires discarding old labels
+and resetting dependent stages rather than resuming mixed-prompt outputs.
+Unknown information may preserve reasonableness, but every specificity point
+requires documented support for the complete applicable requirement. The same
+evidence rules are reused verbatim in the binary TrialChecker specificity tasks.
 For a served alias, the server must report `--teacher-model` as its underlying
 root; tokenizers still load from that HF model. OncoReasoning accumulation scales
 with GPU count (32 steps on two GPUs, 8 on eight) to retain a batch of 64 examples
@@ -80,6 +90,9 @@ resume after interruption: completed stages are checked, teacher outputs resume,
 and student trainers restore their latest checkpoints. Source hashes, code
 revisions, and settings must match. Keep these directories on persistent disk
 on Spot VMs. A new run or changed inputs require fresh output directories.
+For an existing run with unchanged inputs, `--skip-input-validation` reuses its
+recorded source identities without reading or rehashing the input files. It does
+not override prompt/settings compatibility or permit reuse of stale labels.
 
 For an already-running pre-adapter pipeline, pull this update without restarting
 the service, then run:

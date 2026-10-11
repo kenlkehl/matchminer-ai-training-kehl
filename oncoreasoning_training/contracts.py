@@ -18,8 +18,13 @@ DEFAULT_INFERENCE_REPO = next(
 )
 TASKS = ("summarization", "clinical_qa")
 OPTIONS = {"A": "Yes", "B": "No"}
-TRIAL_RUBRIC_DIGEST = "f51bfc1ff971b609f077757eb51014c3411d048174b9e24bde745aae94b4936c"
+TRIAL_RUBRIC_DIGEST = "75c53c7b8c3e1178f94e5013aaea8eefcae58f66bbd57c2e459e0f120ea36676"
 RESPONSE_RULES_HEADER = "RESPONSE TO PRIOR THERAPY AND CURRENT DISEASE STATUS"
+SPECIFICITY_RULES_HEADER = "SPECIFICITY EVIDENCE REQUIREMENTS"
+SPECIFICITY_COMPONENTS = frozenset({
+    "cancer_type_specificity", "cancer_burden_specificity",
+    "prior_treatment_specificity", "biomarker_specificity",
+})
 RESPONSE_COMPONENTS = frozenset({
     "cancer_burden_matching", "treatment_history_matching",
     "cancer_burden_specificity", "prior_treatment_specificity",
@@ -93,10 +98,11 @@ TRIAL_COMPONENTS = {
     ),
     "prior_treatment_specificity": (
         "Does the patient's history match a specific prior-treatment requirement of this trial?",
-        "Answer Yes only when a specific required prior treatment and all associated response "
-        "conditions are supported by the patient's history, including required resistance, "
+        "Answer Yes only when the full specific prior-treatment requirement, including every "
+        "required therapy and all associated response conditions, is clearly documented as "
+        "satisfied in the patient's history, including required resistance, "
         "relapse, intolerance, duration, or timing. Exposure alone is insufficient when an "
-        "outcome is specified. No specific requirement or an unknown match yields No. "
+        "outcome is a specified requirement for the trial. No specific requirement or an unknown match yields No. "
         "Ignore treatment washout periods, not response-duration or relapse/progression timing "
         "requirements. Assess only this specificity point.",
     ),
@@ -138,6 +144,16 @@ def trial_response_rules(sources):
     return template[start:end]
 
 
+def trial_specificity_rules(sources):
+    """Keep the evidence standard identical for aggregate and binary specificity."""
+    template = sources["llm_match_quality.user.txt"]
+    if digest(template) != TRIAL_RUBRIC_DIGEST:
+        raise ValueError("TrialChecker rubric changed; review the individual component adaptation")
+    start = template.index(SPECIFICITY_RULES_HEADER)
+    end = template.index("\n\nStart with 0 points.", start)
+    return template[start:end]
+
+
 def good_option_rules(sources):
     """Read each current criterion verbatim, resolving criterion 4's dependency."""
     rubric = sources["llm_good_option.rubric.txt"]
@@ -170,6 +186,10 @@ def build_question_messages(task, sources):
         question, rule = TRIAL_COMPONENTS[component]
         if component in RESPONSE_COMPONENTS:
             rule += "\n\n" + trial_response_rules(sources)
+        if component in SPECIFICITY_COMPONENTS:
+            rule += "\n\n" + trial_specificity_rules(sources)
+            rule += ("\nFor this one binary specificity question, earning the point means "
+                     "answer Yes; insufficient evidence for the point means answer No.")
         context = f"PATIENT SUMMARY\n{task['patient_summary']}\n\nTRIAL SPACE\n{task['trial_summary']}"
         scope = (
             "Judge reasonable consideration, not complete protocol eligibility. Evaluate the "
