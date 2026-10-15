@@ -237,14 +237,15 @@ def _server_urls_from_file(path: str | Path) -> list[str]:
 def configure_teacher(args: argparse.Namespace) -> MMAIConfig:
     """Use the requested teacher for every catalog stage and labeling call."""
 
+    if args.max_concurrent_requests < 0:
+        raise ValueError("Concurrency must be zero (automatic) or positive")
     config = load_config(args.config) if args.config else load_default_preset()
     urls = [
         value.strip()
         for value in str(getattr(args, "server_urls", "") or "").split(",")
         if value.strip()
     ]
-    if getattr(args, "server_urls_file", ""):
-        urls.extend(_server_urls_from_file(args.server_urls_file))
+    registry = getattr(args, "server_urls_file", "")
     urls = list(dict.fromkeys(urls))
     model = str(getattr(args, "model", "") or "").strip()
     if model:
@@ -252,11 +253,17 @@ def configure_teacher(args: argparse.Namespace) -> MMAIConfig:
             override = config.good_option_catalog.setdefault(f"{stage}_llm", {})
             for backend in ("local", "remote"):
                 override.setdefault(backend, {})["model_name"] = model
-    if urls:
+    if urls or registry:
+        config.remote["server_urls_file"] = str(registry) if registry else None
+        config.remote["use_endpoint_pool"] = True
+        config.remote["concurrency_per_server"] = 96
+        from matchminer_ai.llm.endpoint_pool import MAX_POOL_WORKERS
+        config.remote["pool_max_workers"] = int(args.max_concurrent_requests) or MAX_POOL_WORKERS
+        config.remote["recovery_timeout"] = 86400
         config.remote["enabled"] = True
         config.remote["server_urls"] = urls
         config.remote["request_timeout"] = float(args.llm_request_timeout)
-        config.remote["max_concurrent_requests"] = int(args.max_concurrent_requests)
+        config.remote["max_concurrent_requests"] = int(args.max_concurrent_requests) or 96
         if model:
             config.llm_good_option.setdefault("remote", {})["model_name"] = model
     else:
@@ -1194,7 +1201,8 @@ def add_teacher_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--server-urls", default="")
     parser.add_argument("--server-urls-file", default="")
     parser.add_argument("--llm-request-timeout", type=float, default=7200.0)
-    parser.add_argument("--max-concurrent-requests", type=int, default=32)
+    parser.add_argument("--max-concurrent-requests", type=int, default=0,
+                        help="Catalog chain limit; 0 follows per-server capacities")
     parser.add_argument("--tensor-parallel-size", type=int, default=8)
 
 

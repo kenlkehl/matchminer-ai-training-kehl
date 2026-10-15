@@ -24,7 +24,7 @@ from oncoreasoning_training.create_all_training_data import atomic_json, source_
 from oncoreasoning_training.teacher import DEFAULT_TEACHER
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "1370711f2038ebd140891ee759ca41e753e8b5bd"
+INFERENCE_COMMIT = "fc025bf3407e2f13d7cb52ef65ad0720036faee7"
 
 
 @dataclass
@@ -51,7 +51,8 @@ def parser():
     p.add_argument("--vllm", default=str(Path(sys.executable).parent / "vllm"))
     p.add_argument("--teacher-max-context", type=int, default=262144)
     p.add_argument("--teacher-port", type=int, default=8100)
-    p.add_argument("--teacher-concurrency", type=int, default=32)
+    p.add_argument("--teacher-concurrency", type=int, default=0,
+                   help="Total downstream teacher request limit; 0 uses live per-server capacities")
     p.add_argument("--label-concurrency-per-server", type=int, choices=range(1, 1025),
                    metavar="1..1024", default=96,
                    help="TrialSpace labeling concurrency per endpoint; use 288 for the shared sn4622130540 teacher.")
@@ -120,6 +121,7 @@ def stages(args):
     program = [py, "oncoreasoning_training/create_all_training_data.py"]
     result.append(Stage("prepare-oncoreasoning", program + ["prepare", "--output-dir", str(data),
         "--notes", str(args.data_dir / "all_synthetic_notes.parquet"),
+        "--pipeline-manifest", str(run / "pipeline_manifest.json"),
         "--candidates", *map(str, candidates), "--catalog", str(catalog),
         "--boilerplate-components", str(exclusions), "--model-name", args.student_model,
         "--inference-repo", str(args.inference_repo)], [data / "prepared.json"]))
@@ -247,7 +249,8 @@ def external_teacher_pool(args):
             context = matches[0].get('max_model_len')
             if context and int(context) < args.teacher_max_context:
                 raise ValueError(f"Teacher {url} supports {context} tokens; lower --teacher-max-context")
-            servers.append({"url": url, "kind": "remote"})
+            servers.append({"url": url, "kind": "remote",
+                            "upstream_concurrency": args.label_concurrency_per_server})
         if not servers:
             raise ValueError("Supply at least one --teacher-url")
         atomic_json(registry, {"ready": True, "servers": servers})

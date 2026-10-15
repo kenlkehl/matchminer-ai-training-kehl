@@ -18,7 +18,7 @@ PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 
 All three shell entrypoints use this same runner. It expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`1370711f2038ebd140891ee759ca41e753e8b5bd`. Review the pin and prompt contracts
+`fc025bf3407e2f13d7cb52ef65ad0720036faee7`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -27,7 +27,7 @@ selected with `--vllm` when serving dependencies need their own environment.
 TrialSpace labeling allows up to 96 concurrent requests per teacher GPU
 (768 total), and each vLLM worker permits 96 active sequences. The labeler's
 adaptive limiter ramps up after successful requests and backs off on errors.
-Catalog and long-context distillation retain their separate global concurrency.
+Cataloging, exclusion extraction and distillation share a live endpoint pool.
 
 To run the pipeline against an existing teacher, supply its OpenAI-compatible
 endpoint instead of starting local vLLM workers:
@@ -47,7 +47,17 @@ smaller context, set `--teacher-max-context` to its supported limit.
 `--label-concurrency-per-server` persists the TrialSpace labeling ceiling across
 stage transitions and restarts; the default remains 96 per endpoint. The shared
 teacher above has been measured at 288. Catalog and long-context distillation use
-the separate `--teacher-concurrency` setting. The run identity records the exact
+the separate `--teacher-concurrency` setting (default `0`, automatic). Automatic
+scheduling can fill the sum of the registry's `upstream_concurrency` caps, up to
+1,536 pending workers; entries without a cap default to 96. An explicit positive
+value limits total concurrent chains. The current primary/H200/Camus/cloud caps
+are 288/64/32/96 per server. Registry additions and removals take effect during
+each stage. Singleton catalog calls share the pool instead of repeatedly using
+the first server. Transient connection, rate-limit and server failures retry
+on healthy workers for up to 24 hours, allowing Spot workers to return. Endpoint
+addresses are execution metadata and do not invalidate saved model responses.
+Requests allow 7,200 seconds; `scripts/teacher_proxy.py` allows 7,260 seconds and
+cancels upstream work when a caller disconnects. The run identity records the exact
 trial-scoring rubric digest; changing that rubric requires discarding old labels
 and resetting dependent stages rather than resuming mixed-prompt outputs.
 The scoring instructions precede both summaries to provide a reusable cache
@@ -56,6 +66,8 @@ rules and its exception for novel screening biomarkers. Specificity requires
 support for the complete applicable requirement. Binary TrialChecker questions
 reuse the relevant current reasonableness clauses and specificity guidance;
 their instructions and answer options also precede patient and trial context.
+Prior-treatment specificity explicitly requires an on-therapy response when the
+trial calls for it, matching the aggregate scoring rubric.
 For a served alias, the server must report `--teacher-model` as its underlying
 root; tokenizers still load from that HF model. OncoReasoning accumulation scales
 with GPU count (32 steps on two GPUs, 8 on eight) to retain a batch of 64 examples
@@ -71,6 +83,12 @@ stores checkpoints on persistent disk. The local stage completes only after the
 trained SentenceTransformer artifact has been copied back and checked. The
 ordinary trainer retains its 2,500-step checkpoint interval; `--save-steps`
 can override it.
+
+For the active run, `scripts/register_downstream_upgrade.py` records the reviewed
+teacher transport/prompt update while preserving the original completed-stage
+fingerprints and prior round 2 correction. Register it with the local coordinator
+stopped, then restart that coordinator. The durable cloud fit keeps running on
+its recorded revision; its execution pins must remain unchanged until it finishes.
 
 The run starts from `../data/no_phi/patient_summaries_with_spaces.parquet` and
 `trial_space_lineitems.csv`, mines candidates with the base embedding model,

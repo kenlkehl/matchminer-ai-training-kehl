@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import gc
 import hashlib
@@ -23,7 +22,8 @@ import tempfile
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from oncoreasoning_training import contracts as c
-from oncoreasoning_training.teacher import TeacherPool, server_urls
+from oncoreasoning_training.teacher import TeacherPool, server_urls, worker_count
+from oncoreasoning_training.scheduling import run_tasks
 
 
 def file_digest(path):
@@ -52,16 +52,32 @@ def jsonl(path):
                 yield json.loads(line)
 
 
-def check_manifest(directory, name, manifest):
+def check_manifest(directory, name, manifest, *, transport_keys=()):
     path = Path(directory) / name
-    if path.exists() and read_json(path) != manifest:
-        raise ValueError(f"Incompatible {name}; select a fresh output directory")
+    if path.exists():
+        previous = {key: value for key, value in read_json(path).items() if key not in transport_keys}
+        if previous != manifest:
+            raise ValueError(f"Incompatible {name}; select a fresh output directory")
     atomic_json(path, manifest)
 
 
 def source_record(path):
     path = Path(path).expanduser().resolve()
     return {"path": str(path), "sha256": file_digest(path)}
+
+
+def preparation_inputs(paths, pipeline_manifest=None, *, required_recorded=()):
+    recorded = {}
+    if pipeline_manifest:
+        recorded = {str(Path(item["path"]).resolve()): item
+                    for item in read_json(pipeline_manifest)["inputs"]}
+        if any(str(Path(path).expanduser().resolve()) not in recorded for path in required_recorded):
+            raise ValueError("Source notes are missing from the recorded pipeline inputs")
+    records = []
+    for path in paths:
+        key = str(Path(path).expanduser().resolve())
+        records.append(recorded[key] if key in recorded else source_record(path))
+    return records
 
 
 def split_name(value):
@@ -254,7 +270,8 @@ def prepare(args, tokenizer=None):
     manifest = {"format_version": c.FORMAT_VERSION, "student_model": args.model_name,
                 "tokenizer_fingerprint": c.tokenizer_fingerprint(tokenizer),
                 "contract_sha256": file_digest(c.__file__), "sources": sources,
-                "inputs": [source_record(path) for path in paths],
+                "inputs": preparation_inputs(paths, args.pipeline_manifest,
+                    required_recorded=[args.notes] if "summarization" in args.tasks else []),
                 "inputs_confirmed_non_phi": non_phi or args.confirm_inputs_are_non_phi,
                 "catalog_id": catalog.compatibility_id if catalog else None,
                 "boilerplate_sources": boilerplate_sources,
@@ -362,18 +379,24 @@ def generate(args, tokenizer=None, call=None):
     if not manifest["inputs_confirmed_non_phi"]:
         raise ValueError("Teacher requests must have confirmed non-PHI inputs")
     tokenizer = tokenizer or c.load_chat_tokenizer(args.teacher_tokenizer or args.teacher_model)
-    urls = server_urls(args.server_url, args.server_urls_file)
-    config = {"prepared": prepared, "teacher_model": args.teacher_model, "server_urls": urls,
+    urls = server_urls(url=args.server_url) if not args.server_urls_file else []
+    config = {"prepared": prepared, "teacher_model": args.teacher_model,
               "teacher_tokenizer": args.teacher_tokenizer or args.teacher_model,
               "tokenizer_fingerprint": c.tokenizer_fingerprint(tokenizer),
               "enable_thinking": args.teacher_thinking, "max_tokens": args.teacher_max_tokens,
               "max_context": args.teacher_context, "temperature": args.temperature}
-    check_manifest(directory, "generation_manifest.json", config)
+    check_manifest(directory, "generation_manifest.json", config, transport_keys=("server_urls",))
+    atomic_json(directory / "teacher_execution.json", {"server_urls": urls,
+        "registry": str(args.server_urls_file) if args.server_urls_file else None,
+        "concurrency": args.concurrency, "concurrency_per_server": args.concurrency_per_server,
+        "timeout": args.timeout, "recovery_timeout": args.recovery_timeout})
     response_dir = directory / "responses"
     response_dir.mkdir(exist_ok=True)
     if call is None:
         call = TeacherPool(urls, args.teacher_model, max_tokens=args.teacher_max_tokens,
-                           thinking=args.teacher_thinking, temperature=args.temperature, timeout=args.timeout)
+                           thinking=args.teacher_thinking, temperature=args.temperature, timeout=args.timeout,
+                           registry=args.server_urls_file, per_server=args.concurrency_per_server,
+                           recovery_timeout=args.recovery_timeout)
     def worker(task):
         messages = task_messages(task, manifest["sources"], response_dir)
         path = response_path(response_dir, task['id'])
@@ -389,24 +412,10 @@ def generate(args, tokenizer=None, call=None):
             raise ValueError(f"Teacher context exceeded for {task['id']}; no input was truncated")
         record = invoke_teacher(task, messages, call, attempts=args.attempts)
         atomic_json(path, record)
-    # At most concurrency requests in flight. Flush when a dependent summary
-    # would otherwise read an unfinished parent; never send partial prior summaries.
-    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        pending, pending_ids, done = [], set(), 0
-        def flush():
-            nonlocal done
-            for future in pending:
-                future.result()
-                done += 1
-            pending.clear()
-            pending_ids.clear()
-            print(f"Validated {done} teacher responses", flush=True)
-        for task in jsonl(directory / "requests.jsonl"):
-            if len(pending) >= args.concurrency or task.get("parent_id") in pending_ids:
-                flush()
-            pending.append(executor.submit(worker, task))
-            pending_ids.add(task["id"])
-        flush()
+    done = run_tasks(jsonl(directory / "requests.jsonl"), worker,
+                     concurrency=worker_count(args.concurrency),
+                     progress=lambda n: print(f"Validated {n} teacher responses", flush=True) if n % 100 == 0 else None)
+    print(f"Validated {done} teacher responses", flush=True)
 
 
 def training_rows(directory, tokenizer, max_seq_length):
@@ -487,6 +496,8 @@ def parser():
     prepare_parser = stages.add_parser("prepare", help="Prepare fresh serial summary and individual component requests")
     prepare_parser.add_argument("--model-name", default=c.DEFAULT_MODEL_NAME)
     prepare_parser.add_argument("--inference-repo", type=Path, default=c.DEFAULT_INFERENCE_REPO)
+    prepare_parser.add_argument("--pipeline-manifest", type=Path,
+                                help="Reuse recorded source identities from the integrated run without rehashing them")
     prepare_parser.add_argument("--notes", type=Path, default=c.DEFAULT_DATA_DIR / "all_synthetic_notes.parquet")
     prepare_parser.add_argument("--candidates", type=Path, nargs="+", default=[])
     prepare_parser.add_argument("--catalog", type=Path, default=c.DEFAULT_DATA_DIR / "good_option_catalog_v3")
@@ -513,9 +524,12 @@ def parser():
     generate_parser.add_argument("--teacher-max-tokens", type=int, default=16384)
     generate_parser.add_argument("--teacher-context", type=int, default=131072)
     generate_parser.add_argument("--temperature", type=float, default=0.2)
-    generate_parser.add_argument("--concurrency", type=int, default=8)
+    generate_parser.add_argument("--concurrency", type=int, default=0,
+                                 help="Total in-flight ceiling; 0 follows the per-server limits")
+    generate_parser.add_argument("--concurrency-per-server", type=int, default=96)
+    generate_parser.add_argument("--recovery-timeout", type=float, default=86400)
     generate_parser.add_argument("--attempts", type=int, default=3)
-    generate_parser.add_argument("--timeout", type=float, default=600)
+    generate_parser.add_argument("--timeout", type=float, default=7200)
     build_parser = stages.add_parser("build", help="Mask prompts and supervise only complete final answers")
     build_parser.add_argument("--max-seq-length", type=int, default=98304)
     build_parser.add_argument("--seed", type=int, default=42)
@@ -526,7 +540,7 @@ def parser():
 
 def main():
     args = parser().parse_args()
-    if args.stage == "generate" and min(args.concurrency, args.attempts, args.teacher_max_tokens, args.teacher_context) <= 0:
+    if args.stage == "generate" and (args.concurrency < 0 or min(args.concurrency_per_server, args.attempts, args.teacher_max_tokens, args.teacher_context, args.timeout, args.recovery_timeout) <= 0):
         raise ValueError("Generation limits must be positive")
     {"prepare": prepare, "generate": generate, "build": build}[args.stage](args)
 

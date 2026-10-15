@@ -1,8 +1,9 @@
-"""Small OpenAI-compatible pool shared by distillation and criterion preparation."""
+"""Live teacher pool shared by distillation and criterion preparation."""
 import json
 import os
 from pathlib import Path
-import threading
+
+from matchminer_ai.llm.endpoint_pool import EndpointPool, MAX_POOL_WORKERS
 
 DEFAULT_TEACHER = "nvidia/Gemma-4-31B-IT-NVFP4"
 
@@ -19,16 +20,21 @@ def server_urls(url=None, file=None):
     return list(dict.fromkeys(value.rstrip('/') for value in urls))
 
 
+def worker_count(concurrency):
+    if concurrency < 0:
+        raise ValueError('Concurrency must be zero (automatic) or positive')
+    return concurrency or MAX_POOL_WORKERS
+
+
 class TeacherPool:
-    def __init__(self, urls, model=DEFAULT_TEACHER, *, max_tokens=16384, thinking=True, temperature=0.2, timeout=600):
-        from openai import OpenAI
-        self.clients = [OpenAI(base_url=url, api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"), timeout=timeout, max_retries=0) for url in urls]
+    def __init__(self, urls=(), model=DEFAULT_TEACHER, *, registry=None, per_server=96,
+                 max_tokens=16384, thinking=True, temperature=0.2, timeout=7200,
+                 recovery_timeout=86400):
+        self.pool = EndpointPool(urls, registry=registry, per_server=per_server,
+            timeout=timeout, recovery_timeout=recovery_timeout,
+            api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"))
         self.parameters = dict(model=model, max_tokens=max_tokens, temperature=temperature,
                                extra_body={"chat_template_kwargs": {"enable_thinking": thinking}})
-        self.lock, self.index = threading.Lock(), 0
 
     def __call__(self, messages):
-        with self.lock:
-            client = self.clients[self.index % len(self.clients)]
-            self.index += 1
-        return client.chat.completions.create(messages=messages, **self.parameters)
+        return self.pool.request(messages=messages, **self.parameters)

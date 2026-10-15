@@ -83,6 +83,16 @@ def register_upgrade(repo, run_dir):
 def compatible_identity(previous, current, run_dir, repo):
     if previous == current:
         return previous
+    downstream_receipt = Path(run_dir) / "downstream_code_upgrade.json"
+    if downstream_receipt.exists():
+        receipt = json.loads(downstream_receipt.read_text())
+        from scripts.register_downstream_upgrade import KIND, validate_scope
+        if (receipt.get("kind") == KIND
+                and receipt.get("original_identity_sha256") == digest(previous)
+                and receipt.get("approved_identity_sha256") == digest(current)):
+            validate_scope(repo, previous, current, run_dir)
+            print("Using registered downstream teacher fixes; preserving completed stages", flush=True)
+            return previous
     trialspace_receipt = Path(run_dir) / "trialspace_code_upgrade.json"
     if trialspace_receipt.exists():
         receipt = json.loads(trialspace_receipt.read_text())

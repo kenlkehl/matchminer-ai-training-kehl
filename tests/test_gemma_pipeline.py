@@ -138,7 +138,7 @@ def test_shared_teacher_label_concurrency_survives_both_labeling_rounds():
     assert len(labels) == 4
     for stage in labels:
         assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "288"
-    assert args.teacher_concurrency == 32
+    assert args.teacher_concurrency == 0
     for value in ("0", "-1", "1025"):
         with pytest.raises(SystemExit):
             runner.parser().parse_args(["--label-concurrency-per-server", value])
@@ -177,7 +177,7 @@ def test_external_teacher_validates_model_and_leaves_server_running(tmp_path, mo
     monkeypatch.setattr(runner.os, "killpg", lambda *a: pytest.fail("Must not stop external servers"))
     with runner.external_teacher_pool(args):
         assert json.loads((tmp_path / 'teacher_servers.json').read_text()) == {
-            "ready": True, "servers": [{"url": "http://teacher:8001/v1", "kind": "remote"}],
+            "ready": True, "servers": [{"url": "http://teacher:8001/v1", "kind": "remote", "upstream_concurrency": 96}],
         }
     assert urls == ['http://teacher:8001/v1/models']
     assert json.loads((tmp_path / 'teacher_servers.json').read_text()) == {"ready": False, "servers": []}

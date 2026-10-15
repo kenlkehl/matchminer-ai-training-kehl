@@ -749,10 +749,9 @@ def test_server_file_configures_shared_remote_teacher(tmp_path: Path) -> None:
     config = good_option.configure_teacher(args)
 
     assert config.remote["enabled"] is True
-    assert config.remote["server_urls"] == [
-        "http://host-a:8000/v1",
-        "http://host-b:8000/v1",
-    ]
+    assert config.remote["server_urls"] == []
+    assert config.remote["server_urls_file"] == str(servers)
+    assert config.remote["pool_max_workers"] >= 1216
     assert config.llm_good_option["remote"]["model_name"] == "teacher/model"
     assert all(config.good_option_catalog[f"{stage}_llm"][backend]["model_name"] == "teacher/model"
                for stage in ("screening", "synthesis", "class") for backend in ("local", "remote"))

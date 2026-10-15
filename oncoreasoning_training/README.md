@@ -167,6 +167,19 @@ old shards. A stopped or malformed completion is retried three times; exhausted
 requests stop the stage without saving an invalid target. Teacher thinking is
 on by default and can be disabled with `--no-teacher-thinking`.
 
+Generation and exclusion extraction follow `--server-urls-file` continuously.
+The default `--concurrency 0` fills live per-server capacities (96 if unspecified),
+bounded by 1,536 workers; a positive value supplies a lower total request limit.
+Requests refill as soon as any response finishes while serial summary chunks
+still wait for their parent. Transport failures retry across available servers
+for up to 24 hours; each HTTP request has a 7,200-second timeout. A removed or
+returning Spot server does not change the saved-answer identity. Prompt, model,
+tokenizer and sampling changes still require new targets.
+
+The integrated preparation command passes `--pipeline-manifest` to reuse the
+recorded source-note identity without rehashing the original file. It still reads
+notes to construct tasks and records identities for newly mined candidate files.
+
 The trainer preserves prepared labels, uses gradient checkpointing and BF16
 mixed precision where available, and projects only supervised positions to
 vocabulary logits. Full-parameter fine-tuning is disabled. LoRA defaults:

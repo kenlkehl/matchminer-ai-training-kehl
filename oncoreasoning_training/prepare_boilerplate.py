@@ -2,7 +2,6 @@
 """Use the teacher to separate public trial exclusions into verbatim criteria."""
 from __future__ import annotations
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import re
@@ -11,7 +10,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from oncoreasoning_training import contracts as c
 from oncoreasoning_training.create_all_training_data import atomic_json, read_json, check_manifest
-from oncoreasoning_training.teacher import DEFAULT_TEACHER, TeacherPool, server_urls
+from oncoreasoning_training.teacher import DEFAULT_TEACHER, TeacherPool, worker_count
 
 INSTRUCTION = (
     "Separate this trial's general exclusion criteria into individual self-contained criteria. "
@@ -68,15 +67,16 @@ def main():
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--server-urls-file", required=True)
     p.add_argument("--teacher-model", default=DEFAULT_TEACHER)
-    p.add_argument("--concurrency", type=int, default=32)
+    p.add_argument("--concurrency", type=int, default=0)
+    p.add_argument("--concurrency-per-server", type=int, default=96)
     args = p.parse_args()
-    urls = server_urls(file=args.server_urls_file)
     check_manifest(args.output_dir, "manifest.json", {"version": "verbatim-boilerplate-v1", "instruction": INSTRUCTION,
-                   "teacher": args.teacher_model, "servers": urls})
+                   "teacher": args.teacher_model}, transport_keys=("servers",))
     # Structurally patient-free: read only public trial IDs and exclusions.
     frame = pd.concat([pd.read_parquet(path, columns=["nct_id", "trial_boilerplate_text"]) for path in args.candidates]).drop_duplicates()
-    teacher = TeacherPool(urls, args.teacher_model)
-    def worker(row):
+    teacher = TeacherPool(model=args.teacher_model, registry=args.server_urls_file, per_server=args.concurrency_per_server)
+    def worker(task):
+        row = task["row"]
         source = str(row.trial_boilerplate_text or "").strip()
         if not source or source.lower() == "nan":
             return
@@ -89,10 +89,11 @@ def main():
             validate_criteria(source, record["criteria"])
             return
         atomic_json(path, {"trial_id": str(row.nct_id), "source": source, "criteria": extract(source, teacher)})
-    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        for index, _ in enumerate(pool.map(worker, frame.itertuples(index=False)), 1):
-            if index % 50 == 0:
-                print(f"Validated exclusions for {index} trial records", flush=True)
+    from oncoreasoning_training.scheduling import run_tasks
+    tasks = ({"id": str(index), "row": row} for index, row in enumerate(frame.itertuples(index=False)))
+    run_tasks(tasks, worker, concurrency=worker_count(args.concurrency),
+              progress=lambda n: print(f"Validated exclusions for {n} trial records", flush=True) if n % 50 == 0 else None)
+
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 DEFAULT_MODEL_NAME = "google/gemma-4-E4B-it"
-FORMAT_VERSION = "oncoreasoning-answer-first-v4-instructions-first"
+FORMAT_VERSION = "oncoreasoning-answer-first-v5-on-therapy"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_answer_first_v2"
@@ -98,7 +98,9 @@ TRIAL_COMPONENTS = {
         "outcome is a specified requirement for the trial. Exposure in a different line of therapy "
         "is insufficient when a specific line is required. No specific requirement or an unknown match yields No. "
         "Ignore treatment washout periods, not response-duration or relapse/progression timing "
-        "requirements. Assess only this specificity point.",
+        "requirements. When response or progression on a required therapy is specified, "
+        "it must have occurred WHILE RECEIVING THAT THERAPY; later progression after "
+        "stopping it does not establish progression on it. Assess only this specificity point.",
     ),
     "biomarker_specificity": (
         "Does this trial require a specific biomarker that this patient is known to have?",
