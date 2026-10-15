@@ -41,6 +41,8 @@ def parse_args():
         default=DEFAULT_BASE_MODEL,
         help="EmbeddingGemma 2 model ID or a local TrialSpace checkpoint from this model family."
     )
+    parser.add_argument('--save-steps', type=int, default=2500,
+                        help='Checkpoint interval; a shorter interval is useful on Spot VMs.')
     return parser.parse_args()
 
 
@@ -133,6 +135,10 @@ def validate_resume_checkpoint(checkpoint):
 
 def main():
     args = parse_args()
+    from pathlib import Path
+    from scripts.remote_trialspace import maybe_run_remote
+    if maybe_run_remote(args, Path(__file__).resolve().parent):
+        return
     input_files = expand_inputs(args.input_parquet)
     print(f"[INFO] Using {len(input_files)} input file(s):")
     for f in input_files:
@@ -240,7 +246,7 @@ def main():
         lr_scheduler_type="linear",
         warmup_ratio=0.01,
         save_strategy="steps",
-        save_steps=2500,
+        save_steps=args.save_steps,
         save_total_limit=2,
         logging_steps=100,
         num_train_epochs=3,

@@ -144,6 +144,23 @@ def test_shared_teacher_label_concurrency_survives_both_labeling_rounds():
             runner.parser().parse_args(["--label-concurrency-per-server", value])
 
 
+def test_trialspace_refinement_uses_previous_weights_and_only_current_labels():
+    args = runner.parser().parse_args([])
+    plan = {stage.name: stage for stage in runner.stages(args)}
+    previous = args.embedding_model
+    for iteration in (1, 2):
+        mine = plan[f'mine-{iteration}'].command
+        fit = plan[f'train-trialspace-{iteration}'].command
+        assert mine[mine.index('--model') + 1] == str(previous)
+        assert fit[fit.index('--base-model') + 1] == str(previous)
+        inputs = [fit[i + 1] for i, flag in enumerate(fit) if flag == '--input-parquet']
+        assert inputs == [str(args.run_dir / f'top_{direction}_tocheck_round{iteration}_labels/labels.parquet')
+                          for direction in ('cohorts', 'patients')]
+        previous = args.models_dir / f'trialspace_round{iteration}'
+    mine = plan['mine-3'].command
+    assert mine[mine.index('--model') + 1] == str(previous)
+
+
 def test_external_teacher_validates_model_and_leaves_server_running(tmp_path, monkeypatch):
     import io
     args = runner.parser().parse_args([

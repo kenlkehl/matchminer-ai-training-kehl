@@ -61,10 +61,24 @@ root; tokenizers still load from that HF model. OncoReasoning accumulation scale
 with GPU count (32 steps on two GPUs, 8 on eight) to retain a batch of 64 examples
 per optimizer step when the GPU count divides 64.
 
+An existing local run can send TrialSpace fitting to the eight-GPU GCP VM through
+an explicitly scoped `.mmai_cache/remote_trialspace.json` execution configuration.
+The adapter leaves teacher traces in the local label artifacts, transfers the
+unchanged columns used by the embedder, and waits for a durable cloud job.
+Cloud teachers stop while fitting owns those GPUs and return afterward. The
+Spot job resumes the latest complete checkpoint, saves every 500 steps, and
+stores checkpoints on persistent disk. The local stage completes only after the
+trained SentenceTransformer artifact has been copied back and checked. The
+ordinary trainer retains its 2,500-step checkpoint interval; `--save-steps`
+can override it.
+
 The run starts from `../data/no_phi/patient_summaries_with_spaces.parquet` and
 `trial_space_lineitems.csv`, mines candidates with the base embedding model,
-labels them, and trains TrialSpace. A second mining/label/training round uses
-cumulative labels; a third mining round supplies OncoReasoning candidates.
+labels them, and trains TrialSpace round 1 from the base model. Round 2 mines
+with that trained model, labels those candidates, and continues from the round 1
+weights using only round 2 labels. Each fit has a fresh optimizer and learning-rate
+schedule; checkpoints resume only interruptions within that fit. A third mining
+round uses the trained round 2 model to supply OncoReasoning candidates.
 For each patient, mining samples 500 **distinct NCT IDs**, expands all their
 spaces, and keeps 20 spaces. For each trial space it samples up to 20,000
 patients and keeps 40. Sampling is within original train/validation co-splits;
@@ -96,6 +110,15 @@ on Spot VMs. A new run or changed inputs require fresh output directories.
 For an existing run with unchanged inputs, `--skip-input-validation` reuses its
 recorded source identities without reading or rehashing the input files. It does
 not override prompt/settings compatibility or permit reuse of stale labels.
+
+To correct a run stopped at round 2 training from the older cumulative-label
+pipeline, stop its local runner and cloud job, archive the incorrect round 2
+job directory and checkpoints on both machines, deploy this commit, and run
+`~/thisenv/bin/python scripts/register_trialspace_upgrade.py --run-dir <run-dir>`.
+The scoped receipt preserves completed mining, labels, and round 1 artifacts
+while allowing only the round 2 weight/input change. Resume the original runner
+with `--skip-input-validation`. Cloud execution must use a new operation ID and
+the deployed commit; it must not reuse the old job or optimizer checkpoints.
 
 For an already-running pre-adapter pipeline, pull this update without restarting
 the service, then run:

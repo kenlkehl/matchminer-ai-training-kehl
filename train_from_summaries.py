@@ -69,7 +69,7 @@ def stages(args):
     gpu_count = len(args.gpus.split(','))
     teacher_model = args.teacher_served_model or args.teacher_model
     launch = [py, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={gpu_count}"]
-    result, labels = [], []
+    result = []
     embedding = args.embedding_model
     for iteration in (1, 2, 3):
         candidates = [run / f"top_{direction}_tocheck_round{iteration}.parquet" for direction in ("cohorts", "patients")]
@@ -83,6 +83,7 @@ def stages(args):
             "--out_cohorts_parquet", str(candidates[0]), "--out_patients_parquet", str(candidates[1])], candidates))
         if iteration == 3:
             break
+        labels = []
         for candidate in candidates:
             directory = run / (candidate.stem + "_labels")
             output = directory / "labels.parquet"
@@ -94,8 +95,9 @@ def stages(args):
                 "--max_concurrent_per_server", str(args.label_concurrency_per_server),
                 "--max_attempts", "5"], [output], True))
             labels.append(output)
+        previous_embedding = embedding
         embedding = models / f"trialspace_round{iteration}"
-        command = launch + ["finetune_embedder.py", "--base-model", args.embedding_model,
+        command = launch + ["finetune_embedder.py", "--base-model", str(previous_embedding),
             "--ckpt-dir", str(models / f"trialspace_round{iteration}_checkpoints"),
             "--output-model", str(embedding)]
         for path in labels:
