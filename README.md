@@ -395,3 +395,134 @@ holdouts; invalid statuses and conflicting patient-drug targets retain the
 prototype's filtering and audit policy. All label and catalog sources must be
 inside `data/no_phi`. Training uses the immutable prepared snapshot, saves the
 final epoch, and skips validation when none was reserved.
+
+## Nemotron 3.5 Super VL teacher and trial-space extraction
+
+The shared inference package registers NVIDIA's text sampling profile for
+`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`, BF16, and the short alias
+`nemotron-3.5-super-vl`. Install/select the sibling inference checkout to use it.
+The [NVIDIA model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4)
+(verified 2026-10-15) recommends temperature 1.0 and top-p 0.95 for text,
+`nemotron_v3` for vLLM reasoning parsing, and `qwen3_coder` for tool parsing with
+`--enable-auto-tool-choice`. Its serving examples require vLLM 0.32.0 or the
+specified nightly. Other sampling filters/penalties are neutralized, not claimed
+as NVIDIA recommendations. The vision recommendation is different (temperature
+0.6); these training paths are text-only.
+
+`vllm_reasoning_utils.resolve_sampling_defaults` shares that profile with
+inference and preserves non-None explicit overrides. `0b_create_trial_spaces.py`
+selects it automatically from `--model`; each sampling CLI flag overrides the
+profile. The primary runner selects model-aware reasoning/tool parsers; its
+Nemotron trial labeler and downstream `TeacherPool` use the same text sampling.
+Other legacy scripts can use the shared helper or explicit sampling flags;
+registering a model does not change an existing run's teacher or saved labels.
+Use a new run/checkpoint directory when changing models or sampling settings.
+
+Example against an existing server (no local model startup):
+
+```bash
+PYTHONPATH=../matchminer-ai-inference-kehl/src ~/thisenv/bin/python 0b_create_trial_spaces.py \
+  --input ../data/no_phi/ctgov_trials.csv \
+  --server_urls http://sn4622130540:8000/v1 \
+  --model nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 \
+  --max_concurrent_per_server 256 --request_timeout 7200
+```
+
+Remote extraction keeps parsed reasoning separate from the final spaces and
+retries truncated or empty answers. Outputs remain `trials_with_spaces.csv` and
+`trial_space_lineitems.csv` in `../data/no_phi`, with resumable parquet shards.
+
+### Trial selection in 0a/0b
+
+Run `0a_parse_ctgov_json.py --input <export.json> --output ../data/no_phi/ctgov_trials.csv`
+to retain the original trial text plus ClinicalTrials.gov `designModule.studyType`
+and `designModule.phases` as `study_type` and a JSON-array `phases` column.
+The CSV is replaced atomically only after parsing and writing finish.
+
+By default, **0b keeps only interventional early phase 1 through phase 3 trials**,
+including phase 1/2 and phase 2/3. It requires `study_type=INTERVENTIONAL` and a
+nonempty phase array containing only `EARLY_PHASE1`, `PHASE1`, `PHASE2`, and/or `PHASE3`.
+Phase 4, observational studies, and missing/N/A phases are excluded.
+It uses structured metadata, never mentions of phases in the title or eligibility
+text. Recruitment status is not filtered.
+Use `--trial-filter all` to bypass only the structured study-type/phase filter;
+the treatment-intent screen below still runs.
+Legacy CSVs must be regenerated with 0a for the default filter.
+
+Metadata selection happens before splitting, prompt construction, or LLM calls. A
+`trial_selection.json` manifest fingerprints the selected rows, filter and seed.
+Use a **new `--work-dir`** when changing inputs or filtering, or when old shards
+lack this manifest: checkpoint row numbers cannot safely be reused across
+selections. Both final CSVs retain the study-type and phase columns for audit.
+
+
+### Direct anti-cancer treatment screen in 0b
+
+The extraction primer and closing instructions in `0b_create_trial_spaces.py`
+are complete snapshots of inference-kehl's `trial.user.primer.txt` and
+`trial.user.question.txt`, synchronized on 2026-10-16. They require exhaustive
+cancer-type/histology spaces for broad solid-tumor or hematologic trials before
+a general fallback space, and explicit clarification of whether stage criteria
+include relapsed/recurrent disease. A cross-repository contract test compares
+the complete rendered messages with the sibling inference-kehl checkout.
+Each `space_extraction/` directory records the rendered prompt fingerprint and
+model/sampling configuration in `extraction_manifest.json`. Changing them
+requires fresh extraction checkpoints; unchanged treatment-screening results
+can be retained. Existing extraction shards without that manifest are rejected.
+
+After metadata selection and deduplication, 0b completes a separate LLM pass
+before extracting any trial spaces. It uses the same `--server_urls` or
+`--server_urls_file`, `--model`, reasoning parser, sampling settings, concurrency,
+and retry configuration as extraction. In local GPU mode it uses the same model
+and GPU groups, loading models separately for the two passes.
+
+The distinct prompt in `trial_treatment_screening.py` classifies the studied
+intervention's intent using the supplied `trial_text`. It includes direct
+anti-cancer therapy (including early-phase safety/dose studies and adjuvant or
+maintenance treatment) and excludes diagnostic-only and supportive-care studies.
+Anti-cancer treatment studies qualify even when their only outcomes are PK/PD,
+safety, tolerability, target engagement, or other surrogate measures. This includes
+drug-exposure/food-effect studies and preoperative treatment windows measuring
+tumor biomarkers; clinical efficacy endpoints are not required. Biomarker-only
+sampling without evaluation of an anti-cancer treatment remains excluded.
+Cancer patients receiving background anti-cancer therapy are not sufficient:
+the study must evaluate an anti-cancer treatment strategy. Insufficient textual
+evidence produces a negative decision with an explanation, so the audit can also
+identify records needing richer source text or review.
+
+Only positive decisions proceed to space extraction. `trial_treatment_screening.csv`
+is saved beside `--output-trials` by default, with all screened trials, boolean
+decisions, rationales, parsed reasoning, final responses, finish reasons, and
+status. Override its location with `--output-screening`. This audit covers trials
+that passed the metadata filter, not metadata-excluded rows. The two existing
+final CSV schemas are unchanged; if every trial is rejected, both contain only
+headers. `--screening-max-tokens` defaults to 8192, independently of extraction's
+`--max-tokens`.
+
+Checkpoints live in separate `treatment_screening/` and `space_extraction/`
+subdirectories of `--work-dir`. Resume with the same arguments: successful
+screening decisions are reused, including negatives. Malformed or truncated
+responses are errors, never exclusions. Remote errors are retried by the pool;
+malformed JSON and invalid screening schemas do not lower concurrency or count
+as successful generations. The pool treats `OutputValidationError` and
+`json.JSONDecodeError` as neutral concurrency feedback, while retaining the same
+retry budget and ERROR-on-exhaustion behavior. Other request failures still back
+off. Pool status logs separately report `output_err` within the total `err` count.
+Remote 0b retries now send the specific validation error and the latest rejected
+answer back to the model, preserving the original trial document and task
+instructions. JSON syntax errors include the decoder's location and explanation.
+Thinking is enabled initially; after every two invalid responses for one trial,
+the next retry switches thinking on/off. The completion parser receives the same
+thinking mode as the rendered prompt. Transport failures do not advance this
+counter. Only the latest answer (up to 12,000 characters) enters retry context;
+complete rejected outputs, reasoning, finish reasons, errors, mode changes, and
+recovery events are recorded in each stage's `validation_failures.jsonl`.
+The same retry feedback applies to truncated or malformed trial-space outputs.
+The pool's attempt limit is unchanged. This feedback applies to remote mode;
+local worker failures retain the behavior described below.
+If attempts are exhausted, the audit records errors and extraction does not
+start. Rerunning retries unresolved screens. Local worker failures likewise
+stop before extraction and completed compatible screening shards can be reused.
+Manifests guard input selection and screening prompt/model/sampling compatibility.
+Use a new work directory for pre-screening-era extraction checkpoints or changed
+screening configuration.

@@ -22,6 +22,7 @@ import urllib.request
 from oncoreasoning_training.contracts import DEFAULT_MODEL_NAME, TRIAL_RUBRIC_DIGEST, digest
 from oncoreasoning_training.create_all_training_data import atomic_json, source_record
 from oncoreasoning_training.teacher import DEFAULT_TEACHER
+from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 
 ROOT = Path(__file__).resolve().parent
 INFERENCE_COMMIT = "fc025bf3407e2f13d7cb52ef65ad0720036faee7"
@@ -92,7 +93,7 @@ def stages(args):
                 "--input_parquet", str(candidate), "--out_dir", str(directory),
                 "--final_output", "labels.parquet", "--server_urls_file", str(servers),
                 "--model", teacher_model, "--tokenizer-model", args.teacher_model,
-                "--reasoning-parser", "gemma4",
+                "--reasoning-parser", resolve_parser_name(args.teacher_model),
                 "--max_concurrent_per_server", str(args.label_concurrency_per_server),
                 "--max_attempts", "5"], [output], True))
             labels.append(output)
@@ -142,12 +143,16 @@ def stages(args):
 
 
 def teacher_command(args, index):
-    return [args.vllm, "serve", args.teacher_model, "--host", "127.0.0.1",
+    command = [args.vllm, "serve", args.teacher_model, "--host", "127.0.0.1",
         "--port", str(args.teacher_port + index), "--tensor-parallel-size", "1",
-        "--quantization", "modelopt", "--reasoning-parser", "gemma4",
+        "--quantization", "modelopt", "--reasoning-parser", resolve_parser_name(args.teacher_model),
         "--language-model-only", "--max-model-len", str(args.teacher_max_context),
         "--max-num-seqs", "96", "--gpu-memory-utilization", "0.90",
         "--no-enable-log-requests"]
+    tool_parser = resolve_tool_call_parser(args.teacher_model)
+    if tool_parser:
+        command += ["--enable-auto-tool-choice", "--tool-call-parser", tool_parser]
+    return command
 
 
 def teacher_environment(args):

@@ -41,6 +41,15 @@ from typing import Any, Awaitable, Callable, Iterable, List, Optional, Sequence,
 from openai import AsyncOpenAI
 
 
+class OutputValidationError(ValueError):
+    """A completed model response failed validation, not server capacity.
+
+    Retried under the usual per-item attempt budget without changing the
+    concurrency limit. Callers should use this for invalid output schemas;
+    json.JSONDecodeError is recognized directly as well.
+    """
+
+
 # -------------------------
 # CLI helpers
 # -------------------------
@@ -66,7 +75,7 @@ def add_remote_cli_args(parser: argparse.ArgumentParser) -> None:
     )
     g.add_argument(
         "--max_concurrent_per_server", type=int, default=100,
-        help="Per-server concurrency ceiling (adaptive; backs off on errors).",
+        help="Per-server concurrency ceiling (adaptive; output-validation errors do not cause backoff).",
     )
     g.add_argument(
         "--concurrency_success_threshold", type=int, default=3,
@@ -83,7 +92,7 @@ def add_remote_cli_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--concurrency_backoff_factor", type=float, default=0.5,
         help="Multiplier applied to a server's adaptive concurrency limit after "
-             "a request error.",
+             "a request error other than output validation.",
     )
     g.add_argument(
         "--results_per_shard", "--results-per-shard", type=int, default=200,
@@ -151,7 +160,8 @@ class AdaptiveSemaphore:
                 await self._cond.wait()
             self.in_flight += 1
 
-    async def release(self, *, success: bool):
+    async def release(self, *, success: Optional[bool]):
+        """Release a slot; None leaves the limit and success streak unchanged."""
         async with self._cond:
             self.in_flight = max(0, self.in_flight - 1)
             if success:
@@ -165,7 +175,7 @@ class AdaptiveSemaphore:
                                         self.limit + self._increase_step)
                     self.limit = new_limit
                     self._success_streak = 0
-            else:
+            elif success is False:
                 old = self.limit
                 self.limit = max(1, int(self.limit * self._backoff_factor))
                 self._success_streak = 0
@@ -198,6 +208,7 @@ class ServerEntry:
     ok_count: int = 0
     err_count: int = 0
     first_seen_at: float = field(default_factory=time.monotonic)
+    output_validation_err_count: int = 0
 
 
 class DynamicServerRegistry:
@@ -509,7 +520,7 @@ async def _dispatch_one(
     max_attempts: int,
     error_placeholder: Callable[[Any, Exception], Any],
 ) -> None:
-    success = False
+    success: Optional[bool] = False
     try:
         result = await work_fn(entry.client, payload)
         await results.add(item_id, result)
@@ -517,12 +528,18 @@ async def _dispatch_one(
         success = True
     except Exception as e:
         entry.err_count += 1
+        if isinstance(e, (OutputValidationError, json.JSONDecodeError)):
+            # Content errors require another generation, not fewer requests.
+            # They are neutral feedback, not successful work or server overload.
+            success = None
+            entry.output_validation_err_count += 1
         if attempt + 1 >= max_attempts:
             # Poison pill — record an error placeholder so the run can complete.
             print(f"[remote_vllm_pool] item {item_id!r} exhausted "
                   f"{max_attempts} attempts ({e!r}); writing error placeholder.")
             await results.add(item_id, error_placeholder(payload, e))
-            success = False  # but don't requeue
+            # Keep the failure classification, including neutral feedback for
+            # exhausted output-validation retries, but don't requeue.
         else:
             # Requeue with a tiny stagger so the queue doesn't hot-spin
             # when every server is failing.
@@ -670,7 +687,8 @@ async def _status_logger(
             per_server = ", ".join(
                 f"{e.instance or e.url.split('//')[-1].split('/')[0]}"
                 f"[{e.semaphore.in_flight}/{e.semaphore.limit}"
-                f" ok={e.ok_count} err={e.err_count}]"
+                f" ok={e.ok_count} err={e.err_count}"
+                f" output_err={e.output_validation_err_count}]"
                 for e in entries
             ) or "(no active servers)"
             # "missing" = items not in any tracked state. If non-zero with
@@ -903,6 +921,8 @@ def make_completion_work_fn(
       - 'top_p': float         optional override
       - 'request_timeout': float optional per-call timeout override
       - 'include_completion_metadata': bool optional; return finish metadata
+      - 'enable_thinking': bool optional; match the rendered template when parsing
+      - 'include_raw_text': bool optional; include raw text in completion metadata
 
     A scalar prompt returns one (reasoning, answer) tuple, or a triple including
     metadata when requested. A prompt list returns a list of those results in
@@ -963,6 +983,8 @@ def make_completion_work_fn(
                 raw_text,
                 parser_name,
                 tokenizer,
+                **({"enable_thinking": payload["enable_thinking"]}
+                   if "enable_thinking" in payload else {}),
             )
             if payload.get("include_completion_metadata"):
                 return (
@@ -973,6 +995,7 @@ def make_completion_work_fn(
                             getattr(choice, "finish_reason", "") or ""
                         ),
                         "raw_text_char_count": len(raw_text),
+                        **({"raw_text": raw_text} if payload.get("include_raw_text") else {}),
                     },
                 )
             return (reasoning, answer)

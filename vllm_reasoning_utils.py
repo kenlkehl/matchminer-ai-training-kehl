@@ -24,6 +24,7 @@ MODEL_TO_PARSER: dict[str, str] = {
 }
 
 _SUBSTRING_FALLBACKS: list[tuple[str, str]] = [
+    ("nemotron-3.5-super-vl", "nemotron_v3"),
     ("gemma",         "gemma4"),
     ("qwen",          "qwen3"),
     ("gpt-oss",       "openai_gptoss"),
@@ -57,7 +58,26 @@ def resolve_parser_name(model: str, explicit: Optional[str] = None) -> str:
     )
 
 
-def parse_reasoning_output(text: str, parser_name: str, tokenizer) -> Tuple[str, str]:
+def resolve_tool_call_parser(model: str, explicit: Optional[str] = None) -> Optional[str]:
+    """Use the inference package's publisher-backed tool-parser registry."""
+    from matchminer_ai.llm.reasoning import resolve_tool_call_parser as resolve
+    return resolve(model, explicit)
+
+
+def resolve_sampling_defaults(model: str, **overrides) -> dict:
+    """Text sampling from the shared inference profile, with explicit overrides.
+
+    Use None for unspecified CLI values; callers can supply legacy defaults
+    separately for unregistered models. No task output budget is inferred.
+    """
+    from matchminer_ai.llm.sampling import vendor_defaults
+    defaults, _ = vendor_defaults(model)
+    return {**defaults, **{key: value for key, value in overrides.items() if value is not None}}
+
+
+def parse_reasoning_output(
+    text: str, parser_name: str, tokenizer, *, enable_thinking: Optional[bool] = None,
+) -> Tuple[str, str]:
     """Split raw model output into (reasoning, answer) using vLLM's parser.
 
     ``gemma4`` uses :func:`vllm.reasoning.gemma4_utils.parse_thinking_output`
@@ -81,8 +101,23 @@ def parse_reasoning_output(text: str, parser_name: str, tokenizer) -> Tuple[str,
         )
         register_lazy_reasoning_parsers()
         cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-        parser = cls(tokenizer)
-        reasoning, content = parser.extract_reasoning(text, request=None)
+        # Completion callers render the chat template themselves. Carry its
+        # thinking setting into the parser too, so direct answers are not
+        # mistaken for unfinished reasoning (notably with Nemotron).
+        from types import SimpleNamespace
+        options = {} if enable_thinking is None else {
+            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+        }
+        parser = cls(tokenizer, **options)
+        request = SimpleNamespace(**options) if options else None
+        reasoning, content = parser.extract_reasoning(text, request=request)
+        if parser_name == "nemotron_v3" and enable_thinking is False:
+            # vLLM's direct-content fast path can retain the ChatML stop token
+            # when completions use skip_special_tokens=False. Remove only a
+            # terminal boundary, never text inside the answer/JSON strings.
+            content = (content or "").strip()
+            while content.endswith("<|im_end|>"):
+                content = content.removesuffix("<|im_end|>").rstrip()
     return (reasoning or "").strip(), (content or "").strip()
 
 

@@ -1,4 +1,7 @@
 import json
+import argparse
+import os
+from pathlib import Path
 import pandas as pd
 
 def parse_clinical_trials_json(json_file_path):
@@ -10,7 +13,8 @@ def parse_clinical_trials_json(json_file_path):
         
     Returns:
         pandas DataFrame with columns: nct_id, title, brief_summary, 
-        eligibility_criteria, and trial_text
+        eligibility_criteria, trial_text, study_type, and phases (a JSON array
+        retaining ClinicalTrials.gov's structured phase values).
     """
     # Load the JSON file
     with open(json_file_path, 'r', encoding='utf-8') as f:
@@ -24,6 +28,7 @@ def parse_clinical_trials_json(json_file_path):
         try:
             # Extract the protocol section
             protocol = trial.get('protocolSection', {})
+            design = protocol.get('designModule', {})
             
             # Extract NCT ID
             nct_id = protocol.get('identificationModule', {}).get('nctId', '')
@@ -43,6 +48,8 @@ def parse_clinical_trials_json(json_file_path):
             # Append to list
             trials.append({
                 'nct_id': nct_id,
+                'study_type': design.get('studyType', ''),
+                'phases': json.dumps(design.get('phases') or []),
                 'title': title,
                 'brief_summary': brief_summary,
                 'eligibility_criteria': eligibility_criteria,
@@ -60,20 +67,17 @@ def parse_clinical_trials_json(json_file_path):
 
 
 if __name__ == "__main__":
-    # Example usage
-    input_file = "../data/no_phi/ctgov_interventional_phased_cancer_trials_11-3-25.json"  # Replace with your JSON file path
-    
-    # Parse the JSON file
-    df = parse_clinical_trials_json(input_file)
-    
-    # Display basic info
-    print(f"Parsed {len(df)} clinical trials")
-    print(f"\nDataFrame shape: {df.shape}")
-    print(f"\nColumn names: {df.columns.tolist()}")
-    print(f"\nFirst few rows:")
-    print(df.head())
-    
-    # Optionally save to CSV
-    output_file = "../data/no_phi/ctgov_trials.csv"
-    df.to_csv(output_file, index=False)
-    print(f"\nSaved DataFrame to {output_file}")
+    parser = argparse.ArgumentParser(description="Parse a ClinicalTrials.gov JSON export.")
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", default="../data/no_phi/ctgov_trials.csv")
+    args = parser.parse_args()
+    df = parse_clinical_trials_json(args.input)
+    output = Path(args.output)
+    temporary = output.with_name(output.name + f".{os.getpid()}.tmp")
+    try:
+        df.to_csv(temporary, index=False)
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    print(f"Parsed {len(df)} trials ({df.nct_id.nunique()} unique NCT IDs)")
+    print(f"Saved {output} with structured study_type and phases metadata")

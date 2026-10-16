@@ -108,14 +108,16 @@ def ask_about_trials_loosely(patient_summaries: List[str],
     ]
 
     from vllm import SamplingParams  # import locally inside function to keep worker footprint tidy
+    sampling = dict(temperature=0.0, top_k=1, repetition_penalty=1.1)
+    if reasoning_parser == "nemotron_v3":
+        from vllm_reasoning_utils import resolve_sampling_defaults
+        sampling.update(resolve_sampling_defaults("nemotron-3.5-super-vl"))
 
     responses = llm_model.generate(
         prompts,
         SamplingParams(
-            temperature=0.0,
-            top_k=1,
+            **sampling,
             max_tokens=15000,
-            repetition_penalty=1.1,
             skip_special_tokens=False,
             # You can add stop_token_ids if you want to trim reasoning
         )
@@ -385,12 +387,13 @@ def remote_main(args, df: pd.DataFrame) -> int:
         for i in range(len(work_df))
     ]
 
+    sampling_defaults = dict(temperature=0.0, top_k=1, top_p=1.0, repetition_penalty=1.1)
+    if reasoning_parser == "nemotron_v3":
+        from vllm_reasoning_utils import resolve_sampling_defaults
+        sampling_defaults.update(resolve_sampling_defaults("nemotron-3.5-super-vl"))
     sampling = CompletionSampling(
         model=args.model,
-        temperature=0.0,
-        top_k=1,
-        top_p=1.0,
-        repetition_penalty=1.1,
+        **sampling_defaults,
         request_timeout=float(getattr(args, "request_timeout", 600.0)),
     )
     work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)

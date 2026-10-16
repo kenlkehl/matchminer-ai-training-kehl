@@ -336,6 +336,7 @@ def split_vllm_args(values: list[str]) -> list[str]:
 # model identifier (path or HF repo). First match wins. Add new entries here as
 # new model families ship; the user can always override with --reasoning-parser.
 REASONING_PARSER_HEURISTICS: list[tuple[str, str]] = [
+    ("nemotron-3.5-super-vl", "nemotron_v3"),
     ("qwen3", "qwen3"),
     ("qwen-3", "qwen3"),
     ("gpt-oss", "gpt_oss"),

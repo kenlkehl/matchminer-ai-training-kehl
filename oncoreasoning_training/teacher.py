@@ -28,13 +28,21 @@ def worker_count(concurrency):
 
 class TeacherPool:
     def __init__(self, urls=(), model=DEFAULT_TEACHER, *, registry=None, per_server=96,
-                 max_tokens=16384, thinking=True, temperature=0.2, timeout=7200,
+                 max_tokens=16384, thinking=True, temperature=None, timeout=7200,
                  recovery_timeout=86400):
         self.pool = EndpointPool(urls, registry=registry, per_server=per_server,
             timeout=timeout, recovery_timeout=recovery_timeout,
             api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"))
-        self.parameters = dict(model=model, max_tokens=max_tokens, temperature=temperature,
-                               extra_body={"chat_template_kwargs": {"enable_thinking": thinking}})
+        from matchminer_ai.llm.model_profiles import resolve_model_profile
+        profile = resolve_model_profile(model)
+        # Preserve historical settings for existing teachers. Nemotron's new
+        # text profile is opt-in through its model ID; explicit temperature wins.
+        params, extra = {}, {}
+        if profile and profile.name == "nemotron-3.5-super-vl":
+            params, extra = dict(profile.request_params), dict(profile.extra_body)
+        params["temperature"] = temperature if temperature is not None else params.get("temperature", 0.2)
+        extra["chat_template_kwargs"] = {"enable_thinking": thinking}
+        self.parameters = dict(model=model, max_tokens=max_tokens, **params, extra_body=extra)
 
     def __call__(self, messages):
         return self.pool.request(messages=messages, **self.parameters)
