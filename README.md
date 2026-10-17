@@ -484,7 +484,7 @@ selections. Both final CSVs retain the study-type and phase columns for audit.
 
 ### Direct anti-cancer treatment screen in 0b
 
-The extraction primer and closing instructions in `0b_create_trial_spaces.py`
+The legacy extraction primer and closing instructions in `0b_create_trial_spaces.py`
 are complete snapshots of inference-kehl's `trial.user.primer.txt` and
 `trial.user.question.txt`, synchronized on 2026-10-17. They require exhaustive
 cancer-type/histology spaces for broad solid-tumor or hematologic trials, specific
@@ -494,6 +494,8 @@ criteria include relapsed/recurrent disease. New outputs use `Disease state allo
 not change the CSV columns. Treatment refractoriness belongs in treatment history,
 and boilerplate exclusions must correctly negate inclusion AND/OR conditions. A cross-repository contract test compares
 the complete rendered messages with the sibling inference-kehl checkout.
+These legacy messages are now used only with `--extraction-method one-shot`.
+The default hierarchical path is described below.
 Each `space_extraction/` directory records the rendered prompt fingerprint and
 model/sampling configuration in `extraction_manifest.json`. Changing them
 requires fresh extraction checkpoints; unchanged treatment-screening results
@@ -556,3 +558,55 @@ stop before extraction and completed compatible screening shards can be reused.
 Manifests guard input selection and screening prompt/model/sampling compatibility.
 Use a new work directory for pre-screening-era extraction checkpoints or changed
 screening configuration.
+
+### Hierarchical trial-space extraction
+
+0b now defaults to `--extraction-method hierarchical`. After the unchanged
+treatment screen, it branches through age, sex, cancer primary site, histology,
+disease state, required treatment, excluded treatment, required biomarkers and
+excluded biomarkers, in that order. Each request receives the whole trial text,
+one parent's fixed fields and its internal cohort context, and returns only
+alternatives for the next field. Cohort context preserves linked restrictions;
+fields are never combined as an independent Cartesian product. One separate
+call extracts boilerplate with conditional exclusions kept conditional. Python
+assembles, deduplicates and numbers complete leaves into the existing CSV
+schemas (training numbering remains one-based).
+
+`trial_hierarchy.py` and `trial_prompts/trial.hierarchy.*.txt` mirror the
+inference-kehl engine and prompts. Their ownership is in inference; synchronize
+both copies after edits. Contract tests compare all files. The old monolithic
+primer does not influence the new path. Disease state remains concise; molecular
+assays including Oncotype/PAM50 go in biomarkers, response to specific prior
+treatment stays in treatment history, and all-comer cancer/histology enumeration
+is retained as field-specific work.
+
+Remote requests use the existing adaptive pool, model sampling and reasoning
+parsers. Independent parents run concurrently; a successful parent response is
+checkpointed immediately in `space_extraction/hierarchy_nodes/`. Resume reuses
+these nodes and only calls the model for missing nodes. Local GPU workers keep
+their loaded model resident across all field waves and use the same contract.
+Remote extraction expands `--hierarchy-trial-batch-size` trials together
+(default 32), bounding the live frontier while retaining the same adaptive
+server pool between batches. Increase this setting when a larger pool needs
+more work to fill its available slots.
+Both paths validate JSON and finish reasons, return validation errors to the
+model, and alternate thinking after two invalid responses (Beam alternates
+max/low effort). Remote malformed-output errors remain neutral to concurrency.
+`--max_attempts` controls the remote per-node pool retry budget and local
+per-node validation attempts; choose a small value such as 4 for prompt reviews.
+
+`--hierarchy-max-nodes` (4096) and `--hierarchy-max-calls` (20000 logical requests
+per trial, excluding retries) fail explicitly instead of truncating large trees.
+Context is recounted for each request/retry and output tokens are capped to fit
+`--max-model-len`; source text is never silently shortened. Exhausted or wholly
+pruned trials block final output rather than producing partial space lists.
+Successful nodes, validation-failure logs, and `hierarchy_traces/` remain
+available for review and resumption. `space_reasoning_and_output` contains the
+JSON node audit; `space_output_no_reasoning` is the code-assembled answer.
+
+Existing one-shot extraction manifests are incompatible. Use fresh extraction
+checkpoints while retaining compatible treatment-screening checkpoints. This
+refactor does not clear data or restart a paused run. A single-branch trial
+requires ten logical calls, and branching trials require more; correctness still
+needs source review, especially for early branching decisions. Do not mix new
+spaces/embeddings with artifacts from a previous prompt generation.

@@ -176,6 +176,10 @@ def worker_process(
     batch_size: int,
     reasoning_parser: str,
     screening: bool = False,
+    extraction_method: str = "hierarchical",
+    hierarchy_max_nodes: int = 4096,
+    hierarchy_max_calls: int = 20000,
+    max_attempts: int = 4,
 ):
     """
     Worker: loads its own vLLM on the specified GPU group (via CUDA_VISIBLE_DEVICES),
@@ -203,6 +207,22 @@ def worker_process(
         language_model_only=True,
     )
     tokenizer = llm.get_tokenizer()
+
+    if not screening and extraction_method == "hierarchical":
+        from types import SimpleNamespace
+        from trial_hierarchy_runner import local_extract
+
+        sampling = SamplingParams(
+            temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
+            presence_penalty=presence_penalty, repetition_penalty=repetition_penalty,
+            max_tokens=max_tokens, skip_special_tokens=False,
+        )
+        local_extract(llm, tokenizer, sampling, shard_df, SimpleNamespace(
+            hierarchy_max_nodes=hierarchy_max_nodes, hierarchy_max_calls=hierarchy_max_calls,
+            max_attempts=max_attempts, batch_size=batch_size, max_tokens=max_tokens,
+            max_model_len=max_model_len,
+        ), reasoning_parser, shard_out_path)
+        return
 
     # Build prompts
     trial_texts = shard_df["trial_text"].astype(str).tolist()
@@ -366,6 +386,9 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     """Run trial-space extraction against a remote vLLM pool. Writes one
     or more parquet shards into args.work_dir and returns the list of
     paths for the caller's existing merge code."""
+    if not screening and getattr(args, "extraction_method", "hierarchical") == "hierarchical":
+        from trial_hierarchy_runner import remote_main as run_hierarchy
+        return run_hierarchy(args, trials, reasoning_parser)
     import asyncio
     import glob
     import re
@@ -597,6 +620,16 @@ def check_extraction_manifest(args, reasoning_parser):
             "temperature", "top_p", "top_k", "min_p", "presence_penalty",
             "repetition_penalty", "max_tokens")},
     }
+    if getattr(args, "extraction_method", "hierarchical") == "hierarchical":
+        from trial_hierarchy_runner import prompt_bundle
+        from trial_hierarchy import VERSION
+        identity.update(
+            extraction_method=VERSION,
+            messages_sha256=hashlib.sha256(json.dumps(prompt_bundle(), sort_keys=True).encode()).hexdigest(),
+            hierarchy_max_nodes=getattr(args, "hierarchy_max_nodes", 4096),
+            hierarchy_max_calls=getattr(args, "hierarchy_max_calls", 20000),
+            hierarchy_trial_batch_size=getattr(args, "hierarchy_trial_batch_size", 32),
+        )
     if getattr(args, "tokenizer_model", None):
         identity["tokenizer_model"] = args.tokenizer_model
     if path.exists():
@@ -605,7 +638,8 @@ def check_extraction_manifest(args, reasoning_parser):
                 "Trial-space extraction prompt/configuration changed; use fresh extraction checkpoints. "
                 "Compatible treatment-screening checkpoints may be retained."
             )
-    elif any(Path(args.work_dir).glob("*output_shard_*.parquet")):
+    elif (any(Path(args.work_dir).glob("*output_shard_*.parquet"))
+          or any((Path(args.work_dir) / "hierarchy_nodes").glob("*.json"))):
         raise ValueError("Extraction shards lack a prompt manifest; use fresh extraction checkpoints.")
     else:
         temporary = path.with_suffix(".tmp")
@@ -704,6 +738,10 @@ def local_main(args, trials, base_cols, reasoning_parser, *, screening=False):
                 screening=screening,
                 batch_size=args.batch_size,
                 reasoning_parser=reasoning_parser,
+                extraction_method=getattr(args, "extraction_method", "hierarchical"),
+                hierarchy_max_nodes=getattr(args, "hierarchy_max_nodes", 4096),
+                hierarchy_max_calls=getattr(args, "hierarchy_max_calls", 20000),
+                max_attempts=getattr(args, "max_attempts", 4),
             ),
             name=f"vllm_worker_{i}",
             daemon=False,
@@ -770,6 +808,14 @@ def main():
     parser.add_argument("--screening-max-tokens", type=int, default=8192,
                         help="Reasoning plus final-output token budget for the separate treatment screen")
     parser.add_argument("--output-spaces", default="../data/no_phi/trial_space_lineitems.csv")
+    parser.add_argument("--extraction-method", choices=["hierarchical", "one-shot"], default="hierarchical",
+                        help="Default: one field per parent branch, then separate boilerplate extraction")
+    parser.add_argument("--hierarchy-max-nodes", type=int, default=4096,
+                        help="Fail rather than truncate if one trial exceeds this number of branches")
+    parser.add_argument("--hierarchy-max-calls", type=int, default=20000,
+                        help="Maximum logical field/boilerplate requests per trial, excluding retries")
+    parser.add_argument("--hierarchy-trial-batch-size", type=int, default=32,
+                        help="Remote trials expanded together, bounding the live branch frontier")
     parser.add_argument("--work-dir", default="../data/no_phi/trial_space_shards", help="Directory for shard inputs/outputs")
     parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs, e.g. 0,1,2,3 (required for local mode; omit when using --server_urls / --server_urls_file)")
     parser.add_argument("--gpus-per-instance", type=int, default=1, help="Tensor-parallel GPUs per instance (set >1 for very large models)")
@@ -812,6 +858,9 @@ def main():
 
     if args.screening_max_tokens < 1:
         raise ValueError("--screening-max-tokens must be positive")
+    if min(args.hierarchy_max_nodes, args.hierarchy_max_calls, args.hierarchy_trial_batch_size,
+           args.max_attempts, args.batch_size) < 1:
+        raise ValueError("Hierarchy limits, max attempts and batch size must be positive")
     os.makedirs(args.work_dir, exist_ok=True)
     if any(Path(args.work_dir).glob("*output_shard_*.parquet")):
         raise ValueError("Legacy extraction shards predate treatment screening; use a new --work-dir.")

@@ -77,7 +77,15 @@ def endpoint_run(tmp_path, monkeypatch, request):
             assert kwargs['max_tokens'] == 45000
             assert len([c for c in state.calls if c[0] == 'screen']) >= 3
             assert 'ANTI_CANCER' in text
-            final = ('1. Age range allowed: 18+. Sex allowed: Any. Cancer type allowed: lung cancer. '
+            if 'CURRENT FIELD:' in text:
+                field = text.split('CURRENT FIELD: ')[1].splitlines()[0]
+                value = {'age': '18+', 'sex': 'Both', 'cancer_type': 'lung cancer',
+                         'histology': 'adenocarcinoma', 'disease_state': 'metastatic'}.get(field, 'NA')
+                final = json.dumps({'branches': [{'value': value, 'scope': 'all eligible patients'}], 'prune_reason': ''})
+            elif 'Extract general exclusion criteria' in text:
+                final = '{"exclusions": ["Active infection."]}'
+            else:
+                final = ('1. Age range allowed: 18+. Sex allowed: Any. Cancer type allowed: lung cancer. '
                      'Histology allowed: NA. Cancer burden allowed: metastatic. Prior treatment required: NA. '
                      'Prior treatment excluded: NA. Biomarkers required: NA. Biomarkers excluded: NA.\n'
                      'Boilerplate exclusions:\nActive infection.')
@@ -105,6 +113,7 @@ def endpoint_run(tmp_path, monkeypatch, request):
     monkeypatch.setattr(pool, 'build_registry_from_args', registry)
     monkeypatch.setattr(pool, 'run_pool', run_pool)
     argv = ['0b', '--input', str(source), '--work-dir', str(tmp_path/'work'),
+            '--extraction-method', 'one-shot',
             '--output-trials', str(tmp_path/'out.csv'), '--output-spaces', str(tmp_path/'spaces.csv'),
             '--model', model,
             '--server_urls', 'http://requested-server:8000/v1', '--max_concurrent_per_server', '256']
