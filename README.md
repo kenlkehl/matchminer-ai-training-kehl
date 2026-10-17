@@ -608,6 +608,11 @@ is saved per trial, with stable input-order merging. Resume reuses successful
 nodes in `space_extraction/hierarchy_nodes/`; completion order cannot change
 final numbering. Local GPU workers retain synchronous batches and keep their
 loaded model resident across field waves.
+Set the remote ceiling with `--max_concurrent_per_server 32` (CLI default: 100).
+That is one shared adaptive ceiling per endpoint across trials, field branches,
+boilerplate and retries. With N endpoints the total ceiling is N times the
+per-server limit. `--hierarchy-trial-batch-size` does not multiply it. Separate
+client processes each have their own limit; set the CLI value before launch.
 Both paths validate JSON and finish reasons, return validation errors to the
 model, and alternate thinking after two invalid responses (Beam alternates
 max/low effort). Remote malformed-output errors remain neutral to concurrency.

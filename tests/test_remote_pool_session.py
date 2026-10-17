@@ -11,8 +11,8 @@ from remote_vllm_pool import (
 
 
 class Registry:
-    def __init__(self):
-        self.entry = ServerEntry("synthetic", None, AdaptiveSemaphore(2))
+    def __init__(self, limit=2):
+        self.entry = ServerEntry("synthetic", None, AdaptiveSemaphore(limit))
         self.stopped = False
 
     async def start(self):
@@ -28,9 +28,10 @@ class Registry:
         self.stopped = True
 
 
-def test_session_shares_capacity_retries_json_neutrally_and_accepts_new_work():
+@pytest.mark.parametrize("limit", [1, 2, 5])
+def test_session_shares_capacity_retries_json_neutrally_and_accepts_new_work(limit):
     async def scenario():
-        registry = Registry()
+        registry = Registry(limit)
         running = peak = 0
         attempts = {}
 
@@ -48,13 +49,14 @@ def test_session_shares_capacity_retries_json_neutrally_and_accepts_new_work():
                 running -= 1
 
         async with RequestSession(registry, work, max_attempts=2) as session:
+            payloads = ["a", "b", "c", "d", "e", "retry"]
             assert await asyncio.gather(
-                *(session.submit(x) for x in ["a", "b", "retry"])
-            ) == ["a", "b", "retry"]
+                *(session.submit(x) for x in payloads)
+            ) == payloads
             assert await session.submit("new child") == "new child"
-            assert session.completed == 4
-        assert peak == 2 and running == 0
-        assert registry.entry.semaphore.limit == 2
+            assert session.completed == len(payloads) + 1
+        assert peak == limit and running == 0
+        assert registry.entry.semaphore.limit == limit
         assert registry.entry.output_validation_err_count == 1
         assert registry.stopped
 
