@@ -24,7 +24,7 @@ def test_invalid_response_is_never_an_exclusion(final, finish):
 
 
 @pytest.fixture
-def endpoint_run(tmp_path, monkeypatch):
+def endpoint_run(tmp_path, monkeypatch, request):
     """Exercise both real stage dispatchers with a fake completion transport."""
     import transformers
     import remote_vllm_pool as pool
@@ -37,14 +37,19 @@ def endpoint_run(tmp_path, monkeypatch):
         dict(nct_id='NCT00000003', study_type='INTERVENTIONAL', phases='["PHASE1", "PHASE2"]', trial_text='DIAGNOSTIC'),
         dict(nct_id='NCT00000004', study_type='OBSERVATIONAL', phases='["PHASE2"]', trial_text='NEVER_SEND'),
     ]).to_csv(source, index=False)
-    state = SimpleNamespace(calls=[], reject_all=False, fail=False, registries=[])
+    model, tokenizer_model = getattr(request, 'param', (
+        'nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4', None))
+    state = SimpleNamespace(calls=[], reject_all=False, fail=False, registries=[], tokenizers=[])
 
     class Tokenizer:
         def apply_chat_template(self, conversation, **kwargs):
             assert kwargs['enable_thinking'] is True
             return json.dumps(conversation)
 
-    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', lambda *a, **k: Tokenizer())
+    def load_tokenizer(name, **kwargs):
+        state.tokenizers.append(name)
+        return Tokenizer()
+    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', load_tokenizer)
     monkeypatch.setattr(vllm_reasoning_utils, 'parse_reasoning_output', lambda raw, *a, **k: ('Reasoning', raw))
 
     async def create(**kwargs):
@@ -53,9 +58,12 @@ def endpoint_run(tmp_path, monkeypatch):
         text = messages[-1]['content']
         assert 'NEVER_SEND' not in text
         state.calls.append(('screen' if screening else 'extract', text))
-        assert kwargs['model'] == 'nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4'
+        assert kwargs['model'] == model
         assert kwargs['temperature'] == 1.0 and kwargs['top_p'] == .95
-        assert kwargs['extra_body']['top_k'] == -1
+        assert kwargs['extra_body']['top_k'] == (64 if tokenizer_model else -1)
+        assert kwargs['extra_body']['min_p'] == 0.0
+        assert kwargs['presence_penalty'] == 0.0
+        assert kwargs['extra_body']['repetition_penalty'] == 1.0
         if screening:
             assert kwargs['max_tokens'] == 8192
             final = json.dumps({'is_cancer_treatment_trial': 'ANTI_CANCER' in text and not state.reject_all,
@@ -95,10 +103,27 @@ def endpoint_run(tmp_path, monkeypatch):
     monkeypatch.setattr(pool, 'run_pool', run_pool)
     argv = ['0b', '--input', str(source), '--work-dir', str(tmp_path/'work'),
             '--output-trials', str(tmp_path/'out.csv'), '--output-spaces', str(tmp_path/'spaces.csv'),
-            '--model', 'nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4',
+            '--model', model,
             '--server_urls', 'http://requested-server:8000/v1', '--max_concurrent_per_server', '256']
+    if tokenizer_model:
+        argv.extend(['--tokenizer-model', tokenizer_model])
     monkeypatch.setattr(sys, 'argv', argv)
     return state, tmp_path, argv
+
+
+@pytest.mark.parametrize('endpoint_run', [
+    ('opaque-served-alias', 'RedHatAI/Gemma-4-31B-IT-FP8-Dynamic'),
+], indirect=True)
+def test_gemma_alias_uses_family_sampling_in_screening_and_extraction(endpoint_run):
+    state, path, argv = endpoint_run
+    spaces.main()
+    assert [call[0] for call in state.calls] == ['screen'] * 3 + ['extract']
+    assert state.tokenizers == ['RedHatAI/Gemma-4-31B-IT-FP8-Dynamic'] * 2
+    # The tokenizer is part of checkpoint identity even when sampling matches.
+    argv[argv.index('--tokenizer-model') + 1] = 'google/gemma-4-31B-it'
+    with pytest.raises(ValueError, match='configuration changed'):
+        spaces.main()
+    assert len(state.calls) == 4
 
 
 def test_complete_screen_precedes_extraction_and_resume_reuses_negatives(endpoint_run):

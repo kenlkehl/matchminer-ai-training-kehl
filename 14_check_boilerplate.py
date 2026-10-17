@@ -215,11 +215,10 @@ def worker_process(worker_id: int,
             max_model_len=args.max_model_len,
         )
 
+        from vllm_reasoning_utils import resolve_sampling_defaults
         sampling_params = SamplingParams(
-            temperature=0.0,
-            top_k=1,
+            **resolve_sampling_defaults(args.model, fallback=dict(temperature=0.0, top_k=1, repetition_penalty=1.1)),
             max_tokens=args.max_new_tokens,
-            repetition_penalty=1.1,
             skip_special_tokens=False,
         )
 
@@ -375,11 +374,10 @@ def remote_main(args, unique_df: pd.DataFrame) -> int:
         for i in range(len(work_df))
     ]
 
+    from vllm_reasoning_utils import resolve_sampling_defaults
     sampling = CompletionSampling(
         model=args.model,
-        temperature=0.0,
-        top_k=1,
-        repetition_penalty=1.1,
+        **resolve_sampling_defaults(args.model, fallback=dict(temperature=0.0, top_k=1, repetition_penalty=1.1)),
         request_timeout=float(getattr(args, "request_timeout", 600.0)),
     )
     work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)

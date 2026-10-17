@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+# Direct script invocation places only synthetic_extractors/ on sys.path.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 
 DEFAULT_ID_FIELDS = (
     "record_id",
@@ -147,7 +152,7 @@ def add_common_args(
         default="auto",
         help=(
             "vLLM reasoning parser name to enable when --start-vllm. 'auto' (default) guesses from "
-            "the model name (qwen3, gpt_oss, gemma, deepseek_r1, ...). Pass 'none' to disable, or a "
+            "the model name (qwen3, gpt_oss, gemma4, deepseek_r1, beam, ...). Pass 'none' to disable, or a "
             "specific parser name to force it. Ignored when --vllm-arg already supplies "
             "--reasoning-parser."
         ),
@@ -226,7 +231,8 @@ def add_common_args(
 
     request_group = parser.add_argument_group("request")
     request_group.add_argument("--workers", type=int, default=4, help="Concurrent labeling requests.")
-    request_group.add_argument("--temperature", type=float, default=0.0)
+    request_group.add_argument("--temperature", type=float, default=None,
+                               help="Default: model-family sampling, or 0.0 for unknown models")
     request_group.add_argument("--max-tokens", type=int, default=10000)
     request_group.add_argument("--request-timeout", "--request_timeout", type=float, default=240.0)
     request_group.add_argument("--retries", type=int, default=2, help="Retries per record after the first attempt.")
@@ -332,9 +338,8 @@ def split_vllm_args(values: list[str]) -> list[str]:
     return parts
 
 
-# Substring → vLLM reasoning parser name. Checked in order against a lowercased
-# model identifier (path or HF repo). First match wins. Add new entries here as
-# new model families ship; the user can always override with --reasoning-parser.
+# Legacy substring fallbacks for families without a shared model profile.
+# The user can always override with --reasoning-parser.
 REASONING_PARSER_HEURISTICS: list[tuple[str, str]] = [
     ("nemotron-3.5-super-vl", "nemotron_v3"),
     ("qwen3", "qwen3"),
@@ -353,6 +358,11 @@ REASONING_PARSER_HEURISTICS: list[tuple[str, str]] = [
 
 
 def guess_reasoning_parser(model_name: str) -> str | None:
+    from matchminer_ai.llm.model_profiles import resolve_model_profile
+
+    profile = resolve_model_profile(model_name)
+    if profile is not None and profile.reasoning_parser:
+        return profile.reasoning_parser
     name = model_name.lower()
     for needle, parser_name in REASONING_PARSER_HEURISTICS:
         if needle in name:
@@ -489,21 +499,43 @@ def http_json(
     return json.loads(response_body)
 
 
+def sampling_request_kwargs(model: str, temperature: float | None) -> dict[str, Any]:
+    """Resolve the same family defaults for direct HTTP and pooled requests."""
+    from vllm_reasoning_utils import resolve_sampling_defaults
+    from matchminer_ai.llm.sampling import vendor_defaults
+
+    settings = resolve_sampling_defaults(model, fallback={"temperature": 0.0},
+                                        temperature=temperature)
+    _, template = vendor_defaults(model)
+    extra_keys = {"top_k", "min_p", "repetition_penalty"}
+    params = {key: value for key, value in settings.items() if key not in extra_keys}
+    extra = {key: value for key, value in settings.items() if key in extra_keys}
+    if template:
+        extra["chat_template_kwargs"] = template
+    if extra:
+        params["extra_body"] = extra
+    return params
+
+
 def chat_completion(
     *,
     base_url: str,
     model: str,
     messages: list[dict[str, str]],
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     timeout: float,
     api_key: str | None,
     json_mode: bool,
+    sampling_model: str | None = None,
 ) -> tuple[str, str | None, dict[str, Any]]:
+    settings = sampling_request_kwargs(sampling_model or model, temperature)
+    extra = settings.pop("extra_body", {})
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
+        **settings,
+        **extra,
         "max_tokens": max_tokens,
     }
     if json_mode:
@@ -815,6 +847,7 @@ def label_one_record(
                 timeout=args.request_timeout,
                 api_key=args.api_key,
                 json_mode=not args.no_json_mode,
+                sampling_model=args.model,
             )
             error = None
             break
@@ -917,20 +950,18 @@ async def run_remote_labeling_pool(
     shard_dir: Path,
     starting_shard_idx: int,
 ) -> None:
-    repo_root = Path(__file__).resolve().parent.parent
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-
     from remote_vllm_pool import build_registry_from_args, run_pool  # type: ignore[import-not-found]
 
     if args.server_urls:
         args.server_urls = ",".join(parse_remote_urls(args.server_urls))
 
+    sampling = sampling_request_kwargs(args.model, args.temperature)
+
     async def work_fn(client: Any, record: Record) -> dict[str, Any]:
         request_payload: dict[str, Any] = {
             "model": request_model_name(args),
             "messages": build_messages(record, args),
-            "temperature": args.temperature,
+            **sampling,
             "max_tokens": args.max_tokens,
         }
         if not args.no_json_mode:

@@ -26,8 +26,8 @@ def test_local_and_remote_scoring_render_the_canonical_prompt(monkeypatch):
         return [SimpleNamespace(outputs=[SimpleNamespace(text="Final score: 0")])]
 
     monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(SamplingParams=lambda **kw: kw))
-    monkeypatch.setitem(sys.modules, "vllm_reasoning_utils", SimpleNamespace(
-        parse_reasoning_output=lambda *args: ("", "Final score: 0")))
+    monkeypatch.setattr("vllm_reasoning_utils.parse_reasoning_output",
+                        lambda *args: ("", "Final score: 0"))
     model = SimpleNamespace(get_tokenizer=lambda: tokenizer, generate=generate)
     result = labeling.ask_about_trials_loosely([patient], [trial], model, "gemma4")
     source = c.load_prompt_sources()["llm_match_quality.user.txt"]

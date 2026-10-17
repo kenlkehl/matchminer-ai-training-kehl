@@ -39,12 +39,17 @@ _SUBSTRING_FALLBACKS: list[tuple[str, str]] = [
 def resolve_parser_name(model: str, explicit: Optional[str] = None) -> str:
     """Pick a vLLM reasoning-parser name for a given model.
 
-    If ``explicit`` is set and not ``"auto"``, it wins. Otherwise look up the
-    model in MODEL_TO_PARSER, then fall back to case-insensitive substring
-    match on known families.
+    If ``explicit`` is set and not ``"auto"``, it wins. Otherwise consult the
+    shared model profiles, then MODEL_TO_PARSER and case-insensitive substring
+    fallbacks for other known families.
     """
     if explicit and explicit != "auto":
         return explicit
+    from matchminer_ai.llm.model_profiles import resolve_model_profile
+
+    profile = resolve_model_profile(model)
+    if profile is not None and profile.reasoning_parser is not None:
+        return profile.reasoning_parser
     if model in MODEL_TO_PARSER:
         return MODEL_TO_PARSER[model]
     lowered = model.lower()
@@ -64,15 +69,41 @@ def resolve_tool_call_parser(model: str, explicit: Optional[str] = None) -> Opti
     return resolve(model, explicit)
 
 
-def resolve_sampling_defaults(model: str, **overrides) -> dict:
+SAMPLING_KEYS = (
+    "temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty",
+)
+
+
+def resolve_sampling_defaults(model: str, *, fallback=None, enable_thinking=True, **overrides) -> dict:
     """Text sampling from the shared inference profile, with explicit overrides.
 
     Use None for unspecified CLI values; callers can supply legacy defaults
     separately for unregistered models. No task output budget is inferred.
     """
     from matchminer_ai.llm.sampling import vendor_defaults
-    defaults, _ = vendor_defaults(model)
-    return {**defaults, **{key: value for key, value in overrides.items() if value is not None}}
+    defaults, _ = vendor_defaults(model, template={"enable_thinking": enable_thinking})
+    # A recognized family must not inherit another task/model's penalties.
+    # These are neutral controls, not additional publisher recommendations.
+    neutral = dict(min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0) if defaults else {}
+    return {**(fallback or {}), **neutral, **defaults,
+            **{key: value for key, value in overrides.items() if value is not None}}
+
+
+def add_sampling_cli_args(parser) -> None:
+    """Unspecified CLI values select model defaults; explicit values win."""
+    for key in SAMPLING_KEYS:
+        flags = list(dict.fromkeys(("--" + key.replace("_", "-"), "--" + key)))
+        parser.add_argument(*flags, dest=key, type=int if key == "top_k" else float,
+                            default=None, help="Default: detect from model family.")
+
+
+def sampling_from_args(args, *, model=None, fallback=None) -> dict:
+    """Resolve CLI overrides consistently for local and remote generation."""
+    model = model or getattr(args, "tokenizer_model", None) or getattr(args, "model", None) or getattr(args, "model_name", None)
+    return resolve_sampling_defaults(
+        model, fallback=fallback,
+        **{key: getattr(args, key, None) for key in SAMPLING_KEYS},
+    )
 
 
 def parse_reasoning_output(
@@ -133,6 +164,6 @@ def add_reasoning_cli_args(ap: argparse.ArgumentParser) -> None:
         default="auto",
         help=(
             "vLLM reasoning parser name (default: auto = infer from --model). "
-            "Examples: gemma4, qwen3, openai_gptoss, deepseek_r1."
+            "Examples: gemma4, qwen3, openai_gptoss, deepseek_r1, beam."
         ),
     )

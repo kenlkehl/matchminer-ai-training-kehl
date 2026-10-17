@@ -10,7 +10,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from oncoreasoning_training import contracts as c
 from oncoreasoning_training.create_all_training_data import atomic_json, read_json, check_manifest
-from oncoreasoning_training.teacher import DEFAULT_TEACHER, TeacherPool, worker_count
+from oncoreasoning_training.teacher import DEFAULT_TEACHER, TeacherPool, worker_count, sampling_parameters
 
 INSTRUCTION = (
     "Separate this trial's general exclusion criteria into individual self-contained criteria. "
@@ -71,7 +71,8 @@ def main():
     p.add_argument("--concurrency-per-server", type=int, default=96)
     args = p.parse_args()
     check_manifest(args.output_dir, "manifest.json", {"version": "verbatim-boilerplate-v1", "instruction": INSTRUCTION,
-                   "teacher": args.teacher_model}, transport_keys=("servers",))
+                   "teacher": args.teacher_model, "sampling": sampling_parameters(args.teacher_model)},
+                   transport_keys=("servers",))
     # Structurally patient-free: read only public trial IDs and exclusions.
     frame = pd.concat([pd.read_parquet(path, columns=["nct_id", "trial_boilerplate_text"]) for path in args.candidates]).drop_duplicates()
     teacher = TeacherPool(model=args.teacher_model, registry=args.server_urls_file, per_server=args.concurrency_per_server)

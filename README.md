@@ -409,14 +409,35 @@ specified nightly. Other sampling filters/penalties are neutralized, not claimed
 as NVIDIA recommendations. The vision recommendation is different (temperature
 0.6); these training paths are text-only.
 
-`vllm_reasoning_utils.resolve_sampling_defaults` shares that profile with
-inference and preserves non-None explicit overrides. `0b_create_trial_spaces.py`
-selects it automatically from `--model`; each sampling CLI flag overrides the
-profile. The primary runner selects model-aware reasoning/tool parsers; its
-Nemotron trial labeler and downstream `TeacherPool` use the same text sampling.
-Other legacy scripts can use the shared helper or explicit sampling flags;
-registering a model does not change an existing run's teacher or saved labels.
+`vllm_reasoning_utils.resolve_sampling_defaults` uses the same automatic
+model-family detection and sampling defaults as the installed inference package.
+This applies to trial screening/extraction, synthetic prompt/note generation,
+patient summarization, trial/boilerplate judging, synthetic extractors, and
+`TeacherPool`. Gemma 4, Qwen 3.5/3.8, Nemotron, and Reflection Beam profiles are shared with
+inference; unregistered models retain each task's previous fallback settings.
+Unspecified CLI sampling values select the profile, while explicit values
+(including zero) take precedence. Patient summarization's `--run_deterministic`
+still overrides sampling when requested. Recognized families use neutral
+penalties unless their profile or an explicit override specifies otherwise.
+
+Detection uses the configured model ID. For an opaque server alias in `0b`,
+pass the actual Hugging Face ID through `--tokenizer-model` to select both the
+tokenizer and family defaults while retaining `--model` in endpoint requests.
+The primary runner also selects model-aware reasoning/tool parsers. Registering
+a model does not change an existing run's teacher or saved labels.
 Use a new run/checkpoint directory when changing models or sampling settings.
+
+Reflection Beam 1.0 detection covers BF16, FP8, NVFP4, quantized reuploads, and
+served names such as `Beam-1.0-501B-A23B`, `beam`, and `reflection-beam`.
+Its [official vLLM recipe](https://developers.reflection.ai/serving-vllm)
+specifies temperature 0.7 and top-p 0.99; the generation config also specifies
+repetition penalty 1.0. Top-k/min-p filtering and presence penalty are neutralized.
+Both reasoning and tool-call parsers resolve to `beam`. Explicit sampling
+overrides still win, and no task output budget is changed. Beam always reasons;
+its template uses `reasoning_effort`, not Gemma's boolean thinking switch.
+Use a vLLM build with Beam support when serving or parsing raw local completions.
+These settings are shared from the sibling inference package and were verified
+on 2026-10-16; no existing server or saved run is switched automatically.
 
 Example against an existing server (no local model startup):
 

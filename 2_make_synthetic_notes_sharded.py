@@ -395,11 +395,12 @@ def run_worker(
                 max_model_len=max_model_len,
             )
             tokenizer = llm.get_tokenizer()
+            from vllm_reasoning_utils import resolve_sampling_defaults
             sampling = SamplingParams(
-                temperature=temperature,
-                top_p=top_p,
+                **resolve_sampling_defaults(model,
+                    fallback=dict(temperature=0.5, top_p=0.2, repetition_penalty=1.0),
+                    temperature=temperature, top_p=top_p, repetition_penalty=repetition_penalty),
                 max_tokens=max_new_tokens,
-                repetition_penalty=repetition_penalty,
                 skip_special_tokens=False,
             )
 
@@ -515,9 +516,9 @@ def main():
     ap.add_argument("--max_model_len", type=int, default=20000)
     ap.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     ap.add_argument("--max_new_tokens", type=int, default=15000)
-    ap.add_argument("--temperature", type=float, default=0.5)
-    ap.add_argument("--top_p", type=float, default=0.2)
-    ap.add_argument("--repetition_penalty", type=float, default=1.0)
+    ap.add_argument("--temperature", type=float, default=None)
+    ap.add_argument("--top_p", type=float, default=None)
+    ap.add_argument("--repetition_penalty", type=float, default=None)
     ap.add_argument("--gpu_mem_util", type=float, default=0.94)
     ap.add_argument("--compose_only", action="store_true",
                     help="Skip generation and only compose existing shard files")
@@ -699,12 +700,10 @@ def remote_main(args, promptframe_parquet: str, shards_dir: str, reasoning_parse
 
     df_indexed = work_df.set_index("row_id")
 
+    from vllm_reasoning_utils import sampling_from_args
     sampling = CompletionSampling(
         model=args.model,
-        temperature=float(args.temperature),
-        top_p=float(args.top_p),
-        top_k=1,
-        repetition_penalty=float(args.repetition_penalty),
+        **sampling_from_args(args, fallback=dict(temperature=0.5, top_p=0.2, top_k=1, repetition_penalty=1.0)),
         request_timeout=float(getattr(args, "request_timeout", 600.0)),
     )
     work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)

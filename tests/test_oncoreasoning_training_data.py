@@ -221,6 +221,15 @@ def test_prepare_generate_build_and_safe_resume(tmp_path, tokenizer, monkeypatch
         return response("<think>private analysis</think>A\nSupported fabricated explanation.")
     pipeline.generate(gen, tokenizer=tokenizer, call=teacher)
     assert len(calls) == len(tasks)
+    generation_manifest = directory / 'generation_manifest.json'
+    recorded = pipeline.read_json(generation_manifest)
+    assert recorded['sampling']['temperature'] == 0.2  # Unknown model fallback.
+    changed_sampling = deepcopy(recorded)
+    changed_sampling['sampling']['temperature'] = 1.0
+    pipeline.atomic_json(generation_manifest, changed_sampling)
+    with pytest.raises(ValueError, match='Incompatible'):
+        pipeline.generate(gen, tokenizer=tokenizer, call=lambda _: pytest.fail('Must reject mixed sampling'))
+    pipeline.atomic_json(generation_manifest, recorded)
     assert any("PRIOR SUMMARY:\nUpdated fabricated summary" in m[-1]["content"] for m in calls)
     pipeline.generate(gen, tokenizer=tokenizer, call=lambda _: pytest.fail("Resume unexpectedly called teacher"))
     changed = deepcopy(gen)

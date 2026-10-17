@@ -122,10 +122,10 @@ def parse_args():
     p.add_argument("--gpu-mem-util", type=float, default=0.90)
     p.add_argument("--max-model-len", type=int, default=50000)
     p.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
-    p.add_argument("--temperature", type=float, default=1.0)
-    p.add_argument("--top-p", type=float, default=0.95)
+    p.add_argument("--temperature", type=float, default=None)
+    p.add_argument("--top-p", type=float, default=None)
     p.add_argument("--max-tokens", type=int, default=40000)
-    p.add_argument("--repetition-penalty", type=float, default=1.0)
+    p.add_argument("--repetition-penalty", type=float, default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--shard-size", type=int, default=1000, help="Number of rows per shard (contiguous).")
     p.add_argument("--batch-size", type=int, default=1000, help="Prompts per llm.generate() call inside a shard.")
@@ -199,11 +199,12 @@ def worker_process_shards(
         max_model_len=max_model_len,
     )
     tokenizer = llm.get_tokenizer()
+    from vllm_reasoning_utils import resolve_sampling_defaults
     sampling = SamplingParams(
-        temperature=temperature,
-        top_p=top_p,
+        **resolve_sampling_defaults(model_name,
+            fallback=dict(temperature=1.0, top_p=0.95, repetition_penalty=1.0),
+            temperature=temperature, top_p=top_p, repetition_penalty=repetition_penalty),
         max_tokens=max_tokens,
-        repetition_penalty=repetition_penalty,
         skip_special_tokens=False,
     )
 
@@ -391,12 +392,10 @@ def remote_main(args, spaces: pd.DataFrame, out_dir: Path, reasoning_parser: str
         for cid in prompts_by_id
     ]
 
+    from vllm_reasoning_utils import sampling_from_args
     sampling = CompletionSampling(
         model=args.model_name,
-        temperature=float(args.temperature),
-        top_p=float(args.top_p),
-        top_k=1,
-        repetition_penalty=float(args.repetition_penalty),
+        **sampling_from_args(args, fallback=dict(temperature=1.0, top_p=0.95, top_k=1, repetition_penalty=1.0)),
         request_timeout=float(getattr(args, "request_timeout", 600.0)),
     )
     work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)

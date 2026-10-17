@@ -26,6 +26,21 @@ def worker_count(concurrency):
     return concurrency or MAX_POOL_WORKERS
 
 
+def sampling_parameters(model, *, thinking=True, temperature=None):
+    """Resolved request settings, also recorded in generation manifests."""
+    from vllm_reasoning_utils import resolve_sampling_defaults
+    from matchminer_ai.llm.sampling import vendor_defaults
+
+    settings = resolve_sampling_defaults(model, fallback={"temperature": 0.2},
+                                        enable_thinking=thinking, temperature=temperature)
+    extra_keys = {"top_k", "min_p", "repetition_penalty"}
+    params = {key: value for key, value in settings.items() if key not in extra_keys}
+    extra = {key: value for key, value in settings.items() if key in extra_keys}
+    _, template = vendor_defaults(model, template={"enable_thinking": thinking})
+    extra["chat_template_kwargs"] = template
+    return {**params, "extra_body": extra}
+
+
 class TeacherPool:
     def __init__(self, urls=(), model=DEFAULT_TEACHER, *, registry=None, per_server=96,
                  max_tokens=16384, thinking=True, temperature=None, timeout=7200,
@@ -33,16 +48,8 @@ class TeacherPool:
         self.pool = EndpointPool(urls, registry=registry, per_server=per_server,
             timeout=timeout, recovery_timeout=recovery_timeout,
             api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"))
-        from matchminer_ai.llm.model_profiles import resolve_model_profile
-        profile = resolve_model_profile(model)
-        # Preserve historical settings for existing teachers. Nemotron's new
-        # text profile is opt-in through its model ID; explicit temperature wins.
-        params, extra = {}, {}
-        if profile and profile.name == "nemotron-3.5-super-vl":
-            params, extra = dict(profile.request_params), dict(profile.extra_body)
-        params["temperature"] = temperature if temperature is not None else params.get("temperature", 0.2)
-        extra["chat_template_kwargs"] = {"enable_thinking": thinking}
-        self.parameters = dict(model=model, max_tokens=max_tokens, **params, extra_body=extra)
+        self.parameters = dict(model=model, max_tokens=max_tokens,
+                               **sampling_parameters(model, thinking=thinking, temperature=temperature))
 
     def __call__(self, messages):
         return self.pool.request(messages=messages, **self.parameters)

@@ -96,7 +96,7 @@ def parse_score_from_response(response_text: str) -> Tuple[int, str]:
 def ask_about_trials_loosely(patient_summaries: List[str],
                              trial_summaries: List[str],
                              llm_model,
-                             reasoning_parser: str):
+                             reasoning_parser: str, model: str | None = None):
     """
     Given aligned lists of patient_summaries and trial_summaries, return
     (responses, response_reasonings, response_texts, eligibility_results, eligibility_verdicts)
@@ -108,10 +108,10 @@ def ask_about_trials_loosely(patient_summaries: List[str],
     ]
 
     from vllm import SamplingParams  # import locally inside function to keep worker footprint tidy
-    sampling = dict(temperature=0.0, top_k=1, repetition_penalty=1.1)
-    if reasoning_parser == "nemotron_v3":
-        from vllm_reasoning_utils import resolve_sampling_defaults
-        sampling.update(resolve_sampling_defaults("nemotron-3.5-super-vl"))
+    from vllm_reasoning_utils import resolve_sampling_defaults
+    sampling = resolve_sampling_defaults(
+        model or getattr(tokenizer, "name_or_path", reasoning_parser),
+        fallback=dict(temperature=0.0, top_k=1, repetition_penalty=1.1))
 
     responses = llm_model.generate(
         prompts,
@@ -246,7 +246,7 @@ def worker_process(worker_id: int,
                 batch["patient_summary"].astype(str).tolist(),
                 batch["this_space"].astype(str).tolist(),
                 llm_model=llm,
-                reasoning_parser=reasoning_parser
+                reasoning_parser=reasoning_parser, model=model
             )
 
             batch["trialcheck_llm_reasoning"] = resp_reasonings
@@ -387,10 +387,10 @@ def remote_main(args, df: pd.DataFrame) -> int:
         for i in range(len(work_df))
     ]
 
-    sampling_defaults = dict(temperature=0.0, top_k=1, top_p=1.0, repetition_penalty=1.1)
-    if reasoning_parser == "nemotron_v3":
-        from vllm_reasoning_utils import resolve_sampling_defaults
-        sampling_defaults.update(resolve_sampling_defaults("nemotron-3.5-super-vl"))
+    from vllm_reasoning_utils import resolve_sampling_defaults
+    sampling_defaults = resolve_sampling_defaults(
+        args.tokenizer_model or args.model,
+        fallback=dict(temperature=0.0, top_k=1, top_p=1.0, repetition_penalty=1.1))
     sampling = CompletionSampling(
         model=args.model,
         **sampling_defaults,

@@ -47,4 +47,5 @@ def test_teacher_sampling_preserves_explicit_temperature(monkeypatch):
     assert pool.parameters['top_p'] == 0.95
     assert pool.parameters['extra_body']['top_k'] == -1
     assert teacher.TeacherPool(model=MODEL, temperature=0.2).parameters['temperature'] == 0.2
-    assert teacher.TeacherPool().parameters['temperature'] == 0.2
+    assert teacher.TeacherPool().parameters['temperature'] == 1.0
+    assert teacher.TeacherPool(model='unregistered-model').parameters['temperature'] == 0.2

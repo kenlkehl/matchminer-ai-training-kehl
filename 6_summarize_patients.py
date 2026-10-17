@@ -1243,14 +1243,10 @@ def main():
                          "--additional_vllm_args \"--quantization nvfp4 --kv-cache-dtype fp8\". "
                          "Ignored when --server_urls is set.")
     ap.add_argument("--max_num_seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
-    ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--top_k", type=int, default=1)
-    ap.add_argument("--top_p", type=float, default=1.0)
-    ap.add_argument("--presence_penalty", type=float, default=0.0)
-    ap.add_argument("--min_p", type=float, default=0.0)
+    from vllm_reasoning_utils import add_sampling_cli_args
+    add_sampling_cli_args(ap)
     ap.add_argument("--max_tokens", type=int, default=20000,
                     help="Max generation tokens per prompt. If not set, auto-computed as max_model_len minus prompt token count.")
-    ap.add_argument("--repetition_penalty", type=float, default=1.1)
     from vllm_reasoning_utils import add_reasoning_cli_args
     add_reasoning_cli_args(ap)
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
@@ -1309,6 +1305,14 @@ def main():
     from vllm_reasoning_utils import resolve_parser_name
     reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
     print(f"Using vLLM reasoning parser: {reasoning_parser}")
+
+    from vllm_reasoning_utils import sampling_from_args
+    sampling = sampling_from_args(args, fallback=dict(
+        temperature=0.0, top_k=1, top_p=1.0, presence_penalty=0.0,
+        min_p=0.0, repetition_penalty=1.1))
+    for key, value in sampling.items():
+        setattr(args, key, value)
+    print(f"Model sampling: {sampling}")
 
     # Apply deterministic overrides
     if args.run_deterministic:

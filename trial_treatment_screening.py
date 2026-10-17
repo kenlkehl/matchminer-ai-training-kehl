@@ -101,6 +101,8 @@ def check_screening_manifest(args, reasoning_parser, work_dir):
             "temperature", "top_p", "top_k", "min_p", "presence_penalty",
             "repetition_penalty", "screening_max_tokens")},
     }
+    if getattr(args, "tokenizer_model", None):
+        identity["tokenizer_model"] = args.tokenizer_model
     if path.exists():
         if json.loads(path.read_text()) != identity:
             raise ValueError("Treatment screening configuration changed; use a new --work-dir.")

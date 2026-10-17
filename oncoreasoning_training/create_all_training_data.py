@@ -22,7 +22,7 @@ import tempfile
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from oncoreasoning_training import contracts as c
-from oncoreasoning_training.teacher import TeacherPool, server_urls, worker_count
+from oncoreasoning_training.teacher import TeacherPool, server_urls, worker_count, sampling_parameters
 from oncoreasoning_training.scheduling import run_tasks
 
 
@@ -380,11 +380,14 @@ def generate(args, tokenizer=None, call=None):
         raise ValueError("Teacher requests must have confirmed non-PHI inputs")
     tokenizer = tokenizer or c.load_chat_tokenizer(args.teacher_tokenizer or args.teacher_model)
     urls = server_urls(url=args.server_url) if not args.server_urls_file else []
+    sampling = sampling_parameters(args.teacher_model, thinking=args.teacher_thinking,
+                                   temperature=args.temperature)
     config = {"prepared": prepared, "teacher_model": args.teacher_model,
               "teacher_tokenizer": args.teacher_tokenizer or args.teacher_model,
               "tokenizer_fingerprint": c.tokenizer_fingerprint(tokenizer),
               "enable_thinking": args.teacher_thinking, "max_tokens": args.teacher_max_tokens,
-              "max_context": args.teacher_context, "temperature": args.temperature}
+              "max_context": args.teacher_context, "temperature": args.temperature,
+              "sampling": sampling}
     check_manifest(directory, "generation_manifest.json", config, transport_keys=("server_urls",))
     atomic_json(directory / "teacher_execution.json", {"server_urls": urls,
         "registry": str(args.server_urls_file) if args.server_urls_file else None,
@@ -407,7 +410,7 @@ def generate(args, tokenizer=None, call=None):
             c.validate_answer(record["answer"], task["category"])
             return
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
-                                               enable_thinking=args.teacher_thinking)
+                                               **sampling["extra_body"]["chat_template_kwargs"])
         if len(tokenizer.encode(prompt, add_special_tokens=False)) + args.teacher_max_tokens > args.teacher_context:
             raise ValueError(f"Teacher context exceeded for {task['id']}; no input was truncated")
         record = invoke_teacher(task, messages, call, attempts=args.attempts)
@@ -523,7 +526,8 @@ def parser():
     generate_parser.add_argument("--teacher-thinking", action=argparse.BooleanOptionalAction, default=True)
     generate_parser.add_argument("--teacher-max-tokens", type=int, default=16384)
     generate_parser.add_argument("--teacher-context", type=int, default=131072)
-    generate_parser.add_argument("--temperature", type=float, default=0.2)
+    generate_parser.add_argument("--temperature", type=float, default=None,
+                                 help="Default: model-family sampling, or 0.2 for unknown models")
     generate_parser.add_argument("--concurrency", type=int, default=0,
                                  help="Total in-flight ceiling; 0 follows the per-server limits")
     generate_parser.add_argument("--concurrency-per-server", type=int, default=96)

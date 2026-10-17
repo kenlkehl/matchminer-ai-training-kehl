@@ -957,11 +957,10 @@ def make_completion_work_fn(
             raise ValueError("Completion request_timeout must be positive.")
         extra = {
             "top_k": sampling.top_k,
+            "min_p": sampling.min_p,
             "repetition_penalty": sampling.repetition_penalty,
             "skip_special_tokens": False,
         }
-        if sampling.min_p > 0.0:
-            extra["min_p"] = sampling.min_p
 
         response = await asyncio.wait_for(
             client.completions.create(
