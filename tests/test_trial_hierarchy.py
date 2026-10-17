@@ -38,8 +38,11 @@ def test_default_cli_screens_then_runs_nine_fields_and_separate_boilerplate(
     assert len(state.calls) == 13
 
 
+@pytest.mark.parametrize(
+    "prompt_key", ["age", "definitions", "response", "boilerplate_response"]
+)
 def test_hierarchical_prompt_change_rejects_checkpoint_reuse_without_rescreening(
-    endpoint_run, monkeypatch
+    endpoint_run, monkeypatch, prompt_key
 ):
     import trial_hierarchy_runner
 
@@ -50,7 +53,7 @@ def test_hierarchical_prompt_change_rejects_checkpoint_reuse_without_rescreening
     monkeypatch.setattr(
         trial_hierarchy_runner,
         "prompt_bundle",
-        lambda: {**old, "age": old["age"] + "\nChange"},
+        lambda: {**old, prompt_key: old[prompt_key] + "\nChange"},
     )
     with pytest.raises(ValueError, match="fresh extraction checkpoints"):
         spaces.main()
@@ -96,6 +99,15 @@ def test_shared_core_and_prompts_are_identical_to_inference():
         root / "matchminer-ai-training-kehl/trial_hierarchy.py"
     ).read_bytes()
     assert load_prompts(inference / "prompts") == prompt_bundle()
+    assert (inference / "prompts/trial.user.primer.txt").read_bytes() == (
+        root / "matchminer-ai-training-kehl/trial_prompts/trial.user.primer.txt"
+    ).read_bytes()
+    assert (
+        spaces.PROMPT_HEADER
+        == (
+            root / "matchminer-ai-training-kehl/trial_prompts/trial.user.primer.txt"
+        ).read_text()
+    )
 
 
 class Tokenizer:
@@ -109,12 +121,16 @@ class Tokenizer:
 def test_per_node_context_budget_and_beam_effort():
     request = Hierarchy(0, "source", prompt_bundle()).requests()[0]
     first = _prepare_payload(request, Tokenizer(), 45000, 100000, beam=True)
+    bounded_context = len(first["prompt"].split()) + 512
     fallback = _prepare_payload(
-        request, Tokenizer(), 45000, 2000, beam=True, failures=2
+        request, Tokenizer(), 45000, bounded_context, beam=True, failures=2
     )
     assert first["chat_template_kwargs"] == {"reasoning_effort": "max"}
     assert fallback["chat_template_kwargs"] == {"reasoning_effort": "low"}
-    assert fallback["max_tokens"] == 2000 - len(fallback["prompt"].split()) - 256
+    assert (
+        fallback["max_tokens"]
+        == bounded_context - len(fallback["prompt"].split()) - 256
+    )
     with pytest.raises(ValueError, match="no output budget"):
         _prepare_payload(request, Tokenizer(), 100, 1)
 

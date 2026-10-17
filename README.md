@@ -494,8 +494,9 @@ criteria include relapsed/recurrent disease. New outputs use `Disease state allo
 not change the CSV columns. Treatment refractoriness belongs in treatment history,
 and boilerplate exclusions must correctly negate inclusion AND/OR conditions. A cross-repository contract test compares
 the complete rendered messages with the sibling inference-kehl checkout.
-These legacy messages are now used only with `--extraction-method one-shot`.
-The default hierarchical path is described below.
+These complete one-shot messages are used only with `--extraction-method one-shot`.
+The default hierarchical path below reuses the primer's full semantic instructions
+without its one-shot output formatting.
 Each `space_extraction/` directory records the rendered prompt fingerprint and
 model/sampling configuration in `extraction_manifest.json`. Changing them
 requires fresh extraction checkpoints; unchanged treatment-screening results
@@ -572,11 +573,23 @@ call extracts boilerplate with conditional exclusions kept conditional. Python
 assembles, deduplicates and numbers complete leaves into the existing CSV
 schemas (training numbering remains one-based).
 
-`trial_hierarchy.py` and `trial_prompts/trial.hierarchy.*.txt` mirror the
-inference-kehl engine and prompts. Their ownership is in inference; synchronize
-both copies after edits. Contract tests compare all files. The old monolithic
-primer does not influence the new path. Disease state remains concise; molecular
-assays including Oncotype/PAM50 go in biomarkers, response to specific prior
+Each field call starts with the hierarchical target-population goal, then provides
+the full trial text, all field definitions and examples from the authored primer,
+the current step's instructions, the current candidate's locked fields and scope,
+and finally the request for child spaces across the current field. Including all
+definitions makes field boundaries explicit (for example, HIV/hepatitis exclusions
+belong in boilerplate, not tumor biomarkers). Shared requirements stay in every
+child; cumulative exclusions must not become optional alternative branches.
+
+`trial_hierarchy.py`, `trial_prompts/trial.hierarchy.*.txt`, and
+`trial_prompts/trial.user.primer.txt` mirror inference-kehl. Ownership is in
+inference; synchronize both copies after edits. Contract tests compare all files
+and the embedded one-shot primer. Hierarchy loads the primer's complete semantic
+rules verbatim, leaving out one-shot output formatting. Edits to its definitions
+therefore affect the hierarchy; changed section boundaries fail explicitly
+instead of silently dropping guidance. The separate boilerplate call gets the
+same full definitions and a trial-wide scope. Disease state remains concise; molecular
+assay results go in biomarkers, response to specific prior
 treatment stays in treatment history, and all-comer cancer/histology enumeration
 is retained as field-specific work.
 
@@ -604,7 +617,8 @@ Successful nodes, validation-failure logs, and `hierarchy_traces/` remain
 available for review and resumption. `space_reasoning_and_output` contains the
 JSON node audit; `space_output_no_reasoning` is the code-assembled answer.
 
-Existing one-shot extraction manifests are incompatible. Use fresh extraction
+Existing one-shot and `trial-hierarchy-v1` extraction manifests are incompatible
+with this `trial-hierarchy-v2` prompt layout. Use fresh extraction
 checkpoints while retaining compatible treatment-screening checkpoints. This
 refactor does not clear data or restart a paused run. A single-branch trial
 requires ten logical calls, and branching trials require more; correctness still
