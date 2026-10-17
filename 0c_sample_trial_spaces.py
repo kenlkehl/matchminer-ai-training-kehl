@@ -6,7 +6,7 @@ print(trial_space_lineitems.info())
 
 def clean_trial_spaces(line_item_space_dataframe):
     search_list = ["Age", "Cancer type allowed", "Histology allowed", "Cancer burden allowed", "Prior treatment required", "Prior treatment excluded", "Biomarkers required", "Biomarkers excluded"]
-    return line_item_space_dataframe.this_space.apply(lambda x: all(term in x for term in search_list))
+    return line_item_space_dataframe.this_space.apply(lambda x: all(term in x.replace("Disease state allowed:", "Cancer burden allowed:") for term in search_list))
 
 
 trial_space_lineitems['good_space'] = clean_trial_spaces(trial_space_lineitems)

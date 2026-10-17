@@ -80,7 +80,8 @@ def test_resume_rejects_different_selection_and_untracked_old_shards(tmp_path):
         spaces.check_trial_selection_manifest(rows, tmp_path, 'all', 42)
 
 
-def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkeypatch):
+@pytest.mark.parametrize("state_label", ["Cancer burden allowed", "Disease state allowed"])
+def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkeypatch, state_label):
     import sys
     rows = pd.DataFrame([
         dict(nct_id='NCT00000001', study_type='INTERVENTIONAL', phases='["PHASE1", "PHASE2"]', trial_text='Example'),
@@ -102,7 +103,7 @@ def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkey
             out.to_parquet(path, index=False)
             return [str(path)]
         final = ('1. Age range allowed: 18+. Sex allowed: Any. Cancer type allowed: lung cancer. '
-                 'Histology allowed: NA. Cancer burden allowed: metastatic. '
+                 f'Histology allowed: NA. {state_label}: metastatic. '
                  'Prior treatment required: NA. Prior treatment excluded: NA. '
                  'Biomarkers required: NA. Biomarkers excluded: NA.')
         for name in ['space_text', 'space_output_no_reasoning', 'space_reasoning_and_output']:

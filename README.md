@@ -486,10 +486,13 @@ selections. Both final CSVs retain the study-type and phase columns for audit.
 
 The extraction primer and closing instructions in `0b_create_trial_spaces.py`
 are complete snapshots of inference-kehl's `trial.user.primer.txt` and
-`trial.user.question.txt`, synchronized on 2026-10-16. They require exhaustive
-cancer-type/histology spaces for broad solid-tumor or hematologic trials before
-a general fallback space, and explicit clarification of whether stage criteria
-include relapsed/recurrent disease. A cross-repository contract test compares
+`trial.user.question.txt`, synchronized on 2026-10-17. They require exhaustive
+cancer-type/histology spaces for broad solid-tumor or hematologic trials, specific
+common histologies instead of "any", and explicit clarification of whether stage
+criteria include relapsed/recurrent disease. New outputs use `Disease state allowed:`;
+0b and 0c also accept saved spaces using `Cancer burden allowed:`. These labels do
+not change the CSV columns. Treatment refractoriness belongs in treatment history,
+and boilerplate exclusions must correctly negate inclusion AND/OR conditions. A cross-repository contract test compares
 the complete rendered messages with the sibling inference-kehl checkout.
 Each `space_extraction/` directory records the rendered prompt fingerprint and
 model/sampling configuration in `extraction_manifest.json`. Changing them
