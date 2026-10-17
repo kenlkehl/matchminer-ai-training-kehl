@@ -823,7 +823,7 @@ def main():
     parser.add_argument("--tokenizer-model", default=None,
                         help="Tokenizer/model-family ID when --model is a served alias")
     parser.add_argument("--download-dir", default="/data1/ken/models")
-    parser.add_argument("--max-model-len", type=int, default=50000,
+    parser.add_argument("--max-model-len", type=int, default=100000,
                         help="Local model context or remote request context cap, including output tokens")
     parser.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     parser.add_argument("--gpu-mem-util", type=float, default=0.94)
@@ -833,7 +833,8 @@ def main():
     parser.add_argument("--min-p", type=float, default=None)
     parser.add_argument("--presence-penalty", type=float, default=None)
     parser.add_argument("--repetition-penalty", type=float, default=None)
-    parser.add_argument("--max-tokens", type=int, default=45000)
+    parser.add_argument("--max-tokens", type=int, default=50000,
+                        help="Maximum reasoning plus final-output tokens per extraction request")
     parser.add_argument("--batch-size", type=int, default=1000, help="Prompts per generate() call per instance")
     parser.add_argument("--seed", type=int, default=42, help="Seed for split assignment")
 

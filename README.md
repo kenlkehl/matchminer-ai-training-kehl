@@ -619,6 +619,9 @@ per trial, excluding retries) fail explicitly instead of truncating large trees.
 Context is recounted for each request/retry and output tokens are capped to fit
 `--max-model-len`; source text is never silently shortened. Exhausted or wholly
 pruned trials block final output rather than producing partial space lists.
+Extraction defaults to `--max-tokens 50000` (reasoning plus final answer) and
+`--max-model-len 100000`; explicit caller limits still override these defaults.
+The separate treatment-screening budget remains 8192 tokens.
 Successful nodes, validation-failure logs, and `hierarchy_traces/` remain
 available for review and resumption. `space_reasoning_and_output` contains the
 JSON node audit; `space_output_no_reasoning` is the code-assembled answer.

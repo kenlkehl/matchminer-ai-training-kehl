@@ -100,7 +100,7 @@ def endpoint_run(tmp_path, monkeypatch, request):
             if state.fail and 'DIAGNOSTIC' in text:
                 final = 'invalid response'
         else:
-            assert kwargs['max_tokens'] == 45000
+            assert kwargs['max_tokens'] == 50000
             assert len([c for c in state.calls if c[0] == 'screen']) >= 3
             assert 'ANTI_CANCER' in text
             if 'CURRENT FIELD:' in text:
