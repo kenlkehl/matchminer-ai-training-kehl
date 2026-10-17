@@ -11,10 +11,12 @@ from trial_hierarchy import (
     VERSION,
     Completion,
     Hierarchy,
+    ReadyHierarchy,
     ResponseCache,
     load_prompts,
     parse_response,
     retry_messages,
+    run_ready_hierarchies,
 )
 
 
@@ -75,7 +77,9 @@ def _states(trials, args):
 def _save_results(states, trials, directory, output_name):
     directory = Path(directory)
     errors = {
-        str(trials.iloc[s.trial_index].nct_id): s.error for s in states if s.error
+        str(row.nct_id): state.error
+        for state, row in zip(states, trials.itertuples(), strict=True)
+        if state.error
     }
     status = {
         "method": VERSION,
@@ -131,10 +135,10 @@ def remote_main(args, trials, reasoning_parser):
     from remote_vllm_pool import (
         CompletionSampling,
         OutputValidationError,
+        RequestSession,
         build_registry_from_args,
         make_chat_completion_work_fn,
         make_completion_work_fn,
-        run_pool,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -214,82 +218,70 @@ def remote_main(args, trials, reasoning_parser):
         )  # Persist immediately, without waiting for a full wave/shard.
         return result
 
-    async def run_batch(states, batch):
-        for stage in range(10):
-            groups = [s.requests() for s in states]
-            requests = [r for group in groups for r in group]
-            if not requests:
-                break
-            results = {}
-            work = []
-            for i, request in enumerate(requests):
-                cached = cache.get(request)
-                if cached is not None:
-                    results[i] = cached
-                else:
-                    work.append(
-                        (
-                            i,
-                            {
-                                "request": request,
-                                "nct_id": str(batch.iloc[request.trial_index].nct_id),
-                            },
-                        )
-                    )
+    async def run():
+        paths = {}
+        prompts = prompt_bundle()
+        states = (
+            ReadyHierarchy(
+                i,
+                str(row.trial_text),
+                prompts,
+                max_nodes=getattr(args, "hierarchy_max_nodes", 4096),
+                max_calls=getattr(args, "hierarchy_max_calls", 20000),
+            )
+            for i, row in enumerate(trials.itertuples())
+        )
+
+        def finished(state):
+            index = state.trial_index
+            paths[index] = _save_results(
+                [state],
+                trials.iloc[[index]],
+                args.work_dir,
+                f"remote_output_shard_{index:06d}.parquet",
+            )[0]
             print(
-                f"[hierarchy] {requests[0].field_name}: {len(requests)} parents, {len(work)} new requests",
+                f"[hierarchy] completed trial {index + 1}/{len(trials)}; "
+                f"{state.calls} nodes",
                 flush=True,
             )
 
-            def writer(payload, shard_idx, results=results):
-                results.update(payload)
+        async with RequestSession(
+            registry, work_fn, max_attempts=int(getattr(args, "max_attempts", 4))
+        ) as session:
+            entries = await registry.active_entries()
+            capacity = max(1, len(entries)) * int(
+                getattr(args, "max_concurrent_per_server", 100)
+            )
+            capacity_limit = getattr(registry, "request_capacity", lambda: capacity)
 
-            if work:
-                await run_pool(
-                    work_items=work,
-                    work_fn=work_fn,
-                    registry=registry,
-                    shard_writer=writer,
-                    starting_shard_idx=0,
-                    results_per_shard=int(getattr(args, "results_per_shard", 200)),
-                    max_attempts=int(getattr(args, "max_attempts", 4)),
+            async def complete(request):
+                cached = cache.get(request)
+                if cached is not None:
+                    return cached
+                result = await session.submit(
+                    {
+                        "request": request,
+                        "nct_id": str(trials.iloc[request.trial_index].nct_id),
+                    }
                 )
-            offset = 0
-            for state, group in zip(states, groups, strict=True):
-                answers = [results[i] for i in range(offset, offset + len(group))]
-                offset += len(group)
-                if group:
-                    state.accept(
-                        group,
-                        [
-                            a
-                            if isinstance(a, Completion)
-                            else Completion(str(a), finish_reason="error")
-                            for a in answers
-                        ],
-                    )
+                return (
+                    result
+                    if isinstance(result, Completion)
+                    else Completion(str(result), finish_reason="error")
+                )
 
-    async def run():
-        paths = []
-        try:
-            trial_batch_size = int(getattr(args, "hierarchy_trial_batch_size", 32))
-            for offset in range(0, len(trials), trial_batch_size):
-                batch = trials.iloc[offset : offset + trial_batch_size].reset_index(
-                    drop=True
-                )
-                states = _states(batch, args)
-                await run_batch(states, batch)
-                paths.extend(
-                    _save_results(
-                        states,
-                        batch,
-                        args.work_dir,
-                        f"remote_output_shard_{offset // trial_batch_size:06d}.parquet",
-                    )
-                )
-        finally:
-            await registry.stop()
-        return paths
+            await run_ready_hierarchies(
+                states,
+                complete,
+                concurrency=capacity_limit,
+                active_trials=lambda: max(
+                    capacity_limit(),
+                    int(getattr(args, "hierarchy_trial_batch_size", 32)),
+                ),
+                on_complete=finished,
+            )
+        return [paths[index] for index in sorted(paths)]
 
     return asyncio.run(run())
 

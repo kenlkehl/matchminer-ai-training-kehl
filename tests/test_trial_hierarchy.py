@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from tests.test_trial_treatment_screening import FakeRequestSession, spaces
 from tests.test_trial_treatment_screening import endpoint_run as screening_endpoint_run
-from tests.test_trial_treatment_screening import spaces
 from trial_hierarchy import Completion, Hierarchy, load_prompts
 from trial_hierarchy_runner import _prepare_payload, local_extract, prompt_bundle
 
@@ -26,7 +26,10 @@ def test_default_cli_screens_then_runs_nine_fields_and_separate_boilerplate(
     spaces.main()
     assert [c[0] for c in state.calls] == ["screen"] * 3 + ["extract"] * 10
     assert "CURRENT FIELD: age" in state.calls[3][1]
-    assert "Extract general exclusion criteria" in state.calls[-1][1]
+    assert (
+        sum("Extract general exclusion criteria" in call[1] for call in state.calls)
+        == 1
+    )
     result = pd.read_csv(path / "spaces.csv")
     assert len(result) == 1
     assert result.space_number.tolist() == [1]
@@ -312,6 +315,7 @@ def test_remote_validation_feedback_preserves_concurrency_classification_and_res
         pool, "build_registry_from_args", lambda args: SimpleNamespace(stop=stop)
     )
     monkeypatch.setattr(pool, "run_pool", run_pool)
+    monkeypatch.setattr(pool, "RequestSession", FakeRequestSession)
     args = SimpleNamespace(
         model="nemotron",
         tokenizer_model="cached",

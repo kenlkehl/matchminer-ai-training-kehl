@@ -11,6 +11,32 @@ from trial_treatment_screening import parse_screening_output
 spaces = load_script('screened_trial_spaces', '0b_create_trial_spaces.py')
 
 
+class FakeRequestSession:
+    """Adapt these transport fixtures to the persistent per-request interface."""
+
+    def __init__(self, registry, work_fn, **kwargs):
+        self.registry, self.work_fn = registry, work_fn
+
+    async def __aenter__(self):
+        async def entries():
+            return [None]
+        self.registry.active_entries = entries
+        return self
+
+    async def submit(self, request):
+        import remote_vllm_pool as pool
+        results = []
+        await pool.run_pool(
+            work_items=[(0, request)], work_fn=self.work_fn,
+            registry=self.registry, shard_writer=lambda rows, _: results.extend(rows),
+            starting_shard_idx=0,
+        )
+        return results[0][1]
+
+    async def __aexit__(self, *exc):
+        await self.registry.stop()
+
+
 @pytest.mark.parametrize('final,finish', [
     ('{}', 'stop'), ('[]', 'stop'), ('not JSON', 'stop'),
     ('{"is_cancer_treatment_trial": "false", "rationale": "Supportive"}', 'stop'),
@@ -112,6 +138,7 @@ def endpoint_run(tmp_path, monkeypatch, request):
 
     monkeypatch.setattr(pool, 'build_registry_from_args', registry)
     monkeypatch.setattr(pool, 'run_pool', run_pool)
+    monkeypatch.setattr(pool, 'RequestSession', FakeRequestSession)
     argv = ['0b', '--input', str(source), '--work-dir', str(tmp_path/'work'),
             '--extraction-method', 'one-shot',
             '--output-trials', str(tmp_path/'out.csv'), '--output-spaces', str(tmp_path/'spaces.csv'),

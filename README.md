@@ -593,15 +593,18 @@ assay results go in biomarkers, response to specific prior
 treatment stays in treatment history, and all-comer cancer/histology enumeration
 is retained as field-specific work.
 
-Remote requests use the existing adaptive pool, model sampling and reasoning
-parsers. Independent parents run concurrently; a successful parent response is
-checkpointed immediately in `space_extraction/hierarchy_nodes/`. Resume reuses
-these nodes and only calls the model for missing nodes. Local GPU workers keep
-their loaded model resident across all field waves and use the same contract.
-Remote extraction expands `--hierarchy-trial-batch-size` trials together
-(default 32), bounding the live frontier while retaining the same adaptive
-server pool between batches. Increase this setting when a larger pool needs
-more work to fill its available slots.
+Remote requests use one persistent adaptive pool, with the existing model
+sampling, reasoning parsers, retries and per-server concurrency limits. A
+validated parent is checkpointed immediately and releases its children without
+waiting for siblings or other trials. Independent field levels and trials share
+one ready queue; boilerplate can run from the start. Completed trials immediately
+admit replacements from a rolling window. `--hierarchy-trial-batch-size`
+(default 32) now sets the minimum active trial window, enlarged to at least total
+endpoint capacity, rather than a serial batch barrier. One completed-trial shard
+is saved per trial, with stable input-order merging. Resume reuses successful
+nodes in `space_extraction/hierarchy_nodes/`; completion order cannot change
+final numbering. Local GPU workers retain synchronous batches and keep their
+loaded model resident across field waves.
 Both paths validate JSON and finish reasons, return validation errors to the
 model, and alternate thinking after two invalid responses (Beam alternates
 max/low effort). Remote malformed-output errors remain neutral to concurrency.

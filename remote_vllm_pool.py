@@ -292,6 +292,13 @@ class DynamicServerRegistry:
         async with self._lock:
             return [e for e in self._entries.values() if not e.retired]
 
+    def request_capacity(self) -> int:
+        """Maximum active slots; read on the registry's owning event loop."""
+        return max(self._max_concurrent, sum(
+            entry.semaphore.max_limit for entry in self._entries.values()
+            if not entry.retired
+        ))
+
     async def _read_servers_file(self) -> Optional[List[dict]]:
         try:
             with open(self._servers_file, "r") as fh:
@@ -579,6 +586,9 @@ async def _server_loop(
                 break
 
             item_id, payload, attempt = item
+            if stop_event.is_set():
+                await entry.semaphore.release(success=None)
+                break
             task = asyncio.create_task(
                 _dispatch_one(
                     entry, item_id, payload, attempt,
@@ -710,6 +720,85 @@ async def _status_logger(
 
 def _default_error_placeholder(payload: Any, err: Exception) -> Any:
     return f"ERROR: {err!r}"
+
+
+class RequestSession:
+    """Persistent adaptive pool for a dynamically expanding dependency graph.
+
+    Uses the same dispatch, retry and per-server semaphores as run_pool, but
+    delivers each result immediately instead of waiting for a shard or batch.
+    The caller persists validated nodes before releasing their children.
+    """
+
+    def __init__(self, registry, work_fn, *, max_attempts=4):
+        self.registry, self.work_fn = registry, work_fn
+        self.max_attempts = max_attempts
+        self.queue = asyncio.Queue()
+        self.stop_event = asyncio.Event()
+        self.futures = {}
+        self.dispatch_tasks = set()
+        self.submitted = self.completed = 0
+
+    async def __aenter__(self):
+        await self.registry.start()
+        self.supervisor = asyncio.create_task(_registry_supervisor(
+            self.registry, work_queue=self.queue, work_fn=self._tracked_work,
+            results=self, max_attempts=self.max_attempts,
+            error_placeholder=_default_error_placeholder, stop_event=self.stop_event,
+        ))
+        self.logger = asyncio.create_task(self._log_progress())
+        return self
+
+    async def _tracked_work(self, client, payload):
+        task = asyncio.current_task()
+        self.dispatch_tasks.add(task)
+        task.add_done_callback(self.dispatch_tasks.discard)
+        return await self.work_fn(client, payload)
+
+    async def submit(self, payload):
+        item_id = self.submitted
+        self.submitted += 1
+        future = asyncio.get_running_loop().create_future()
+        self.futures[item_id] = future
+        self.queue.put_nowait((item_id, payload, 0))
+        return await future
+
+    async def add(self, item_id, result):
+        future = self.futures.pop(item_id, None)
+        if future is not None:
+            self.completed += 1
+            if not future.done():
+                future.set_result(result)
+
+    async def _log_progress(self):
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                entries = await self.registry.active_entries()
+                slots = sum(e.semaphore.in_flight for e in entries)
+                print(f"[pool] graph completed={self.completed}/{self.submitted} "
+                      f"queued={self.queue.qsize()} in_flight={slots}", flush=True)
+
+    async def __aexit__(self, *exc):
+        self.stop_event.set()
+        if exc[0] is not None:
+            tasks = list(self.dispatch_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.supervisor.cancel()
+        try:
+            await asyncio.wait_for(self.supervisor, timeout=30)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            self.supervisor.cancel()
+            await asyncio.gather(self.supervisor, return_exceptions=True)
+        finally:
+            self.logger.cancel()
+            await asyncio.gather(self.logger, return_exceptions=True)
+            for future in self.futures.values():
+                future.cancel()
+            await self.registry.stop()
 
 
 async def run_pool(

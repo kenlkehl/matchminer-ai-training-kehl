@@ -809,13 +809,13 @@ def main():
                         help="Reasoning plus final-output token budget for the separate treatment screen")
     parser.add_argument("--output-spaces", default="../data/no_phi/trial_space_lineitems.csv")
     parser.add_argument("--extraction-method", choices=["hierarchical", "one-shot"], default="hierarchical",
-                        help="Default: one field per parent branch, then separate boilerplate extraction")
+                        help="Default: one field per parent branch, plus independent boilerplate extraction")
     parser.add_argument("--hierarchy-max-nodes", type=int, default=4096,
                         help="Fail rather than truncate if one trial exceeds this number of branches")
     parser.add_argument("--hierarchy-max-calls", type=int, default=20000,
                         help="Maximum logical field/boilerplate requests per trial, excluding retries")
     parser.add_argument("--hierarchy-trial-batch-size", type=int, default=32,
-                        help="Remote trials expanded together, bounding the live branch frontier")
+                        help="Minimum rolling active-trial window; enlarged to endpoint concurrency")
     parser.add_argument("--work-dir", default="../data/no_phi/trial_space_shards", help="Directory for shard inputs/outputs")
     parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs, e.g. 0,1,2,3 (required for local mode; omit when using --server_urls / --server_urls_file)")
     parser.add_argument("--gpus-per-instance", type=int, default=1, help="Tensor-parallel GPUs per instance (set >1 for very large models)")
