@@ -254,7 +254,8 @@ def worker_process(
     out_df.to_parquet(shard_out_path, index=False)
 
 
-def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screening=False):
+def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screening=False,
+                                  max_model_len=None, always_reasons=False):
     """Give remote retries validation feedback, with per-item thinking fallback.
 
     The pool owns the attempt budget and requeues the same payload. Retain only
@@ -273,8 +274,21 @@ def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screeni
     async def work_fn(client, payload):
         failures = payload.get("validation_failures", 0)
         thinking = payload.get("enable_thinking", True)
+        request = dict(payload)
+        if max_model_len is not None:
+            # Recount every attempt because validation feedback changes the prompt.
+            # Reserve a small margin for server/template differences; never truncate
+            # the source trial to make a request fit.
+            prompt_tokens = len(tokenizer.encode(payload["prompt"], add_special_tokens=False))
+            available = max_model_len - prompt_tokens - 256
+            if available <= 0:
+                raise OutputValidationError(
+                    f"Trial {payload['nct_id']} needs {prompt_tokens} prompt tokens; "
+                    f"context limit {max_model_len} leaves no output budget"
+                )
+            request["max_tokens"] = min(int(payload["max_tokens"]), available)
         reasoning, final, metadata = await completion_fn(
-            client, {**payload, "enable_thinking": thinking,
+            client, {**request, "enable_thinking": thinking,
                      "include_completion_metadata": True, "include_raw_text": True}
         )
         try:
@@ -293,11 +307,14 @@ def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screeni
             next_thinking = not thinking if failures % 2 == 0 else thinking
             audit(payload, event="validation_failure", failure_number=failures,
                   enable_thinking=thinking, next_enable_thinking=next_thinking,
+                  **({"reasoning_effort": "max" if thinking else "low",
+                      "next_reasoning_effort": "max" if next_thinking else "low"}
+                     if always_reasons else {}),
                   error=str(exc), finish_reason=metadata["finish_reason"],
                   reasoning=reasoning, final=final, raw_text=metadata.get("raw_text"))
             messages = (build_screening_messages(payload["trial_text"]) if screening
                         else build_messages(payload["trial_text"]))
-            if not next_thinking and messages[0]["content"].strip() == "Reasoning: high.":
+            if not always_reasons and not next_thinking and messages[0]["content"].strip() == "Reasoning: high.":
                 messages[0] = {"role": "system", "content": "Return the requested final answer directly."}
             # Bounded feedback prevents large extraction responses from making
             # successive retries exceed the original context budget.
@@ -315,16 +332,22 @@ def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screeni
                 feedback += "Return the complete numbered trial spaces followed by 'Boilerplate exclusions:' and the exclusions."
             messages += [{"role": "assistant", "content": rejected},
                          {"role": "user", "content": feedback}]
+            template_kwargs = ({"reasoning_effort": "max" if next_thinking else "low"}
+                               if always_reasons else {"enable_thinking": next_thinking})
+            if "messages" in payload:
+                payload.update(messages=messages, chat_template_kwargs=template_kwargs)
             payload.update(
                 validation_failures=failures, enable_thinking=next_thinking,
                 prompt=tokenizer.apply_chat_template(
                     conversation=messages, add_generation_prompt=True,
-                    tokenize=False, enable_thinking=next_thinking,
+                    tokenize=False, **template_kwargs,
                 ),
             )
             raise
         if failures:
             audit(payload, event="recovered", failure_number=failures,
+                  **({"reasoning_effort": "max" if thinking else "low"}
+                     if always_reasons else {}),
                   enable_thinking=thinking, finish_reason=metadata["finish_reason"])
         return result
 
@@ -342,6 +365,7 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     from remote_vllm_pool import (
         CompletionSampling,
         make_completion_work_fn,
+        make_chat_completion_work_fn,
         run_pool,
         build_registry_from_args,
     )
@@ -358,12 +382,16 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     trials["_work_id"] = np.arange(len(trials), dtype=np.int64)
     trial_texts = trials["trial_text"].astype(str).tolist()
     print(f"[remote] building {len(trial_texts)} prompts...")
+    # Beam's raw parser requires a specialized local vLLM build. Let the serving
+    # instance parse its own output; keep local rendering for token accounting.
+    use_chat = reasoning_parser == "beam"
+    template_kwargs = {"reasoning_effort": "max"} if use_chat else {"enable_thinking": True}
     prompts = [
         tokenizer.apply_chat_template(
             conversation=(build_screening_messages(t) if screening else build_messages(t)),
             add_generation_prompt=True,
             tokenize=False,
-            enable_thinking=True,
+            **template_kwargs,
         )
         for t in trial_texts
     ]
@@ -398,7 +426,10 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     work_items = [
         (int(trials.iloc[i]["_work_id"]),
          {"prompt": prompts[i], "max_tokens": int(args.max_tokens),
-          "trial_text": trial_texts[i], "nct_id": str(trials.iloc[i]["nct_id"])})
+          "trial_text": trial_texts[i], "nct_id": str(trials.iloc[i]["nct_id"]),
+          **({"messages": (build_screening_messages(trial_texts[i]) if screening
+                           else build_messages(trial_texts[i])),
+              "chat_template_kwargs": template_kwargs} if use_chat else {})})
         for i in range(len(trials))
         if int(trials.iloc[i]["_work_id"]) not in done_ids
     ]
@@ -418,10 +449,12 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
         repetition_penalty=float(args.repetition_penalty),
         request_timeout=float(getattr(args, "request_timeout", 600.0)),
     )
-    completion_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
+    completion_fn = (make_chat_completion_work_fn(sampling) if use_chat else
+                     make_completion_work_fn(sampling, reasoning_parser, tokenizer))
 
     work_fn = make_trial_completion_work_fn(
         completion_fn, tokenizer, args.work_dir, screening=screening,
+        max_model_len=args.max_model_len, always_reasons=use_chat,
     )
     registry = build_registry_from_args(args)
 
@@ -550,6 +583,8 @@ def check_extraction_manifest(args, reasoning_parser):
         "messages_sha256": hashlib.sha256(messages.encode()).hexdigest(),
         "model": args.model, "reasoning_parser": reasoning_parser,
         "enable_thinking": True,
+        "max_model_len": args.max_model_len,
+        "transport": "chat_completions" if reasoning_parser == "beam" else "completions",
         "sampling": {key: getattr(args, key) for key in (
             "temperature", "top_p", "top_k", "min_p", "presence_penalty",
             "repetition_penalty", "max_tokens")},
@@ -734,7 +769,8 @@ def main():
     parser.add_argument("--tokenizer-model", default=None,
                         help="Tokenizer/model-family ID when --model is a served alias")
     parser.add_argument("--download-dir", default="/data1/ken/models")
-    parser.add_argument("--max-model-len", type=int, default=50000)
+    parser.add_argument("--max-model-len", type=int, default=50000,
+                        help="Local model context or remote request context cap, including output tokens")
     parser.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
     parser.add_argument("--gpu-mem-util", type=float, default=0.94)
     parser.add_argument("--temperature", type=float, default=None)

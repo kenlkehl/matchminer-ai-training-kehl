@@ -1037,6 +1037,45 @@ def make_completion_work_fn(
 # Convenience constructor
 # -------------------------
 
+def make_chat_completion_work_fn(sampling: CompletionSampling) -> WorkFn:
+    """Use the server's chat/reasoning parser, without a matching local vLLM build.
+
+    Accept the same sampling and metadata contract as raw completions, with
+    ``messages`` and optional ``chat_template_kwargs`` in the work payload.
+    Raw token text is unavailable on this endpoint; reasoning is saved separately.
+    """
+    async def work_fn(client: AsyncOpenAI, payload: dict):
+        timeout = float(payload.get("request_timeout", sampling.request_timeout))
+        extra = dict(top_k=sampling.top_k, min_p=sampling.min_p,
+                     repetition_penalty=sampling.repetition_penalty)
+        if payload.get("chat_template_kwargs"):
+            extra["chat_template_kwargs"] = payload["chat_template_kwargs"]
+        response = await asyncio.wait_for(client.chat.completions.create(
+            model=sampling.model, messages=payload["messages"],
+            max_tokens=int(payload["max_tokens"]),
+            temperature=float(payload.get("temperature", sampling.temperature)),
+            top_p=float(payload.get("top_p", sampling.top_p)),
+            presence_penalty=sampling.presence_penalty,
+            extra_body=extra, timeout=timeout,
+        ), timeout=timeout)
+        if not response.choices:
+            raise RuntimeError("Chat endpoint returned no choices.")
+        choice = response.choices[0]
+        message = choice.message
+        reasoning = (getattr(message, "reasoning", None)
+                     or getattr(message, "reasoning_content", None) or "").strip()
+        answer = (message.content or "").strip()
+        if payload.get("include_completion_metadata"):
+            return reasoning, answer, {
+                "finish_reason": str(choice.finish_reason or ""),
+                "raw_text": None,
+                "transport": "chat_completions",
+            }
+        return reasoning, answer
+
+    return work_fn
+
+
 def build_registry_from_args(args) -> DynamicServerRegistry:
     """Build a DynamicServerRegistry from the standard remote CLI flags."""
     if not getattr(args, "server_urls", None) and not getattr(args, "server_urls_file", None):

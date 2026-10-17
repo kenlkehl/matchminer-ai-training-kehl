@@ -42,6 +42,9 @@ def endpoint_run(tmp_path, monkeypatch, request):
     state = SimpleNamespace(calls=[], reject_all=False, fail=False, registries=[], tokenizers=[])
 
     class Tokenizer:
+        def encode(self, text, **kwargs):
+            return text.split()
+
         def apply_chat_template(self, conversation, **kwargs):
             assert kwargs['enable_thinking'] is True
             return json.dumps(conversation)

@@ -436,6 +436,11 @@ Both reasoning and tool-call parsers resolve to `beam`. Explicit sampling
 overrides still win, and no task output budget is changed. Beam always reasons;
 its template uses `reasoning_effort`, not Gemma's boolean thinking switch.
 Use a vLLM build with Beam support when serving or parsing raw local completions.
+Remote `0b` uses Beam's server-side chat parser, so the client does not need that
+specialized vLLM build. It saves the returned reasoning separately from the answer.
+`--max-model-len` also caps remote requests: each attempt counts its rendered input,
+reserves 256 tokens, and reduces the output allowance if necessary. Source trial
+text is never truncated. Set this flag to the endpoint's actual context limit.
 These settings are shared from the sibling inference package and were verified
 on 2026-10-16; no existing server or saved run is switched automatically.
 
@@ -535,7 +540,8 @@ instructions. JSON syntax errors include the decoder's location and explanation.
 Thinking is enabled initially; after every two invalid responses for one trial,
 the next retry switches thinking on/off. The completion parser receives the same
 thinking mode as the rendered prompt. Transport failures do not advance this
-counter. Only the latest answer (up to 12,000 characters) enters retry context;
+counter. Beam always reasons, so its retries alternate max/low reasoning effort
+instead of toggling thinking off. Only the latest answer (up to 12,000 characters) enters retry context;
 complete rejected outputs, reasoning, finish reasons, errors, mode changes, and
 recovery events are recorded in each stage's `validation_failures.jsonl`.
 The same retry feedback applies to truncated or malformed trial-space outputs.

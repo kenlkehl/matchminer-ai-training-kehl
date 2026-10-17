@@ -97,6 +97,8 @@ def check_screening_manifest(args, reasoning_parser, work_dir):
         "prompt_sha256": hashlib.sha256(SCREENING_PROMPT.encode()).hexdigest(),
         "model": args.model, "reasoning_parser": reasoning_parser,
         "enable_thinking": True,
+        "max_model_len": args.max_model_len,
+        "transport": "chat_completions" if reasoning_parser == "beam" else "completions",
         "sampling": {key: getattr(args, key) for key in (
             "temperature", "top_p", "top_k", "min_p", "presence_penalty",
             "repetition_penalty", "screening_max_tokens")},
