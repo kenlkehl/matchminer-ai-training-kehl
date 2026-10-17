@@ -790,7 +790,12 @@ class RequestSession:
             self.supervisor.cancel()
         try:
             await asyncio.wait_for(self.supervisor, timeout=30)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except asyncio.CancelledError:
+            self.supervisor.cancel()
+            await asyncio.gather(self.supervisor, return_exceptions=True)
+            if exc[0] is None:
+                raise
+        except asyncio.TimeoutError:
             self.supervisor.cancel()
             await asyncio.gather(self.supervisor, return_exceptions=True)
         finally:

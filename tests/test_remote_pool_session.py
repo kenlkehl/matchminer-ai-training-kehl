@@ -89,3 +89,33 @@ def test_session_cancellation_releases_requests_and_clients():
         assert registry.entry.semaphore.in_flight == 0
 
     asyncio.run(scenario())
+
+
+def test_cancellation_during_normal_session_shutdown_is_not_swallowed():
+    async def scenario():
+        waiting, exiting = asyncio.Event(), asyncio.Event()
+
+        class SlowRegistry(Registry):
+            async def wait_for_change(self, timeout):
+                waiting.set()
+                await asyncio.Event().wait()
+
+        registry = SlowRegistry()
+
+        async def work(client, payload):
+            return payload
+
+        async def run():
+            async with RequestSession(registry, work):
+                await waiting.wait()
+                exiting.set()
+
+        task = asyncio.create_task(run())
+        await exiting.wait()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+        assert registry.stopped
+
+    asyncio.run(scenario())
