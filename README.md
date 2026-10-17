@@ -575,8 +575,11 @@ schemas (training numbering remains one-based).
 
 Each field call starts with the hierarchical target-population goal, then provides
 the full trial text, all field definitions and examples from the authored primer,
-the current step's instructions, the current candidate's locked fields and scope,
-and finally the request for child spaces across the current field. Including all
+the current candidate's locked fields and scope, and the request for child spaces
+across the current field. The closing step instructions include
+`REMINDER OF FIELD-SPECIFIC RULES:`, repeating that field's definition and
+valid/invalid examples verbatim from the primer (age reuses its existing step
+instructions because the primer has no separate age section). Including all
 definitions makes field boundaries explicit (for example, HIV/hepatitis exclusions
 belong in boilerplate, not tumor biomarkers). Shared requirements stay in every
 child; cumulative exclusions must not become optional alternative branches.
