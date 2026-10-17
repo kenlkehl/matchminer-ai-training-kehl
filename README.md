@@ -563,7 +563,7 @@ screening configuration.
 ### Hierarchical trial-space extraction
 
 0b now defaults to `--extraction-method hierarchical`. After the unchanged
-treatment screen, it branches through age, sex, cancer primary site, histology,
+treatment screen, it branches through age, cancer primary site, sex, histology,
 disease state, required treatment, excluded treatment, required biomarkers and
 excluded biomarkers, in that order. Each request receives the whole trial text,
 one parent's fixed fields and its internal cohort context, and returns only
@@ -623,8 +623,10 @@ Successful nodes, validation-failure logs, and `hierarchy_traces/` remain
 available for review and resumption. `space_reasoning_and_output` contains the
 JSON node audit; `space_output_no_reasoning` is the code-assembled answer.
 
-Existing one-shot and `trial-hierarchy-v1` extraction manifests are incompatible
-with this `trial-hierarchy-v2` prompt layout. Use fresh extraction
+Primary site is fixed before the sex call; final space text retains the established
+age, sex, primary-site label order. Existing one-shot, `trial-hierarchy-v1` and
+`trial-hierarchy-v2` extraction manifests are incompatible with this
+`trial-hierarchy-v3` ordering. Use fresh extraction
 checkpoints while retaining compatible treatment-screening checkpoints. This
 refactor does not clear data or restart a paused run. A single-branch trial
 requires ten logical calls, and branching trials require more; correctness still
