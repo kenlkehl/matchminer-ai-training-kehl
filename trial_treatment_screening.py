@@ -90,6 +90,62 @@ def screening_record(reasoning, final, finish_reason):
             "treatment_screen_status": "ok"}
 
 
+def load_screening_results(trials, input_path, work_dir):
+    """Reuse a complete audit against identical selected inputs, with independent extraction settings."""
+    import pandas as pd
+
+    source = Path(input_path)
+    audit = pd.read_csv(source)
+    required = set(trials.columns) | {
+        "is_cancer_treatment_trial", "treatment_screen_output",
+        "treatment_screen_finish_reason", "treatment_screen_status", "treatment_screen_model",
+    }
+    missing = required - set(audit.columns)
+    if missing:
+        raise ValueError(f"Saved screening results lack required columns: {sorted(missing)}")
+    if (audit.nct_id.isna().any() or not audit.nct_id.is_unique
+            or set(audit.nct_id) != set(trials.nct_id)):
+        raise ValueError("Saved screening results must cover every selected trial exactly once")
+    audit = audit.set_index("nct_id", drop=False).loc[trials.nct_id].reset_index(drop=True)
+    try:
+        pd.testing.assert_frame_equal(
+            audit[trials.columns], trials.reset_index(drop=True),
+            check_dtype=False, check_exact=True,
+        )
+    except AssertionError as exc:
+        raise ValueError("Saved screening inputs do not match the selected trial data and splits") from exc
+    if not audit.treatment_screen_status.eq("ok").all():
+        raise ValueError("Saved screening is incomplete; all trials must have status 'ok'")
+    models = audit.treatment_screen_model.astype("string").str.strip()
+    if models.isna().any() or models.eq("").any():
+        raise ValueError("Saved screening results must retain the screening model for every trial")
+    decisions = [parse_screening_output(row.treatment_screen_output, row.treatment_screen_finish_reason)
+                 for row in audit.itertuples()]
+    if not pd.api.types.is_bool_dtype(audit.is_cancer_treatment_trial.dtype):
+        raise ValueError("Saved screening decisions must be boolean")
+    if audit.is_cancer_treatment_trial.tolist() != [d["is_cancer_treatment_trial"] for d in decisions]:
+        raise ValueError("Saved screening decisions disagree with the validated model responses")
+
+    digest = hashlib.sha256()
+    with source.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    identity = {"input_path": str(source.resolve()), "sha256": digest.hexdigest(),
+                "rows": len(audit), "screening_models": sorted(models.unique().tolist())}
+    path = Path(work_dir) / "screening_input_manifest.json"
+    if path.exists():
+        if json.loads(path.read_text()) != identity:
+            raise ValueError("Saved screening results changed; use a new --work-dir")
+    else:
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(identity, indent=2))
+        temporary.replace(path)
+    selected = trials.loc[audit.is_cancer_treatment_trial.to_numpy()].copy()
+    print(f"[screen] reused {len(audit)} validated decisions from {source}; "
+          f"retained {len(selected)} trials; screening models: {identity['screening_models']}")
+    return selected
+
+
 def check_screening_manifest(args, reasoning_parser, work_dir):
     """Input identity is guarded by 0b's parent trial-selection manifest."""
     path = Path(work_dir) / "screening_manifest.json"

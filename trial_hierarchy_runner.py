@@ -74,7 +74,7 @@ def _states(trials, args):
     ]
 
 
-def _save_results(states, trials, directory, output_name):
+def _save_results(states, trials, directory, output_name, *, raise_errors=True):
     directory = Path(directory)
     errors = {
         str(row.nct_id): state.error
@@ -119,6 +119,8 @@ def _save_results(states, trials, directory, output_name):
             }
         )
     if errors:
+        if not raise_errors:
+            return []
         raise RuntimeError(
             f"Hierarchical extraction incomplete: {errors}. Successful nodes are checkpointed; no partial final CSVs were written."
         )
@@ -220,6 +222,7 @@ def remote_main(args, trials, reasoning_parser):
 
     async def run():
         paths = {}
+        errors = {}
         prompts = prompt_bundle()
         states = (
             ReadyHierarchy(
@@ -234,12 +237,23 @@ def remote_main(args, trials, reasoning_parser):
 
         def finished(state):
             index = state.trial_index
-            paths[index] = _save_results(
+            saved = _save_results(
                 [state],
                 trials.iloc[[index]],
                 args.work_dir,
                 f"remote_output_shard_{index:06d}.parquet",
-            )[0]
+                raise_errors=False,
+            )
+            if state.error:
+                errors[str(trials.iloc[index].nct_id)] = state.error
+                failure_path = Path(args.work_dir) / "extraction_failures.json"
+                temporary = failure_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(errors, indent=2))
+                temporary.replace(failure_path)
+                print(f"[hierarchy] trial {index + 1}/{len(trials)} needs review: {state.error}; "
+                      "continuing remaining trials", flush=True)
+                return
+            paths[index] = saved[0]
             print(
                 f"[hierarchy] completed trial {index + 1}/{len(trials)}; "
                 f"{state.calls} nodes",
@@ -280,6 +294,16 @@ def remote_main(args, trials, reasoning_parser):
                     int(getattr(args, "hierarchy_trial_batch_size", 32)),
                 ),
                 on_complete=finished,
+            )
+        failure_path = Path(args.work_dir) / "extraction_failures.json"
+        temporary = failure_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(errors, indent=2))
+        temporary.replace(failure_path)
+        if errors:
+            raise RuntimeError(
+                f"Hierarchical extraction incomplete: {len(errors)} trials need review; "
+                f"{len(paths)} complete trials remain checkpointed. See {failure_path}. "
+                "No partial final CSVs were written."
             )
         return [paths[index] for index in sorted(paths)]
 

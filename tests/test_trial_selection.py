@@ -19,7 +19,7 @@ spaces = load_script('trial_spaces_filter', '0b_create_trial_spaces.py')
 REGISTRY_METADATA = {
     'overall_status': 'COMPLETED',
     'status_verified_date': '2025-11',
-    'study_first_post_date': '2019-11-05',
+    'study_first_post_date': '2020-01-01',
     'study_first_post_date_type': 'ACTUAL',
     'study_start_date': '2020-10',
     'study_start_date_type': 'ACTUAL',
@@ -75,7 +75,8 @@ def test_parse_preserves_registry_dates_without_inventing_precision_or_status(tm
     ]))
     rows = parse.parse_clinical_trials_json(path)
     assert len(rows) == 4
-    expected = dict(REGISTRY_METADATA, overall_status='ACTIVE_NOT_RECRUITING',
+    expected = dict(REGISTRY_METADATA, study_first_post_date='2019-11-05',
+                    overall_status='ACTIVE_NOT_RECRUITING',
                     study_completion_date='2028-06', study_completion_date_type='ESTIMATED')
     assert rows.iloc[0][list(expected)].to_dict() == expected
     assert rows.iloc[0].trial_text == 'Example trial\nExample summary\nExample criteria'
@@ -119,12 +120,32 @@ def test_missing_and_malformed_metadata_are_not_guessed():
     assert spaces.select_trials(rows, 'interventional-phase1-3').empty
 
 
+def test_start_year_uses_first_posted_date_inclusively_without_inventing_dates():
+    dates = ['2019-12-31', '2020-01-01', '2020-12-31', '2021-01-01',
+             '2022', '2023-05', '', None, 'invalid', '2020-02-30']
+    rows = pd.DataFrame({
+        'study_first_post_date': dates,
+        'study_start_date': ['2025-01-01'] * len(dates),
+        'last_update_post_date': ['2026-10-15'] * len(dates),
+        'trial_text': ['First posted in 2026'] * len(dates),
+    })
+    original = rows.copy()
+    assert spaces.select_trials_since_year(rows, 2020).index.tolist() == [1, 2, 3, 4, 5]
+    assert spaces.select_trials_since_year(rows, 2021).index.tolist() == [3, 4, 5]
+    assert spaces.select_trials_since_year(rows, 2024).empty
+    pd.testing.assert_frame_equal(rows, original)
+    with pytest.raises(ValueError, match='study_first_post_date.*Rerun 0a'):
+        spaces.select_trials_since_year(rows.drop(columns='study_first_post_date'), 2020)
+
+
 def test_resume_rejects_different_selection_and_untracked_old_shards(tmp_path):
     rows = pd.DataFrame([dict(nct_id='NCT00000001', trial_text='Example')])
     spaces.check_trial_selection_manifest(rows, tmp_path, 'all', 42)
     spaces.check_trial_selection_manifest(rows, tmp_path, 'all', 42)
     with pytest.raises(ValueError, match='new --work-dir'):
         spaces.check_trial_selection_manifest(rows, tmp_path, 'interventional-phase1-3', 42)
+    with pytest.raises(ValueError, match='new --work-dir'):
+        spaces.check_trial_selection_manifest(rows, tmp_path, 'all', 42, start_year=2021)
     changed = rows.assign(trial_text='Changed example')
     with pytest.raises(ValueError, match='new --work-dir'):
         spaces.check_trial_selection_manifest(changed, tmp_path, 'all', 42)
@@ -136,21 +157,26 @@ def test_resume_rejects_different_selection_and_untracked_old_shards(tmp_path):
 
 @pytest.mark.parametrize("state_label", ["Cancer burden allowed", "Disease state allowed"])
 @pytest.mark.parametrize('with_registry_metadata', [False, True])
-def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkeypatch, state_label, with_registry_metadata):
+@pytest.mark.parametrize('start_year', [None, 2019])
+@pytest.mark.parametrize('mode', ['local', 'remote'])
+def test_main_filters_before_dispatch_and_keeps_metadata(tmp_path, monkeypatch, state_label, with_registry_metadata, start_year, mode):
     import sys
-    metadata = REGISTRY_METADATA if with_registry_metadata else {}
+    metadata = REGISTRY_METADATA if with_registry_metadata else {'study_first_post_date': '2020-01-01'}
     rows = pd.DataFrame([
         dict(nct_id='NCT00000001', study_type='INTERVENTIONAL', phases='["PHASE1", "PHASE2"]', trial_text='Example', **metadata),
-        dict(nct_id='NCT00000002', study_type='INTERVENTIONAL', phases='["PHASE4"]', trial_text='Example'),
-        dict(nct_id='NCT00000003', study_type='OBSERVATIONAL', phases='["PHASE2"]', trial_text='Example'),
+        dict(nct_id='NCT00000002', study_type='INTERVENTIONAL', phases='["PHASE4"]', trial_text='Example', **metadata),
+        dict(nct_id='NCT00000003', study_type='OBSERVATIONAL', phases='["PHASE2"]', trial_text='Example', **metadata),
+        dict(nct_id='NCT00000004', study_type='INTERVENTIONAL', phases='["PHASE1", "PHASE2"]', trial_text='Older',
+             **dict(metadata, study_first_post_date='2019-12-31')),
+        dict(nct_id='NCT00000005', study_type='INTERVENTIONAL', phases='["PHASE2"]', trial_text='Missing date'),
     ])
+    expected_ids = ['NCT00000001', 'NCT00000004'] if start_year == 2019 else ['NCT00000001']
     source = tmp_path / 'input.csv'
     rows.to_csv(source, index=False)
     output_trials, output_spaces = tmp_path/'trials.csv', tmp_path/'spaces.csv'
     def remote(args, trials, base_cols, reasoning_parser, *, screening=False):
-        assert trials.nct_id.tolist() == ['NCT00000001']
-        if with_registry_metadata:
-            assert trials.iloc[0][list(metadata)].to_dict() == metadata
+        assert trials.nct_id.tolist() == expected_ids
+        assert trials.iloc[0][list(metadata)].to_dict() == metadata
         out = trials.copy()
         if screening:
             from trial_treatment_screening import screening_record
@@ -170,17 +196,44 @@ def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkey
         path = Path(args.work_dir)/'remote_output_shard_000000.parquet'
         out.to_parquet(path, index=False)
         return [str(path)]
-    monkeypatch.setattr(spaces, 'remote_main', remote)
-    monkeypatch.setattr(sys, 'argv', ['0b_create_trial_spaces.py', '--input', str(source),
+    monkeypatch.setattr(spaces, f'{mode}_main', remote)
+    argv = ['0b_create_trial_spaces.py', '--input', str(source),
         '--work-dir', str(tmp_path/'work'), '--output-trials', str(output_trials),
-        '--output-spaces', str(output_spaces), '--server_urls', 'http://unused/v1'])
+        '--output-spaces', str(output_spaces)]
+    argv.extend(['--server_urls', 'http://unused/v1'] if mode == 'remote' else ['--gpus', '0'])
+    if start_year is not None:
+        argv.extend(['--start-year', str(start_year)])
+    monkeypatch.setattr(sys, 'argv', argv)
     spaces.main()
-    for path in [output_trials, output_spaces]:
+    for path in [output_trials, output_spaces, tmp_path/'trial_treatment_screening.csv']:
         result = pd.read_csv(path)
-        assert result.nct_id.tolist() == ['NCT00000001']
+        assert result.nct_id.tolist() == expected_ids
         assert json.loads(result.phases.iloc[0]) == ['PHASE1', 'PHASE2']
         assert result.study_type.iloc[0] == 'INTERVENTIONAL'
-        if with_registry_metadata:
-            assert result.iloc[0][list(metadata)].to_dict() == metadata
-        else:
-            assert not set(REGISTRY_METADATA).intersection(result.columns)
+        assert result.iloc[0][list(metadata)].to_dict() == metadata
+        if not with_registry_metadata:
+            assert set(REGISTRY_METADATA).intersection(result.columns) == {'study_first_post_date'}
+    for folder in [tmp_path/'work', tmp_path/'work'/'space_extraction']:
+        assert json.loads((folder/'trial_selection.json').read_text())['start_year'] == (start_year or 2020)
+
+
+@pytest.mark.parametrize('trial_filter', ['all', 'interventional-phase1-3'])
+def test_start_year_excluding_every_trial_stops_before_inference(tmp_path, monkeypatch, trial_filter):
+    import sys
+    source = tmp_path/'input.csv'
+    pd.DataFrame([dict(nct_id='NCT00000001', study_type='INTERVENTIONAL', phases='["PHASE2"]',
+                       study_first_post_date='2019-12-31')]).to_csv(source, index=False)
+    monkeypatch.setattr(spaces, 'screen_trials', lambda *a: pytest.fail('Screening must not start'))
+    monkeypatch.setattr(sys, 'argv', ['0b', '--input', str(source), '--work-dir', str(tmp_path/'work'),
+                                    '--trial-filter', trial_filter])
+    with pytest.raises(ValueError, match='No trials match.*no inference was started'):
+        spaces.main()
+
+
+@pytest.mark.parametrize('year', ['0', '10000', 'not-a-year'])
+def test_cli_rejects_invalid_start_year_before_reading_input(monkeypatch, year):
+    import sys
+    monkeypatch.setattr(sys, 'argv', ['0b', '--input', 'unused.csv', '--start-year', year])
+    with pytest.raises(SystemExit) as exc:
+        spaces.main()
+    assert exc.value.code == 2

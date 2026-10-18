@@ -93,6 +93,34 @@ def test_remote_trial_batches_preserve_ids_and_one_registry(endpoint_run):
     assert len(list(shards.glob("remote_output_shard_*.parquet"))) == 3
 
 
+def test_failed_trial_does_not_cancel_other_trials_or_export_partial_csvs(endpoint_run, monkeypatch):
+    import trial_hierarchy_runner
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    source = pd.read_csv(path/'trials.csv')
+    for index in range(3):
+        source.loc[index, 'trial_text'] = f'ANTI_CANCER {index}'
+    source.to_csv(path/'trials.csv', index=False)
+    original_get = trial_hierarchy_runner.ResponseCache.get
+
+    def cached_prune(cache, request):
+        if request.trial_index == 0 and request.field_name == 'cancer_type':
+            return Completion('{"branches": [], "prune_reason": "No cancer population in this synthetic case"}',
+                              finish_reason='stop')
+        return original_get(cache, request)
+
+    monkeypatch.setattr(trial_hierarchy_runner.ResponseCache, 'get', cached_prune)
+    with pytest.raises(RuntimeError, match='1 trials need review; 2 complete trials remain checkpointed'):
+        spaces.main()
+    directory = path/'work/space_extraction'
+    assert set(json.loads((directory/'extraction_failures.json').read_text())) == {'NCT00000001'}
+    assert len(list(directory.glob('remote_output_shard_*.parquet'))) == 2
+    assert len(list((directory/'hierarchy_traces').glob('*.json'))) == 3
+    assert not (path/'out.csv').exists() and not (path/'spaces.csv').exists()
+    audit = pd.read_csv(path/'trial_treatment_screening.csv')
+    assert audit.is_cancer_treatment_trial.tolist() == [True, True, True]
+
+
 def test_shared_core_and_prompts_are_identical_to_inference():
     root = Path(__file__).resolve().parents[2]
     inference = root / "matchminer-ai-inference-kehl/src/matchminer_ai"

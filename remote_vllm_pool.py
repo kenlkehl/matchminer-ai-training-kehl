@@ -78,6 +78,12 @@ def add_remote_cli_args(parser: argparse.ArgumentParser) -> None:
         help="Per-server concurrency ceiling (adaptive; output-validation errors do not cause backoff).",
     )
     g.add_argument(
+        "--concurrency-control-file", default=None,
+        help="Optional live JSON file with max_concurrent_per_server and an optional "
+             "per_server mapping of endpoint URLs to limits; values must be positive "
+             "and no greater than the CLI ceiling. Reloaded with --server_urls_refresh.",
+    )
+    g.add_argument(
         "--concurrency_success_threshold", type=int, default=3,
         help="Successful requests needed before increasing a server's adaptive "
              "concurrency limit. Below half of max_concurrent_per_server the "
@@ -160,6 +166,15 @@ class AdaptiveSemaphore:
                 await self._cond.wait()
             self.in_flight += 1
 
+    async def set_max_limit(self, maximum):
+        """Resize without cancelling active requests or undoing error backoff."""
+        async with self._cond:
+            maximum = max(1, int(maximum))
+            self.limit = maximum if self.limit == self.max_limit else min(self.limit, maximum)
+            self.max_limit = maximum
+            self._slow_start_ceiling = max(2, maximum // 2)
+            self._cond.notify_all()
+
     async def release(self, *, success: Optional[bool]):
         """Release a slot; None leaves the limit and success streak unchanged."""
         async with self._cond:
@@ -235,6 +250,7 @@ class DynamicServerRegistry:
         static_urls: Optional[List[str]] = None,
         refresh_seconds: float = 15.0,
         api_key: str = "not-needed",
+        concurrency_file: Optional[str] = None,
     ):
         if not servers_file and not static_urls:
             raise ValueError("Either servers_file or static_urls must be set.")
@@ -242,6 +258,9 @@ class DynamicServerRegistry:
         self._static_urls = list(static_urls) if static_urls else []
         self._refresh_seconds = max(1.0, float(refresh_seconds))
         self._max_concurrent = max_concurrent_per_server
+        self._effective_max_concurrent = max_concurrent_per_server
+        self._per_server_max_concurrent: dict[str, int] = {}
+        self._concurrency_file = concurrency_file
         self._concurrency_success_threshold = concurrency_success_threshold
         self._concurrency_increase_step = concurrency_increase_step
         self._concurrency_backoff_factor = concurrency_backoff_factor
@@ -260,7 +279,7 @@ class DynamicServerRegistry:
             return
         # Always reconcile once synchronously so callers see initial set.
         await self._reconcile_once()
-        if self._servers_file:
+        if self._servers_file or self._concurrency_file:
             self._reconcile_task = asyncio.create_task(self._reconcile_loop())
 
     async def stop(self) -> None:
@@ -294,10 +313,10 @@ class DynamicServerRegistry:
 
     def request_capacity(self) -> int:
         """Maximum active slots; read on the registry's owning event loop."""
-        return max(self._max_concurrent, sum(
+        return sum(
             entry.semaphore.max_limit for entry in self._entries.values()
             if not entry.retired
-        ))
+        ) or self._effective_max_concurrent
 
     async def _read_servers_file(self) -> Optional[List[dict]]:
         try:
@@ -319,6 +338,24 @@ class DynamicServerRegistry:
         )
 
     async def _reconcile_once(self) -> None:
+        if self._concurrency_file:
+            try:
+                with open(self._concurrency_file) as stream:
+                    control = json.load(stream)
+                maximum = control["max_concurrent_per_server"]
+                if type(maximum) is not int or not 1 <= maximum <= self._max_concurrent:
+                    raise ValueError("live concurrency must be an integer within the CLI ceiling")
+                per_server = control.get("per_server", {})
+                if not isinstance(per_server, dict) or any(
+                    not isinstance(url, str) or not url
+                    or type(limit) is not int or not 1 <= limit <= self._max_concurrent
+                    for url, limit in per_server.items()
+                ):
+                    raise ValueError("per_server must map endpoint URLs to integers within the CLI ceiling")
+                self._effective_max_concurrent = maximum
+                self._per_server_max_concurrent = per_server
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                print(f"[remote_vllm_pool] retaining concurrency {self._effective_max_concurrent}: {exc}")
         if self._servers_file:
             servers = await self._read_servers_file()
             if servers is None:
@@ -337,7 +374,13 @@ class DynamicServerRegistry:
         async with self._lock:
             # Add new
             for url, info in desired.items():
+                maximum = self._per_server_max_concurrent.get(url, self._effective_max_concurrent)
                 if url in self._entries:
+                    semaphore = self._entries[url].semaphore
+                    if semaphore.max_limit != maximum:
+                        await semaphore.set_max_limit(maximum)
+                        print(f"[remote_vllm_pool] concurrency ceiling for {url}: {semaphore.max_limit}")
+                        changed = True
                     if self._entries[url].retired:
                         # Server came back; un-retire and reset stats
                         self._entries[url].retired = False
@@ -349,7 +392,7 @@ class DynamicServerRegistry:
                     url=url,
                     client=client,
                     semaphore=AdaptiveSemaphore(
-                        self._max_concurrent,
+                        maximum,
                         success_threshold=self._concurrency_success_threshold,
                         increase_step=self._concurrency_increase_step,
                         backoff_factor=self._concurrency_backoff_factor,
@@ -1192,4 +1235,5 @@ def build_registry_from_args(args) -> DynamicServerRegistry:
         static_urls=static_urls or None,
         refresh_seconds=float(getattr(args, "server_urls_refresh", 15.0)),
         api_key=api_key,
+        concurrency_file=getattr(args, "concurrency_control_file", None) or None,
     )

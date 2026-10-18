@@ -481,29 +481,37 @@ Each of the five structured dates also has a corresponding `_type` column,
 preserving the supplied `ACTUAL` or `ESTIMATED` value. Date strings retain their
 original precision (for example, `2025-11` stays month-only); missing values stay
 blank. These are metadata columns and are not appended to the LLM's trial text.
-Both 0b output CSVs preserve them when present, including empty outputs; older
-input CSVs without these optional fields remain supported.
+Both 0b output CSVs preserve them when present, including empty outputs.
+0b requires `study_first_post_date` for year selection; the other registry
+status/date fields remain optional.
 
 Completion dates refer to final outcome-data collection, **not an accrual-closure
 date**; see the [NLM definitions](https://support.nlm.nih.gov/knowledgebase/article/KA-03766/en-us).
 Use recruitment status to distinguish currently accruing records, rather than
-inferring it from completion dates. Neither recency nor status filtering is
-enabled by retaining these columns. Existing CSVs acquire the columns only when
+inferring it from completion dates. Existing CSVs acquire the columns only when
 0a is rerun; regenerate into a separate output path while a paused run still
 references the original file.
 
-By default, **0b keeps only interventional early phase 1 through phase 3 trials**,
+By default, **0b keeps trials first posted in 2020 or later**. Use
+`--start-year YEAR` to change this inclusive calendar-year cutoff, for example
+`--start-year 2023`. Selection uses `study_first_post_date`, not study start or
+last-update dates. Missing or invalid first-posted dates are excluded; an input
+without the column must be regenerated with 0a.
+
+0b also defaults to **interventional early phase 1 through phase 3 trials**,
 including phase 1/2 and phase 2/3. It requires `study_type=INTERVENTIONAL` and a
 nonempty phase array containing only `EARLY_PHASE1`, `PHASE1`, `PHASE2`, and/or `PHASE3`.
 Phase 4, observational studies, and missing/N/A phases are excluded.
 It uses structured metadata, never mentions of phases in the title or eligibility
 text. Recruitment status is not filtered.
 Use `--trial-filter all` to bypass only the structured study-type/phase filter;
-the treatment-intent screen below still runs.
+the start-year cutoff and treatment-intent screen below still apply.
 Legacy CSVs must be regenerated with 0a for the default filter.
 
 Metadata selection happens before splitting, prompt construction, or LLM calls. A
-`trial_selection.json` manifest fingerprints the selected rows, filter and seed.
+`trial_selection.json` manifest fingerprints the selected rows, start year,
+study-type/phase filter and seed. The year cutoff applies to treatment screening,
+space extraction, and both output CSVs consumed downstream.
 Use a **new `--work-dir`** when changing inputs or filtering, or when old shards
 lack this manifest: checkpoint row numbers cannot safely be reused across
 selections. Both final CSVs retain study type, phase, and available registry status
@@ -552,12 +560,29 @@ identify records needing richer source text or review.
 
 Only positive decisions proceed to space extraction. `trial_treatment_screening.csv`
 is saved beside `--output-trials` by default, with all screened trials, boolean
-decisions, rationales, parsed reasoning, final responses, finish reasons, and
-status. Override its location with `--output-screening`. This audit covers trials
+decisions, rationales, parsed reasoning, final responses, finish reasons, status,
+and `treatment_screen_model` (the requested `--model` ID or served alias). The
+model is also recorded in new local and remote screening shards. Override the
+CSV location with `--output-screening`. This audit covers trials
 that passed the metadata filter, not metadata-excluded rows. The two existing
 final CSV schemas are unchanged; if every trial is rejected, both contain only
 headers. `--screening-max-tokens` defaults to 8192, independently of extraction's
 `--max-tokens`.
+
+Use `--screening-only` to save the screening CSV and stop before any trial-space
+extraction. This mode creates no extraction checkpoints or trial-space output
+CSVs. Later, remove `--screening-only` while retaining the other arguments and
+work directory to reuse completed screening decisions and proceed to extraction.
+
+To extract with a different model or endpoint, use
+`--screening-input /path/to/trial_treatment_screening.csv` with a new `--work-dir`
+and the original input, year/phase filters, and seed. This validates complete
+coverage, unchanged trial data and splits, successful responses, boolean
+decisions, and screening-model provenance before selecting positive trials.
+It makes no screening requests and leaves the source CSV unchanged. A
+`screening_input_manifest.json` records its path, content hash and screening
+models; extraction records its own model and prompt configuration separately.
+`--screening-input` and `--screening-only` are mutually exclusive.
 
 Checkpoints live in separate `treatment_screening/` and `space_extraction/`
 subdirectories of `--work-dir`. Resume with the same arguments: successful
@@ -636,11 +661,27 @@ is saved per trial, with stable input-order merging. Resume reuses successful
 nodes in `space_extraction/hierarchy_nodes/`; completion order cannot change
 final numbering. Local GPU workers retain synchronous batches and keep their
 loaded model resident across field waves.
+In remote batches, a failed trial retains its trace and is listed in
+`space_extraction/extraction_failures.json`; other trials continue and save their
+completed shards. If any trial still fails, the batch reports an error after
+processing the remaining trials and does not write partial final CSVs. A fully
+pruned trial remains an extraction failure requiring review; its screening
+decision is not changed automatically.
 Set the remote ceiling with `--max_concurrent_per_server 32` (CLI default: 100).
 That is one shared adaptive ceiling per endpoint across trials, field branches,
 boilerplate and retries. With N endpoints the total ceiling is N times the
 per-server limit. `--hierarchy-trial-batch-size` does not multiply it. Separate
 client processes each have their own limit; set the CLI value before launch.
+For tuning a running job, `--concurrency-control-file /path/to/control.json`
+accepts `{"max_concurrent_per_server": 256}` and reloads it every
+`--server_urls_refresh` seconds. The CLI limit remains the hard ceiling. Atomic
+file updates change the active cap without restarting or cancelling requests;
+invalid updates retain the previous value and request-error backoff still applies.
+The optional `per_server` object overrides the default for exact endpoint URLs,
+for example `{"max_concurrent_per_server": 256, "per_server": {"http://worker-b:8001/v1": 384}}`.
+Each limit must fit within the CLI ceiling. Total capacity is the sum of active
+endpoint limits; removing an override restores that endpoint's default. Combine
+this with `--server_urls_file` to add or retire endpoints during a run.
 Both paths validate JSON and finish reasons, return validation errors to the
 model, and alternate thinking after two invalid responses (Beam alternates
 max/low effort). Remote malformed-output errors remain neutral to concurrency.

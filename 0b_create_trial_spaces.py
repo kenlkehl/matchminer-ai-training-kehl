@@ -9,6 +9,7 @@ Usage examples
 # One instance per GPU (model fits on a single GPU):
 python 0b_create_trial_spaces.py \
   --input ctgov_trials.csv \
+  --start-year 2020 \
   --gpus 2,3 \
   --gpus-per-instance 1 \
   --download-dir ../models
@@ -33,7 +34,7 @@ from copy import copy
 from ctgov_metadata import REGISTRY_METADATA_COLUMNS
 from trial_treatment_screening import (
     build_screening_messages, parse_screening_output, screening_record,
-    check_screening_manifest,
+    check_screening_manifest, load_screening_results,
 )
 
 # vLLM imports happen inside worker after setting CUDA_VISIBLE_DEVICES
@@ -264,6 +265,7 @@ def worker_process(
 
     if screening:
         out_df = pd.concat([shard_df.reset_index(drop=True), pd.DataFrame(screen_records)], axis=1)
+        out_df["treatment_screen_model"] = model
         temporary = Path(shard_out_path).with_suffix(".tmp")
         out_df.to_parquet(temporary, index=False)
         temporary.replace(shard_out_path)
@@ -497,7 +499,8 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
                 orig = trials_indexed.loc[work_id].to_dict()
                 if isinstance(result, str) and result.startswith("ERROR:"):
                     result = {"treatment_screen_status": "error", "treatment_screen_output": result}
-                rows.append({**orig, "_work_id": work_id, **result})
+                rows.append({**orig, "_work_id": work_id, **result,
+                             "treatment_screen_model": args.model})
             path = Path(args.work_dir) / f"remote_output_shard_{shard_idx:06d}.parquet"
             temporary = path.with_suffix(".tmp")
             pd.DataFrame(rows).to_parquet(temporary, index=False)
@@ -574,6 +577,21 @@ def split_into_groups(items, group_size):
     return groups
 
 
+def select_trials_since_year(trials: pd.DataFrame, start_year: int) -> pd.DataFrame:
+    """Keep trials first posted in or after start_year, using registry dates only."""
+    if not 1 <= start_year <= 9999:
+        raise ValueError("--start-year must be a calendar year between 1 and 9999")
+    if "study_first_post_date" not in trials.columns:
+        raise ValueError(
+            "Missing study_first_post_date. Rerun 0a_parse_ctgov_json.py on the original export."
+        )
+    dates = pd.to_datetime(
+        trials["study_first_post_date"].astype("string").str.strip(),
+        format="ISO8601", errors="coerce",
+    )
+    return trials.loc[dates.dt.year.ge(start_year)].copy()
+
+
 def select_trials(trials: pd.DataFrame, trial_filter: str) -> pd.DataFrame:
     """Filter on registry metadata, never phase words in eligibility text."""
     if trial_filter == "all":
@@ -585,7 +603,7 @@ def select_trials(trials: pd.DataFrame, trial_filter: str) -> pd.DataFrame:
         raise ValueError(
             f"Missing structured trial metadata: {sorted(missing)}. "
             "Rerun 0a_parse_ctgov_json.py on the original export. "
-            "Use --trial-filter all only to intentionally process every trial."
+            "Use --trial-filter all only to bypass study-type/phase filtering."
         )
 
     def eligible_phase(value):
@@ -603,7 +621,7 @@ def select_trials(trials: pd.DataFrame, trial_filter: str) -> pd.DataFrame:
         phases = set(value)
         return bool(phases) and phases <= {"EARLY_PHASE1", "PHASE1", "PHASE2", "PHASE3"}
 
-    mask = trials.study_type.eq("INTERVENTIONAL") & trials.phases.map(eligible_phase)
+    mask = trials.study_type.eq("INTERVENTIONAL") & trials.phases.map(eligible_phase).astype(bool)
     return trials.loc[mask].copy()
 
 
@@ -648,7 +666,7 @@ def check_extraction_manifest(args, reasoning_parser):
         temporary.replace(path)
 
 
-def check_trial_selection_manifest(trials, work_dir, trial_filter, seed):
+def check_trial_selection_manifest(trials, work_dir, trial_filter, seed, start_year=2020):
     """Prevent row-position checkpoints being reused after selection changes."""
     path = Path(work_dir) / "trial_selection.json"
     # Fingerprint selected content as well as the policy: _work_id is positional.
@@ -656,7 +674,8 @@ def check_trial_selection_manifest(trials, work_dir, trial_filter, seed):
     for offset in range(0, len(trials), 1000):
         content = trials.iloc[offset:offset + 1000].to_json(orient="records", force_ascii=False)
         digest.update(content.encode())
-    identity = {"trial_filter": trial_filter, "seed": seed, "rows": len(trials),
+    identity = {"trial_filter": trial_filter, "start_year": start_year,
+                "seed": seed, "rows": len(trials),
                 "selected_sha256": digest.hexdigest()}
     if path.exists():
         if json.loads(path.read_text()) != identity:
@@ -777,6 +796,9 @@ def screen_trials(args, trials, reasoning_parser):
         paths = local_main(screen_args, trials, trials.columns.tolist(), reasoning_parser, screening=True)
     audit = pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
     audit = audit.drop_duplicates("nct_id", keep="last")
+    # The checked screening manifest binds all checkpoints to this model, including
+    # older shards saved before per-row model provenance was added.
+    audit["treatment_screen_model"] = args.model
     audit_path = Path(args.output_screening) if args.output_screening else Path(args.output_trials).with_name("trial_treatment_screening.csv")
     temporary = audit_path.with_suffix(".tmp")
     audit.drop(columns=["_work_id"], errors="ignore").to_csv(temporary, index=False)
@@ -798,6 +820,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Input CSV of trials (ctgov_cancer_trials_9-2025.csv)")
     parser.add_argument(
+        "--start-year", type=int, default=2020,
+        help="Inclusive earliest initial-posting year (default: 2020), using study_first_post_date. "
+             "Missing or invalid dates are excluded; applies with every --trial-filter.",
+    )
+    parser.add_argument(
         "--trial-filter", choices=["interventional-phase1-3", "all"],
         default="interventional-phase1-3",
         help="Default: interventional early phase 1 and phase 1/2/3, including combined phases. "
@@ -806,6 +833,12 @@ def main():
     parser.add_argument("--output-trials", default="../data/no_phi/trials_with_spaces.csv")
     parser.add_argument("--output-screening", default=None,
                         help="All treatment-screen decisions/rationales; default trial_treatment_screening.csv beside --output-trials")
+    screening_mode = parser.add_mutually_exclusive_group()
+    screening_mode.add_argument("--screening-only", action="store_true",
+                                help="Save treatment screening results and stop before trial-space extraction")
+    screening_mode.add_argument("--screening-input", default=None,
+                                help="Reuse a complete screening CSV for identical selected inputs; "
+                                     "--model and endpoint settings apply only to extraction")
     parser.add_argument("--screening-max-tokens", type=int, default=8192,
                         help="Reasoning plus final-output token budget for the separate treatment screen")
     parser.add_argument("--output-spaces", default="../data/no_phi/trial_space_lineitems.csv")
@@ -846,6 +879,8 @@ def main():
     add_remote_cli_args(parser)
 
     args = parser.parse_args()
+    if not 1 <= args.start_year <= 9999:
+        parser.error("--start-year must be a calendar year between 1 and 9999")
     from vllm_reasoning_utils import resolve_sampling_defaults
     legacy = dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0,
                   presence_penalty=1.5, repetition_penalty=1.0)
@@ -870,10 +905,14 @@ def main():
     # Load and pre-process trials
     trials = pd.read_csv(args.input)
     original_count = len(trials)
+    trials = select_trials_since_year(trials, args.start_year)
+    print(f"[main] first posted in {args.start_year} or later: kept {len(trials)}/{original_count} trials "
+          "(missing or invalid first-posted dates excluded)")
+    date_filtered_count = len(trials)
     trials = select_trials(trials, args.trial_filter)
-    print(f"[main] {args.trial_filter}: kept {len(trials)}/{original_count} trials")
+    print(f"[main] {args.trial_filter}: kept {len(trials)}/{date_filtered_count} trials")
     if trials.empty:
-        raise ValueError("No trials match the requested trial filter; no inference was started.")
+        raise ValueError("No trials match the requested start year and trial filter; no inference was started.")
     # Deterministic split assignment
     rng = np.random.default_rng(args.seed)
     trials = trials.copy()
@@ -881,13 +920,19 @@ def main():
 
     # Deduplicate by NCT ID like your original
     trials = trials.groupby("nct_id").first().reset_index()
-    check_trial_selection_manifest(trials, args.work_dir, args.trial_filter, args.seed)
+    check_trial_selection_manifest(trials, args.work_dir, args.trial_filter, args.seed, args.start_year)
 
-    trials = screen_trials(args, trials, reasoning_parser)
+    if args.screening_input:
+        trials = load_screening_results(trials, args.screening_input, args.work_dir)
+    else:
+        trials = screen_trials(args, trials, reasoning_parser)
+    if args.screening_only:
+        print("[main] screening complete; --screening-only requested, so trial-space extraction was not started.")
+        return
     args.work_dir = str(Path(args.work_dir) / "space_extraction")
     Path(args.work_dir).mkdir(parents=True, exist_ok=True)
     check_extraction_manifest(args, reasoning_parser)
-    check_trial_selection_manifest(trials, args.work_dir, args.trial_filter, args.seed)
+    check_trial_selection_manifest(trials, args.work_dir, args.trial_filter, args.seed, args.start_year)
 
     # We only generate from trial_text, but keep the rest for merging later
     # Keep the original column set so we can write the same outputs
