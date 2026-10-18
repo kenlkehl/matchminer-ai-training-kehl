@@ -18,7 +18,7 @@ PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 
 All three shell entrypoints use this same runner. It expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`9a935d6c09211f46c9e2de633397e0acfa54424b`. Review the pin and prompt contracts
+`6a4fd38b1e45ae927887454be3826377a59794f5`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -729,3 +729,10 @@ polarity guidance. The `oncoreasoning-answer-first-v6-combined-space` contract p
 that rubric; preparation prefers the sibling `matchminer-ai-inference-kehl` checkout
 when present. Existing prepared distillation data must be regenerated for this
 contract. The installed inference package must match it for aggregate labeling.
+
+Hierarchical response parsing accepts one complete outer Markdown code fence
+(`json`, case-insensitive, or no language tag). It then applies the same strict
+JSON/schema, duplicate-key, and completion-status validation. Prose outside the
+fence, malformed JSON, and truncated responses still fail. Raw responses and
+reasoning remain unchanged in the audit. This presentation-only parser fix is
+compatible with existing v5 prompts and successful node checkpoints.

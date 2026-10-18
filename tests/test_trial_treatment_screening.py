@@ -116,6 +116,8 @@ def endpoint_run(tmp_path, monkeypatch, request):
                      'Histology allowed: NA. Cancer burden allowed: metastatic. Prior treatment required: NA. '
                      'Prior treatment excluded: NA. Biomarkers required: NA. Biomarkers excluded: NA.\n'
                      'Boilerplate exclusions:\nActive infection.')
+        if not screening and getattr(state, "fenced", False):
+            final = "```json\n" + final + "\n```"
         return SimpleNamespace(choices=[SimpleNamespace(text=final, finish_reason='stop')])
 
     async def stop_registry():

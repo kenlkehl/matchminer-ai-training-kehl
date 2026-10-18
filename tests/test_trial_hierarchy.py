@@ -370,3 +370,19 @@ def test_remote_validation_feedback_preserves_concurrency_classification_and_res
     assert [p["enable_thinking"] for p in templates[:3]] == [True, True, False]
     runner.remote_main(args, trials, "nemotron_v3")
     assert len(calls) == 10
+
+
+def test_fenced_remote_field_and_boilerplate_answers_need_no_retry(endpoint_run):
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    state.fenced = True
+    spaces.main()
+    assert len(state.calls) == 11  # Three screens plus seven fields and boilerplate.
+    work = path / "work/space_extraction"
+    assert not (work / "validation_failures.jsonl").exists()
+    assert len(pd.read_csv(path / "spaces.csv")) == 1
+    nodes = [json.loads(p.read_text()) for p in (work / "hierarchy_nodes").glob("*.json")]
+    assert len(nodes) == 8
+    assert all(node["completion"]["final"].startswith("```json\n") for node in nodes)
+    spaces.main()
+    assert len(state.calls) == 11  # Fenced checkpoint responses also resume without calls.
