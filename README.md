@@ -644,7 +644,11 @@ verbatim into the corresponding request, leaving out one-shot output formatting.
 therefore affect the relevant hierarchy field; changed section boundaries fail
 explicitly instead of silently dropping guidance. The separate boilerplate call
 gets only the authored boilerplate rules, shared omissions and a trial-wide scope.
-The active primer and one-shot extraction are unchanged. Disease state remains concise; molecular
+Biomarker fields retain only positive/negative result restrictions, including
+specified alterations and expression thresholds. Testing or known-status
+requirements alone are omitted, with `NA` when no result restriction remains;
+screening-assessment notes accompany actual result restrictions only. The shared
+primer applies this rule to one-shot extraction too. Disease state remains concise; molecular
 assay results go in biomarkers, response to specific prior
 treatment stays in treatment history, and all-comer cancer/histology enumeration
 is retained as field-specific work.
