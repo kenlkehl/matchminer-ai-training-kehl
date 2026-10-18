@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from tests.test_trial_selection import load_script
+from tests.test_trial_selection import REGISTRY_METADATA, load_script
 from trial_treatment_screening import parse_screening_output
 
 spaces = load_script('screened_trial_spaces', '0b_create_trial_spaces.py')
@@ -58,7 +58,7 @@ def endpoint_run(tmp_path, monkeypatch, request):
 
     source = tmp_path / 'trials.csv'
     pd.DataFrame([
-        dict(nct_id='NCT00000001', study_type='INTERVENTIONAL', phases='["EARLY_PHASE1"]', trial_text='ANTI_CANCER'),
+        dict(nct_id='NCT00000001', study_type='INTERVENTIONAL', phases='["EARLY_PHASE1"]', trial_text='ANTI_CANCER', **REGISTRY_METADATA),
         dict(nct_id='NCT00000002', study_type='INTERVENTIONAL', phases='["PHASE2"]', trial_text='SUPPORTIVE'),
         dict(nct_id='NCT00000003', study_type='INTERVENTIONAL', phases='["PHASE1", "PHASE2"]', trial_text='DIAGNOSTIC'),
         dict(nct_id='NCT00000004', study_type='OBSERVATIONAL', phases='["PHASE2"]', trial_text='NEVER_SEND'),
@@ -172,6 +172,8 @@ def test_complete_screen_precedes_extraction_and_resume_reuses_negatives(endpoin
     assert state.registries == [('http://requested-server:8000/v1', None, 256)] * 2
     assert pd.read_csv(path/'out.csv').nct_id.tolist() == ['NCT00000001']
     assert pd.read_csv(path/'spaces.csv').nct_id.tolist() == ['NCT00000001']
+    for name in ['out.csv', 'spaces.csv']:
+        assert pd.read_csv(path/name).iloc[0][list(REGISTRY_METADATA)].to_dict() == REGISTRY_METADATA
     audit = pd.read_csv(path/'trial_treatment_screening.csv')
     assert audit.is_cancer_treatment_trial.tolist() == [True, False, False]
     assert audit.treatment_screen_rationale.notna().all()
@@ -187,6 +189,8 @@ def test_all_rejected_produces_empty_outputs_without_extraction(endpoint_run):
     assert [c[0] for c in state.calls] == ['screen'] * 3
     assert pd.read_csv(path/'out.csv').empty
     assert pd.read_csv(path/'spaces.csv').empty
+    for name in ['out.csv', 'spaces.csv']:
+        assert set(REGISTRY_METADATA) <= set(pd.read_csv(path/name).columns)
     assert len(pd.read_csv(path/'trial_treatment_screening.csv')) == 3
 
 

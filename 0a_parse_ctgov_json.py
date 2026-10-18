@@ -3,6 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import pandas as pd
+from ctgov_metadata import extract_registry_metadata
 
 def parse_clinical_trials_json(json_file_path):
     """
@@ -14,7 +15,8 @@ def parse_clinical_trials_json(json_file_path):
     Returns:
         pandas DataFrame with columns: nct_id, title, brief_summary, 
         eligibility_criteria, trial_text, study_type, and phases (a JSON array
-        retaining ClinicalTrials.gov's structured phase values).
+        retaining ClinicalTrials.gov's structured phase values), plus registry
+        status and dates with their original precision and actual/estimated types.
     """
     # Load the JSON file
     with open(json_file_path, 'r', encoding='utf-8') as f:
@@ -50,6 +52,7 @@ def parse_clinical_trials_json(json_file_path):
                 'nct_id': nct_id,
                 'study_type': design.get('studyType', ''),
                 'phases': json.dumps(design.get('phases') or []),
+                **extract_registry_metadata(protocol),
                 'title': title,
                 'brief_summary': brief_summary,
                 'eligibility_criteria': eligibility_criteria,
@@ -80,4 +83,4 @@ if __name__ == "__main__":
     finally:
         temporary.unlink(missing_ok=True)
     print(f"Parsed {len(df)} trials ({df.nct_id.nunique()} unique NCT IDs)")
-    print(f"Saved {output} with structured study_type and phases metadata")
+    print(f"Saved {output} with study type, phases, registry status, and date metadata")

@@ -16,6 +16,21 @@ def load_script(name, filename):
 parse = load_script('ctgov_parse', '0a_parse_ctgov_json.py')
 spaces = load_script('trial_spaces_filter', '0b_create_trial_spaces.py')
 
+REGISTRY_METADATA = {
+    'overall_status': 'COMPLETED',
+    'status_verified_date': '2025-11',
+    'study_first_post_date': '2019-11-05',
+    'study_first_post_date_type': 'ACTUAL',
+    'study_start_date': '2020-10',
+    'study_start_date_type': 'ACTUAL',
+    'primary_completion_date': '2023-10-30',
+    'primary_completion_date_type': 'ACTUAL',
+    'study_completion_date': '2024-10-31',
+    'study_completion_date_type': 'ACTUAL',
+    'last_update_post_date': '2025-11-25',
+    'last_update_post_date_type': 'ACTUAL',
+}
+
 
 def test_parse_retains_structured_design_fields(tmp_path):
     path = tmp_path / 'export.json'
@@ -31,6 +46,45 @@ def test_parse_retains_structured_design_fields(tmp_path):
     csv = tmp_path / 'trials.csv'
     rows.to_csv(csv, index=False)
     assert spaces.select_trials(pd.read_csv(csv), 'interventional-phase1-3').nct_id.tolist() == ['NCT00000001']
+
+
+def test_parse_preserves_registry_dates_without_inventing_precision_or_status(tmp_path):
+    path = tmp_path / 'export.json'
+    protocol = {
+        'identificationModule': {'nctId': 'NCT00000001', 'briefTitle': 'Example trial'},
+        'descriptionModule': {'briefSummary': 'Example summary'},
+        'eligibilityModule': {'eligibilityCriteria': 'Example criteria'},
+        'statusModule': {
+            'overallStatus': 'ACTIVE_NOT_RECRUITING',
+            'statusVerifiedDate': '2025-11',
+            'studyFirstPostDateStruct': {'date': '2019-11-05', 'type': 'ACTUAL'},
+            'startDateStruct': {'date': '2020-10', 'type': 'ACTUAL'},
+            'primaryCompletionDateStruct': {'date': '2023-10-30', 'type': 'ACTUAL'},
+            'completionDateStruct': {'date': '2028-06', 'type': 'ESTIMATED'},
+            'lastUpdatePostDateStruct': {'date': '2025-11-25', 'type': 'ACTUAL'},
+        },
+    }
+    path.write_text(json.dumps([
+        {'protocolSection': protocol},
+        {'protocolSection': {'identificationModule': {'nctId': 'NCT00000002'}}},
+        {'protocolSection': {'statusModule': None}},
+        {'protocolSection': {'statusModule': {
+            'studyFirstPostDateStruct': None,
+            'completionDateStruct': {'date': None, 'type': None},
+        }}},
+    ]))
+    rows = parse.parse_clinical_trials_json(path)
+    assert len(rows) == 4
+    expected = dict(REGISTRY_METADATA, overall_status='ACTIVE_NOT_RECRUITING',
+                    study_completion_date='2028-06', study_completion_date_type='ESTIMATED')
+    assert rows.iloc[0][list(expected)].to_dict() == expected
+    assert rows.iloc[0].trial_text == 'Example trial\nExample summary\nExample criteria'
+    assert rows.iloc[1:][list(expected)].eq('').all().all()
+    output = tmp_path / 'trials.csv'
+    rows.to_csv(output, index=False)
+    saved = pd.read_csv(output, keep_default_na=False)
+    assert saved.iloc[0][list(expected)].to_dict() == expected
+    assert saved.iloc[1:][list(expected)].eq('').all().all()
 
 
 @pytest.mark.parametrize('study_type,phases,keep', [
@@ -81,10 +135,12 @@ def test_resume_rejects_different_selection_and_untracked_old_shards(tmp_path):
 
 
 @pytest.mark.parametrize("state_label", ["Cancer burden allowed", "Disease state allowed"])
-def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkeypatch, state_label):
+@pytest.mark.parametrize('with_registry_metadata', [False, True])
+def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkeypatch, state_label, with_registry_metadata):
     import sys
+    metadata = REGISTRY_METADATA if with_registry_metadata else {}
     rows = pd.DataFrame([
-        dict(nct_id='NCT00000001', study_type='INTERVENTIONAL', phases='["PHASE1", "PHASE2"]', trial_text='Example'),
+        dict(nct_id='NCT00000001', study_type='INTERVENTIONAL', phases='["PHASE1", "PHASE2"]', trial_text='Example', **metadata),
         dict(nct_id='NCT00000002', study_type='INTERVENTIONAL', phases='["PHASE4"]', trial_text='Example'),
         dict(nct_id='NCT00000003', study_type='OBSERVATIONAL', phases='["PHASE2"]', trial_text='Example'),
     ])
@@ -93,6 +149,8 @@ def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkey
     output_trials, output_spaces = tmp_path/'trials.csv', tmp_path/'spaces.csv'
     def remote(args, trials, base_cols, reasoning_parser, *, screening=False):
         assert trials.nct_id.tolist() == ['NCT00000001']
+        if with_registry_metadata:
+            assert trials.iloc[0][list(metadata)].to_dict() == metadata
         out = trials.copy()
         if screening:
             from trial_treatment_screening import screening_record
@@ -122,3 +180,7 @@ def test_main_filters_before_remote_dispatch_and_keeps_metadata(tmp_path, monkey
         assert result.nct_id.tolist() == ['NCT00000001']
         assert json.loads(result.phases.iloc[0]) == ['PHASE1', 'PHASE2']
         assert result.study_type.iloc[0] == 'INTERVENTIONAL'
+        if with_registry_metadata:
+            assert result.iloc[0][list(metadata)].to_dict() == metadata
+        else:
+            assert not set(REGISTRY_METADATA).intersection(result.columns)

@@ -465,6 +465,33 @@ to retain the original trial text plus ClinicalTrials.gov `designModule.studyTyp
 and `designModule.phases` as `study_type` and a JSON-array `phases` column.
 The CSV is replaced atomically only after parsing and writing finish.
 
+0a also retains these fields from the export's `statusModule`:
+
+| CSV column | Registry field |
+| --- | --- |
+| `overall_status` | `overallStatus` (for example, `RECRUITING` or `COMPLETED`) |
+| `status_verified_date` | `statusVerifiedDate` |
+| `study_first_post_date` | `studyFirstPostDateStruct.date` |
+| `study_start_date` | `startDateStruct.date` |
+| `primary_completion_date` | `primaryCompletionDateStruct.date` |
+| `study_completion_date` | `completionDateStruct.date` |
+| `last_update_post_date` | `lastUpdatePostDateStruct.date` |
+
+Each of the five structured dates also has a corresponding `_type` column,
+preserving the supplied `ACTUAL` or `ESTIMATED` value. Date strings retain their
+original precision (for example, `2025-11` stays month-only); missing values stay
+blank. These are metadata columns and are not appended to the LLM's trial text.
+Both 0b output CSVs preserve them when present, including empty outputs; older
+input CSVs without these optional fields remain supported.
+
+Completion dates refer to final outcome-data collection, **not an accrual-closure
+date**; see the [NLM definitions](https://support.nlm.nih.gov/knowledgebase/article/KA-03766/en-us).
+Use recruitment status to distinguish currently accruing records, rather than
+inferring it from completion dates. Neither recency nor status filtering is
+enabled by retaining these columns. Existing CSVs acquire the columns only when
+0a is rerun; regenerate into a separate output path while a paused run still
+references the original file.
+
 By default, **0b keeps only interventional early phase 1 through phase 3 trials**,
 including phase 1/2 and phase 2/3. It requires `study_type=INTERVENTIONAL` and a
 nonempty phase array containing only `EARLY_PHASE1`, `PHASE1`, `PHASE2`, and/or `PHASE3`.
@@ -479,7 +506,8 @@ Metadata selection happens before splitting, prompt construction, or LLM calls. 
 `trial_selection.json` manifest fingerprints the selected rows, filter and seed.
 Use a **new `--work-dir`** when changing inputs or filtering, or when old shards
 lack this manifest: checkpoint row numbers cannot safely be reused across
-selections. Both final CSVs retain the study-type and phase columns for audit.
+selections. Both final CSVs retain study type, phase, and available registry status
+and date columns for audit.
 
 
 ### Direct anti-cancer treatment screen in 0b

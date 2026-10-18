@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 import multiprocessing as mp
 from copy import copy
+from ctgov_metadata import REGISTRY_METADATA_COLUMNS
 from trial_treatment_screening import (
     build_screening_messages, parse_screening_output, screening_record,
     check_screening_manifest,
@@ -911,10 +912,15 @@ def main():
                               "space_output_no_reasoning", "space_text", "trial_boilerplate_text"]))
 
     # Keep and order columns as in your original final selection
+    registry_metadata_cols = [
+        column for column in REGISTRY_METADATA_COLUMNS
+        if column in trials_with_spaces.columns
+    ]
     final_cols = [
         "nct_id",
         "study_type",
         "phases",
+        *registry_metadata_cols,
         "split",
         "title",
         "brief_summary",
@@ -967,6 +973,7 @@ def main():
             "nct_id",
             "study_type",
             "phases",
+            *registry_metadata_cols,
             "split",
             "title",
             "eligibility_criteria",
@@ -988,6 +995,7 @@ def main():
                 "nct_id",
                 "study_type",
                 "phases",
+                *registry_metadata_cols,
                 "split",
                 "title",
                 "eligibility_criteria",
