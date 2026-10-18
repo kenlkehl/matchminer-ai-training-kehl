@@ -626,25 +626,25 @@ call extracts boilerplate with conditional exclusions kept conditional. Python
 assembles, deduplicates and numbers complete leaves into the existing CSV
 schemas (training numbering remains one-based).
 
-Each field call starts with the hierarchical target-population goal, then provides
-the full trial text, all field definitions and examples from the authored primer,
-the current candidate's locked fields and scope, and the request for child spaces
-across the current field. The closing step instructions include
-`REMINDER OF FIELD-SPECIFIC RULES:`, repeating that field's definition and
-valid/invalid examples verbatim from the primer (age reuses its existing step
-instructions because the primer has no separate age section). Including all
-definitions makes field boundaries explicit (for example, HIV/hepatitis exclusions
-belong in boilerplate, not tumor biomarkers). Shared requirements stay in every
-child; cumulative exclusions must not become optional alternative branches.
+Each field call supplies the full trial and one candidate's inherited characteristics,
+then asks: "For a patient with this set of characteristics ... what sets of [the
+current field] are relevant for determining eligibility?" It includes only the
+current field's definition and examples verbatim from the active primer, plus
+shared anti-boilerplate and omission guidance. Age retains its existing instructions
+because the primer has no separate age section. Diagnosis enumeration accompanies
+only primary-site/histology calls, and the treatment-defining biomarker example
+accompanies only biomarker calls. Shared requirements stay in every child;
+cumulative exclusions must not become optional alternative branches.
 
 `trial_hierarchy.py`, `trial_prompts/trial.hierarchy.*.txt`, and
 `trial_prompts/trial.user.primer.txt` mirror inference-kehl. Ownership is in
 inference; synchronize both copies after edits. Contract tests compare all files
-and the embedded one-shot primer. Hierarchy loads the primer's complete semantic
-rules verbatim, leaving out one-shot output formatting. Edits to its definitions
-therefore affect the hierarchy; changed section boundaries fail explicitly
-instead of silently dropping guidance. The separate boilerplate call gets the
-same full definitions and a trial-wide scope. Disease state remains concise; molecular
+and the embedded one-shot primer. Hierarchy loads each authored field section
+verbatim into the corresponding request, leaving out one-shot output formatting. Edits to its definitions
+therefore affect the relevant hierarchy field; changed section boundaries fail
+explicitly instead of silently dropping guidance. The separate boilerplate call
+gets only the authored boilerplate rules, shared omissions and a trial-wide scope.
+The active primer and one-shot extraction are unchanged. Disease state remains concise; molecular
 assay results go in biomarkers, response to specific prior
 treatment stays in treatment history, and all-comer cancer/histology enumeration
 is retained as field-specific work.
@@ -702,8 +702,8 @@ JSON node audit; `space_output_no_reasoning` is the code-assembled answer.
 
 Primary site is fixed before the sex call; final space text retains the established
 age, sex, primary-site label order. Existing one-shot, `trial-hierarchy-v1` and
-`trial-hierarchy-v2` extraction manifests are incompatible with this
-`trial-hierarchy-v3` ordering. Use fresh extraction
+`trial-hierarchy-v2` and `trial-hierarchy-v3` extraction manifests are incompatible
+with this `trial-hierarchy-v4` field-specific prompt contract. Use fresh extraction
 checkpoints while retaining compatible treatment-screening checkpoints. This
 refactor does not clear data or restart a paused run. A single-branch trial
 requires ten logical calls, and branching trials require more; correctness still

@@ -42,7 +42,7 @@ def test_default_cli_screens_then_runs_nine_fields_and_separate_boilerplate(
 
 
 @pytest.mark.parametrize(
-    "prompt_key", ["age", "definitions", "response", "boilerplate_response"]
+    "prompt_key", ["age", "anti_boilerplate", "omissions", "response", "boilerplate_response"]
 )
 def test_hierarchical_prompt_change_rejects_checkpoint_reuse_without_rescreening(
     endpoint_run, monkeypatch, prompt_key
