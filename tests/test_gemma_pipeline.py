@@ -274,3 +274,15 @@ def test_execution_upgrade_only_normalizes_positive_scheduling_limits():
     assert normalize(before) == normalize(after)
     assert normalize(before) != normalize(after.replace("'teacher'", "'different'"))
     assert normalize(before) != normalize(after.replace("'64'", "'0'"))
+
+
+def test_integrated_inference_pin_contains_the_current_trialchecker_rubric():
+    import subprocess
+    inference = runner.ROOT.parent / "matchminer-ai-inference-kehl"
+    if not (inference / ".git").exists():
+        pytest.skip("Requires the sibling inference-kehl Git checkout")
+    rubric = subprocess.check_output([
+        "git", "-C", str(inference), "show",
+        runner.INFERENCE_COMMIT + ":src/matchminer_ai/prompts/llm_match_quality.user.txt",
+    ], text=True)
+    assert c.digest(rubric) == c.TRIAL_RUBRIC_DIGEST

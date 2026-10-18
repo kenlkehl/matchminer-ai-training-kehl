@@ -18,7 +18,7 @@ PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 
 All three shell entrypoints use this same runner. It expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`fc025bf3407e2f13d7cb52ef65ad0720036faee7`. Review the pin and prompt contracts
+`9a935d6c09211f46c9e2de633397e0acfa54424b`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -617,8 +617,7 @@ screening configuration.
 
 0b now defaults to `--extraction-method hierarchical`. After the unchanged
 treatment screen, it branches through age, cancer primary site, sex, histology,
-disease state, required treatment, excluded treatment, required biomarkers and
-excluded biomarkers, in that order. Each request receives the whole trial text,
+disease state, prior treatment requirements, and biomarker requirements, in that order. Each request receives the whole trial text,
 one parent's fixed fields and its internal cohort context, and returns only
 alternatives for the next field. Cohort context preserves linked restrictions;
 fields are never combined as an independent Cartesian product. One separate
@@ -632,7 +631,7 @@ current field] are relevant for determining eligibility?" It includes only the
 current field's definition and examples verbatim from the active primer, plus
 shared anti-boilerplate and omission guidance. Age retains its existing instructions
 because the primer has no separate age section. Diagnosis enumeration accompanies
-only primary-site/histology calls, and the treatment-defining biomarker example
+only primary-site calls, and the treatment-defining biomarker example
 accompanies only biomarker calls. Shared requirements stay in every child;
 cumulative exclusions must not become optional alternative branches.
 
@@ -706,10 +705,27 @@ JSON node audit; `space_output_no_reasoning` is the code-assembled answer.
 
 Primary site is fixed before the sex call; final space text retains the established
 age, sex, primary-site label order. Existing one-shot, `trial-hierarchy-v1` and
-`trial-hierarchy-v2` and `trial-hierarchy-v3` extraction manifests are incompatible
-with this `trial-hierarchy-v4` field-specific prompt contract. Use fresh extraction
+`trial-hierarchy-v2`, `trial-hierarchy-v3`, and `trial-hierarchy-v4` extraction manifests are incompatible
+with this `trial-hierarchy-v5` combined-requirements prompt contract. Use fresh extraction
 checkpoints while retaining compatible treatment-screening checkpoints. This
 refactor does not clear data or restart a paused run. A single-branch trial
-requires ten logical calls, and branching trials require more; correctness still
+requires eight logical calls, and branching trials require more; correctness still
 needs source review, especially for early branching decisions. Do not mix new
 spaces/embeddings with artifacts from a previous prompt generation.
+
+New space text uses `Cancer primary site allowed`, `Prior treatment requirements`,
+and `Biomarker requirements`. Treatment and biomarker fields each retain both
+positive and negative conditions. Extraction postprocessing, QC, contextualization,
+and training's 0c sampling accept these seven fields as well as saved legacy
+nine-field spaces; they do not rewrite saved text or mix extraction checkpoints.
+TrialChecker and synthetic-patient prompts preserve clause polarity and AND/OR
+logic. The structured ontology API and PDQ catalog retain their separate JSON
+required/excluded fields, with explicit prompt adapters for the combined input.
+Existing trained models can consume the new text, but their quality on this prompt
+generation still requires evaluation; regenerate embeddings for changed spaces.
+
+TrialChecker aggregate and component prompts use the inference rubric with combined-field
+polarity guidance. The `oncoreasoning-answer-first-v6-combined-space` contract pins
+that rubric; preparation prefers the sibling `matchminer-ai-inference-kehl` checkout
+when present. Existing prepared distillation data must be regenerated for this
+contract. The installed inference package must match it for aggregate labeling.

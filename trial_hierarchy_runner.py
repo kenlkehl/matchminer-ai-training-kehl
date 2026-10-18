@@ -9,6 +9,7 @@ import pandas as pd
 
 from trial_hierarchy import (
     VERSION,
+    FIELDS,
     Completion,
     Hierarchy,
     ReadyHierarchy,
@@ -324,7 +325,7 @@ def local_extract(
         directory / "hierarchy_nodes",
         json.loads((directory / "extraction_manifest.json").read_text()),
     )
-    for stage in range(10):
+    for stage in range(len(FIELDS) + 1):
         groups = [s.requests() for s in states]
         requests = [r for group in groups for r in group]
         responses = []

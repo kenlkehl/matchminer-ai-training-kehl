@@ -25,7 +25,7 @@ from oncoreasoning_training.teacher import DEFAULT_TEACHER
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "fc025bf3407e2f13d7cb52ef65ad0720036faee7"
+INFERENCE_COMMIT = "9a935d6c09211f46c9e2de633397e0acfa54424b"
 
 
 @dataclass

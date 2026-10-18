@@ -31,6 +31,7 @@ USER_PROMPT_TEMPLATE_SUFFIX = (
     "\n For each patient, generate a list of events that might have occurred along the disease trajectory "
     "before the point of trial enrollment.\n"
     "Use everything you know about cancer and clinical oncology.\n"
+    'The "Prior treatment requirements" and "Biomarker requirements" fields each include both positive and negative conditions. Preserve each clause, its negation, AND/OR logic, and exceptions when interpreting eligibility.\n'
     "Types of events might include a diagnosis as recorded in a cancer registry; initiation of a systemic therapy; "
     "a surgery; a radiation treatment; an adverse event; a clinical progress note; an imaging report; a pathology report; "
     "and a next-generation sequencing (NGS) report. For progress notes, imaging reports, pathology reports, and NGS reports, "

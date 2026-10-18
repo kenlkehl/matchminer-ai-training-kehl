@@ -85,3 +85,18 @@ def test_aggregate_labeling_rejects_an_unreviewed_rubric(monkeypatch):
             labeling.trial_check_template()
     finally:
         labeling.trial_check_template.cache_clear()
+
+
+def test_combined_space_keeps_negative_clauses_in_aggregate_and_component_prompts():
+    trial = ('Prior treatment requirements: prior cisplatin AND no prior pembrolizumab. '
+             'Biomarker requirements: KRAS G12D AND no EGFR mutation.')
+    tokenizer = SimpleNamespace(apply_chat_template=lambda **kw: kw['conversation'][-1]['content'])
+    aggregate = labeling.build_trial_check_prompt(tokenizer, 'Fabricated patient.', trial)
+    assert trial in aggregate
+    sources = c.load_prompt_sources()
+    for component in c.TRIAL_COMPONENTS:
+        prompt = c.build_question_messages(dict(family='trialchecking', component=component,
+            patient_summary='Fabricated patient.', trial_summary=trial), sources)[-1]['content']
+        assert trial in prompt
+        assert 'prohibits pembrolizumab exposure' in prompt
+        assert 'excludes an EGFR mutation' in prompt

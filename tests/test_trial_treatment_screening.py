@@ -106,7 +106,7 @@ def endpoint_run(tmp_path, monkeypatch, request):
             assert 'ANTI_CANCER' in text
             if 'CURRENT FIELD:' in text:
                 field = text.split('CURRENT FIELD: ')[1].splitlines()[0]
-                value = {'age': '18+', 'sex': 'Both', 'cancer_type': 'lung cancer',
+                value = {'age': '18+', 'sex': 'Both', 'cancer_primary_site': 'lung cancer',
                          'histology': 'adenocarcinoma', 'disease_state': 'metastatic'}.get(field, 'NA')
                 final = json.dumps({'branches': [{'value': value, 'scope': 'all eligible patients'}], 'prune_reason': ''})
             elif 'Extract general exclusion criteria' in text:

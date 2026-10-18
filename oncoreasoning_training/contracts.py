@@ -7,18 +7,18 @@ from pathlib import Path
 import re
 
 DEFAULT_MODEL_NAME = "google/gemma-4-E4B-it"
-FORMAT_VERSION = "oncoreasoning-answer-first-v5-on-therapy"
+FORMAT_VERSION = "oncoreasoning-answer-first-v6-combined-space"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_answer_first_v2"
 DEFAULT_INFERENCE_REPO = next(
-    (p for p in (REPO_ROOT.parent / "matchminer-ai-inference",
-                 REPO_ROOT.parent / "matchminer-ai-inference-kehl") if p.is_dir()),
+    (p for p in (REPO_ROOT.parent / "matchminer-ai-inference-kehl",
+                 REPO_ROOT.parent / "matchminer-ai-inference") if p.is_dir()),
     REPO_ROOT.parent / "matchminer-ai-inference",
 )
 TASKS = ("summarization", "clinical_qa")
 OPTIONS = {"A": "Yes", "B": "No"}
-TRIAL_RUBRIC_DIGEST = "4a9ce0f1b3375f0cf92f66cce65cc2cb23bd240f237155d62c9ff9c770d8c1c0"
+TRIAL_RUBRIC_DIGEST = "ba429a9342160c3eae37abdb83d251a9565c0163b6ed123e369c08b866af72f3"
 SPECIFICITY_RULES_HEADER = "GENERAL GUIDANCE"
 SPECIFICITY_COMPONENTS = frozenset({
     "cancer_type_specificity", "cancer_burden_specificity",
@@ -187,6 +187,9 @@ def build_question_messages(task, sources):
             rule += "\n\n" + trial_specificity_rules(sources)
             rule += ("\nFor this one binary specificity question, earning the point means "
                      "answer Yes; insufficient evidence for the point means answer No.")
+        format_start = sources["llm_match_quality.user.txt"].index("Trial spaces may combine")
+        format_end = sources["llm_match_quality.user.txt"].index("\n\n", format_start)
+        rule += "\n\n" + sources["llm_match_quality.user.txt"][format_start:format_end]
         context = f"PATIENT SUMMARY\n{task['patient_summary']}\n\nTRIAL SPACE\n{task['trial_summary']}"
         scope = (
             "Judge reasonable consideration, not complete protocol eligibility. Evaluate the "

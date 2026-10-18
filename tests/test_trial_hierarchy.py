@@ -18,13 +18,13 @@ def enable_hierarchy(argv):
     del argv[position : position + 2]
 
 
-def test_default_cli_screens_then_runs_nine_fields_and_separate_boilerplate(
+def test_default_cli_screens_then_runs_seven_fields_and_separate_boilerplate(
     endpoint_run,
 ):
     state, path, argv = endpoint_run
     enable_hierarchy(argv)
     spaces.main()
-    assert [c[0] for c in state.calls] == ["screen"] * 3 + ["extract"] * 10
+    assert [c[0] for c in state.calls] == ["screen"] * 3 + ["extract"] * 8
     assert "CURRENT FIELD: age" in state.calls[3][1]
     assert (
         sum("Extract general exclusion criteria" in call[1] for call in state.calls)
@@ -36,9 +36,9 @@ def test_default_cli_screens_then_runs_nine_fields_and_separate_boilerplate(
     assert result.trial_boilerplate_text.tolist() == ["Active infection."]
     assert "Histology allowed: adenocarcinoma." in result.this_space.iloc[0]
     nodes = path / "work/space_extraction/hierarchy_nodes"
-    assert len(list(nodes.glob("*.json"))) == 10
+    assert len(list(nodes.glob("*.json"))) == 8
     spaces.main()
-    assert len(state.calls) == 13
+    assert len(state.calls) == 11
 
 
 @pytest.mark.parametrize(
@@ -60,7 +60,7 @@ def test_hierarchical_prompt_change_rejects_checkpoint_reuse_without_rescreening
     )
     with pytest.raises(ValueError, match="fresh extraction checkpoints"):
         spaces.main()
-    assert len(state.calls) == 13
+    assert len(state.calls) == 11
     assert len(list((path / "work/treatment_screening").glob("*.parquet"))) == 1
 
 
@@ -82,7 +82,7 @@ def test_remote_trial_batches_preserve_ids_and_one_registry(endpoint_run):
         source.loc[index, "trial_text"] = f"ANTI_CANCER {index}"
     source.to_csv(path / "trials.csv", index=False)
     spaces.main()
-    assert len(state.calls) == 33  # 3 screens, then 10 calls per trial.
+    assert len(state.calls) == 27  # 3 screens, then 8 calls per trial.
     assert len(state.registries) == 2  # Screening and one shared extraction pool.
     assert pd.read_csv(path / "spaces.csv").nct_id.tolist() == [
         "NCT00000001",
@@ -104,7 +104,7 @@ def test_failed_trial_does_not_cancel_other_trials_or_export_partial_csvs(endpoi
     original_get = trial_hierarchy_runner.ResponseCache.get
 
     def cached_prune(cache, request):
-        if request.trial_index == 0 and request.field_name == 'cancer_type':
+        if request.trial_index == 0 and request.field_name == 'cancer_primary_site':
             return Completion('{"branches": [], "prune_reason": "No cancer population in this synthetic case"}',
                               finish_reason='stop')
         return original_get(cache, request)
@@ -128,6 +128,9 @@ def test_shared_core_and_prompts_are_identical_to_inference():
         pytest.skip("Sibling inference checkout required for cross-repository contract")
     assert (inference / "trials/hierarchy.py").read_bytes() == (
         root / "matchminer-ai-training-kehl/trial_hierarchy.py"
+    ).read_bytes()
+    assert (inference / "_trial_space_format.py").read_bytes() == (
+        root / "matchminer-ai-training-kehl/trial_space_format.py"
     ).read_bytes()
     assert load_prompts(inference / "prompts") == prompt_bundle()
     assert (inference / "prompts/trial.user.primer.txt").read_bytes() == (
@@ -194,7 +197,7 @@ def test_local_hierarchy_keeps_model_resident_retries_and_resumes(
                     value = {
                         "age": "18+",
                         "sex": "Both",
-                        "cancer_type": "lung cancer",
+                        "cancer_primary_site": "lung cancer",
                         "histology": "adenocarcinoma",
                         "disease_state": "metastatic",
                     }.get(field, "NA")
@@ -226,7 +229,7 @@ def test_local_hierarchy_keeps_model_resident_retries_and_resumes(
             "none",
             output,
         )
-    assert len(calls) == 11
+    assert len(calls) == 9
     assert "failed validation" in calls[1]
     assert (
         pd.read_parquet(output)
@@ -309,7 +312,7 @@ def test_remote_validation_feedback_preserves_concurrency_classification_and_res
             value = {
                 "age": "18+",
                 "sex": "Both",
-                "cancer_type": "lung cancer",
+                "cancer_primary_site": "lung cancer",
                 "histology": "adenocarcinoma",
                 "disease_state": "metastatic",
             }.get(field, "NA")
@@ -361,9 +364,9 @@ def test_remote_validation_feedback_preserves_concurrency_classification_and_res
     )
     trials = pd.DataFrame([{"nct_id": "T1", "trial_text": "synthetic"}])
     runner.remote_main(args, trials, "nemotron_v3")
-    assert len(calls) == 12
+    assert len(calls) == 10
     assert len(validation_errors) == 2
     assert "failed validation" in calls[1][-1]["content"]
     assert [p["enable_thinking"] for p in templates[:3]] == [True, True, False]
     runner.remote_main(args, trials, "nemotron_v3")
-    assert len(calls) == 12
+    assert len(calls) == 10
