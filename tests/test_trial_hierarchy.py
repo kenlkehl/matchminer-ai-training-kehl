@@ -38,8 +38,45 @@ def test_default_cli_screens_then_runs_seven_fields_and_separate_boilerplate(
     assert result.trial_boilerplate_text.tolist() == ["Active infection."]
     assert "Histology allowed: adenocarcinoma." in result.this_space.iloc[0]
     nodes = path / "work/space_extraction/hierarchy_nodes"
-    assert len(list(nodes.glob("*.json"))) == 8
+    assert len(list(nodes.rglob("*.json"))) == 8
     spaces.main()
+    assert len(state.calls) == 11
+
+
+def test_remote_resume_reuses_flat_node_cache_after_directory_sharding(endpoint_run):
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    spaces.main()
+    work = path / "work/space_extraction"
+    nodes = work / "hierarchy_nodes"
+    for checkpoint in list(nodes.rglob("*.json")):
+        checkpoint.replace(nodes / checkpoint.name)
+    for shard in work.glob("remote_output_shard_*.parquet"):
+        shard.unlink()
+    previous = pd.read_csv(path / "spaces.csv")
+    spaces.main()
+    assert len(state.calls) == 11
+    result = pd.read_csv(path / "spaces.csv")
+    # Independent boilerplate/field completions can appear in a different order.
+    column = "space_reasoning_and_output"
+    pd.testing.assert_frame_equal(result.drop(columns=column), previous.drop(columns=column))
+    before, after = (json.loads(frame[column].iloc[0]) for frame in (previous, result))
+    assert {node['request_key']: node for node in before.pop('nodes')} == {
+        node['request_key']: node for node in after.pop('nodes')
+    }
+    assert before == after
+
+
+def test_sharded_nodes_still_require_a_prompt_manifest(endpoint_run):
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    spaces.main()
+    work = path / "work/space_extraction"
+    (work / "extraction_manifest.json").unlink()
+    for shard in work.glob("remote_output_shard_*.parquet"):
+        shard.unlink()
+    with pytest.raises(ValueError, match="lack a prompt manifest"):
+        spaces.main()
     assert len(state.calls) == 11
 
 
@@ -383,7 +420,7 @@ def test_fenced_remote_field_and_boilerplate_answers_need_no_retry(endpoint_run)
     work = path / "work/space_extraction"
     assert not (work / "validation_failures.jsonl").exists()
     assert len(pd.read_csv(path / "spaces.csv")) == 1
-    nodes = [json.loads(p.read_text()) for p in (work / "hierarchy_nodes").glob("*.json")]
+    nodes = [json.loads(p.read_text()) for p in (work / "hierarchy_nodes").rglob("*.json")]
     assert len(nodes) == 8
     assert all(node["completion"]["final"].startswith("```json\n") for node in nodes)
     spaces.main()

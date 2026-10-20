@@ -659,7 +659,7 @@ def check_extraction_manifest(args, reasoning_parser):
                 "Compatible treatment-screening checkpoints may be retained."
             )
     elif (any(Path(args.work_dir).glob("*output_shard_*.parquet"))
-          or any((Path(args.work_dir) / "hierarchy_nodes").glob("*.json"))):
+          or any((Path(args.work_dir) / "hierarchy_nodes").rglob("*.json"))):
         raise ValueError("Extraction shards lack a prompt manifest; use fresh extraction checkpoints.")
     else:
         temporary = path.with_suffix(".tmp")
