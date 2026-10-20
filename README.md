@@ -18,7 +18,7 @@ PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 
 All three shell entrypoints use this same runner. It expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`6a4fd38b1e45ae927887454be3826377a59794f5`. Review the pin and prompt contracts
+`ac75640363bec71f529d8fe4af36f152642290db`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -664,6 +664,10 @@ is saved per trial, with stable input-order merging. Resume reuses successful
 nodes in `space_extraction/hierarchy_nodes/`; completion order cannot change
 final numbering. Local GPU workers retain synchronous batches and keep their
 loaded model resident across field waves.
+Remote checkpoint reads/writes run off the request event loop, so shared-filesystem
+latency does not stall every server. Each accepted node is still persisted before
+its children can run. Resume validates and reuses completed one-trial shards
+without replaying their nodes or changing their original completion timestamps.
 In remote batches, a failed trial retains its trace and is listed in
 `space_extraction/extraction_failures.json`; other trials continue and save their
 completed shards. If any trial still fails, the batch reports an error after

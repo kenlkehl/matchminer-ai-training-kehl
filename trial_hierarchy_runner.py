@@ -216,13 +216,29 @@ def remote_main(args, trials, reasoning_parser):
                 )
             # Content errors must not reduce pool concurrency.
             raise OutputValidationError(str(exc)) from exc
-        cache.put(
-            request, result
+        await asyncio.to_thread(
+            cache.put, request, result
         )  # Persist immediately, without waiting for a full wave/shard.
         return result
 
     async def run():
-        paths = {}
+        # The caller has validated the prompt/runtime and selected-input manifests.
+        # Reuse atomic completed shards without replaying every accepted node or
+        # rewriting their original completion timestamps on a worker restart.
+        semaphore = asyncio.Semaphore(16)
+
+        async def existing(index, nct_id):
+            async with semaphore:
+                return await asyncio.to_thread(
+                    _completed_trial_path, Path(args.work_dir), index, nct_id
+                )
+
+        saved = await asyncio.gather(*(
+            existing(i, str(row.nct_id)) for i, row in enumerate(trials.itertuples())
+        ))
+        paths = {i: path for i, path in enumerate(saved) if path is not None}
+        if paths:
+            print(f"[hierarchy] reusing {len(paths)} completed trial shards", flush=True)
         errors = {}
         prompts = prompt_bundle()
         states = (
@@ -234,11 +250,13 @@ def remote_main(args, trials, reasoning_parser):
                 max_calls=getattr(args, "hierarchy_max_calls", 20000),
             )
             for i, row in enumerate(trials.itertuples())
+            if i not in paths
         )
 
-        def finished(state):
+        async def finished(state):
             index = state.trial_index
-            saved = _save_results(
+            saved = await asyncio.to_thread(
+                _save_results,
                 [state],
                 trials.iloc[[index]],
                 args.work_dir,
@@ -271,7 +289,7 @@ def remote_main(args, trials, reasoning_parser):
             capacity_limit = getattr(registry, "request_capacity", lambda: capacity)
 
             async def complete(request):
-                cached = cache.get(request)
+                cached = await asyncio.to_thread(cache.get, request)
                 if cached is not None:
                     return cached
                 result = await session.submit(
@@ -309,6 +327,26 @@ def remote_main(args, trials, reasoning_parser):
         return [paths[index] for index in sorted(paths)]
 
     return asyncio.run(run())
+
+
+def _completed_trial_path(directory, index, nct_id):
+    """Verify an already atomically published one-trial shard before skipping it."""
+    import pyarrow.parquet as parquet
+
+    path = directory / f"remote_output_shard_{index:06d}.parquet"
+    if not path.exists():
+        return None
+    status = json.loads(path.with_suffix('.parquet.status.json').read_text())
+    if status.get('method') != VERSION or status.get('complete') is not True or status.get('trials') != 1:
+        raise ValueError(f"Completed trial shard has incompatible status: {path}")
+    saved = parquet.ParquetFile(path)
+    required = {'nct_id', 'space_text', 'trial_boilerplate_text', 'space_reasoning_and_output',
+                'space_output_no_reasoning'}
+    if saved.metadata.num_rows != 1 or not required.issubset(saved.schema_arrow.names):
+        raise ValueError(f"Completed trial shard has invalid schema/row count: {path}")
+    if str(saved.read(columns=['nct_id']).column('nct_id')[0].as_py()) != nct_id:
+        raise ValueError(f"Completed trial shard belongs to a different trial: {path}")
+    return str(path)
 
 
 def local_extract(

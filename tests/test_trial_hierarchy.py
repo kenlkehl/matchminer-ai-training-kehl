@@ -25,7 +25,9 @@ def test_default_cli_screens_then_runs_seven_fields_and_separate_boilerplate(
     enable_hierarchy(argv)
     spaces.main()
     assert [c[0] for c in state.calls] == ["screen"] * 3 + ["extract"] * 8
-    assert "CURRENT FIELD: age" in state.calls[3][1]
+    # Boilerplate is independent; concurrent cache lookups may dispatch it first.
+    field_calls = [text for _, text in state.calls[3:] if "CURRENT FIELD:" in text]
+    assert "CURRENT FIELD: age" in field_calls[0]
     assert (
         sum("Extract general exclusion criteria" in call[1] for call in state.calls)
         == 1
@@ -386,3 +388,55 @@ def test_fenced_remote_field_and_boilerplate_answers_need_no_retry(endpoint_run)
     assert all(node["completion"]["final"].startswith("```json\n") for node in nodes)
     spaces.main()
     assert len(state.calls) == 11  # Fenced checkpoint responses also resume without calls.
+
+
+def test_resume_reuses_completed_shard_without_node_replay_or_rewriting(endpoint_run, monkeypatch):
+    import trial_hierarchy_runner as runner
+
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    spaces.main()
+    shard = next((path / "work/space_extraction").glob("remote_output_shard_*.parquet"))
+    before = (shard.read_bytes(), shard.stat().st_mtime_ns)
+
+    def unexpected_read(*args):
+        pytest.fail("Completed trial should not replay its node cache")
+
+    monkeypatch.setattr(runner.ResponseCache, "get", unexpected_read)
+    spaces.main()
+    assert (shard.read_bytes(), shard.stat().st_mtime_ns) == before
+    assert len(state.calls) == 11
+    with pytest.raises(ValueError, match="different trial"):
+        runner._completed_trial_path(shard.parent, 0, "wrong-trial")
+
+
+def test_remote_checkpoint_io_keeps_event_loop_responsive(endpoint_run, monkeypatch):
+    import asyncio
+    import threading
+    import trial_hierarchy_runner as runner
+
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    loop = None
+    original_schedule = runner.run_ready_hierarchies
+
+    async def schedule(*args, **kwargs):
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        return await original_schedule(*args, **kwargs)
+
+    def checked_io(original):
+        def wrapped(*args, **kwargs):
+            heartbeat = threading.Event()
+            loop.call_soon_threadsafe(heartbeat.set)
+            assert heartbeat.wait(2), "Checkpoint I/O blocked the request loop"
+            return original(*args, **kwargs)
+        return wrapped
+
+    monkeypatch.setattr(runner, "run_ready_hierarchies", schedule)
+    monkeypatch.setattr(runner.ResponseCache, "get", checked_io(runner.ResponseCache.get))
+    monkeypatch.setattr(runner.ResponseCache, "put", checked_io(runner.ResponseCache.put))
+    monkeypatch.setattr(runner, "_save_results", checked_io(runner._save_results))
+    spaces.main()
+    assert len(state.calls) == 11
+    assert len(pd.read_csv(path / "spaces.csv")) == 1
