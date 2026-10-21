@@ -1,12 +1,10 @@
 """Model-family defaults must reach real request and local-generation paths."""
 import argparse
 import asyncio
-import sys
 from types import SimpleNamespace
 
 import pytest
 
-from tests.test_trial_selection import load_script
 from vllm_reasoning_utils import add_sampling_cli_args, resolve_sampling_defaults, sampling_from_args
 
 
@@ -49,29 +47,20 @@ def test_teacher_request_sampling_tracks_thinking_mode(monkeypatch, thinking, te
     assert request['extra_body']['chat_template_kwargs']['enable_thinking'] is thinking
 
 
-@pytest.mark.parametrize('filename', ['1a_make_synthetic_enrollee_prompts.py',
-                                     '1b_make_synthetic_negative_enrollee_prompts.py'])
-@pytest.mark.parametrize('temperature', [None, 0.0])
-def test_local_synthetic_prompt_workers_use_gemma_defaults(tmp_path, monkeypatch, filename, temperature):
-    module = load_script(filename.removesuffix('.py'), filename)
-    captured = []
-    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '')
-    class LLM:
-        def __init__(self, **kwargs):
-            pass
-        def get_tokenizer(self):
-            return object()
-    monkeypatch.setitem(sys.modules, 'vllm', SimpleNamespace(
-        LLM=LLM, SamplingParams=lambda **kwargs: captured.append(kwargs)))
-    # No GPU or data are needed to exercise actual worker sampler construction.
-    module.worker_process_shards(worker_id=0, gpu_group='', shard_payloads=[],
-        model_name='gemma4-31b', download_dir=None, gpu_memory_utilization=.9,
-        max_model_len=50000, max_num_seqs=10, temperature=temperature, top_p=None,
-        max_tokens=40000, repetition_penalty=None, base_seed=42, batch_size=10,
-        out_dir=str(tmp_path), reasoning_parser='gemma4')
-    assert captured[0]['temperature'] == (1.0 if temperature is None else temperature)
-    assert captured[0]['top_k'] == 64 and captured[0]['top_p'] == .95
-    assert captured[0]['repetition_penalty'] == 1.0
+@pytest.mark.parametrize('model,top_k', [
+    ('RedHatAI/Gemma-4-31B-IT-FP8-Dynamic', 64),
+    ('nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4', -1),
+])
+def test_production_synthetic_generator_uses_tokenizer_family_sampling(tmp_path, model, top_k):
+    from generate_synthetic_data import Generator
+    from tests.test_synthetic_generation import Tokenizer, args_for
+
+    args = args_for(tmp_path)
+    args.model, args.tokenizer_model = 'served-alias', model
+    sampling = Generator(args, Tokenizer()).sampling
+    assert sampling.model == 'served-alias'
+    assert sampling.temperature == 1.0 and sampling.top_p == .95
+    assert sampling.top_k == top_k and sampling.repetition_penalty == 1.0
 
 
 @pytest.mark.parametrize('temperature', [None, 0.0])

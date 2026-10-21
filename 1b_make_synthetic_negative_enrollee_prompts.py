@@ -1,41 +1,28 @@
-#!/usr/bin/env python3
-import os
-import sys
-import math
-import json
-import glob
-import shutil
-import random
-import argparse
-import traceback
-import numpy as np
-import pandas as pd
-from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from multiprocessing import set_start_method
+"""Negative-patient prompt definitions imported by generate_synthetic_data.py.
 
-# -----------------------------
-# Prompt / generation utilities
-# -----------------------------
+Edit the clinical instruction blocks here. Generation, validation, and
+checkpointing belong to the production driver, not this prompt module.
+"""
+import random
+
+
 SYSTEM_PROMPT = (
     "I'm a medical oncologist and data scientist. Your job is to help me create synthetic clinical data "
     "for cancer research."
 )
 
-USER_PROMPT_TEMPLATE_PREFIX = (
-    "Imagine the longitudinal clinical history for 5 patients with cancer who did not quite meet criteria to enroll on a clinical trial "
-    "with the following eligibility criteria:\n"
-)
 
 DIAGNOSIS_INSTRUCTIONS = (
     'Diagnosis events should include TNM stage, summary stage, site description and code, histology description '
     'and code, and all relevant site-specific data elements that a cancer registrar would annotate.\n'
 )
 
+
 DIVERSITY_INSTRUCTIONS = (
     'To ensure diversity in the generated data, vary patient age, gender, name, stage at diagnosis, biomarkers, '
     'treatment approaches, and disease course (e.g., stable disease, progression, remission, recurrence).\n'
 )
+
 
 CONSISTENCY_INSTRUCTIONS = (
     'VERY IMPORTANT: All events MUST be in chronological order and must be internally consistent in that context. '
@@ -45,6 +32,7 @@ CONSISTENCY_INSTRUCTIONS = (
     'contaminate the synthetic data and render them useless, since we will be using the synthetic data to derive '
     'clinical history models to match patients to clinical trials on which they have not yet enrolled!\n'
 )
+
 
 EVENT_INSTRUCTIONS = (
     'Use everything you know about cancer and clinical oncology.\n'
@@ -112,34 +100,11 @@ EVENT_INSTRUCTIONS = (
     )
 )
 
-USER_PROMPT_TEMPLATE_SUFFIX = (
-    'For example, the patient might have not had quite the right age, cancer type, histology, biomarkers, prior '
-    'treatment, comorbidites, or disease burden to be eligible.\n'
-    'For each patient, generate a list of events that might have occurred along the disease trajectory before the '
-    'point of trial enrollment/failure to enroll.\n'
-    + EVENT_INSTRUCTIONS
-    + DIVERSITY_INSTRUCTIONS
-    + (
-        'Now, generate your output for the imagined patients who enrolled on the trial.\n'
-        'Separate the outputs for individual patients using the tag <new_patient>, which should go on its own line.'
-    )
-    + CONSISTENCY_INSTRUCTIONS
-)
 
 SECOND_PRIMARY_INSTRUCTION = (
     "In this particular group of patients, each patient have had a second primary prior unrelated cancer history before "
     "the cancer relevant to the trial. Incorporate events for the prior cancer as well as the current cancer into your output."
 )
-
-def build_messages(criteria_text: str, rng: random.Random):
-    content = USER_PROMPT_TEMPLATE_PREFIX + criteria_text + USER_PROMPT_TEMPLATE_SUFFIX
-    # ~10% chance to include second-primary instruction
-    if rng.randrange(10) == 5:
-        content = content + "\n" + SECOND_PRIMARY_INSTRUCTION + "\n"
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": content},
-    ]
 
 
 def build_seed_messages(criteria_text: str, rng: random.Random):
@@ -157,456 +122,8 @@ def build_patient_messages(criteria_text: str, seed_text: str):
                             instructions=EVENT_INSTRUCTIONS, consistency=CONSISTENCY_INSTRUCTIONS)
 
 
-def process_outputs(request_outputs, reasoning_parser: str, tokenizer):
-    from vllm_reasoning_utils import parse_reasoning_output
-    full_responses, final_outputs = [], []
-    for ro in request_outputs:
-        text = ro.outputs[0].text
-        full_responses.append(text)
-        _, answer = parse_reasoning_output(text, reasoning_parser, tokenizer)
-        final_outputs.append(answer)
-    return full_responses, final_outputs
-
-
-# -----------------------------
-# Args / sharding
-# -----------------------------
-def parse_args():
-    p = argparse.ArgumentParser(description="Resumable synthetic clinical history generator per trial space.")
-    p.add_argument("--input-csv", default="../data/no_phi/sample_trial_space_lineitems.csv", help="Input CSV with trial spaces.")
-    p.add_argument("--output-csv", default="../data/no_phi/trial_spaces_with_negative_prompts.csv", help="Final output CSV path.")
-    p.add_argument("--output-dir", default="../data/no_phi/trial_spaces_negative_prompts_shards/", help="Directory for shard outputs and logs.")
-    p.add_argument("--gpu-groups", default="0|1|2|3|4|5|6|7",
-                   help='GPU groups string. Examples: "0,1,2,3|4,5,6,7" (two workers, TP=4 each) or "0,1,2,3,4,5,6,7" (one worker, TP=8).')
-    p.add_argument("--model-name", default="google/gemma-4-31b-it", help="vLLM-compatible model name or path.")
-    p.add_argument("--download-dir", default="../models")
-    p.add_argument("--gpu-mem-util", type=float, default=0.90)
-    p.add_argument("--max-model-len", type=int, default=50000)
-    p.add_argument("--max-num-seqs", type=int, default=900, help="vLLM max_num_seqs (concurrent request cap).")
-    p.add_argument("--temperature", type=float, default=None)
-    p.add_argument("--top-p", type=float, default=None)
-    p.add_argument("--max-tokens", type=int, default=40000)
-    p.add_argument("--repetition-penalty", type=float, default=None)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--shard-size", type=int, default=1000, help="Number of rows per shard (contiguous).")
-    p.add_argument("--batch-size", type=int, default=1000, help="Prompts per llm.generate() call inside a shard.")
-    p.add_argument("--assemble-partial", action="store_true",
-                   help="If not all shards are done, write a partial combined CSV (<output_csv>.partial).")
-
-    from vllm_reasoning_utils import add_reasoning_cli_args
-    add_reasoning_cli_args(p)
-
-    from remote_vllm_pool import add_remote_cli_args
-    add_remote_cli_args(p)
-
-    return p.parse_args()
-
-
-def make_gpu_groups(gpu_groups_arg: str):
-    parts = [grp.strip() for grp in gpu_groups_arg.split("|")]
-    parts = [p for p in parts if p]
-    return parts
-
-
-def ensure_dirs(base_dir: Path):
-    (base_dir / "shards").mkdir(parents=True, exist_ok=True)
-    (base_dir / "logs").mkdir(parents=True, exist_ok=True)
-
-
-def shard_id_for_index(idx: int, shard_size: int) -> int:
-    return idx // shard_size
-
-
-def shard_bounds(shard_id: int, shard_size: int, n_rows: int):
-    start = shard_id * shard_size
-    end = min(n_rows, (shard_id + 1) * shard_size)
-    return start, end
-
-
-# -----------------------------
-# Worker
-# -----------------------------
-def worker_process_shards(
-    worker_id: int,
-    gpu_group: str,
-    shard_payloads: list,        # list of tuples: (shard_id, [records])
-    model_name: str,
-    download_dir: str,
-    gpu_memory_utilization: float,
-    max_model_len: int,
-    max_num_seqs: int,
-    temperature: float,
-    top_p: float,
-    max_tokens: int,
-    repetition_penalty: float,
-    base_seed: int,
-    batch_size: int,
-    out_dir: str,
-    reasoning_parser: str,
-):
-    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_group
-    # Lazy import post CUDA visibility
-    from vllm import LLM, SamplingParams
-
-    local_devices = [d for d in gpu_group.split(",") if d.strip() != ""]
-    tp = max(1, len(local_devices))
-
-    llm = LLM(
-        model=model_name,
-        tensor_parallel_size=tp,
-        download_dir=download_dir,
-        gpu_memory_utilization=gpu_memory_utilization,
-        max_num_seqs=max_num_seqs,
-        max_model_len=max_model_len,
-    )
-    tokenizer = llm.get_tokenizer()
-    from vllm_reasoning_utils import resolve_sampling_defaults
-    sampling = SamplingParams(
-        **resolve_sampling_defaults(model_name,
-            fallback=dict(temperature=1.0, top_p=0.95, repetition_penalty=1.0),
-            temperature=temperature, top_p=top_p, repetition_penalty=repetition_penalty),
-        max_tokens=max_tokens,
-        skip_special_tokens=False,
-    )
-
-    completed = []
-    for shard_id, recs in shard_payloads:
-        shard_path = Path(out_dir) / "shards" / f"shard_{shard_id:06d}.csv"
-        tmp_path = shard_path.with_suffix(".csv.part")
-        log_path = Path(out_dir) / "logs" / f"shard_{shard_id:06d}.log"
-
-        # Double-check skip inside worker too (in case of race)
-        if shard_path.exists():
-            completed.append(shard_id)
-            continue
-
-        try:
-            # Build prompts
-            order_keys, prompts = [], []
-            for rec in recs:
-                # deterministic per-row RNG
-                ridx = int(rec["criteria_index"])
-                messages = build_messages(rec["criteria"], rng=random.Random(base_seed + ridx))
-                prompt = tokenizer.apply_chat_template(
-                    conversation=messages,
-                    add_generation_prompt=True,
-                    tokenize=False,
-                    enable_thinking=True,
-                )
-                order_keys.append(ridx)
-                prompts.append(prompt)
-
-            # Generate in mini-batches to control memory footprint
-            full_responses_all, final_outputs_all = [], []
-            for i in range(0, len(prompts), batch_size):
-                sub_prompts = prompts[i:i+batch_size]
-                request_outputs = llm.generate(sub_prompts, sampling)
-                fr, fo = process_outputs(request_outputs, reasoning_parser, tokenizer)
-                full_responses_all.extend(fr)
-                final_outputs_all.extend(fo)
-
-            # Align and write shard file atomically
-            shard_df = pd.DataFrame({
-                "criteria_index": order_keys,
-                "synthetic_patient_prompt_generation_reasoning": full_responses_all,
-                "synthetic_patient_prompts": final_outputs_all,
-            }).sort_values("criteria_index").reset_index(drop=True)
-
-            shard_df.to_csv(tmp_path, index=False)
-            os.replace(tmp_path, shard_path)
-
-            with open(log_path, "w") as f:
-                f.write(json.dumps({
-                    "worker_id": worker_id,
-                    "gpu_group": gpu_group,
-                    "shard_id": shard_id,
-                    "n_rows": len(recs),
-                }, indent=2))
-
-            completed.append(shard_id)
-            print(f"[worker {worker_id}] wrote shard {shard_id} -> {shard_path}", flush=True)
-
-        except Exception as e:
-            # Capture error and continue; shard will remain missing and be retried on resume
-            err_path = Path(out_dir) / "logs" / f"shard_{shard_id:06d}.error.txt"
-            with open(err_path, "w") as f:
-                f.write("".join(traceback.format_exception(type(e), e, e.__traceback__)))
-            print(f"[worker {worker_id}] ERROR shard {shard_id}: {e}", file=sys.stderr, flush=True)
-
-    return completed
-
-
-# -----------------------------
-# Assembly
-# -----------------------------
-def assemble_if_ready(spaces: pd.DataFrame, out_dir: Path, output_csv: Path, assemble_partial: bool):
-    shard_files = sorted((out_dir / "shards").glob("shard_*.csv"))
-    if not shard_files:
-        print("No shard files present yet; skipping assembly.")
-        return False
-
-    shards_df = pd.concat([pd.read_csv(p) for p in shard_files], ignore_index=True)
-    n_expected = len(spaces)
-    n_have = len(shards_df)
-
-    if n_have == n_expected:
-        # Map back to original order by criteria_index
-        merged = spaces.merge(
-            shards_df[["criteria_index", "synthetic_patient_prompt_generation_reasoning", "synthetic_patient_prompts"]],
-            on="criteria_index",
-            how="left",
-            validate="one_to_one",
-        )
-        # Ensure final order by original row order (criteria_index was set equal to original index)
-        merged = merged.sort_values("criteria_index").reset_index(drop=True)
-
-        # (Optional) drop helper columns like 'criteria' before writing
-        if "criteria" in merged.columns:
-            merged = merged.drop(columns=["criteria"])
-
-        tmp_out = output_csv.with_suffix(output_csv.suffix + ".part")
-        merged.to_csv(tmp_out, index=False)
-        os.replace(tmp_out, output_csv)
-        print(f"✅ Final output complete: {output_csv} ({len(merged)} rows).")
-        return True
-    else:
-        remaining = n_expected - n_have
-        print(f"Partial progress: {n_have}/{n_expected} rows available; {remaining} remaining.")
-        if assemble_partial:
-            # Write a partial combined CSV aligned to input order, leaving missing rows absent
-            merged_partial = spaces.merge(
-                shards_df[["criteria_index", "synthetic_patient_prompt_generation_reasoning", "synthetic_patient_prompts"]],
-                on="criteria_index",
-                how="left",
-                validate="one_to_one",
-            ).sort_values("criteria_index").reset_index(drop=True)
-            partial_path = output_csv.with_suffix(output_csv.suffix + ".partial")
-            tmp_partial = partial_path.with_suffix(partial_path.suffix + ".part")
-            merged_partial.to_csv(tmp_partial, index=False)
-            os.replace(tmp_partial, partial_path)
-            print(f"✳️ Wrote partial output: {partial_path} ({n_have} filled rows).")
-        return False
-
-
-# -----------------------------
-# Remote-mode (GCP orchestrator)
-# -----------------------------
-def remote_main(args, spaces: pd.DataFrame, out_dir: Path, reasoning_parser: str):
-    """Run synthetic-enrollee generation through a remote vLLM pool. Writes
-    per-batch shard CSVs in the same format as the local worker so
-    assemble_if_ready() can merge them."""
-    import asyncio
-    import re
-    from transformers import AutoTokenizer
-    from remote_vllm_pool import (
-        CompletionSampling,
-        make_completion_work_fn,
-        run_pool,
-        build_registry_from_args,
-    )
-
-    print("[remote] loading tokenizer...", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name,
-        cache_dir=args.download_dir or None,
-        trust_remote_code=True,
-    )
-
-    shard_dir = out_dir / "shards"
-    shard_dir.mkdir(parents=True, exist_ok=True)
-
-    done_indices = set()
-    for f in sorted(shard_dir.glob("shard_*.csv")):
-        try:
-            df_prev = pd.read_csv(f, usecols=["criteria_index"])
-            done_indices.update(int(x) for x in df_prev["criteria_index"].tolist())
-        except Exception:
-            pass
-    if done_indices:
-        print(f"[remote] {len(done_indices)} rows already in shards; skipping.", flush=True)
-
-    work_mask = ~spaces["criteria_index"].isin(done_indices)
-    work_df = spaces[work_mask].reset_index(drop=True)
-    if len(work_df) == 0:
-        print("[remote] nothing to do.", flush=True)
-        return
-
-    print(f"[remote] building {len(work_df)} prompts...", flush=True)
-    prompts_by_id: dict = {}
-    for _, row in work_df.iterrows():
-        ridx = int(row["criteria_index"])
-        messages = build_messages(row["criteria"], rng=random.Random(args.seed + ridx))
-        prompt = tokenizer.apply_chat_template(
-            conversation=messages,
-            add_generation_prompt=True,
-            tokenize=False,
-            enable_thinking=True,
-        )
-        prompts_by_id[ridx] = prompt
-
-    work_items = [
-        (cid, {"prompt": prompts_by_id[cid], "max_tokens": int(args.max_tokens)})
-        for cid in prompts_by_id
-    ]
-
-    from vllm_reasoning_utils import sampling_from_args
-    sampling = CompletionSampling(
-        model=args.model_name,
-        **sampling_from_args(args, fallback=dict(temperature=1.0, top_p=0.95, top_k=1, repetition_penalty=1.0)),
-        request_timeout=float(getattr(args, "request_timeout", 600.0)),
-    )
-    work_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
-    registry = build_registry_from_args(args)
-
-    remote_pat = re.compile(r"shard_R(\d+)\.csv$")
-    next_idx = 0
-    for f in shard_dir.iterdir():
-        m = remote_pat.match(f.name)
-        if m:
-            next_idx = max(next_idx, int(m.group(1)) + 1)
-
-    def shard_writer(payload, shard_idx):
-        rows = []
-        for cid, result in payload:
-            if isinstance(result, str) and result.startswith("ERROR:"):
-                reasoning, final = "", result
-            else:
-                reasoning, final = result
-            rows.append({
-                "criteria_index": int(cid),
-                "synthetic_patient_prompt_generation_reasoning": reasoning,
-                "synthetic_patient_prompts": final,
-            })
-        out_path = shard_dir / f"shard_R{shard_idx:06d}.csv"
-        tmp = out_path.with_suffix(".csv.part")
-        pd.DataFrame(rows).to_csv(tmp, index=False)
-        os.replace(tmp, out_path)
-        print(f"[remote] wrote {out_path.name} ({len(rows)} rows)", flush=True)
-
-    asyncio.run(run_pool(
-        work_items=work_items,
-        work_fn=work_fn,
-        registry=registry,
-        shard_writer=shard_writer,
-        results_per_shard=int(getattr(args, "results_per_shard", 200)),
-        starting_shard_idx=next_idx,
-        max_attempts=int(getattr(args, "max_attempts", 200)),
-    ))
-
-
-# -----------------------------
-# Main
-# -----------------------------
-def main():
-    args = parse_args()
-    from vllm_reasoning_utils import resolve_parser_name
-    reasoning_parser = resolve_parser_name(args.model_name, args.reasoning_parser)
-
-    output_csv = Path(args.output_csv)
-    out_dir = Path(args.output_dir) if args.output_dir else Path(f"{output_csv.stem}_shards")
-    ensure_dirs(out_dir)
-
-    # Load and prep input
-    spaces = pd.read_csv(args.input_csv)
-    spaces["this_space"] = spaces['this_space'].str.replace(r'^\s*\d+\.', '', regex=True)
-    spaces["trial_boilerplate_text"] = spaces["trial_boilerplate_text"].fillna("")
-    spaces["criteria"] = spaces["this_space"] + "\nNo history of:\n" + spaces["trial_boilerplate_text"]
-    spaces["criteria_index"] = spaces.index.astype(int)
-
-    n_rows = len(spaces)
-    shard_size = max(1, args.shard_size)
-    total_shards = math.ceil(n_rows / shard_size)
-    print(f"Total rows: {n_rows} | shard_size={shard_size} -> total_shards={total_shards}")
-
-    # Quick exit if final already assembled (and valid)
-    if output_csv.exists():
-        print(f"Final output already exists: {output_csv}")
-        return
-
-    # ---- Remote-mode dispatch ----
-    if args.server_urls or args.server_urls_file:
-        print("[main] dispatching to remote vLLM pool", flush=True)
-        remote_main(args, spaces, out_dir, reasoning_parser)
-        assemble_if_ready(spaces, out_dir, output_csv, args.assemble_partial)
-        return
-
-    # ---- Local mode ----
-    try:
-        set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
-    rng = np.random.default_rng(args.seed)
-
-    # Build payloads per shard (contiguous blocks)
-    all_shard_ids = list(range(total_shards))
-    shard_dir = out_dir / "shards"
-    done_shard_ids = sorted([
-        int(p.stem.split("_")[-1])
-        for p in shard_dir.glob("shard_*.csv")
-        if p.stem.split("_")[-1].isdigit()
-    ])
-
-    missing_shard_ids = [sid for sid in all_shard_ids if sid not in done_shard_ids]
-    if not missing_shard_ids:
-        # Nothing to do; try to assemble final (or verify)
-        assembled = assemble_if_ready(spaces, out_dir, output_csv, args.assemble_partial)
-        if assembled:
-            return
-        else:
-            # If somehow mismatch, fall through to regeneration of any missing rows (shouldn't happen)
-            pass
-
-    # Prepare shard records
-    def build_shard_records(shard_id: int):
-        s, e = shard_bounds(shard_id, shard_size, n_rows)
-        block = spaces.iloc[s:e][["criteria_index", "criteria"]]
-        return [{"criteria_index": int(ci), "criteria": c} for ci, c in zip(block["criteria_index"], block["criteria"])]
-
-    # Distribute missing shards to workers round-robin
-    gpu_groups = make_gpu_groups(args.gpu_groups)
-    n_workers = max(1, len(gpu_groups))
-    worker_payloads = [[] for _ in range(n_workers)]
-    for i, sid in enumerate(missing_shard_ids):
-        worker_payloads[i % n_workers].append((sid, build_shard_records(sid)))
-
-    # Launch workers
-    futures = []
-    with ProcessPoolExecutor(max_workers=n_workers) as ex:
-        for wid, (grp, payload) in enumerate(zip(gpu_groups, worker_payloads)):
-            if not payload:
-                continue
-            futures.append(
-                ex.submit(
-                    worker_process_shards,
-                    wid,
-                    grp,
-                    payload,
-                    args.model_name,
-                    args.download_dir,
-                    args.gpu_mem_util,
-                    args.max_model_len,
-                    args.max_num_seqs,
-                    args.temperature,
-                    args.top_p,
-                    args.max_tokens,
-                    args.repetition_penalty,
-                    args.seed,
-                    args.batch_size,
-                    str(out_dir),
-                    reasoning_parser,
-                )
-            )
-
-        for fut in as_completed(futures):
-            try:
-                completed = fut.result()
-                print(f"Worker completed shards: {completed}")
-            except Exception as e:
-                print(f"Worker crashed: {e}", file=sys.stderr)
-
-    # Assemble if everything is present (or write partial if requested)
-    assemble_if_ready(spaces, out_dir, output_csv, args.assemble_partial)
-
-
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        "This is an import-only prompt module. Run generate_synthetic_data.py "
+        "or train_all.sh --start-at generate-synthetic instead."
+    )

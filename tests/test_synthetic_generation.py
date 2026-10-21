@@ -3,6 +3,8 @@ import asyncio
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pandas as pd
@@ -42,6 +44,20 @@ def args_for(tmp_path):
         seed=42, seed_max_tokens=16000, event_max_tokens=20000, note_max_tokens=15000, stop_after_events=False, max_model_len=250000,
         spaces_per_note_chunk=1, pending_requests=4, results_per_shard=3,
         max_attempts=2, request_timeout=7200, reasoning_parser='gemma4')
+
+
+@pytest.mark.parametrize('filename', ['1a_make_synthetic_enrollee_prompts.py',
+                                     '1b_make_synthetic_negative_enrollee_prompts.py'])
+def test_prompt_modules_reject_standalone_execution_without_side_effects(tmp_path, filename):
+    module = generation.load_stage(filename)
+    assert callable(module.build_seed_messages) and callable(module.build_patient_messages)
+    result = subprocess.run([sys.executable, '-S', module.__file__, '--help'],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert 'import-only prompt module' in result.stderr
+    assert 'generate_synthetic_data.py' in result.stderr
+    assert not result.stdout
+    assert not list(tmp_path.iterdir())
 
 
 def test_patient_ids_do_not_collide_between_spaces_or_classes():

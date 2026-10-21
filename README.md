@@ -800,8 +800,10 @@ per sampled space in two stages. For each class, one call creates five diverse
 seeds containing only demographics and diagnosis lines. After that seed batch
 is saved, five independent calls each expand exactly one patient's chronology.
 The clinical instructions, including chronology/anatomy and trial-reference
-rules, remain in `1a_make_synthetic_enrollee_prompts.py` and
-`1b_make_synthetic_negative_enrollee_prompts.py`. Their named instruction blocks
+rules, remain in the import-only modules `1a_make_synthetic_enrollee_prompts.py`
+and `1b_make_synthetic_negative_enrollee_prompts.py`. They cannot run generation
+standalone; use `generate_synthetic_data.py` or the pipeline's
+`generate-synthetic` stage. Their named instruction blocks
 feed `build_seed_messages` and `build_patient_messages`; shared stage framing
 lives in `synthetic_event_prompts.py`. A positive patient's eligibility takes
 precedence over the optional second-primary diversity request.
