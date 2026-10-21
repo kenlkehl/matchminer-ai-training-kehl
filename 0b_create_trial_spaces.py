@@ -875,6 +875,11 @@ def main():
                         help="Maximum reasoning plus final-output tokens per extraction request")
     parser.add_argument("--batch-size", type=int, default=1000, help="Prompts per generate() call per instance")
     parser.add_argument("--seed", type=int, default=42, help="Seed for split assignment")
+    parser.add_argument(
+        "--preserve-input-splits", action="store_true",
+        help="Keep existing train/val/test assignments when re-extracting an already sampled cohort; "
+             "requires a valid, consistent split for every selected NCT ID.",
+    )
 
     from vllm_reasoning_utils import add_reasoning_cli_args, resolve_parser_name
     add_reasoning_cli_args(parser)
@@ -917,10 +922,16 @@ def main():
     print(f"[main] {args.trial_filter}: kept {len(trials)}/{date_filtered_count} trials")
     if trials.empty:
         raise ValueError("No trials match the requested start year and trial filter; no inference was started.")
-    # Deterministic split assignment
-    rng = np.random.default_rng(args.seed)
     trials = trials.copy()
-    trials["split"] = rng.choice(["train", "val", "test"], size=len(trials), p=[0.8, 0.1, 0.1])
+    if args.preserve_input_splits:
+        if "split" not in trials or not trials["split"].isin(["train", "val", "test"]).all():
+            raise ValueError("--preserve-input-splits requires train/val/test in every selected row")
+        if trials.groupby("nct_id")["split"].nunique().gt(1).any():
+            raise ValueError("--preserve-input-splits requires a consistent split per NCT ID")
+    else:
+        # Deterministic split assignment for a new cohort.
+        rng = np.random.default_rng(args.seed)
+        trials["split"] = rng.choice(["train", "val", "test"], size=len(trials), p=[0.8, 0.1, 0.1])
 
     # Deduplicate by NCT ID like your original
     trials = trials.groupby("nct_id").first().reset_index()

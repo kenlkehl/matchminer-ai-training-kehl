@@ -520,6 +520,15 @@ lack this manifest: checkpoint row numbers cannot safely be reused across
 selections. Both final CSVs retain study type, phase, and available registry status
 and date columns for audit.
 
+When re-extracting an existing sampled cohort, supply an input CSV containing
+only those NCT IDs and their saved `split` values, and pass
+`--preserve-input-splits`. This keeps the original train/val/test assignments
+instead of drawing new ones for the smaller cohort. Missing, invalid, or
+conflicting assignments are rejected. If reusing `--screening-input`, subset
+the saved screening CSV to the exact same IDs without changing its source text,
+decisions, model provenance, or splits. Use fresh extraction checkpoints and
+output paths for the new model.
+
 
 ### Direct anti-cancer treatment screen in 0b
 
