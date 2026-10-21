@@ -75,6 +75,8 @@ python 6_summarize_patients.py \
   --additional_vllm_args "--quantization nvfp4 --kv-cache-dtype fp8"
 """
 
+from matchminer_ai.llm.reasoning import reasoning_system_prompt
+
 import argparse
 import asyncio
 import glob
@@ -337,7 +339,7 @@ You may update the old summary content in your output if the new information dem
 You may sometimes encounter contradictory information across notes (eg different biomarker results, or different cancer stage descriptions) - in that case, use your best judgment to determine which information is most likely to be correct based on the dates and context, and update the summary accordingly to reflect the most likely current state of the patient.
 Do not add preceding text before the abstraction, and do not add commentary afterwards."""
 
-    system_content = 'Reasoning: high' if 'gpt-oss' in model_name.lower() else ''
+    system_content = reasoning_system_prompt(model_name)
     messages = [
         {'role': 'system', 'content': system_content},
         {'role': 'user', 'content': user_content}

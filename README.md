@@ -21,7 +21,7 @@ All three shell entrypoints use `run_pipeline.py`. By default they start at
 Select `--start-at` to include data production, and `--stop-after` to stop before
 later stages. The training portion expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`fb412f771aab80a8cb485a4bcb0d1c599d729bbd`. Review the pin and prompt contracts
+`408b6d7f13e9e4e403ef94d08ff68502d112b7c3`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -914,3 +914,8 @@ or completed outputs fail rather than silently reusing stale checkpoints.
 `--dry-run` prints the complete selected plan, including downstream training
 commands, without starting work or writing run files. No stage is inferred from
 unrelated files or another run directory.
+
+Model-specific reasoning text: the literal `Reasoning: high` system header is
+added only for GPT-OSS model identities. Gemma, Nemotron, Qwen, and other families
+use their configured chat-template/API thinking controls; task instructions are
+preserved without the GPT-OSS header. Unknown model identities receive no header.

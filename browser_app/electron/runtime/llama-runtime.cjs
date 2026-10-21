@@ -8,7 +8,9 @@ const { DEFAULT_LLAMA_FILE, DEFAULT_LLAMA_REPO, downloadFile, ensureLlamaModel, 
 const DEFAULT_CONTEXT_TOKENS = 32768;
 const DEFAULT_REPEAT_PENALTY = 1.1;
 const SERVER_START_TIMEOUT_MS = 180000;
-const GENERATION_SYSTEM_PROMPT = "Reasoning: high";
+function reasoningSystemPrompt(modelId) {
+  return /gpt[-_]?oss/i.test(modelId) ? "Reasoning: high" : "";
+}
 
 class LlamaRuntime {
   constructor(app) {
@@ -36,11 +38,12 @@ class LlamaRuntime {
   }
 
   async generate({ prompt, maxNewTokens, contextTokens, repo, file, llamaModelRepo, llamaModelFile, repetitionPenalty, systemPrompt }) {
-    await this.ensureStarted({ contextTokens, repo: repo || llamaModelRepo, file: file || llamaModelFile });
+    const modelRepo = repo || llamaModelRepo || DEFAULT_LLAMA_REPO;
+    await this.ensureStarted({ contextTokens, repo: modelRepo, file: file || llamaModelFile });
     const response = await postJson(this.baseUrl("/v1/chat/completions"), {
       model: "matchminer-local",
       messages: [
-        { role: "system", content: String(systemPrompt || GENERATION_SYSTEM_PROMPT) },
+        { role: "system", content: String(systemPrompt ?? reasoningSystemPrompt(modelRepo)) },
         { role: "user", content: String(prompt ?? "") }
       ],
       max_tokens: Math.max(1, Math.floor(maxNewTokens ?? 512)),

@@ -29,6 +29,8 @@ python llm_check_trials.py \
   --gpu_memory_utilization 0.92
 """
 
+from matchminer_ai.llm.reasoning import reasoning_system_prompt
+
 import os
 import re
 import argparse
@@ -59,10 +61,10 @@ def trial_check_template() -> str:
     return template.strip()
 
 
-def build_trial_check_prompt(tokenizer, patient_summary: str, trial_summary: str) -> str:
+def build_trial_check_prompt(tokenizer, patient_summary: str, trial_summary: str, *, model_name: str | None = None) -> str:
     """Render the canonical scoring rubric identically for local and remote teachers."""
     messages = [
-        {"role": "system", "content": "Reasoning: high"},
+        {"role": "system", "content": reasoning_system_prompt(model_name or getattr(tokenizer, "name_or_path", ""))},
         {"role": "user", "content": trial_check_template().format(
             patient_summary=patient_summary, trial_summary=trial_summary)},
     ]
@@ -103,7 +105,7 @@ def ask_about_trials_loosely(patient_summaries: List[str],
     """
     tokenizer = llm_model.get_tokenizer()
     prompts = [
-        build_trial_check_prompt(tokenizer, patient_summary, trial_summary)
+        build_trial_check_prompt(tokenizer, patient_summary, trial_summary, model_name=model)
         for patient_summary, trial_summary in zip(patient_summaries, trial_summaries)
     ]
 

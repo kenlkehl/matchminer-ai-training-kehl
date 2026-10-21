@@ -19,6 +19,8 @@ python vllm_parallel_trialcheck.py \
      --n-samples 100 \
 """
 
+from matchminer_ai.llm.reasoning import reasoning_system_prompt
+
 import argparse
 import os
 import sys
@@ -263,7 +265,7 @@ def worker_process(
             trial_summary = str(row["this_space"])
             
             messages = [
-                {"role": "system", "content": "Reasoning: high"},
+                {"role": "system", "content": reasoning_system_prompt(getattr(tokenizer, "name_or_path", ""))},
                 {"role": "user", "content": (
                     "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
                     "Your job is to evaluate whether a given clinical trial is a reasonable consideration for a patient, "

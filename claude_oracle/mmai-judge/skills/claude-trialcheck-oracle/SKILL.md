@@ -9,8 +9,8 @@ allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *
 # claude-trialcheck-oracle
 
 You are running the oracle replica of `llm_check_trials.py`. Use **ultrathink**
-on every row: the original script sets `Reasoning: high`, so extended thinking
-must be active throughout the scoring loop.
+on every row, using Claude's supported extended-thinking controls throughout
+the scoring loop. The GPT-OSS-only text header does not enable Claude thinking.
 
 ## Workflow
 
@@ -99,11 +99,10 @@ Notes on this step:
 - Use a unique heredoc sentinel (e.g. `TRIALCHECK_RESPONSE_EOF`) so the
   response body can contain arbitrary characters without terminating early.
 
-#### System message (verbatim)
+#### Reasoning configuration
 
-```
-Reasoning: high
-```
+Use Claude's supported extended-thinking controls. Do not prepend the GPT-OSS-only
+`Reasoning: high` text to Claude prompts.
 
 #### User message template (verbatim — fill in `{trial_summary}` and `{patient_summary}`)
 

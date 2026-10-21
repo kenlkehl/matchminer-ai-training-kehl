@@ -80,11 +80,10 @@ SPACES_JUDGE_EOF
 Keep the command prefix identical across rows so one "always allow" covers
 every invocation.
 
-#### System message (verbatim)
+#### Reasoning configuration
 
-```
-Reasoning: high
-```
+Use Claude's supported extended-thinking controls. Do not prepend the GPT-OSS-only
+`Reasoning: high` text to Claude prompts.
 
 #### User message template (verbatim — fill in `{trial_text}` and `{spaces_block}`)
 

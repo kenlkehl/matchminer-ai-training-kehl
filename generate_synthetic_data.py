@@ -193,7 +193,8 @@ class Generator:
             # Preserve the exact step-2 prompt. The larger limit prevents its
             # legacy head/tail truncation; reject an overlong context below.
             prompt = self.notes.build_prompts([item['masked_text']], self.tokenizer,
-                                             max_ctx_tokens=self.args.max_model_len)[0]
+                                             max_ctx_tokens=self.args.max_model_len,
+                                             model_name=self.args.tokenizer_model or self.args.model)[0]
             max_tokens = self.args.note_max_tokens
         length = len(self.tokenizer.encode(prompt, add_special_tokens=False))
         if length + max_tokens + 256 > self.args.max_model_len:

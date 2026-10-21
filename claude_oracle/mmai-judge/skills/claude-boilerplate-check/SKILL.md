@@ -9,7 +9,7 @@ allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *
 # claude-boilerplate-check
 
 You are running the oracle replica of `14_check_boilerplate.py`. Use
-**ultrathink** on every row: the original script sets `Reasoning: high`, so
+**ultrathink** on every row using Claude's supported controls, so
 extended thinking must be active throughout the scoring loop.
 
 ## Workflow
@@ -103,11 +103,10 @@ Notes on this step:
 - Use a unique heredoc sentinel (e.g. `BOILERPLATE_RESPONSE_EOF`) so the
   response body can contain arbitrary characters without terminating early.
 
-#### System message (verbatim)
+#### Reasoning configuration
 
-```
-Reasoning: high
-```
+Use Claude's supported extended-thinking controls. Do not prepend the GPT-OSS-only
+`Reasoning: high` text to Claude prompts.
 
 #### User message template (verbatim — fill in `{p_blp}` and `{t_blp}`)
 

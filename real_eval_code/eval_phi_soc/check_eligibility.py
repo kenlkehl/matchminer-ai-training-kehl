@@ -11,6 +11,8 @@ Usage:
     python check_eligibility.py --gpu 0 --mode trial_centric
 """
 
+from matchminer_ai.llm.reasoning import reasoning_system_prompt
+
 import argparse
 import os
 import re
@@ -73,7 +75,7 @@ def ask_about_trials_loosely(patient_summaries, trial_summaries, llama_model, re
 
     for patient_summary, trial_summary in zip(patient_summaries, trial_summaries):
         messages = [
-            {'role': 'system', 'content': "Reasoning: high"},
+            {'role': 'system', 'content': reasoning_system_prompt(getattr(tokenizer, "name_or_path", ""))},
             {'role': 'user', 'content': (
                 "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
                 "Your job is to evaluate whether a given clinical trial is a reasonable consideration for a patient, "

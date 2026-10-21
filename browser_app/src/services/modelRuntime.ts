@@ -29,7 +29,9 @@ const pipelineCache = new Map<string, Promise<AnyPipeline>>();
 const tokenizerCache = new Map<string, Promise<any>>();
 const classifierCache = new Map<string, Promise<any>>();
 const patchedLogitSessions = new WeakSet<object>();
-const REASONING_SYSTEM_PROMPT = "Reasoning: high";
+function reasoningSystemPrompt(modelId: string): string {
+  return /gpt[-_]?oss/i.test(modelId) ? "Reasoning: high" : "";
+}
 let webGpuDetailsLogged = false;
 let runtimePreferences: Pick<ModelSettings, "llmBackend" | "onnxBackend" | "llmContextTokens" | "llamaModelRepo" | "llamaModelFile" | "repetitionPenalty"> | null = null;
 
@@ -101,7 +103,10 @@ export async function generateText(modelId: string, prompt: string, options: Tex
   assertNotAborted(options.signal);
   const native = nativeApi();
   const enableThinking = options.enableThinking !== false;
-  const systemPrompt = options.systemPrompt ?? REASONING_SYSTEM_PROMPT;
+  const effectiveModelId = native && shouldUseNativeLlm()
+    ? runtimePreferences?.llamaModelRepo ?? DEFAULT_LLAMA_GGUF_REPO
+    : modelId;
+  const systemPrompt = options.systemPrompt ?? reasoningSystemPrompt(effectiveModelId);
   if (native && shouldUseNativeLlm()) {
     const output = await native.generateText({
       prompt,

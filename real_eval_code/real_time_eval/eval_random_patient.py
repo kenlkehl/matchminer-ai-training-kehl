@@ -26,6 +26,8 @@ Examples:
     python eval_random_patient.py /path/to/model --trial-checker /path/to/trial_checker_model
 """
 
+from matchminer_ai.llm.reasoning import reasoning_system_prompt
+
 import argparse
 import configparser
 import os
@@ -106,7 +108,7 @@ def run_trial_check(patient_summary, trial_texts, llm, reasoning_parser):
 
     for trial_summary in trial_texts:
         messages = [
-            {'role': 'system', 'content': "Reasoning: high"},
+            {'role': 'system', 'content': reasoning_system_prompt(getattr(tokenizer, "name_or_path", ""))},
             {'role': 'user', 'content': (
                 "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment. "
                 "Your job is to evaluate whether a given clinical trial is a reasonable consideration for a patient, "
@@ -200,7 +202,7 @@ def run_boilerplate_check(patient_boilerplate, trial_boilerplates, llm, reasonin
 
     for trial_boilerplate in trial_boilerplates:
         messages = [
-            {'role': 'system', 'content': "Reasoning: high"},
+            {'role': 'system', 'content': reasoning_system_prompt(getattr(tokenizer, "name_or_path", ""))},
             {'role': 'user', 'content': (
                 "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment.\n"
                 "Your job is to evaluate whether a patient has any underlying medical conditions that would exclude him or her from a specific clinical trial.\n\n"

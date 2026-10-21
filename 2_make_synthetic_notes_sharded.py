@@ -25,6 +25,8 @@ Notes:
 - Safe resume: existing shard files are detected and skipped by default.
 """
 
+from matchminer_ai.llm.reasoning import reasoning_system_prompt
+
 import os
 import re
 import uuid
@@ -259,7 +261,7 @@ def replace_generics_with_alternatives(text: str, patterns, rng: np.random.Gener
 # Worker: one process per (GPU group), one vLLM instance inside
 # ------------------------------
 
-def build_prompts(masked_texts: List[str], tokenizer, max_ctx_tokens: int = 40000) -> List[str]:
+def build_prompts(masked_texts: List[str], tokenizer, max_ctx_tokens: int = 40000, *, model_name: str | None = None) -> List[str]:
     prompts = []
     for masked_text in masked_texts:
         # Trim very long histories by taking head+tail
@@ -269,7 +271,7 @@ def build_prompts(masked_texts: List[str], tokenizer, max_ctx_tokens: int = 4000
             last_part = patient_text_tokens[- max_ctx_tokens // 2 :]
             masked_text = tokenizer.decode(first_part) + " ... " + tokenizer.decode(last_part)
 
-        messages = [{'role':'system', 'content': "Reasoning: high"},
+        messages = [{'role':'system', 'content': reasoning_system_prompt(model_name or getattr(tokenizer, "name_or_path", ""))},
                     {'role':'user', 'content': """You are a brilliant synthetic clinical document generation bot with encyclopedic knowledge about cancer and its treatment. 
 You will be given a semi-structured list of events from a patient's clinical history, with each event on its own line of text.
 The events are sorted in chronological order.
@@ -406,7 +408,7 @@ def run_worker(
                 skip_special_tokens=False,
             )
 
-        prompts = build_prompts(batch['masked_text'].tolist(), tokenizer)
+        prompts = build_prompts(batch['masked_text'].tolist(), tokenizer, model_name=model)
         responses = llm.generate(prompts, sampling)
 
         # Parse outputs
@@ -686,7 +688,7 @@ def remote_main(args, promptframe_parquet: str, shards_dir: str, reasoning_parse
         return
 
     print(f"[remote] building {len(work_df)} prompts...")
-    prompts = build_prompts(work_df['masked_text'].tolist(), tokenizer)
+    prompts = build_prompts(work_df['masked_text'].tolist(), tokenizer, model_name=args.model)
 
     do_perturb = bool(args.perturb_prob) and args.perturb_prob > 0.0
     drug_map = load_drug_map(args.drug_map_csv) if do_perturb else {}

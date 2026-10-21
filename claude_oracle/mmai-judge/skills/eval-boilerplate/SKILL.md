@@ -81,11 +81,10 @@ python "${CLAUDE_SKILL_DIR}/scripts/append_response.py" \
 BOILERPLATE_JUDGE_EOF
 ```
 
-#### System message (verbatim)
+#### Reasoning configuration
 
-```
-Reasoning: high
-```
+Use Claude's supported extended-thinking controls. Do not prepend the GPT-OSS-only
+`Reasoning: high` text to Claude prompts.
 
 #### User message template (verbatim)
 

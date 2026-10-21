@@ -21,6 +21,8 @@ Outputs
 - trial_space_lineitems.csv
 """
 
+from matchminer_ai.llm.reasoning import reasoning_system_prompt
+
 import os
 import argparse
 import hashlib
@@ -89,10 +91,10 @@ PROMPT_SUFFIX = (
 BOILERPLATE_MARKER = "Boilerplate"
 
 
-def build_messages(trial_text: str):
+def build_messages(trial_text: str, model_name: str = ""):
     """Chat messages for a single trial."""
     return [
-        {"role": "system", "content": "\nReasoning: high.\n"},
+        {"role": "system", "content": reasoning_system_prompt(model_name)},
         {
             "role": "user",
             "content": (
@@ -231,7 +233,7 @@ def worker_process(
     trial_texts = shard_df["trial_text"].astype(str).tolist()
     prompts = [
         tokenizer.apply_chat_template(
-            conversation=(build_screening_messages(t) if screening else build_messages(t)),
+            conversation=(build_screening_messages(t) if screening else build_messages(t, model)),
             add_generation_prompt=True,
             tokenize=False,
             enable_thinking=True
@@ -287,7 +289,7 @@ def worker_process(
 
 
 def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screening=False,
-                                  max_model_len=None, always_reasons=False):
+                                  max_model_len=None, always_reasons=False, model_name=""):
     """Give remote retries validation feedback, with per-item thinking fallback.
 
     The pool owns the attempt budget and requeues the same payload. Retain only
@@ -345,8 +347,8 @@ def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screeni
                   error=str(exc), finish_reason=metadata["finish_reason"],
                   reasoning=reasoning, final=final, raw_text=metadata.get("raw_text"))
             messages = (build_screening_messages(payload["trial_text"]) if screening
-                        else build_messages(payload["trial_text"]))
-            if not always_reasons and not next_thinking and messages[0]["content"].strip() == "Reasoning: high.":
+                        else build_messages(payload["trial_text"], model_name or getattr(tokenizer, "name_or_path", "")))
+            if not screening and not always_reasons and not next_thinking:
                 messages[0] = {"role": "system", "content": "Return the requested final answer directly."}
             # Bounded feedback prevents large extraction responses from making
             # successive retries exceed the original context budget.
@@ -423,7 +425,7 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     template_kwargs = {"reasoning_effort": "max"} if use_chat else {"enable_thinking": True}
     prompts = [
         tokenizer.apply_chat_template(
-            conversation=(build_screening_messages(t) if screening else build_messages(t)),
+            conversation=(build_screening_messages(t) if screening else build_messages(t, getattr(args, "tokenizer_model", None) or args.model)),
             add_generation_prompt=True,
             tokenize=False,
             **template_kwargs,
@@ -463,7 +465,7 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
          {"prompt": prompts[i], "max_tokens": int(args.max_tokens),
           "trial_text": trial_texts[i], "nct_id": str(trials.iloc[i]["nct_id"]),
           **({"messages": (build_screening_messages(trial_texts[i]) if screening
-                           else build_messages(trial_texts[i])),
+                           else build_messages(trial_texts[i], getattr(args, "tokenizer_model", None) or args.model)),
               "chat_template_kwargs": template_kwargs} if use_chat else {})})
         for i in range(len(trials))
         if int(trials.iloc[i]["_work_id"]) not in done_ids
@@ -490,6 +492,7 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     work_fn = make_trial_completion_work_fn(
         completion_fn, tokenizer, args.work_dir, screening=screening,
         max_model_len=args.max_model_len, always_reasons=use_chat,
+        model_name=getattr(args, "tokenizer_model", None) or args.model,
     )
     registry = build_registry_from_args(args)
 

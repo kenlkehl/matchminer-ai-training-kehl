@@ -15,6 +15,8 @@ Usage:
     python check_boilerplate.py --gpu 0 --mode patient_centric --input ./custom_candidates.csv
 """
 
+from matchminer_ai.llm.reasoning import reasoning_system_prompt
+
 import argparse
 import os
 import sys
@@ -76,7 +78,7 @@ def ask_about_boilerplate(patient_boilerplates, trial_boilerplates, llama_model,
 
     for patient_boilerplate, trial_boilerplate in zip(patient_boilerplates, trial_boilerplates):
         messages = [
-            {'role': 'system', 'content': "Reasoning: high"},
+            {'role': 'system', 'content': reasoning_system_prompt(getattr(tokenizer, "name_or_path", ""))},
             {'role': 'user', 'content': (
                 "You are a brilliant oncologist with encyclopedic knowledge about cancer and its treatment.\n"
                 "Your job is to evaluate whether a patient has any underlying medical conditions that would exclude him or her from a specific clinical trial.\n\n"
