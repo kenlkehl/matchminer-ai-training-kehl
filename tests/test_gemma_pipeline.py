@@ -131,6 +131,54 @@ def test_integrated_plan_starts_with_base_mining_and_trains_only_two_models():
             assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "96"
 
 
+@pytest.mark.parametrize('wrapper', ['train_all.sh', 'train_all_gcp.sh', 'temp_train_gcp.sh'])
+def test_shell_entrypoints_forward_explicit_run_filenames(tmp_path, wrapper):
+    import os
+    import subprocess
+    import sys
+    inputs = dict(trial_spaces=tmp_path / 'completed_trial_space_lineitems.csv',
+                  patient_summaries=tmp_path / 'new_patient_summaries.parquet',
+                  synthetic_notes=tmp_path / 'new_synthetic_notes.parquet')
+    flags = [value for key, path in inputs.items() for value in ('--' + key.replace('_', '-'), str(path))]
+    output = subprocess.check_output(['bash', str(runner.ROOT / wrapper), '--dry-run', *flags],
+                                     text=True, env={**os.environ, 'PYTHON': sys.executable})
+    plan = {stage['name']: stage['command'] for stage in json.loads(output)}
+    for iteration in (1, 2, 3):
+        command = plan[f'mine-{iteration}']
+        assert command[command.index('--trials-file') + 1] == str(inputs['trial_spaces'])
+        assert command[command.index('--patients-parquet') + 1] == str(inputs['patient_summaries'])
+    command = plan['prepare-oncoreasoning']
+    assert command[command.index('--notes') + 1] == str(inputs['synthetic_notes'])
+    args = runner.parser().parse_args(flags)
+    assert runner.input_paths(args) == inputs
+
+
+def test_default_pipeline_filenames_remain_compatible():
+    args = runner.parser().parse_args([])
+    assert runner.input_paths(args) == {
+        'patient_summaries': args.data_dir / 'patient_summaries_with_spaces.parquet',
+        'synthetic_notes': args.data_dir / 'all_synthetic_notes.parquet',
+        'trial_spaces': args.data_dir / 'trial_space_lineitems.csv',
+    }
+
+
+def test_mining_reads_compact_space_exports_without_whole_trial_fields(tmp_path):
+    from trial_space_export import write_trial_exports
+    from tests.test_trial_space_export import SPACE
+    shard, patients = tmp_path / 'extraction.parquet', tmp_path / 'patients.parquet'
+    pd.DataFrame([dict(nct_id='NCT1', space_text=f'1. {SPACE}', split='train',
+                      trial_boilerplate_text='Active infection',
+                      space_reasoning_and_output='Full saved reasoning')]).to_parquet(shard, index=False)
+    pd.DataFrame([dict(pseudo_mrn='p1', patient_summary='Synthetic history', split='train')]).to_parquet(patients)
+    output = tmp_path / 'completed_trial_space_lineitems.csv'
+    write_trial_exports([shard], tmp_path / 'completed_trials_with_spaces.csv', output,
+                        ['nct_id', 'split'])
+    _, spaces = load_retrieval_tables(SimpleNamespace(patients_parquet=str(patients),
+        trials_file=str(output), splits=['train']))
+    assert spaces.this_space.tolist() == [SPACE]
+    assert spaces.trial_boilerplate_text.tolist() == ['Active infection']
+
+
 def test_shared_teacher_label_concurrency_survives_both_labeling_rounds():
     args = runner.parser().parse_args(["--label-concurrency-per-server", "288"])
     plan = runner.stages(args)

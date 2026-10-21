@@ -39,6 +39,12 @@ class Stage:
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-dir", type=Path, default=ROOT.parent / "data/no_phi")
+    p.add_argument("--trial-spaces", type=Path,
+                   help="0b space-level CSV/parquet, including completed_ exports; default: DATA_DIR/trial_space_lineitems.csv")
+    p.add_argument("--patient-summaries", type=Path,
+                   help="Summarized synthetic patients; default: DATA_DIR/patient_summaries_with_spaces.parquet")
+    p.add_argument("--synthetic-notes", type=Path,
+                   help="Generated synthetic notes; default: DATA_DIR/all_synthetic_notes.parquet")
     p.add_argument("--run-dir", type=Path, default=ROOT.parent / "data/no_phi/gemma_pipeline_v2")
     p.add_argument("--models-dir", type=Path, default=ROOT.parent / "models/gemma_pipeline_v2")
     p.add_argument("--inference-repo", type=Path, default=ROOT.parent / "matchminer-ai-inference-kehl")
@@ -64,8 +70,17 @@ def parser():
     return p
 
 
+def input_paths(args):
+    """Use the same explicit filenames in validation, manifests, and every stage."""
+    defaults = dict(patient_summaries="patient_summaries_with_spaces.parquet",
+                    synthetic_notes="all_synthetic_notes.parquet", trial_spaces="trial_space_lineitems.csv")
+    return {key: (getattr(args, key, None) or args.data_dir / filename).expanduser().resolve()
+            for key, filename in defaults.items()}
+
+
 def stages(args):
     run, models = args.run_dir, args.models_dir
+    inputs = input_paths(args)
     py = sys.executable
     servers = run / "teacher_servers.json"
     gpu_count = len(args.gpus.split(','))
@@ -76,8 +91,8 @@ def stages(args):
     for iteration in (1, 2, 3):
         candidates = [run / f"top_{direction}_tocheck_round{iteration}.parquet" for direction in ("cohorts", "patients")]
         result.append(Stage(f"mine-{iteration}", [py, "make_top_matches.py",
-            "--patients-parquet", str(args.data_dir / "patient_summaries_with_spaces.parquet"),
-            "--trials-file", str(args.data_dir / "trial_space_lineitems.csv"),
+            "--patients-parquet", str(inputs['patient_summaries']),
+            "--trials-file", str(inputs['trial_spaces']),
             "--model", str(embedding), "--gpus", args.gpus,
             "--sample_trials_per_patient", "500", "--sample_patients_per_trial", "20000",
             "--top_k_spaces", "20", "--top_k_patients", "40",
@@ -121,7 +136,7 @@ def stages(args):
     data = run / "oncoreasoning"
     program = [py, "oncoreasoning_training/create_all_training_data.py"]
     result.append(Stage("prepare-oncoreasoning", program + ["prepare", "--output-dir", str(data),
-        "--notes", str(args.data_dir / "all_synthetic_notes.parquet"),
+        "--notes", str(inputs['synthetic_notes']),
         "--pipeline-manifest", str(run / "pipeline_manifest.json"),
         "--candidates", *map(str, candidates), "--catalog", str(catalog),
         "--boilerplate-components", str(exclusions), "--model-name", args.student_model,
@@ -284,6 +299,9 @@ def main():
     args = parser().parse_args()
     for key in ("data_dir", "run_dir", "models_dir", "inference_repo"):
         setattr(args, key, getattr(args, key).expanduser().resolve())
+    for key in ("trial_spaces", "patient_summaries", "synthetic_notes"):
+        if getattr(args, key) is not None:
+            setattr(args, key, getattr(args, key).expanduser().resolve())
     plan = stages(args)
     if args.dry_run:
         print(json.dumps([vars(stage) for stage in plan], default=str, indent=2))
@@ -296,11 +314,13 @@ def main():
     (args.run_dir / "logs").mkdir(exist_ok=True)
     lock = (args.run_dir / "pipeline.lock").open("w")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    files = [args.data_dir / name for name in ("patient_summaries_with_spaces.parquet",
-             "all_synthetic_notes.parquet", "trial_space_lineitems.csv")]
+    files = list(input_paths(args).values())
+    if any(not path.is_relative_to(ROOT.parent / "data/no_phi") for path in files):
+        raise ValueError("The integrated runner requires inputs in the authorized data/no_phi directory")
     manifest_path = args.run_dir / "pipeline_manifest.json"
     identity = {"args": {key: str(value) for key, value in vars(args).items()
-                         if key not in ("dry_run", "skip_input_validation")},
+                         if key not in ("dry_run", "skip_input_validation")
+                         and not (key in ("trial_spaces", "patient_summaries", "synthetic_notes") and value is None)},
                 "training_commit": git_revision(ROOT), "inference_commit": INFERENCE_COMMIT,
                 "trial_rubric_digest": TRIAL_RUBRIC_DIGEST,
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}

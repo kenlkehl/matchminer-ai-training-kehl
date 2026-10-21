@@ -706,8 +706,19 @@ Extraction defaults to `--max-tokens 50000` (reasoning plus final answer) and
 `--max-model-len 100000`; explicit caller limits still override these defaults.
 The separate treatment-screening budget remains 8192 tokens.
 Successful nodes, validation-failure logs, and `hierarchy_traces/` remain
-available for review and resumption. `space_reasoning_and_output` contains the
-JSON node audit; `space_output_no_reasoning` is the code-assembled answer.
+available for review and resumption. In `trials_with_spaces.csv`,
+`space_reasoning_and_output` contains the full JSON node audit,
+`space_output_no_reasoning` is the code-assembled answer, and `space_text`
+contains the complete list of spaces. These whole-trial fields are saved once
+per trial and omitted from `trial_space_lineitems.csv`. Each line item retains
+its own `this_space`, `space_number`, source/registry metadata, boilerplate, and
+`reasoning_trials_path`; join its `nct_id` to that trial-level CSV to inspect the
+full audit. Original parquet checkpoints and hierarchy trace JSON remain intact.
+The shared exporter streams checkpoints and individual rows, so local and remote
+extraction (both hierarchical and one-shot) do not assemble a giant expanded
+DataFrame or duplicate the entire reasoning tree on every space. Step 0c,
+synthetic generation, embedding, and checker consumers continue to use the
+space-level `this_space` and boilerplate columns.
 
 Primary site is fixed before the sex call; final space text retains the established
 age, sex, primary-site label order. Existing one-shot, `trial-hierarchy-v1` and
@@ -742,3 +753,68 @@ JSON/schema, duplicate-key, and completion-status validation. Prose outside the
 fence, malformed JSON, and truncated responses still fail. Raw responses and
 reasoning remain unchanged in the audit. This presentation-only parser fix is
 compatible with existing v5 prompts and successful node checkpoints.
+
+## Generate event lists and synthetic notes with existing servers
+
+After `0b` has completed, `0c_sample_trial_spaces.py` samples 3,000 trials
+(seed 42) and retains all their spaces. Its DFCI holdout excludes trials open
+during 2025–2026 using `dfci_trials_summary_10-18-26.csv`. A trial with an
+invalid space is excluded as a whole so sampling never silently drops one of
+its spaces. Input/output paths, sample size, seed, and holdout years are CLI
+options. The sampling receipt records the exact NCT IDs and space count.
+
+`generate_synthetic_data.py` uses the existing `1a` and `1b` prompt builders
+unchanged to create five matching and five near-miss event histories per sampled
+space, then uses the existing step-2 prompt to expand clinical, imaging,
+pathology, and NGS report events into notes. It shares one adaptive endpoint
+pool across both patient classes, renders prompts with thinking enabled, and
+saves raw completions, separated reasoning, model names, endpoints, and prompt
+hashes. Completed responses and stable patient IDs survive resumption. Truncated
+completions, missing patients, and invalid event tags are retried rather than
+being exported as clinical data. Full source prompts are pinned by the run
+manifest; use a fresh output directory after changing them.
+
+```bash
+python 0c_sample_trial_spaces.py \
+  --input-csv /path/to/completed/trial_space_lineitems.csv \
+  --output-csv /path/to/new-run/sample_trial_space_lineitems.csv
+python generate_synthetic_data.py \
+  --input-csv /path/to/new-run/sample_trial_space_lineitems.csv \
+  --output-dir /path/to/new-run \
+  --model gemma4-31b \
+  --tokenizer-model RedHatAI/Gemma-4-31B-IT-FP8-Dynamic \
+  --server_urls_file /path/to/live/servers.json \
+  --concurrency-control-file /path/to/live/concurrency.json \
+  --max_concurrent_per_server 1024 --request_timeout 7200
+```
+
+Outputs include `trial_spaces_with_positive_prompts.csv`,
+`trial_spaces_with_negative_prompts.csv`, `all_synthetic_events.parquet`, and
+`all_synthetic_notes.parquet`. `status.json` records the current stage. Preparation
+and note assembly are bounded and streamed; all checkpoints and final files
+remain on the client machine. The command does not start or stop vLLM services,
+shut down VMs, summarize patients, or launch model training. A separately running
+pool supervisor must maintain remote tunnels, endpoint health, and VM recovery.
+
+Both `train_all.sh` and `train_all_gcp.sh` forward explicit input overrides to
+`train_from_summaries.py`: `--trial-spaces`, `--synthetic-notes`, and
+`--patient-summaries`. Defaults retain the canonical filenames under `--data-dir`.
+When using a run that exported successful trials under a `completed_` name,
+pass that exact space-level CSV; do not rename it or substitute the trial-level
+audit CSV. The selected paths are shared by input validation, the run manifest,
+all three mining rounds, and OncoReasoning preparation. For example, after notes
+have been summarized:
+
+```bash
+./train_all.sh \
+  --data-dir /path/to/new-synthetic-run \
+  --trial-spaces /path/to/extraction/completed_trial_space_lineitems.csv \
+  --synthetic-notes /path/to/new-synthetic-run/all_synthetic_notes.parquet \
+  --patient-summaries /path/to/new-synthetic-run/patient_summaries_with_spaces.parquet \
+  --dry-run
+```
+
+Use the same arguments with `train_all_gcp.sh` or `temp_train_gcp.sh`. These training entrypoints start
+from completed patient summaries; the sampling and synthetic-generation workflow
+above runs beforehand. They do not restart extraction or infer filenames from
+other run directories.

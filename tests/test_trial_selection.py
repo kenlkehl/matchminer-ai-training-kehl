@@ -213,6 +213,11 @@ def test_main_filters_before_dispatch_and_keeps_metadata(tmp_path, monkeypatch, 
         assert result.iloc[0][list(metadata)].to_dict() == metadata
         if not with_registry_metadata:
             assert set(REGISTRY_METADATA).intersection(result.columns) == {'study_first_post_date'}
+    # Exercise the actual main-path export for local/remote and metadata variants.
+    lineitems = pd.read_csv(output_spaces)
+    assert not {'space_reasoning_and_output', 'space_output_no_reasoning', 'space_text'} & set(lineitems)
+    assert lineitems.reasoning_trials_path.eq(str(output_trials.resolve())).all()
+    assert pd.read_csv(output_trials).space_reasoning_and_output.notna().all()
     for folder in [tmp_path/'work', tmp_path/'work'/'space_extraction']:
         assert json.loads((folder/'trial_selection.json').read_text())['start_year'] == (start_year or 2020)
 

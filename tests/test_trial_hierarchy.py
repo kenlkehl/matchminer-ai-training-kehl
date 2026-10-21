@@ -54,13 +54,20 @@ def test_remote_resume_reuses_flat_node_cache_after_directory_sharding(endpoint_
     for shard in work.glob("remote_output_shard_*.parquet"):
         shard.unlink()
     previous = pd.read_csv(path / "spaces.csv")
+    previous_trials = pd.read_csv(path / "out.csv")
     spaces.main()
     assert len(state.calls) == 11
     result = pd.read_csv(path / "spaces.csv")
+    pd.testing.assert_frame_equal(result, previous)
+    assert result.reasoning_trials_path.tolist() == [str((path / "out.csv").resolve())]
+    trials = pd.read_csv(path / "out.csv")
+    assert trials.nct_id.tolist() == result.nct_id.tolist()
     # Independent boilerplate/field completions can appear in a different order.
+    # Full reasoning is stored once per trial, outside the compact space rows.
     column = "space_reasoning_and_output"
-    pd.testing.assert_frame_equal(result.drop(columns=column), previous.drop(columns=column))
-    before, after = (json.loads(frame[column].iloc[0]) for frame in (previous, result))
+    assert column not in result.columns
+    pd.testing.assert_frame_equal(trials.drop(columns=column), previous_trials.drop(columns=column))
+    before, after = (json.loads(frame[column].iloc[0]) for frame in (previous_trials, trials))
     assert {node['request_key']: node for node in before.pop('nodes')} == {
         node['request_key']: node for node in after.pop('nodes')
     }

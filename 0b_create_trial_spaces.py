@@ -951,108 +951,12 @@ def main():
     else:
         shard_out_paths = local_main(args, trials, base_cols, reasoning_parser)
 
-    # Merge shard outputs
-    out_parts = [pd.read_parquet(pth) for pth in shard_out_paths]
-    trials_with_spaces = (pd.concat(out_parts, axis=0, ignore_index=True) if out_parts else
-                          pd.DataFrame(columns=base_cols + ["space_reasoning_and_output",
-                              "space_output_no_reasoning", "space_text", "trial_boilerplate_text"]))
-
-    # Keep and order columns as in your original final selection
-    registry_metadata_cols = [
-        column for column in REGISTRY_METADATA_COLUMNS
-        if column in trials_with_spaces.columns
-    ]
-    final_cols = [
-        "nct_id",
-        "study_type",
-        "phases",
-        *registry_metadata_cols,
-        "split",
-        "title",
-        "brief_summary",
-        "eligibility_criteria",
-        "trial_text",
-        "space_reasoning_and_output",
-        "space_output_no_reasoning",
-        "space_text",
-        "trial_boilerplate_text",
-    ]
-    # Some inputs may not have every column (defensive handling)
-    final_cols = [c for c in final_cols if c in trials_with_spaces.columns]
-    trials_with_spaces = trials_with_spaces[final_cols]
-
-    # Write trials_with_spaces.csv
-    trials_with_spaces.to_csv(args.output_trials, index=False)
-
-    # Build line-items dataframe
-    tws = trials_with_spaces.copy()
-    tws["space_text"] = tws["space_text"].astype(str)
-
-    frames = []
-    for i in range(tws.shape[0]):
-        row = tws.iloc[[i]]  # 1-row DataFrame
-        cohorts = pd.Series(str(row.iloc[0]["space_text"]).split("\n"))
-        cohorts = cohorts[~(cohorts.isna() | (cohorts == "\n") | (cohorts == ""))].reset_index(drop=True)
-        if len(cohorts) == 0:
-            continue
-        frame = pd.DataFrame(np.repeat(row.values, len(cohorts), axis=0), columns=row.columns)
-        frame["this_space"] = cohorts.values
-
-        # quality check - require all space components
-        frame = frame[frame.this_space.apply(has_required_space_fields)]
-        
-        # 1-based space numbering within this trial
-        frame["space_number"] = np.arange(1, frame.shape[0] + 1)
-        frames.append(frame)
-
-    if frames:
-        cohort_level_trials = pd.concat(frames, axis=0, ignore_index=True)
-        # Keep only lines that look like numbered spaces ("1.", "2.", ...)
-        keep_mask = cohort_level_trials["this_space"].str.strip().str[0].isin(list("123456789"))
-        cohort_level_trials = cohort_level_trials[keep_mask]
-        # Remove numbers from space names now
-        cohort_level_trials["this_space"] = cohort_level_trials['this_space'].str.replace(r'^\s*\d+\.', '', regex=True).str.strip()   
-
-        # Order columns similar to your original (dropping the accidental duplicate nct_id)
-        ordered_cols = [
-            "nct_id",
-            "study_type",
-            "phases",
-            *registry_metadata_cols,
-            "split",
-            "title",
-            "eligibility_criteria",
-            "trial_text",
-            "space_reasoning_and_output",
-            "space_output_no_reasoning",
-            "space_text",
-            "trial_boilerplate_text",
-            "this_space",
-            "space_number",
-        ]
-        ordered_cols = [c for c in ordered_cols if c in cohort_level_trials.columns]
-        cohort_level_trials = cohort_level_trials[ordered_cols]
-        cohort_level_trials.to_csv(args.output_spaces, index=False)
-    else:
-        # Still emit an empty file with headers if no frames
-        pd.DataFrame(
-            columns=[
-                "nct_id",
-                "study_type",
-                "phases",
-                *registry_metadata_cols,
-                "split",
-                "title",
-                "eligibility_criteria",
-                "trial_text",
-                "space_reasoning_and_output",
-                "space_output_no_reasoning",
-                "space_text",
-                "trial_boilerplate_text",
-                "this_space",
-                "space_number",
-            ]
-        ).to_csv(args.output_spaces, index=False)
+    # Share the bounded exporter across local/remote and one-shot/hierarchical
+    # extraction. Full reasoning stays once per trial, with NCT-linked audit
+    # references on individual spaces instead of repeating entire trial trees.
+    from trial_space_export import write_trial_exports
+    counts = write_trial_exports(shard_out_paths, args.output_trials, args.output_spaces, base_cols)
+    print(f"[export] wrote {counts['trials']} trials and {counts['spaces']} individual spaces")
 
 
 if __name__ == "__main__":
