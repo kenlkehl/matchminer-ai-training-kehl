@@ -17,8 +17,9 @@ from trial_hierarchy import (
     ReadyHierarchy,
     ResponseCache,
     load_prompts,
-    parse_response,
+    validate_completion,
     retry_messages,
+    retry_thinking,
     run_ready_hierarchies,
 )
 
@@ -35,9 +36,10 @@ def _prepare_payload(
     *,
     beam=False,
     failures=0,
+    max_attempts=4,
     messages=None,
 ):
-    thinking = (failures // 2) % 2 == 0
+    thinking = retry_thinking(True, failures, max_attempts)
     template = (
         {"reasoning_effort": "max" if thinking else "low"}
         if beam
@@ -88,6 +90,9 @@ def _save_results(states, trials, directory, output_name, *, raise_errors=True):
         "method": VERSION,
         "trials": len(states),
         "errors": errors,
+        "rejections": {str(row.nct_id): state.rejection
+                       for state, row in zip(states, trials.itertuples(), strict=True)
+                       if state.rejection},
         "calls": sum(s.calls for s in states),
         "complete": not errors,
     }
@@ -104,6 +109,7 @@ def _save_results(states, trials, directory, output_name, *, raise_errors=True):
                 "nct_id": str(row.nct_id),
                 "nodes": state.trace,
                 "error": state.error,
+                "rejection": state.rejection,
             },
             ensure_ascii=False,
         )
@@ -111,7 +117,7 @@ def _save_results(states, trials, directory, output_name, *, raise_errors=True):
         if state.error:
             continue
         final = state.output()
-        spaces, boilerplate = final.split("\nBoilerplate exclusions:\n", 1)
+        spaces, boilerplate = ("", "") if state.rejection else final.split("\nBoilerplate exclusions:\n", 1)
         rows.append(
             {
                 **row.to_dict(),
@@ -119,6 +125,9 @@ def _save_results(states, trials, directory, output_name, *, raise_errors=True):
                 "space_output_no_reasoning": final,
                 "space_text": spaces,
                 "trial_boilerplate_text": boilerplate,
+                "space_extraction_status": "rejected" if state.rejection else "completed",
+                "space_rejection_reason": state.rejection.get("reason", ""),
+                "space_rejection_evidence": state.rejection.get("evidence", ""),
             }
         )
     if errors:
@@ -187,6 +196,7 @@ def remote_main(args, trials, reasoning_parser):
             partial(
                 _prepare_payload, request, tokenizer, args.max_tokens,
                 args.max_model_len, beam=beam, failures=failures,
+                max_attempts=int(getattr(args, "max_attempts", 4)),
                 messages=payload.get("messages"),
             ),
         )
@@ -195,10 +205,10 @@ def remote_main(args, trials, reasoning_parser):
             final, reasoning, metadata["finish_reason"], metadata.get("raw_text", "")
         )
         try:
-            parse_response(final, request.field_name, result.finish_reason)
+            validate_completion(request, result)
         except ValueError as exc:
             payload["failures"] = failures + 1
-            payload["messages"] = retry_messages(request, result, str(exc))
+            payload["messages"] = retry_messages(request, result, str(exc), failures=failures + 1)
             with audit_path.open("a") as stream:
                 stream.write(
                     json.dumps(
@@ -210,6 +220,8 @@ def remote_main(args, trials, reasoning_parser):
                             "failure_number": failures + 1,
                             "error": str(exc),
                             "enable_thinking": outgoing["enable_thinking"],
+                            "next_enable_thinking": retry_thinking(True, failures + 1, int(getattr(args, "max_attempts", 4))),
+                            "retry_feedback": payload["messages"][-1]["content"],
                             **vars(result),
                         }
                     )
@@ -241,6 +253,18 @@ def remote_main(args, trials, reasoning_parser):
         if paths:
             print(f"[hierarchy] reusing {len(paths)} completed trial shards", flush=True)
         errors = {}
+        # Include previously checkpointed rejections in the run-level audit.
+        rejections = {}
+        for path in paths.values():
+            rejections.update(json.loads(Path(path).with_suffix('.parquet.status.json').read_text()).get('rejections', {}))
+
+        def save_rejections():
+            target = Path(args.work_dir) / "extraction_rejections.json"
+            temporary = target.with_suffix('.tmp')
+            temporary.write_text(json.dumps(rejections, indent=2))
+            temporary.replace(target)
+
+        save_rejections()
         prompts = prompt_bundle()
         states = (
             ReadyHierarchy(
@@ -274,8 +298,11 @@ def remote_main(args, trials, reasoning_parser):
                       "continuing remaining trials", flush=True)
                 return
             paths[index] = saved[0]
+            if state.rejection:
+                rejections[str(trials.iloc[index].nct_id)] = state.rejection
+                save_rejections()
             print(
-                f"[hierarchy] completed trial {index + 1}/{len(trials)}; "
+                f"[hierarchy] {'rejected' if state.rejection else 'completed'} trial {index + 1}/{len(trials)}; "
                 f"{state.calls} nodes",
                 flush=True,
             )
@@ -367,7 +394,7 @@ def local_extract(
         directory / "hierarchy_nodes",
         json.loads((directory / "extraction_manifest.json").read_text()),
     )
-    for stage in range(len(FIELDS) + 1):
+    for stage in range(len(FIELDS) + 2):
         groups = [s.requests() for s in states]
         requests = [r for group in groups for r in group]
         responses = []
@@ -387,6 +414,7 @@ def local_extract(
                         args.max_model_len,
                         beam=reasoning_parser == "beam",
                         failures=attempt,
+                        max_attempts=getattr(args, "max_attempts", 4),
                         messages=feedback.get(i),
                     )
                     for i in pending
@@ -408,9 +436,9 @@ def local_extract(
                         final, reasoning, str(output.finish_reason), output.text
                     )
                     try:
-                        parse_response(final, chunk[i].field_name, answer.finish_reason)
+                        validate_completion(chunk[i], answer)
                     except ValueError as exc:
-                        feedback[i] = retry_messages(chunk[i], answer, str(exc))
+                        feedback[i] = retry_messages(chunk[i], answer, str(exc), failures=attempt + 1)
                         with (
                             directory
                             / (Path(output_path).stem + ".validation_failures.jsonl")
@@ -422,6 +450,8 @@ def local_extract(
                                         "field": chunk[i].field_name,
                                         "error": str(exc),
                                         "attempt": attempt + 1,
+                                        "enable_thinking": payload["enable_thinking"],
+                                        "retry_feedback": feedback[i][-1]["content"],
                                         **vars(answer),
                                     }
                                 )

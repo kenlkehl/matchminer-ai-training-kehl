@@ -12,9 +12,11 @@ from trial_space_format import has_required_space_fields
 GENERATED_TRIAL_COLUMNS = (
     'space_reasoning_and_output', 'space_output_no_reasoning',
     'space_text', 'trial_boilerplate_text',
+    'space_extraction_status', 'space_rejection_reason', 'space_rejection_evidence',
 )
 TRIAL_ONLY_COLUMNS = frozenset({
     'brief_summary', 'space_reasoning_and_output', 'space_output_no_reasoning', 'space_text',
+    'space_extraction_status', 'space_rejection_reason', 'space_rejection_evidence',
 })
 
 
@@ -37,6 +39,8 @@ def iter_space_rows(row, output_trials):
     Drop whole-trial fields before expanding rows, so neither memory nor output
     size grows as the product of a trial's audit size and its number of spaces.
     """
+    if row.get('space_extraction_status') == 'rejected':
+        return
     base = {key: value for key, value in row.items() if key not in TRIAL_ONLY_COLUMNS}
     base['reasoning_trials_path'] = str(Path(output_trials).resolve())
     number = 0
@@ -71,6 +75,7 @@ def write_trial_exports(shard_paths, output_trials, output_spaces, base_columns)
                     if row['nct_id'] in seen:
                         raise ValueError(f"Duplicate trial in extraction checkpoints: {row['nct_id']}")
                     seen.add(row['nct_id'])
+                    row.setdefault('space_extraction_status', 'completed')
                     writers[0].writerow(row)
                     trials += 1
                     for space in iter_space_rows(row, output_trials):

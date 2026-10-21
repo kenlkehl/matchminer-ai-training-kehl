@@ -21,7 +21,7 @@ All three shell entrypoints use `run_pipeline.py`. By default they start at
 Select `--start-at` to include data production, and `--stop-after` to stop before
 later stages. The training portion expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`6930c5bc31acd163b7cd8e216efcd6eda3f643d9`. Review the pin and prompt contracts
+`75a14df89d27698c504ef81e61d652822f1faea9`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -709,17 +709,31 @@ for example `{"max_concurrent_per_server": 256, "per_server": {"http://worker-b:
 Each limit must fit within the CLI ceiling. Total capacity is the sum of active
 endpoint limits; removing an override restores that endpoint's default. Combine
 this with `--server_urls_file` to add or retire endpoints during a run.
-Both paths validate JSON and finish reasons, return validation errors to the
-model, and alternate thinking after two invalid responses (Beam alternates
-max/low effort). Remote malformed-output errors remain neutral to concurrency.
+Both paths validate JSON and finish reasons and return the exact validation error,
+latest rejected draft, and a valid JSON structure to the model. Thinking stays off
+after two invalid responses, or on the last retry with a smaller budget (Beam
+stays at low effort). After repeated failures, the malformed draft is omitted;
+the original source, exact error, and valid JSON structure remain. Remote
+malformed-output errors remain neutral to concurrency.
 `--max_attempts` controls the remote per-node pool retry budget and local
 per-node validation attempts; choose a small value such as 4 for prompt reviews.
 
 `--hierarchy-max-nodes` (4096) and `--hierarchy-max-calls` (20000 logical requests
 per trial, excluding retries) fail explicitly instead of truncating large trees.
 Context is recounted for each request/retry and output tokens are capped to fit
-`--max-model-len`; source text is never silently shortened. Exhausted or wholly
-pruned trials block final output rather than producing partial space lists.
+`--max-model-len`; source text is never silently shortened. Exhausted nodes still
+block final output rather than producing partial space lists. Wholly pruned trials
+receive a separate study-scope review against the full source. A confirmed absence
+of a human therapeutic cancer population, supported by a verified verbatim source
+excerpt, is a terminal rejection rather than an extraction error. Uncertain reviews,
+malformed responses and unsupported excerpts remain errors. This targeted review
+does not rescreen the denominator or change the seven-field extraction prompts.
+Rejections are checkpointed; remote extraction also records them in
+`space_extraction/extraction_rejections.json`.
+The trial CSV retains rejected NCT IDs with `space_extraction_status=rejected`,
+`space_rejection_reason`, `space_rejection_evidence`, and the full audit; those trials
+produce zero space line items. Completed older shards remain reusable. Rejected
+trials therefore do not enter 0c or synthetic generation, which consume line items.
 Extraction defaults to `--max-tokens 50000` (reasoning plus final answer) and
 `--max-model-len 100000`; explicit caller limits still override these defaults.
 The separate treatment-screening budget remains 8192 tokens.

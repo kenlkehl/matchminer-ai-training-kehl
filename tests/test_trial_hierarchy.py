@@ -167,6 +167,79 @@ def test_failed_trial_does_not_cancel_other_trials_or_export_partial_csvs(endpoi
     assert audit.is_cancer_treatment_trial.tolist() == [True, True, True]
 
 
+@pytest.mark.parametrize("all_rejected", [False, True])
+def test_reviewed_rejections_export_audit_without_spaces_and_resume(endpoint_run, monkeypatch, all_rejected):
+    import trial_hierarchy_runner as runner
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    source = pd.read_csv(path / 'trials.csv')
+    for index in range(3):
+        source.loc[index, 'trial_text'] = f'ANTI_CANCER {index}; healthy volunteers'
+    source.to_csv(path / 'trials.csv', index=False)
+    original_get = runner.ResponseCache.get
+
+    def cached(cache, request):
+        if all_rejected or request.trial_index == 0:
+            if request.field_name == 'cancer_primary_site':
+                return Completion('{"branches": [], "prune_reason": "Healthy volunteer study"}')
+            if request.field_name == 'study_relevance':
+                return Completion('{"decision": "reject", "reason": "No therapeutic cancer population", "evidence": "healthy volunteers"}')
+        return original_get(cache, request)
+
+    monkeypatch.setattr(runner.ResponseCache, 'get', cached)
+    spaces.main()
+    full = pd.read_csv(path / 'out.csv')
+    count = 3 if all_rejected else 1
+    assert len(full) == 3
+    assert full.space_extraction_status.eq('rejected').sum() == count
+    assert len(pd.read_csv(path / 'spaces.csv')) == 3 - count
+    rejected = full.loc[full.space_extraction_status.eq('rejected')]
+    assert rejected.space_text.isna().all()
+    assert rejected.space_rejection_evidence.eq('healthy volunteers').all()
+    directory = path / 'work/space_extraction'
+    assert json.loads((directory / 'extraction_failures.json').read_text()) == {}
+    assert len(json.loads((directory / 'extraction_rejections.json').read_text())) == count
+    calls = len(state.calls)
+    spaces.main()
+    assert len(state.calls) == calls
+    assert len(json.loads((directory / 'extraction_rejections.json').read_text())) == count
+
+
+def test_training_payload_keeps_thinking_off_after_repeated_failures():
+    request = Hierarchy(0, 'source', prompt_bundle()).requests()[0]
+    modes = [_prepare_payload(request, Tokenizer(), 100, 10000, failures=n,
+                              max_attempts=8)['enable_thinking'] for n in range(8)]
+    assert modes == [True, True, False, False, False, False, False, False]
+
+
+def test_local_extraction_records_reviewed_rejection(tmp_path, monkeypatch):
+    import vllm_reasoning_utils
+    monkeypatch.setattr(vllm_reasoning_utils, 'parse_reasoning_output', lambda text, *a, **kw: ('trace', text))
+    (tmp_path / 'extraction_manifest.json').write_text('{}')
+
+    class LLM:
+        def generate(self, prompts, sampling):
+            answers = []
+            for prompt in prompts:
+                text = json.loads(prompt)[1]['content']
+                if 'CURRENT FIELD: age\n' in text:
+                    final = '{"branches":[{"value":"18+","scope":"all"}],"prune_reason":""}'
+                elif 'CURRENT FIELD: cancer_primary_site\n' in text:
+                    final = '{"branches":[],"prune_reason":"Healthy volunteers"}'
+                else:
+                    final = '{"decision":"reject","reason":"No cancer population","evidence":"healthy volunteers"}'
+                answers.append(SimpleNamespace(outputs=[SimpleNamespace(text=final, finish_reason='stop')]))
+            return answers
+
+    paths = local_extract(LLM(), Tokenizer(), SimpleNamespace(max_tokens=1000),
+        pd.DataFrame([{'nct_id':'R1', 'trial_text':'Study in healthy volunteers'}]),
+        SimpleNamespace(batch_size=10, max_attempts=3, max_tokens=1000, max_model_len=10000),
+        'nemotron_v3', tmp_path / 'local_output_shard_000000.parquet')
+    row = pd.read_parquet(paths[0]).iloc[0]
+    assert row.space_extraction_status == 'rejected'
+    assert row.space_text == '' and row.space_rejection_evidence == 'healthy volunteers'
+
+
 def test_shared_core_and_prompts_are_identical_to_inference():
     root = Path(__file__).resolve().parents[2]
     inference = root / "matchminer-ai-inference-kehl/src/matchminer_ai"
