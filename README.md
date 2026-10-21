@@ -16,7 +16,10 @@ sibling inference repository into a uv venv, then run:
 PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
 ```
 
-All three shell entrypoints use this same runner. It expects eight GPUs and a
+All three shell entrypoints use `run_pipeline.py`. By default they start at
+`train_from_summaries.py`, preserving existing training commands and checkpoints.
+Select `--start-at` to include data production, and `--stop-after` to stop before
+later stages. The training portion expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
 `fb412f771aab80a8cb485a4bcb0d1c599d729bbd`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
@@ -773,6 +776,9 @@ hashes. Completed responses and stable patient IDs survive resumption. Truncated
 completions, missing patients, and invalid event tags are retried rather than
 being exported as clinical data. Full source prompts are pinned by the run
 manifest; use a fresh output directory after changing them.
+Both the generation runner and standalone step 2 parse complete event tags as
+boundaries, preserving clinical inequalities such as `PD-L1 <1%` or
+`margin < 1 mm` in the event text and downstream note prompts.
 
 ```bash
 python 0c_sample_trial_spaces.py \
@@ -796,8 +802,8 @@ remain on the client machine. The command does not start or stop vLLM services,
 shut down VMs, summarize patients, or launch model training. A separately running
 pool supervisor must maintain remote tunnels, endpoint health, and VM recovery.
 
-Both `train_all.sh` and `train_all_gcp.sh` forward explicit input overrides to
-`train_from_summaries.py`: `--trial-spaces`, `--synthetic-notes`, and
+Both `train_all.sh` and `train_all_gcp.sh` accept explicit input overrides:
+`--trial-spaces`, `--synthetic-notes`, and
 `--patient-summaries`. Defaults retain the canonical filenames under `--data-dir`.
 When using a run that exported successful trials under a `completed_` name,
 pass that exact space-level CSV; do not rename it or substitute the trial-level
@@ -814,7 +820,97 @@ have been summarized:
   --dry-run
 ```
 
-Use the same arguments with `train_all_gcp.sh` or `temp_train_gcp.sh`. These training entrypoints start
-from completed patient summaries; the sampling and synthetic-generation workflow
-above runs beforehand. They do not restart extraction or infer filenames from
-other run directories.
+Use the same arguments with `train_all_gcp.sh` or `temp_train_gcp.sh`. Without
+`--start-at`, these entrypoints still start from completed patient summaries.
+
+## Run the complete pipeline or resume at an intermediate stage
+
+`run_pipeline.py` invokes the existing stage implementations; the event and note
+prompts remain owned by `1a`, `1b`, and `2` and are executed by
+`generate_synthetic_data.py`. It does not duplicate generation or matching logic.
+
+| Stage name (`--start-at` / `--stop-after`) | Work and outputs |
+| --- | --- |
+| `parse-trials` | `0a`: CT.gov JSON → `ctgov_trials.csv` |
+| `extract-spaces` | `0b`: year/phase filtering, treatment screening, hierarchical extraction; compact `trial_space_lineitems.csv` plus full trial audit |
+| `sample-trials` | `0c`: 3,000 complete trials, all their spaces, existing DFCI holdout and sampling receipt |
+| `generate-synthetic` | Existing `generate_synthetic_data.py`: event histories, then raw notes; all checkpoints/reasoning preserved |
+| `prepare-notes` | `prepare_synthetic_training.py notes`: dated/split notes plus `synthetic_patient_metadata.parquet` |
+| `summarize-patients` | Existing `6`: chronological serial summaries, retaining chunk reasoning and one final summary per patient |
+| `prepare-training` | Join final summaries to patient/space IDs, class, originating trial space, boilerplate, and source trial split |
+| `train` | Existing `train_from_summaries.py`: mining, labeling, TrialSpace training, catalogs, and OncoReasoning |
+
+For a new complete run, first inspect the plan:
+
+```bash
+./train_all.sh --start-at parse-trials \
+  --ctgov-json ../data/no_phi/ctgov_export.json \
+  --data-dir ../data/no_phi/new_dataset \
+  --run-dir ../data/no_phi/new_training_run \
+  --models-dir ../models/new_training_run \
+  --server-urls-file ../data/no_phi/live_pool/servers.json \
+  --concurrency-control-file ../data/no_phi/live_pool/concurrency.json \
+  --generation-model gemma4-31b \
+  --generation-tokenizer RedHatAI/Gemma-4-31B-IT-FP8-Dynamic \
+  --dry-run
+```
+
+Remove `--dry-run` to execute; `--stop-after prepare-training` produces the data
+without starting model training. `--start-year` defaults to 2020, inclusive;
+`--sample-trials` defaults to 3000 and `--data-seed` to 42. Supply
+`--screening-input` to reuse the previously generated treatment screen instead
+of screening with the extraction model. Starting at `sample-trials` accepts an
+existing compact `--trial-spaces` file, including `completed_` filenames.
+
+Upstream stages require an existing live `--server-urls-file`. The external pool
+supervisor owns VM recovery, tunnels and serving processes. The orchestrator does
+not stop that pool. Unless separate teacher URLs are supplied, downstream training
+uses the same live registry through `--teacher-servers-file`; declared model roots
+allow the explicit mixed FP8/NVFP4 pool. TrialSpace labeling accepts the same live
+concurrency-control file; other downstream teacher stages retain their own
+`--teacher-concurrency` setting. Mining and fine-tuning still use `--gpus`, so
+choose devices appropriate for those stages before executing training.
+
+Raw generated notes stay under `--generation-dir` (default
+`DATA_DIR/synthetic_generation`). Prepared training notes go to
+`--synthetic-notes` (default `DATA_DIR/all_synthetic_notes.parquet`) without
+overwriting raw outputs. Calendar dates absent from the synthetic event histories
+are **explicitly fabricated**, using source event ages for approximate intervals
+and event numbers for ordering, ending at `--synthetic-date-anchor` (2025-01-01).
+Missing ages are interpolated within a patient; a history without ages uses daily
+event order. `date_provenance` records the method. Supplied complete dates are
+retained; partially dated or contradictory histories fail. These dates are for
+synthetic records only. The adapter streams the note text, uses a temporary
+on-disk index for metadata, and retains all source patient IDs and trial co-splits.
+It requires all five positive and five negative patients per sampled space and
+rejects missing/failed final summaries before mining.
+
+To attach to an already-running generation job without restarting it:
+
+```bash
+./train_all.sh --start-at generate-synthetic --stop-after prepare-training \
+  --wait-for-generation \
+  --generation-dir ../data/no_phi/existing_synthetic_run \
+  --data-dir ../data/no_phi/prepared_existing_run \
+  --run-dir ../data/no_phi/training_existing_run \
+  --trial-spaces ../data/no_phi/extraction/completed_trial_space_lineitems.csv \
+  --server-urls-file ../data/no_phi/live_pool/servers.json \
+  --generation-model gemma4-31b \
+  --generation-tokenizer RedHatAI/Gemma-4-31B-IT-FP8-Dynamic \
+  --dry-run
+```
+
+`--wait-for-generation` only reads that job's manifest/status until completion;
+it never signals it, changes its manifest or prompts, or starts another generator.
+A generation lock also prevents duplicate clients or resampling a live run.
+An explicit wait timeout leaves the original job running. Remove `--dry-run`
+when ready to wait and execute the selected downstream stages.
+
+Upstream state lives in `RUN_DIR/upstream` (override with `--pipeline-dir`),
+separate from the training runner's existing manifest and locks. Each stage saves
+its exact command, input/source hashes, logs and verified output identities.
+Rerunning the same command skips completed stages; changed inputs, code, options
+or completed outputs fail rather than silently reusing stale checkpoints.
+`--dry-run` prints the complete selected plan, including downstream training
+commands, without starting work or writing run files. No stage is inferred from
+unrelated files or another run directory.

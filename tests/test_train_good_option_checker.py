@@ -535,7 +535,10 @@ def test_orchestrators_build_the_catalog_without_training_the_checker() -> None:
     root = Path(good_option.__file__).resolve().parent
     for script in ("train_all.sh", "train_all_gcp.sh"):
         text = (root / script).read_text(encoding="utf-8")
-        assert "train_from_summaries.py" in text
+        assert "run_pipeline.py" in text
+    import run_pipeline
+    entrypoint = run_pipeline.resolve_paths(run_pipeline.parser().parse_args([]))
+    assert run_pipeline.build_plan(entrypoint)[0].command[1].endswith('train_from_summaries.py')
     plan = pipeline.stages(pipeline.parser().parse_args([]))
     modes = [stage.command[stage.command.index("train_good_option_checker.py") + 1]
              for stage in plan if "train_good_option_checker.py" in stage.command]

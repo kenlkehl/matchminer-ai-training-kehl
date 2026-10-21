@@ -57,7 +57,9 @@ def process_clinical_notes_from_df(input_frame: pd.DataFrame) -> pd.DataFrame:
                     continue
                 patient_id = f"patient_{uuid.uuid4()}"
                 patient_events = []
-                pattern = re.compile(r'<(\w+)>(.*?)(?=<|\Z)', re.DOTALL)
+                # Preserve inequalities inside event text; only complete tags
+                # delimit events, matching the resumable generation runner.
+                pattern = re.compile(r'<(\w+)>(.*?)(?=<\w+>|\Z)', re.DOTALL)
                 matches = pattern.findall(history)
                 for event_type, event_text in matches:
                     patient_events.append({

@@ -94,6 +94,14 @@ import requests
 from openai import AsyncOpenAI
 
 
+def load_summary_notes(path, patient_id_col, date_col, text_col):
+    """Read summary inputs without loading repeated histories or generation traces."""
+    import pyarrow.parquet as pq
+    available = pq.read_schema(path).names
+    columns = list(dict.fromkeys((patient_id_col, date_col, text_col)))
+    return pd.read_parquet(path, columns=[name for name in columns if name in available])
+
+
 def concatenate_and_chunk_notes(
     notes: List[Tuple[str, str]],
     tokenizer,
@@ -1226,6 +1234,11 @@ def main():
     ap.add_argument("--model", default=None,
                     help="Model name. Required for local mode. In remote mode "
                          "(--server_urls / --server_urls_file), auto-discovered from the server.")
+    ap.add_argument("--tokenizer-model", default=None,
+                    help="Tokenizer/model-family ID when --model is a served alias.")
+    ap.add_argument("--concurrency-control-file", default=None,
+                    help="Live per-server limits for the remote request pool.")
+    ap.add_argument("--api-key-env", dest="api_key_env", default="OPENAI_API_KEY")
     ap.add_argument("--download_dir", default=None,
                     help="HuggingFace cache directory. Required for local mode. "
                          "Optional in remote mode (defaults to standard HF cache).")
@@ -1303,7 +1316,8 @@ def main():
 
     # Resolve reasoning parser from --model + --reasoning-parser (default auto)
     from vllm_reasoning_utils import resolve_parser_name
-    reasoning_parser = resolve_parser_name(args.model, args.reasoning_parser)
+    tokenizer_model = args.tokenizer_model or args.model
+    reasoning_parser = resolve_parser_name(tokenizer_model, args.reasoning_parser)
     print(f"Using vLLM reasoning parser: {reasoning_parser}")
 
     from vllm_reasoning_utils import sampling_from_args
@@ -1330,7 +1344,7 @@ def main():
     print("Loading tokenizer...")
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
+        tokenizer_model,
         cache_dir=args.download_dir,
         trust_remote_code=True
     )
@@ -1342,7 +1356,7 @@ def main():
     else:
         # No cache — load data, generate dates, chunk notes, and save
         print(f"Loading {args.input_parquet}...")
-        df = pd.read_parquet(args.input_parquet)
+        df = load_summary_notes(args.input_parquet, args.patient_id_col, args.date_col, args.text_col)
 
         # Validate columns
         if args.patient_id_col not in df.columns:
@@ -1404,7 +1418,7 @@ def main():
         prompt_pool = Pool(
             processes=n_workers,
             initializer=_init_prompt_worker,
-            initargs=(args.model, args.download_dir),
+            initargs=(tokenizer_model, args.download_dir),
         )
 
         # --- Server setup: remote pool, static URLs, or launch our own ---

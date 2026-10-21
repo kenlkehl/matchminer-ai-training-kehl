@@ -80,7 +80,9 @@ def parse_histories(answer):
     """Validate the requested five patients without rewriting clinical content."""
     histories = []
     for section in answer.split('<new_patient>'):
-        events = re.findall(r'<(\w+)>(.*?)(?=<|\Z)', section, re.DOTALL)
+        # A literal inequality (e.g. "margin < 1 mm") is clinical content;
+        # only a complete tag begins the next event. Unknown tags still fail below.
+        events = re.findall(r'<(\w+)>(.*?)(?=<\w+>|\Z)', section, re.DOTALL)
         if not events:
             continue  # A heading or a leading/trailing delimiter is not a patient.
         if any(kind not in EVENT_TYPES or not text.strip() for kind, text in events):

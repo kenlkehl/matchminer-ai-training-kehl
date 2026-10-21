@@ -52,6 +52,10 @@ def parser():
     p.add_argument("--teacher-served-model", help="API model alias; --teacher-model remains the underlying HF model")
     p.add_argument("--teacher-url", action="append", default=[],
                    help="Existing OpenAI-compatible teacher URL; repeat for a pool. Skips local vLLM startup.")
+    p.add_argument("--teacher-servers-file", type=Path,
+                   help="Externally managed live endpoint registry. Never rewritten or shut down by this runner.")
+    p.add_argument("--teacher-concurrency-file", type=Path,
+                   help="Live per-server limits for TrialSpace labeling.")
     p.add_argument("--student-model", default=DEFAULT_MODEL_NAME)
     p.add_argument("--embedding-model", default="google/embeddinggemma-2")
     p.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
@@ -82,7 +86,7 @@ def stages(args):
     run, models = args.run_dir, args.models_dir
     inputs = input_paths(args)
     py = sys.executable
-    servers = run / "teacher_servers.json"
+    servers = getattr(args, 'teacher_servers_file', None) or run / "teacher_servers.json"
     gpu_count = len(args.gpus.split(','))
     teacher_model = args.teacher_served_model or args.teacher_model
     launch = [py, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={gpu_count}"]
@@ -112,6 +116,8 @@ def stages(args):
                 "--max_concurrent_per_server", str(args.label_concurrency_per_server),
                 "--max_attempts", "5"], [output], True))
             labels.append(output)
+            if getattr(args, 'teacher_concurrency_file', None):
+                result[-1].command += ['--concurrency-control-file', str(args.teacher_concurrency_file)]
         previous_embedding = embedding
         embedding = models / f"trialspace_round{iteration}"
         command = launch + ["finetune_embedder.py", "--base-model", str(previous_embedding),
@@ -245,6 +251,32 @@ def teacher_pool(args):
 
 
 @contextmanager
+def managed_teacher_pool(args):
+    """Read an external registry without taking ownership of it or its servers."""
+    from oncoreasoning_training.teacher import server_urls
+    path = args.teacher_servers_file
+    registry = json.loads(path.read_text())
+    entries = registry.get('servers', [])
+    if not registry.get('ready', True) or not entries:
+        raise ValueError('The external teacher registry has no ready servers')
+    for entry in entries:
+        url = entry if isinstance(entry, str) else entry['url']
+        url = server_urls(url=url)[0].rstrip('/')
+        with urllib.request.urlopen(url + '/models', timeout=15) as response:
+            models = json.load(response)['data']
+        served = args.teacher_served_model or args.teacher_model
+        matches = [model for model in models if model['id'] == served]
+        if not matches:
+            raise ValueError(f'Teacher {url} does not serve {served}')
+        root = entry.get('model_root', args.teacher_model) if isinstance(entry, dict) else args.teacher_model
+        if args.teacher_served_model and matches[0].get('root') != root:
+            raise ValueError(f'Teacher {url} does not report the declared model root {root}')
+        if int(matches[0].get('max_model_len') or args.teacher_max_context) < args.teacher_max_context:
+            raise ValueError(f'Teacher {url} has insufficient context')
+    yield
+
+
+@contextmanager
 def external_teacher_pool(args):
     """Publish validated external endpoints without owning their processes."""
     from oncoreasoning_training.teacher import server_urls
@@ -299,9 +331,11 @@ def main():
     args = parser().parse_args()
     for key in ("data_dir", "run_dir", "models_dir", "inference_repo"):
         setattr(args, key, getattr(args, key).expanduser().resolve())
-    for key in ("trial_spaces", "patient_summaries", "synthetic_notes"):
+    for key in ("trial_spaces", "patient_summaries", "synthetic_notes", "teacher_servers_file", "teacher_concurrency_file"):
         if getattr(args, key) is not None:
             setattr(args, key, getattr(args, key).expanduser().resolve())
+    if args.teacher_servers_file and args.teacher_url:
+        raise ValueError('Use either --teacher-servers-file or --teacher-url')
     plan = stages(args)
     if args.dry_run:
         print(json.dumps([vars(stage) for stage in plan], default=str, indent=2))
@@ -320,7 +354,7 @@ def main():
     manifest_path = args.run_dir / "pipeline_manifest.json"
     identity = {"args": {key: str(value) for key, value in vars(args).items()
                          if key not in ("dry_run", "skip_input_validation")
-                         and not (key in ("trial_spaces", "patient_summaries", "synthetic_notes") and value is None)},
+                         and not (key in ("trial_spaces", "patient_summaries", "synthetic_notes", "teacher_servers_file", "teacher_concurrency_file") and value is None)},
                 "training_commit": git_revision(ROOT), "inference_commit": INFERENCE_COMMIT,
                 "trial_rubric_digest": TRIAL_RUBRIC_DIGEST,
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}
@@ -347,7 +381,8 @@ def main():
                 pool.__exit__(None, None, None)
                 pool = None
             if stage.teacher and not pool:
-                pool = external_teacher_pool(args) if args.teacher_url else teacher_pool(args)
+                pool = (managed_teacher_pool(args) if args.teacher_servers_file else
+                        external_teacher_pool(args) if args.teacher_url else teacher_pool(args))
                 pool.__enter__()
             atomic_json(args.run_dir / "status.json", {"stage": stage.name, "status": "running"})
             print(f"[start] {stage.name}", flush=True)

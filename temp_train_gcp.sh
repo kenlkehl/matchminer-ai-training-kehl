@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Both environments run the same resumable two-model pipeline.
-# Accepts the same --trial-spaces, --synthetic-notes, and --patient-summaries
-# input overrides as train_all.sh and train_all_gcp.sh.
+# Compatibility entrypoint for the same resumable data-production and training pipeline.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
-exec "${PYTHON:-python}" train_from_summaries.py "$@"
+exec "${PYTHON:-python}" run_pipeline.py "$@"

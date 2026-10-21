@@ -60,6 +60,45 @@ def test_invalid_event_outputs_are_not_accepted(answer, finish):
         generation.validate_completion(answer, {'finish_reason': finish}, 'events')
 
 
+@pytest.mark.parametrize('finding', [
+    'Margins were close (< 1mm). No tumor at ink.',
+    'PD-L1 TPS <1%; tumor purity >=20%; TMB <=5 mutations/Mb.',
+    'Lesion size < 5 mm and > 2 mm, with no new metastases.',
+    'Value <0.01; reference range 0 <= value < 1.',
+])
+@pytest.mark.parametrize('separator', ['\n', ''])
+def test_event_inequalities_survive_both_parsers_and_note_inputs(finding, separator):
+    histories = '\n<new_patient>\n'.join(
+        separator.join([f'<demographics> Synthetic patient {i}, aged 60.',
+                        '<diagnosis> Metastatic cancer.',
+                        f'<pathology_report> {finding}',
+                        '<clinical_note> Cancer is stable.'])
+        for i in range(5)
+    )
+    record = dict(space_index=0, patient_class='positive', nct_id='NCT1', answer=histories)
+    notes = generation.load_stage('2_make_synthetic_notes_sharded.py')
+    current = generation.event_rows([record], 'run')
+    legacy = notes.process_clinical_notes_from_df(pd.DataFrame([
+        dict(space_index=0, synthetic_patient_prompts=histories)]))
+    for events in (current, legacy):
+        assert events.patient_id.nunique() == 5
+        assert len(events) == 20
+        assert events.loc[events.event_type.eq('pathology_report'), 'event_text'].tolist() == [finding] * 5
+        prompts = notes.create_masked_dataset(events)
+        assert len(prompts) == 10
+        assert prompts.masked_text.map(lambda text: finding in text).all()
+        for text in prompts.loc[prompts.event_type.eq('pathology_report'), 'masked_text']:
+            assert f'<pathology_report>{finding} <END EVENT CORRESPONDING TO SYNTHETIC NOTE>' in text
+    assert current.event_text.tolist() == legacy.event_text.tolist()
+
+
+@pytest.mark.parametrize('bad_event', ['<unknown_tag> Invalid event.', '<pathology_report>'])
+def test_tag_boundaries_still_reject_unknown_and_empty_events(bad_event):
+    answer = HISTORIES.replace('<clinical_note>', bad_event + '\n<clinical_note>', 1)
+    with pytest.raises(OutputValidationError, match='Unknown event tag or empty event'):
+        generation.parse_histories(answer)
+
+
 def test_existing_prompts_are_used_exactly(tmp_path):
     instance = generation.Generator(args_for(tmp_path), Tokenizer())
     item = dict(key='positive:0', space_index=0, this_space=SPACE, trial_boilerplate_text='Active infection',
