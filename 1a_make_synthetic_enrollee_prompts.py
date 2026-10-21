@@ -76,8 +76,9 @@ USER_PROMPT_TEMPLATE_SUFFIX = (
     "<clinical_note>At age 71, the patient had an oncologist office assessment, which showed cancer. There was progression of disease.\n"
     "<imaging_report>At age 71, the patient had a MRI ABDOMEN, which showed no cancer.\n"
     "(End of example)\n\n"
-    "Now, generate your output for the imagined patients who enrolled on the trial. \n"
-    "CRITICAL: Do not mention screening or enrollment on the trial itself. That would contaminate the synthetic data and render them useless, since we will be using the synthetic data to derive clinical history models to match patients to clinical trials on which they have not yet enrolled.\n"
+    "Now, generate your output for the imagined patients who enrolled on the trial.\n"
+    "VERY IMPORTANT: All events MUST be in chronological order and must be internally consistent in that context. For example, an event from a younger age must not follow an event from an older age, and an organ that has been removed must not later be described as present.\n"
+    "CRITICAL: Do not mention screening or enrollment on the trial itself anywhere in your chronology!! That would contaminate the synthetic data and render them useless, since we will be using the synthetic data to derive clinical history models to match patients to clinical trials on which they have not yet enrolled!\n"
     "Separate the outputs for individual patients using the tag <new_patient>, which should go on its own line."
 )
 
