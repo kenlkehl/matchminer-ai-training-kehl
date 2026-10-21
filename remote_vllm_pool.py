@@ -1140,7 +1140,7 @@ def make_completion_work_fn(
         if not prompt_is_batch:
             if not choices:
                 raise RuntimeError("Completion endpoint returned no choices.")
-            return parse_choice(choices[0])
+            return await asyncio.to_thread(parse_choice, choices[0])
 
         choices_by_index: dict[int, Any] = {}
         for position, choice in enumerate(choices):
@@ -1162,10 +1162,13 @@ def make_completion_work_fn(
                 "Completion endpoint omitted batched prompt choices at indices "
                 f"{missing}."
             )
-        return [
-            parse_choice(choices_by_index[index])
-            for index in range(len(request_prompt))
-        ]
+        def parse_batch():
+            return [
+                parse_choice(choices_by_index[index])
+                for index in range(len(request_prompt))
+            ]
+
+        return await asyncio.to_thread(parse_batch)
 
     return work_fn
 

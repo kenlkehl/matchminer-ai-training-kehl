@@ -331,7 +331,7 @@ def test_remote_validation_feedback_preserves_concurrency_classification_and_res
 
     class TrackingTokenizer(Tokenizer):
         def apply_chat_template(self, conversation, **kwargs):
-            templates.append(kwargs)
+            templates.append((conversation[1]["content"], kwargs))
             return super().apply_chat_template(conversation, **kwargs)
 
     monkeypatch.setattr(
@@ -349,7 +349,8 @@ def test_remote_validation_feedback_preserves_concurrency_classification_and_res
         messages = json.loads(kwargs["prompt"])
         calls.append(messages)
         text = messages[1]["content"]
-        if len(calls) <= 2:
+        age_calls = [c for c in calls if "CURRENT FIELD: age\n" in c[1]["content"]]
+        if "CURRENT FIELD: age\n" in text and len(age_calls) <= 2:
             final = "bad JSON"
         elif "CURRENT FIELD:" not in text:
             final = '{"exclusions": []}'
@@ -412,8 +413,10 @@ def test_remote_validation_feedback_preserves_concurrency_classification_and_res
     runner.remote_main(args, trials, "nemotron_v3")
     assert len(calls) == 10
     assert len(validation_errors) == 2
-    assert "failed validation" in calls[1][-1]["content"]
-    assert [p["enable_thinking"] for p in templates[:3]] == [True, True, False]
+    age_calls = [c for c in calls if "CURRENT FIELD: age\n" in c[1]["content"]]
+    assert "failed validation" in age_calls[1][-1]["content"]
+    age_templates = [p for text, p in templates if "CURRENT FIELD: age\n" in text]
+    assert [p["enable_thinking"] for p in age_templates] == [True, True, False]
     runner.remote_main(args, trials, "nemotron_v3")
     assert len(calls) == 10
 
@@ -454,10 +457,11 @@ def test_resume_reuses_completed_shard_without_node_replay_or_rewriting(endpoint
         runner._completed_trial_path(shard.parent, 0, "wrong-trial")
 
 
-def test_remote_checkpoint_io_keeps_event_loop_responsive(endpoint_run, monkeypatch):
+def test_remote_cpu_work_and_checkpoint_io_keep_event_loop_responsive(endpoint_run, monkeypatch):
     import asyncio
     import threading
     import trial_hierarchy_runner as runner
+    import vllm_reasoning_utils
 
     state, path, argv = endpoint_run
     enable_hierarchy(argv)
@@ -478,6 +482,15 @@ def test_remote_checkpoint_io_keeps_event_loop_responsive(endpoint_run, monkeypa
         return wrapped
 
     monkeypatch.setattr(runner, "run_ready_hierarchies", schedule)
+    monkeypatch.setattr(runner, "_prepare_payload", checked_io(runner._prepare_payload))
+    parse = vllm_reasoning_utils.parse_reasoning_output
+
+    def checked_parse(*args, **kwargs):
+        if loop is not None:
+            return checked_io(parse)(*args, **kwargs)
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(vllm_reasoning_utils, "parse_reasoning_output", checked_parse)
     monkeypatch.setattr(runner.ResponseCache, "get", checked_io(runner.ResponseCache.get))
     monkeypatch.setattr(runner.ResponseCache, "put", checked_io(runner.ResponseCache.put))
     monkeypatch.setattr(runner, "_save_results", checked_io(runner._save_results))

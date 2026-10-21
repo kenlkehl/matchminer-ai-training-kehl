@@ -118,38 +118,10 @@ def parse_reasoning_output(
     NotImplementedError). Everything else goes through the standard
     :class:`ReasoningParser` class API.
     """
-    if parser_name == "gemma4":
-        from vllm.reasoning.gemma4_utils import parse_thinking_output
-        parsed = parse_thinking_output(text)
-        reasoning, content = parsed["thinking"], parsed["answer"]
-    elif parser_name == "openai_gptoss":
-        from vllm.entrypoints.openai.parser.harmony_utils import parse_chat_output
-        reasoning, content = parse_chat_output(text)
-    else:
-        from vllm.reasoning import (
-            ReasoningParserManager,
-            register_lazy_reasoning_parsers,
-        )
-        register_lazy_reasoning_parsers()
-        cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-        # Completion callers render the chat template themselves. Carry its
-        # thinking setting into the parser too, so direct answers are not
-        # mistaken for unfinished reasoning (notably with Nemotron).
-        from types import SimpleNamespace
-        options = {} if enable_thinking is None else {
-            "chat_template_kwargs": {"enable_thinking": enable_thinking},
-        }
-        parser = cls(tokenizer, **options)
-        request = SimpleNamespace(**options) if options else None
-        reasoning, content = parser.extract_reasoning(text, request=request)
-        if parser_name == "nemotron_v3" and enable_thinking is False:
-            # vLLM's direct-content fast path can retain the ChatML stop token
-            # when completions use skip_special_tokens=False. Remove only a
-            # terminal boundary, never text inside the answer/JSON strings.
-            content = (content or "").strip()
-            while content.endswith("<|im_end|>"):
-                content = content.removesuffix("<|im_end|>").rstrip()
-    return (reasoning or "").strip(), (content or "").strip()
+    from matchminer_ai.llm.reasoning import parse_reasoning_output as parse
+
+    return parse(text, parser_name=parser_name, tokenizer=tokenizer,
+                 enable_thinking=enable_thinking)
 
 
 def add_reasoning_cli_args(ap: argparse.ArgumentParser) -> None:

@@ -21,7 +21,7 @@ All three shell entrypoints use `run_pipeline.py`. By default they start at
 Select `--start-at` to include data production, and `--stop-after` to stop before
 later stages. The training portion expects eight GPUs and a
 sibling `matchminer-ai-inference-kehl` checkout pinned to
-`408b6d7f13e9e4e403ef94d08ff68502d112b7c3`. Review the pin and prompt contracts
+`6930c5bc31acd163b7cd8e216efcd6eda3f643d9`. Review the pin and prompt contracts
 before adopting changes in that dependency. The default teacher for every
 label, catalog stage, exclusion extraction, and distillation request is
 `nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
@@ -528,6 +528,12 @@ conflicting assignments are rejected. If reusing `--screening-input`, subset
 the saved screening CSV to the exact same IDs without changing its source text,
 decisions, model provenance, or splits. Use fresh extraction checkpoints and
 output paths for the new model.
+
+Remote hierarchical extraction prepares prompts on a dedicated tokenizer worker
+and parses completion responses off the request event loop. Reasoning parsing
+uses the inference package's bounded, synchronized Nemotron parser cache instead
+of rebuilding its vocabulary for every response. This keeps ready requests
+flowing while preserving prompts, reasoning traces, and existing checkpoints.
 
 
 ### Direct anti-cancer treatment screen in 0b

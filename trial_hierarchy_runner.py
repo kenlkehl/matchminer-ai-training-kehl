@@ -3,6 +3,8 @@
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import pandas as pd
@@ -180,14 +182,13 @@ def remote_main(args, trials, reasoning_parser):
     async def work_fn(client, payload):
         request = payload["request"]
         failures = payload.get("failures", 0)
-        outgoing = _prepare_payload(
-            request,
-            tokenizer,
-            args.max_tokens,
-            args.max_model_len,
-            beam=beam,
-            failures=failures,
-            messages=payload.get("messages"),
+        outgoing = await asyncio.get_running_loop().run_in_executor(
+            preparation,
+            partial(
+                _prepare_payload, request, tokenizer, args.max_tokens,
+                args.max_model_len, beam=beam, failures=failures,
+                messages=payload.get("messages"),
+            ),
         )
         reasoning, final, metadata = await completion_fn(client, outgoing)
         result = Completion(
@@ -326,7 +327,10 @@ def remote_main(args, trials, reasoning_parser):
             )
         return [paths[index] for index in sorted(paths)]
 
-    return asyncio.run(run())
+    # Serialize access to the tokenizer on a dedicated worker; do not let a
+    # burst of CPU preparation block HTTP dispatch or checkpoint I/O workers.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="trial-prompts") as preparation:
+        return asyncio.run(run())
 
 
 def _completed_trial_path(directory, index, nct_id):
