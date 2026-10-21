@@ -59,6 +59,8 @@ def parser():
     p.add_argument('--generation-pending-requests', type=int, default=2560)
     p.add_argument('--generation-request-timeout', type=float, default=7200)
     p.add_argument('--generation-max-attempts', type=int, default=16)
+    p.add_argument('--generation-seed-max-tokens', type=int, default=16000)
+    p.add_argument('--generation-event-max-tokens', type=int, default=20000)
     p.add_argument('--api-key-env', default='OPENAI_API_KEY')
     p.add_argument('--wait-for-generation', action='store_true',
                    help='Observe the existing generation job until complete; never launch or interrupt it')
@@ -161,11 +163,13 @@ def build_plan(args):
               source('0c_sample_trial_spaces.py', 'trial_space_format.py')),
         Stage('generate-synthetic', [py, str(ROOT / 'generate_synthetic_data.py'), '--input-csv', str(args.sampled_spaces),
               '--output-dir', str(g), '--seed', str(args.data_seed), '--max-model-len', str(args.generation_context),
+              '--seed-max-tokens', str(args.generation_seed_max_tokens),
+              '--event-max-tokens', str(args.generation_event_max_tokens),
               '--pending-requests', str(args.generation_pending_requests), *model, *cache, *remote],
               [args.sampled_spaces], generated,
               source('generate_synthetic_data.py', '1a_make_synthetic_enrollee_prompts.py',
                      '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
-                     'remote_vllm_pool.py', 'vllm_reasoning_utils.py')),
+                     'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py')),
         Stage('prepare-notes', [py, str(ROOT / 'prepare_synthetic_training.py'), 'notes',
               '--input', str(args.raw_synthetic_notes), '--sampled-spaces', str(args.sampled_spaces),
               '--output', str(args.synthetic_notes), '--patients', str(patient_map),

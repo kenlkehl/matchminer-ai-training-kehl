@@ -795,16 +795,41 @@ invalid space is excluded as a whole so sampling never silently drops one of
 its spaces. Input/output paths, sample size, seed, and holdout years are CLI
 options. The sampling receipt records the exact NCT IDs and space count.
 
-`generate_synthetic_data.py` uses the existing `1a` and `1b` prompt builders
-unchanged to create five matching and five near-miss event histories per sampled
-space, then uses the existing step-2 prompt to expand clinical, imaging,
-pathology, and NGS report events into notes. It shares one adaptive endpoint
-pool across both patient classes, renders prompts with thinking enabled, and
-saves raw completions, separated reasoning, model names, endpoints, and prompt
-hashes. Completed responses and stable patient IDs survive resumption. Truncated
-completions, missing patients, and invalid event tags are retried rather than
-being exported as clinical data. Full source prompts are pinned by the run
-manifest; use a fresh output directory after changing them.
+`generate_synthetic_data.py` creates five matching and five near-miss patients
+per sampled space in two stages. For each class, one call creates five diverse
+seeds containing only demographics and diagnosis lines. After that seed batch
+is saved, five independent calls each expand exactly one patient's chronology.
+The clinical instructions, including chronology/anatomy and trial-reference
+rules, remain in `1a_make_synthetic_enrollee_prompts.py` and
+`1b_make_synthetic_negative_enrollee_prompts.py`. Their named instruction blocks
+feed `build_seed_messages` and `build_patient_messages`; shared stage framing
+lives in `synthetic_event_prompts.py`. A positive patient's eligibility takes
+precedence over the optional second-primary diversity request.
+
+Seed and patient calls share one continuous adaptive endpoint pool. Patient
+expansion starts as soon as its own seeds are saved, without waiting for all
+seed calls to finish. Each expansion receives only its assigned seed and must
+preserve its demographics and diagnosis lines. The runner validates five seeds,
+one patient per expansion, seed preservation, increasing event ages, report
+events, and common target-trial references. Invalid or truncated responses retry
+with the specific validation error. These checks do not establish clinical or
+biological coherence. Thinking remains enabled and both stages save raw output,
+reasoning, model, endpoint, and prompt hashes.
+
+`patient_seeds/` contains durable parent responses; `patient_events/` contains
+individually checkpointed histories with stable patient numbers and seed hashes.
+Resumption reuses both and requests only missing patients. Five histories are
+reassembled in patient-number order for the established positive/negative CSV
+schema. The run manifest is versioned and pins all prompt/helper source files;
+use a fresh output directory after changing them. Old multi-patient event
+checkpoints cannot be mixed into this format.
+
+After event generation completes, the unchanged step-2 prompt expands clinical,
+imaging, pathology, and NGS report events into notes. `--stop-after-events` on the
+generator allows an event-only pilot. Seed and individual-history budgets default
+to 16,000 and 20,000 tokens (`--seed-max-tokens`, `--event-max-tokens`); the main
+pipeline exposes these as `--generation-seed-max-tokens` and
+`--generation-event-max-tokens`, including through all `train_all*.sh` wrappers.
 Both the generation runner and standalone step 2 parse complete event tags as
 boundaries, preserving clinical inequalities such as `PD-L1 <1%` or
 `margin < 1 mm` in the event text and downstream note prompts.
@@ -825,7 +850,9 @@ python generate_synthetic_data.py \
 
 Outputs include `trial_spaces_with_positive_prompts.csv`,
 `trial_spaces_with_negative_prompts.csv`, `all_synthetic_events.parquet`, and
-`all_synthetic_notes.parquet`. `status.json` records the current stage. Preparation
+`all_synthetic_notes.parquet`. The combined event parquet is saved before note
+generation starts. During events, `status.json` reports saved seed batches and
+individual patient histories separately. Preparation
 and note assembly are bounded and streamed; all checkpoints and final files
 remain on the client machine. The command does not start or stop vLLM services,
 shut down VMs, summarize patients, or launch model training. A separately running
