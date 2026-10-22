@@ -163,6 +163,8 @@ def test_user_instructions_and_single_seed_reach_the_new_stages(tmp_path, kind, 
     assert 'verbatim' not in event_prompt
     assert 'exactly one <demographics> line' in event_prompt
     assert 'age at the earliest event' in event_prompt
+    assert 'The first clinical event does not have to be a diagnosis' in event_prompt
+    assert 'including events at the same age in causal order' in event_prompt
     assert 'Immediately after the tag' in event_prompt
     assert SPACE in seed_prompt and 'Active infection' in seed_prompt
     assert module.ELIGIBILITY_INSTRUCTIONS in seed_prompt
@@ -181,7 +183,11 @@ def test_user_instructions_and_single_seed_reach_the_new_stages(tmp_path, kind, 
     assert module.EVENT_INSTRUCTIONS in event_prompt
     assert 'At age N years and W weeks,' in event_prompt
     example = module.EVENT_INSTRUCTIONS.split('(Beginning of example)\n')[1].split('(End of example)')[0]
-    generation.check_event_order(generation.tagged_events(example))
+    example_events = generation.parse_patient_history(
+        example, 'John Smith, male, was diagnosed with CNS lymphoma at 70 years and 2 weeks.')
+    example_kinds = [event[0] for event in example_events]
+    assert example_kinds[:6] == ['demographics', 'imaging_report', 'surgery',
+                                'pathology_report', 'imaging_report', 'diagnosis']
     if kind == 'negative':
         assert 'would narrowly miss at least one' in seed_prompt
         assert 'who enrolled' not in event_prompt

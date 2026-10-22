@@ -832,7 +832,11 @@ are confined to the seed call. Event expansion cannot repair a seed toward the
 trial criteria; matching/near-miss labels are generation intentions, not verified
 properties of the final histories. The prompt requires preservation of seed facts without verbatim
 copying. The demographics line comes first and gives the age at the earliest
-event. The runner validates five distinct prose seeds with diagnosis ages,
+event. Clinical events can begin with symptoms, imaging, biopsy, or surgery;
+the diagnosis follows the workup establishing it, at its seed-assigned age.
+Both event examples illustrate workup before diagnosis. Findings must follow
+the procedures or tests that establish them, including within the same week.
+The runner validates five distinct prose seeds with diagnosis ages,
 one patient per expansion, a diagnosis event at each seed age, nondecreasing
 event ages, report events, and common target-trial references. It does not
 automatically compare names, sex, or all clinical facts across free prose;
