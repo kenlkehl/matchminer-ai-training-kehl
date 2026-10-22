@@ -37,11 +37,15 @@ CONSISTENCY_INSTRUCTIONS = (
 )
 
 
-EVENT_INSTRUCTIONS = (
-    'Use everything you know about cancer and clinical oncology.\n'
+ELIGIBILITY_INSTRUCTIONS = (
     'The "Prior treatment requirements" and "Biomarker requirements" fields each include both positive and '
     'negative conditions. Preserve each clause, its negation, AND/OR logic, and exceptions when interpreting '
     'eligibility.\n'
+)
+
+
+EVENT_INSTRUCTIONS = (
+    'Use everything you know about cancer and clinical oncology.\n'
     'Types of events might include a diagnosis as recorded in a cancer registry; initiation of a systemic therapy; '
     'a surgery; a radiation treatment; an adverse event; a clinical progress note; an imaging report; a pathology '
     'report; and a next-generation sequencing (NGS) report. For progress notes, imaging reports, pathology '
@@ -113,15 +117,14 @@ SECOND_PRIMARY_INSTRUCTION = (
 def build_seed_messages(criteria_text: str, rng: random.Random):
     from synthetic_event_prompts import seed_messages
     return seed_messages(system=SYSTEM_PROMPT, criteria=criteria_text,
-                         patient_class='negative', diagnosis=DIAGNOSIS_INSTRUCTIONS,
+                         patient_class='negative', diagnosis=DIAGNOSIS_INSTRUCTIONS + ELIGIBILITY_INSTRUCTIONS,
                          diversity=DIVERSITY_INSTRUCTIONS, consistency=CONSISTENCY_INSTRUCTIONS,
                          second_primary=SECOND_PRIMARY_INSTRUCTION if rng.randrange(10) == 5 else '')
 
 
-def build_patient_messages(criteria_text: str, seed_text: str):
+def build_patient_messages(seed_text: str):
     from synthetic_event_prompts import patient_messages
-    return patient_messages(system=SYSTEM_PROMPT, criteria=criteria_text,
-                            patient_class='negative', seed=seed_text,
+    return patient_messages(system=SYSTEM_PROMPT, seed=seed_text,
                             instructions=EVENT_INSTRUCTIONS, consistency=CONSISTENCY_INSTRUCTIONS)
 
 

@@ -154,15 +154,26 @@ def test_user_instructions_and_single_seed_reach_the_new_stages(tmp_path, kind, 
     assert 'Generate the complete event chronology' not in seed_prompt
     assert '(Beginning of example)' not in seed_prompt
     assert 'short prose paragraphs' in seed_prompt
+    from synthetic_event_prompts import SEED_FORMAT_EXAMPLE
+    assert SEED_FORMAT_EXAMPLE in seed_prompt
+    assert 'Do not copy this example into your output' in seed_prompt
+    assert 'reuse its patient identity' in seed_prompt
+    assert SEED_FORMAT_EXAMPLE not in event_prompt
     assert '<demographics>' not in seed_prompt and '<diagnosis>' not in seed_prompt
     assert 'verbatim' not in event_prompt
     assert 'exactly one <demographics> line' in event_prompt
     assert 'age at the earliest event' in event_prompt
     assert 'Immediately after the tag' in event_prompt
+    assert SPACE in seed_prompt and 'Active infection' in seed_prompt
+    assert module.ELIGIBILITY_INSTRUCTIONS in seed_prompt
+    assert SPACE not in event_prompt and 'Active infection' not in event_prompt
+    assert 'Eligibility criteria:' not in event_prompt
+    assert module.ELIGIBILITY_INSTRUCTIONS not in event_prompt
+    assert 'intended fit or mismatch' not in event_prompt
+    assert 'supplied criterion' not in event_prompt and 'supplied criteria' not in event_prompt
     for prompt in (seed_prompt, event_prompt):
         assert module.CONSISTENCY_INSTRUCTIONS in prompt
         assert module.DIAGNOSIS_INSTRUCTIONS in prompt
-        assert 'Active infection' in prompt
         assert '50 years and 21 weeks' in prompt
         assert '0 through 51' in prompt
         assert 'organs that would not have been visualized' in prompt
@@ -172,8 +183,13 @@ def test_user_instructions_and_single_seed_reach_the_new_stages(tmp_path, kind, 
     example = module.EVENT_INSTRUCTIONS.split('(Beginning of example)\n')[1].split('(End of example)')[0]
     generation.check_event_order(generation.tagged_events(example))
     if kind == 'negative':
-        assert 'narrowly misses at least one supplied criterion' in event_prompt
+        assert 'would narrowly miss at least one' in seed_prompt
         assert 'who enrolled' not in event_prompt
+    # No trial fields are needed or accepted by the patient prompt builder.
+    minimal = dict(key=item['key'], patient_class=kind, seed_text=item['seed_text'])
+    assert instance.build_payload(minimal, 'patient_events')['prompt'] == event_prompt
+    minimal['patient_class'] = 'negative' if kind == 'positive' else 'positive'
+    assert instance.build_payload(minimal, 'patient_events')['prompt'] == event_prompt
     item['masked_text'] = 'A synthetic event <BEGIN EVENT CORRESPONDING TO SYNTHETIC NOTE> clinical note'
     assert instance.build_payload(item, 'notes')['prompt'] == instance.notes.build_prompts(
         [item['masked_text']], tokenizer, max_ctx_tokens=250000)[0]
@@ -306,7 +322,6 @@ def fake_session(monkeypatch, complete):
         async def submit(self, payload):
             return await self.work(SimpleNamespace(base_url='http://test/v1/'), payload)
     monkeypatch.setattr(generation, 'make_completion_work_fn', lambda *args: complete)
-    monkeypatch.setattr(generation, 'make_chat_completion_work_fn', lambda *args: complete)
     monkeypatch.setattr(generation, 'build_registry_from_args', lambda args: None)
     monkeypatch.setattr(generation, 'RequestSession', Session)
 
@@ -386,8 +401,8 @@ def test_validation_retry_contains_exact_error_and_same_seed(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize('stage', ['seeds', 'patient_events', 'notes'])
-def test_beam_generation_uses_server_parser_and_saves_complete_response(tmp_path, monkeypatch, stage):
-    from openai.types.chat import ChatCompletion
+def test_beam_generation_parses_native_raw_completions_and_saves_reasoning(tmp_path, stage):
+    from openai.types import Completion
     model = 'reflection/Beam-1.0-501B-A23B-NVFP4'
     args = args_for(tmp_path)
     args.model = args.tokenizer_model = model
@@ -397,29 +412,29 @@ def test_beam_generation_uses_server_parser_and_saves_complete_response(tmp_path
     instance = generation.Generator(args, tokenizer)
     seed = generation.parse_seeds(SEEDS)[0]
     answer = SEEDS if stage == 'seeds' else expand_seed(seed) if stage == 'patient_events' else 'Synthetic note.'
-    response = ChatCompletion.model_validate(dict(id='test', object='chat.completion', created=0,
-        model=model, choices=[dict(index=0, finish_reason='stop', message=dict(
-            role='assistant', content=answer, reasoning='Saved thinking.'))]))
+    raw = ('<|channel|>analysis<|message|>Saved thinking.<|end|><|start|>assistant'
+           '<|channel|>final<|message|>' + answer + '<|return|>')
+    response = Completion.model_validate(dict(id='test', object='text_completion', created=0,
+        model=model, choices=[dict(index=0, finish_reason='stop', text=raw, logprobs=None)]))
     calls = []
 
     async def create(**kwargs):
         calls.append(kwargs)
         return response
 
-    def no_local_parser(*args):
-        raise AssertionError('Beam must use the server parser')
-
-    monkeypatch.setattr(generation, 'make_completion_work_fn', no_local_parser)
     payload = instance.build_payload(dict(key='positive:0:0', space_index=0, this_space=SPACE,
         trial_boilerplate_text='', patient_class='positive', seed_text=seed, masked_text='Synthetic event.'), stage)
-    client = SimpleNamespace(base_url='http://test/v1/', chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    client = SimpleNamespace(base_url='http://test/v1/', completions=SimpleNamespace(create=create))
     result = asyncio.run(instance.completion_work(tmp_path)(client, payload))
-    assert calls[0]['messages'] == payload['source_messages']
-    assert calls[0]['extra_body']['chat_template_kwargs'] == {'reasoning_effort': 'medium'}
+    assert calls[0]['prompt'] == payload['prompt']
+    assert 'messages' not in calls[0]
+    assert calls[0]['extra_body']['skip_special_tokens'] is False
+    assert payload['chat_template_kwargs'] == {'reasoning_effort': 'medium'}
     assert calls[0]['temperature'] == .7 and calls[0]['top_p'] == .99
     assert result['reasoning'] == 'Saved thinking.'
-    assert result['transport'] == 'chat_completions'
-    assert json.loads(result['raw_response']) == response.model_dump()
+    assert result['transport'] == 'completions'
+    assert result['raw_response'] == raw
+    assert '<|channel|>' not in result['answer']
 
 
 def test_full_generation_and_resume_preserve_all_patients_and_reasoning(tmp_path, monkeypatch):

@@ -132,7 +132,8 @@ def parse_reasoning_output(
     which also strips trailing ``<turn|>`` / ``<eos>`` sentinels — behavior
     the class-based ``extract_reasoning`` skips. ``openai_gptoss`` goes
     through vLLM's harmony helper (its ``extract_reasoning`` raises
-    NotImplementedError). Everything else goes through the standard
+    NotImplementedError). ``beam`` uses the shared native-channel splitter,
+    without depending on the installed vLLM build. Everything else uses the standard
     :class:`ReasoningParser` class API.
     """
     from matchminer_ai.llm.reasoning import parse_reasoning_output as parse

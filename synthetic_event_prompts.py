@@ -1,6 +1,16 @@
 """Stage framing; clinical instructions remain editable in the 1a/1b scripts."""
 
 
+SEED_FORMAT_EXAMPLE = (
+    'Marisol Vega, female, was diagnosed with sigmoid colon adenocarcinoma at '
+    '54 years and 19 weeks: site sigmoid colon (C18.7), histology adenocarcinoma, '
+    'NOS (8140/3), grade 2, tumor size 2.8 cm, pT2 pN0 cM0, stage I, summary '
+    'stage localized, 18 regional lymph nodes examined with none positive, '
+    'lymphovascular and perineural invasion absent, margins negative; '
+    'microsatellite stable, KRAS p.G12D mutation detected, BRAF wild-type.'
+)
+
+
 def seed_messages(*, system, criteria, patient_class, diagnosis, diversity,
                   consistency, second_primary=''):
     population = ('could meet all of these criteria at the end of their histories'
@@ -35,18 +45,21 @@ def seed_messages(*, system, criteria, patient_class, diagnosis, diversity,
            'violate the supplied exclusions.\n' if patient_class == 'positive' else
            'These are near-miss examples; preserve a plausible clinical history '
            'even when choosing a characteristic that does not meet the criteria.\n')
-        + 'Return only five short prose seeds separated by <new_patient>.'
+        + '\nThe following is one hypothetical prose seed, provided only to '
+        'illustrate formatting. Do not copy this example into your output or '
+        'reuse its patient identity. Generate five new patients. '
+        'It is not an additional patient or a template for the required cancer '
+        'type or biomarkers; use the supplied criteria for those.\n'
+        '(Beginning of seed prose format example)\n' + SEED_FORMAT_EXAMPLE
+        + '\n(End of seed prose format example)\n'
+        'Return only five new short prose seeds separated by <new_patient>.'
     )
     return [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]
 
 
-def patient_messages(*, system, criteria, patient_class, seed, instructions, consistency):
-    population = ('could meet all supplied criteria at the end of the history'
-                  if patient_class == 'positive' else
-                  'narrowly misses at least one supplied criterion at the end of the history')
+def patient_messages(*, system, seed, instructions, consistency):
     content = (
-        f'Generate the complete event chronology for exactly one patient who {population}.\n'
-        'Eligibility criteria:\n' + criteria + '\n\n'
+        'Generate the complete event chronology for exactly one patient based on the assigned prose seed.\n'
         + instructions + consistency
         + '\nThe assigned patient prose seed is:\n<patient_seed>\n' + seed
         + '\n</patient_seed>\n\n'
@@ -70,7 +83,6 @@ def patient_messages(*, system, criteria, patient_class, seed, instructions, con
         'all diagnoses and other events in one complete history of about 20–30 '
         'events. Do not output <new_patient>, another patient, headings, closing '
         'tags, or an explanation. Do not describe trial screening, eligibility '
-        'decisions, study entry, or enrollment in any event. '
-        'Record ordinary clinical facts that establish the intended fit or mismatch.'
+        'decisions, study entry, or enrollment in any event.'
     )
     return [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]

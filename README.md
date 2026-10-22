@@ -440,7 +440,9 @@ overrides still win, and no task output budget is changed. Beam always reasons;
 its template uses `reasoning_effort`, not Gemma's boolean thinking switch.
 The shared workspace default is `medium`, overriding the upstream template's
 `max`, for trial extraction, synthetic seeds/events/notes, and downstream teachers.
-Use a vLLM build with Beam support when serving or parsing raw local completions.
+Use a vLLM build with Beam support when serving. The shared inference package
+parses raw Beam analysis/final channels locally without requiring that build
+on the client.
 Remote `0b` uses Beam's server-side chat parser, so the client does not need that
 specialized vLLM build. It saves the returned reasoning separately from the answer.
 `--max-model-len` also caps remote requests: each attempt counts its rendered input,
@@ -800,6 +802,8 @@ options. The sampling receipt records the exact NCT IDs and space count.
 `generate_synthetic_data.py` creates five matching and five near-miss patients
 per sampled space in two stages. For each class, one call creates five diverse
 short prose seeds containing names, sex, diagnoses, and ages at each diagnosis.
+Both classes receive a hypothetical prose format example with explicit
+instructions not to reproduce the example or reuse its patient identity.
 After that seed batch
 is saved, five independent calls each expand exactly one patient's chronology.
 The clinical instructions, including chronology/anatomy and trial-reference
@@ -821,9 +825,12 @@ of absence, for organs outside the specified scan's field of view.
 
 Seed and patient calls share one continuous adaptive endpoint pool. Patient
 expansion starts as soon as its own seeds are saved, without waiting for all
-seed calls to finish. Each expansion receives its assigned prose seed and the
-trial criteria, then generates all tagged events, including demographics and
-diagnoses. The prompt requires preservation of seed facts without verbatim
+seed calls to finish. Each expansion receives only its assigned prose seed and the clinical/formatting
+instructions, then generates all tagged events, including demographics and
+diagnoses. Trial criteria, general exclusions, and matching/near-miss objectives
+are confined to the seed call. Event expansion cannot repair a seed toward the
+trial criteria; matching/near-miss labels are generation intentions, not verified
+properties of the final histories. The prompt requires preservation of seed facts without verbatim
 copying. The demographics line comes first and gives the age at the earliest
 event. The runner validates five distinct prose seeds with diagnosis ages,
 one patient per expansion, a diagnosis event at each seed age, nondecreasing
@@ -833,19 +840,21 @@ these require output review. Invalid or truncated responses retry
 with the specific validation error. These checks do not establish clinical or
 biological coherence. Thinking remains enabled and both stages save raw output,
 reasoning, model, endpoint, and prompt hashes.
-Beam uses the server's chat-completion parser for seeds, histories, and notes,
-so the local environment need not install Beam's matching vLLM build. Its full
-chat-response JSON is saved in `raw_response`, alongside separate reasoning and
-answer fields; other models retain raw completion text. The pinned Beam fast
-tokenizer renders prompts locally for context-budget checks and provenance.
+Seeds, histories, and notes use locally rendered prompts through `/v1/completions`,
+including Beam. Beam's native analysis/final channel parser is shared with the
+inference package and does not depend on the local vLLM version. Full raw text
+is saved in `raw_response`, alongside separate reasoning and answer fields.
+The pinned Beam fast tokenizer renders prompts locally with medium effort for
+context-budget checks and provenance.
 
 `patient_seeds/` contains durable parent responses; `patient_events/` contains
 individually checkpointed histories with stable patient numbers and seed hashes.
 Resumption reuses both and requests only missing patients. Five histories are
 reassembled in patient-number order for the established positive/negative CSV
 schema. The run manifest is versioned and pins all prompt/helper source files;
-use a fresh output directory after changing them. The v3 prose-seed manifest
-rejects reuse of tagged-seed or old multi-patient event checkpoints.
+use a fresh output directory after changing them. The v4 seed-only event manifest
+rejects reuse of previous trial-conditioned event, tagged-seed, or multi-patient
+checkpoints.
 
 After event generation completes, the unchanged step-2 prompt expands clinical,
 imaging, pathology, and NGS report events into notes. `--stop-after-events` on the

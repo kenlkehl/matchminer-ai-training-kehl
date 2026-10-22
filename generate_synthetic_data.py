@@ -27,7 +27,7 @@ import pyarrow.parquet as pq
 
 from remote_vllm_pool import (
     CompletionSampling, OutputValidationError, RequestSession,
-    add_remote_cli_args, build_registry_from_args, make_completion_work_fn, make_chat_completion_work_fn,
+    add_remote_cli_args, build_registry_from_args, make_completion_work_fn,
 )
 from vllm_reasoning_utils import resolve_parser_name, resolve_sampling_defaults, resolve_chat_template_kwargs
 
@@ -294,12 +294,11 @@ class Generator:
         sources = ['generate_synthetic_data.py', '1a_make_synthetic_enrollee_prompts.py',
                    '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
                    'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py']
-        value = dict(version='synthetic-prose-seeds-patient-events-notes-v3', input_sha256=sha_file(self.args.input_csv),
+        value = dict(version='synthetic-seed-only-patient-events-notes-v4', input_sha256=sha_file(self.args.input_csv),
                      source_sha256={name: sha_file(HERE / name) for name in sources},
                      sampling=asdict(self.sampling), tokenizer=self.args.tokenizer_model or self.args.model,
                      chat_template_kwargs=resolve_chat_template_kwargs(self.args.tokenizer_model or self.args.model),
-                     transport=('chat_completions' if resolve_parser_name(self.args.tokenizer_model or self.args.model,
-                                self.args.reasoning_parser) == 'beam' else 'completions'),
+                     transport='completions',
                      chat_template_sha256=hashlib.sha256(str(self.tokenizer.chat_template).encode()).hexdigest(),
                      seed=self.args.seed, enable_thinking=True, patients_per_space_per_class=5,
                      seed_max_tokens=self.args.seed_max_tokens,
@@ -315,12 +314,12 @@ class Generator:
         messages = None
         if stage in ('seeds', 'patient_events'):
             module = self.positive if item['patient_class'] == 'positive' else self.negative
-            criteria = item['this_space'] + '\nNo history of:\n' + item['trial_boilerplate_text']
             if stage == 'seeds':
+                criteria = item['this_space'] + '\nNo history of:\n' + item['trial_boilerplate_text']
                 messages = module.build_seed_messages(criteria, rng=random.Random(self.args.seed + int(item['space_index'])))
                 max_tokens = self.args.seed_max_tokens
             else:
-                messages = module.build_patient_messages(criteria, item['seed_text'])
+                messages = module.build_patient_messages(item['seed_text'])
                 max_tokens = self.args.event_max_tokens
         else:
             # Preserve the exact step-2 prompt. The larger limit prevents its
@@ -342,8 +341,7 @@ class Generator:
 
     def completion_work(self, directory):
         parser = resolve_parser_name(self.args.tokenizer_model or self.args.model, self.args.reasoning_parser)
-        base_work = (make_chat_completion_work_fn(self.sampling) if parser == 'beam'
-                     else make_completion_work_fn(self.sampling, parser, self.tokenizer))
+        base_work = make_completion_work_fn(self.sampling, parser, self.tokenizer)
 
         async def work(client, payload):
             reasoning, answer, metadata = await base_work(client, payload)
