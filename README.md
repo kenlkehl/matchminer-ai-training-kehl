@@ -38,6 +38,15 @@ including formatting repairs. This policy is recorded in the extraction
 manifest and requires fresh checkpoints when changed. Without the flag, repeated
 formatting failures can still use the existing non-thinking repair fallback.
 
+When every trial-population branch is pruned, a separate study-scope review
+checks whether the study truly lacks a therapeutic cancer population. A review
+that does not confirm rejection now triggers up to two automatic recovery rounds
+for the pruned fields, using its explanation and the original field instructions.
+Corrective calls have new checkpoint keys; existing successful nodes, screening,
+and completed trials remain reusable. Exhausted recovery still flags the trial
+for intervention and prevents an incomplete final export. Recovery calls honor
+`--hierarchy-always-think` along with ordinary requests.
+
 To run the pipeline against an existing teacher, supply its OpenAI-compatible
 endpoint instead of starting local vLLM workers:
 

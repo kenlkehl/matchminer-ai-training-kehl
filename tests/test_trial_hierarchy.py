@@ -167,6 +167,32 @@ def test_failed_trial_does_not_cancel_other_trials_or_export_partial_csvs(endpoi
     assert audit.is_cancer_treatment_trial.tolist() == [True, True, True]
 
 
+def test_production_recovers_cached_pruning_without_repeating_screening(endpoint_run, monkeypatch):
+    import trial_hierarchy_runner as runner
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    original_get = runner.ResponseCache.get
+
+    def previous_failed_run(cache, request):
+        if request.field_name == 'cancer_primary_site' and not request.recovery_round:
+            return Completion('{"branches":[],"prune_reason":"No single primary site named"}')
+        if request.field_name == 'study_relevance':
+            return Completion('{"decision":"review","reason":"Therapeutic cancer population remains","evidence":"ANTI_CANCER"}')
+        return original_get(cache, request)
+
+    monkeypatch.setattr(runner.ResponseCache, 'get', previous_failed_run)
+    spaces.main()
+    output = pd.read_csv(path / 'out.csv')
+    assert output.space_extraction_status.tolist() == ['completed']
+    trace = json.loads(output.space_reasoning_and_output.iloc[0])
+    assert any(n.get('recovery_round') == 1 for n in trace['nodes'])
+    assert any('PRUNING RECOVERY' in text for _, text in state.calls)
+    assert json.loads((path / 'work/space_extraction/extraction_failures.json').read_text()) == {}
+    count = len(state.calls)
+    spaces.main()
+    assert len(state.calls) == count
+
+
 @pytest.mark.parametrize("all_rejected", [False, True])
 def test_reviewed_rejections_export_audit_without_spaces_and_resume(endpoint_run, monkeypatch, all_rejected):
     import trial_hierarchy_runner as runner

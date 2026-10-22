@@ -85,7 +85,7 @@ def endpoint_run(tmp_path, monkeypatch, request):
     async def create(**kwargs):
         messages = json.loads(kwargs['prompt'])
         screening = 'is_cancer_treatment_trial' in messages[0]['content']
-        text = messages[-1]['content']
+        text = '\n'.join(m['content'] for m in messages if m['role'] == 'user')
         assert 'NEVER_SEND' not in text
         state.calls.append(('screen' if screening else 'extract', text))
         assert kwargs['model'] == model

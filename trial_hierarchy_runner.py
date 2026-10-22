@@ -313,6 +313,10 @@ def remote_main(args, trials, reasoning_parser):
                 cached = await asyncio.to_thread(cache.get, request)
                 if cached is not None:
                     return cached
+                if request.recovery_round:
+                    print(f"[hierarchy] recovering {trials.iloc[request.trial_index].nct_id} "
+                          f"field={request.field_name} round={request.recovery_round} "
+                          f"replacing={request.recovery_of}", flush=True)
                 result = await session.submit(
                     {
                         "request": request,
@@ -387,9 +391,11 @@ def local_extract(
         directory / "hierarchy_nodes",
         json.loads((directory / "extraction_manifest.json").read_text()),
     )
-    for stage in range(len(FIELDS) + 2):
+    while True:
         groups = [s.requests() for s in states]
         requests = [r for group in groups for r in group]
+        if not requests:
+            break
         responses = []
         for offset in range(0, len(requests), args.batch_size):
             chunk = requests[offset : offset + args.batch_size]
