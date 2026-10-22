@@ -32,6 +32,12 @@ TrialSpace labeling allows up to 96 concurrent requests per teacher GPU
 adaptive limiter ramps up after successful requests and backs off on errors.
 Cataloging, exclusion extraction and distillation share a live endpoint pool.
 
+Trial extraction in `0b_create_trial_spaces.py` accepts
+`--hierarchy-always-think` to keep reasoning enabled on all hierarchical calls,
+including formatting repairs. This policy is recorded in the extraction
+manifest and requires fresh checkpoints when changed. Without the flag, repeated
+formatting failures can still use the existing non-thinking repair fallback.
+
 To run the pipeline against an existing teacher, supply its OpenAI-compatible
 endpoint instead of starting local vLLM workers:
 

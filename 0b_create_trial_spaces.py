@@ -188,6 +188,7 @@ def worker_process(
     hierarchy_max_nodes: int = 4096,
     hierarchy_max_calls: int = 20000,
     max_attempts: int = 4,
+    hierarchy_always_think: bool = False,
 ):
     """
     Worker: loads its own vLLM on the specified GPU group (via CUDA_VISIBLE_DEVICES),
@@ -228,7 +229,7 @@ def worker_process(
         local_extract(llm, tokenizer, sampling, shard_df, SimpleNamespace(
             hierarchy_max_nodes=hierarchy_max_nodes, hierarchy_max_calls=hierarchy_max_calls,
             max_attempts=max_attempts, batch_size=batch_size, max_tokens=max_tokens,
-            max_model_len=max_model_len,
+            max_model_len=max_model_len, hierarchy_always_think=hierarchy_always_think,
         ), reasoning_parser, shard_out_path)
         return
 
@@ -654,6 +655,8 @@ def check_extraction_manifest(args, reasoning_parser):
             hierarchy_max_calls=getattr(args, "hierarchy_max_calls", 20000),
             hierarchy_trial_batch_size=getattr(args, "hierarchy_trial_batch_size", 32),
         )
+        if getattr(args, "hierarchy_always_think", False):
+            identity["hierarchy_always_think"] = True
     if getattr(args, "tokenizer_model", None):
         identity["tokenizer_model"] = args.tokenizer_model
     if reasoning_parser == "beam":
@@ -769,6 +772,7 @@ def local_main(args, trials, base_cols, reasoning_parser, *, screening=False):
                 hierarchy_max_nodes=getattr(args, "hierarchy_max_nodes", 4096),
                 hierarchy_max_calls=getattr(args, "hierarchy_max_calls", 20000),
                 max_attempts=getattr(args, "max_attempts", 4),
+                hierarchy_always_think=getattr(args, "hierarchy_always_think", False),
             ),
             name=f"vllm_worker_{i}",
             daemon=False,
@@ -857,6 +861,8 @@ def main():
                         help="Maximum logical field/boilerplate requests per trial, excluding retries")
     parser.add_argument("--hierarchy-trial-batch-size", type=int, default=32,
                         help="Minimum rolling active-trial window; enlarged to endpoint concurrency")
+    parser.add_argument("--hierarchy-always-think", action="store_true",
+                        help="Keep thinking enabled on every hierarchical call, including JSON repair retries")
     parser.add_argument("--work-dir", default="../data/no_phi/trial_space_shards", help="Directory for shard inputs/outputs")
     parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs, e.g. 0,1,2,3 (required for local mode; omit when using --server_urls / --server_urls_file)")
     parser.add_argument("--gpus-per-instance", type=int, default=1, help="Tensor-parallel GPUs per instance (set >1 for very large models)")

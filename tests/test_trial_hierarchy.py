@@ -212,6 +212,42 @@ def test_training_payload_keeps_thinking_off_after_repeated_failures():
     assert modes == [True, True, False, False, False, False, False, False]
 
 
+def test_training_payload_can_require_thinking_on_every_repair():
+    request = Hierarchy(0, 'source', prompt_bundle()).requests()[0]
+
+    class RecordingTokenizer(Tokenizer):
+        def apply_chat_template(self, **kwargs):
+            assert kwargs['enable_thinking'] is True
+            return super().apply_chat_template(**kwargs)
+
+    for failures in range(8):
+        payload = _prepare_payload(request, RecordingTokenizer(), 100, 10000,
+                                   failures=failures, max_attempts=8, always_think=True)
+        assert payload['enable_thinking'] is True
+
+
+def test_always_think_cli_is_recorded_and_reaches_remote_payload(endpoint_run, monkeypatch):
+    import trial_hierarchy_runner as runner
+    state, path, argv = endpoint_run
+    enable_hierarchy(argv)
+    argv.append('--hierarchy-always-think')
+    prepare = runner._prepare_payload
+    observed = []
+
+    def check(*args, **kwargs):
+        observed.append(kwargs['always_think'])
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(runner, '_prepare_payload', check)
+    spaces.main()
+    assert observed and all(observed)
+    manifest = json.loads((path / 'work/space_extraction/extraction_manifest.json').read_text())
+    assert manifest['hierarchy_always_think'] is True
+    argv.remove('--hierarchy-always-think')
+    with pytest.raises(ValueError, match='configuration changed'):
+        spaces.main()
+
+
 def test_local_extraction_records_reviewed_rejection(tmp_path, monkeypatch):
     import vllm_reasoning_utils
     monkeypatch.setattr(vllm_reasoning_utils, 'parse_reasoning_output', lambda text, *a, **kw: ('trace', text))

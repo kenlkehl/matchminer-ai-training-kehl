@@ -39,8 +39,9 @@ def _prepare_payload(
     failures=0,
     max_attempts=4,
     messages=None,
+    always_think=False,
 ):
-    thinking = retry_thinking(True, failures, max_attempts)
+    thinking = True if always_think else retry_thinking(True, failures, max_attempts)
     template = resolve_chat_template_kwargs("beam" if beam else "", enable_thinking=thinking)
     messages = messages or request.messages
     prompt = tokenizer.apply_chat_template(
@@ -188,6 +189,7 @@ def remote_main(args, trials, reasoning_parser):
                 args.max_model_len, beam=beam, failures=failures,
                 max_attempts=int(getattr(args, "max_attempts", 4)),
                 messages=payload.get("messages"),
+                always_think=getattr(args, "hierarchy_always_think", False),
             ),
         )
         reasoning, final, metadata = await completion_fn(client, outgoing)
@@ -210,7 +212,8 @@ def remote_main(args, trials, reasoning_parser):
                             "failure_number": failures + 1,
                             "error": str(exc),
                             "enable_thinking": outgoing["enable_thinking"],
-                            "next_enable_thinking": retry_thinking(True, failures + 1, int(getattr(args, "max_attempts", 4))),
+                            "next_enable_thinking": (True if getattr(args, "hierarchy_always_think", False)
+                                else retry_thinking(True, failures + 1, int(getattr(args, "max_attempts", 4)))),
                             "retry_feedback": payload["messages"][-1]["content"],
                             **vars(result),
                         }
@@ -406,6 +409,7 @@ def local_extract(
                         failures=attempt,
                         max_attempts=getattr(args, "max_attempts", 4),
                         messages=feedback.get(i),
+                        always_think=getattr(args, "hierarchy_always_think", False),
                     )
                     for i in pending
                 ]
