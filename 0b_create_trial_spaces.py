@@ -22,6 +22,7 @@ Outputs
 """
 
 from matchminer_ai.llm.reasoning import reasoning_system_prompt
+from vllm_reasoning_utils import resolve_chat_template_kwargs
 
 import os
 import argparse
@@ -236,7 +237,7 @@ def worker_process(
             conversation=(build_screening_messages(t) if screening else build_messages(t, model)),
             add_generation_prompt=True,
             tokenize=False,
-            enable_thinking=True
+            **resolve_chat_template_kwargs(model)
         )
         for t in trial_texts
     ]
@@ -341,8 +342,8 @@ def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screeni
             next_thinking = not thinking if failures % 2 == 0 else thinking
             audit(payload, event="validation_failure", failure_number=failures,
                   enable_thinking=thinking, next_enable_thinking=next_thinking,
-                  **({"reasoning_effort": "max" if thinking else "low",
-                      "next_reasoning_effort": "max" if next_thinking else "low"}
+                  **({**resolve_chat_template_kwargs("beam", enable_thinking=thinking),
+                      "next_reasoning_effort": resolve_chat_template_kwargs("beam", enable_thinking=next_thinking)["reasoning_effort"]}
                      if always_reasons else {}),
                   error=str(exc), finish_reason=metadata["finish_reason"],
                   reasoning=reasoning, final=final, raw_text=metadata.get("raw_text"))
@@ -366,8 +367,8 @@ def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screeni
                 feedback += "Return the complete numbered trial spaces followed by 'Boilerplate exclusions:' and the exclusions."
             messages += [{"role": "assistant", "content": rejected},
                          {"role": "user", "content": feedback}]
-            template_kwargs = ({"reasoning_effort": "max" if next_thinking else "low"}
-                               if always_reasons else {"enable_thinking": next_thinking})
+            template_kwargs = resolve_chat_template_kwargs(
+                "beam" if always_reasons else "", enable_thinking=next_thinking)
             if "messages" in payload:
                 payload.update(messages=messages, chat_template_kwargs=template_kwargs)
             payload.update(
@@ -380,7 +381,7 @@ def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screeni
             raise
         if failures:
             audit(payload, event="recovered", failure_number=failures,
-                  **({"reasoning_effort": "max" if thinking else "low"}
+                  **(resolve_chat_template_kwargs("beam", enable_thinking=thinking)
                      if always_reasons else {}),
                   enable_thinking=thinking, finish_reason=metadata["finish_reason"])
         return result
@@ -422,7 +423,7 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     # Beam's raw parser requires a specialized local vLLM build. Let the serving
     # instance parse its own output; keep local rendering for token accounting.
     use_chat = reasoning_parser == "beam"
-    template_kwargs = {"reasoning_effort": "max"} if use_chat else {"enable_thinking": True}
+    template_kwargs = resolve_chat_template_kwargs("beam" if use_chat else "")
     prompts = [
         tokenizer.apply_chat_template(
             conversation=(build_screening_messages(t) if screening else build_messages(t, getattr(args, "tokenizer_model", None) or args.model)),
@@ -655,6 +656,8 @@ def check_extraction_manifest(args, reasoning_parser):
         )
     if getattr(args, "tokenizer_model", None):
         identity["tokenizer_model"] = args.tokenizer_model
+    if reasoning_parser == "beam":
+        identity["chat_template_kwargs"] = resolve_chat_template_kwargs("beam")
     if path.exists():
         if json.loads(path.read_text()) != identity:
             raise ValueError(

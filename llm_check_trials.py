@@ -30,6 +30,7 @@ python llm_check_trials.py \
 """
 
 from matchminer_ai.llm.reasoning import reasoning_system_prompt
+from vllm_reasoning_utils import resolve_chat_template_kwargs
 
 import os
 import re
@@ -72,7 +73,7 @@ def build_trial_check_prompt(tokenizer, patient_summary: str, trial_summary: str
         conversation=messages,
         add_generation_prompt=True,
         tokenize=False,
-        enable_thinking=True,
+        **resolve_chat_template_kwargs(model_name or getattr(tokenizer, "name_or_path", "")),
     )
 
 

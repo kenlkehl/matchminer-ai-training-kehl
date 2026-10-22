@@ -17,7 +17,11 @@ class Tokenizer:
         self.name_or_path = model
 
     def apply_chat_template(self, conversation, **kwargs):
-        assert kwargs['enable_thinking'] is True
+        if 'Beam' in self.name_or_path:
+            assert kwargs['reasoning_effort'] == 'medium'
+            assert 'enable_thinking' not in kwargs
+        else:
+            assert kwargs['enable_thinking'] is True
         return json.dumps(conversation)
 
     def __call__(self, text, **kwargs):
@@ -32,6 +36,7 @@ class Tokenizer:
     ('nvidia/Gemma-4-31B-IT-NVFP4', False),
     ('nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4', False),
     ('Qwen/Qwen3.6-27B', False), ('unknown/model', False),
+    ('reflection/Beam-1.0-501B-A23B-NVFP4', False),
 ])
 def test_generation_and_checking_headers_follow_teacher(model, expected, tmp_path):
     tokenizer = Tokenizer(model)

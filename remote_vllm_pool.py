@@ -1210,6 +1210,7 @@ def make_chat_completion_work_fn(sampling: CompletionSampling) -> WorkFn:
                 "finish_reason": str(choice.finish_reason or ""),
                 "raw_text": None,
                 "transport": "chat_completions",
+                **({"response_json": response.model_dump()} if payload.get("include_raw_text") else {}),
             }
         return reasoning, answer
 

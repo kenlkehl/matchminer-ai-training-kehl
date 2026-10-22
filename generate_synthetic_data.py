@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 import fcntl
@@ -28,9 +27,9 @@ import pyarrow.parquet as pq
 
 from remote_vllm_pool import (
     CompletionSampling, OutputValidationError, RequestSession,
-    add_remote_cli_args, build_registry_from_args, make_completion_work_fn,
+    add_remote_cli_args, build_registry_from_args, make_completion_work_fn, make_chat_completion_work_fn,
 )
-from vllm_reasoning_utils import resolve_parser_name, resolve_sampling_defaults
+from vllm_reasoning_utils import resolve_parser_name, resolve_sampling_defaults, resolve_chat_template_kwargs
 
 HERE = Path(__file__).resolve().parent
 EVENT_TYPES = {'demographics', 'diagnosis', 'systemic', 'surgery', 'radiation',
@@ -44,6 +43,16 @@ def load_stage(filename):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_generation_tokenizer(model, cache_dir=None):
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+    from matchminer_ai.llm.model_profiles import REFLECTION_BEAM
+
+    # Beam publishes a complete tokenizers backend. Loading it directly avoids
+    # requiring local Transformers to recognize the server's Beam architecture.
+    loader = PreTrainedTokenizerFast if REFLECTION_BEAM.matches(model) else AutoTokenizer
+    return loader.from_pretrained(model, cache_dir=cache_dir)
 
 
 def now():
@@ -131,41 +140,59 @@ def tagged_events(text):
 
 def check_event_order(events):
     previous = None
+    age_pattern = r'(\d+) years? and (\d+) weeks?'
     for kind, text in events:
-        if kind == 'demographics':
-            continue
-        match = re.match(r'At age (\d+(?:\.\d+)?)\s*(months?|years?)?', text, re.I)
+        match = (re.search(r'\b' + age_pattern + r'\b', text, re.I) if kind == 'demographics'
+                 else re.match(r'At age ' + age_pattern + ',', text, re.I))
         if not match:
-            raise OutputValidationError(f'Every {kind} event must begin with At age N years')
-        age = float(match[1]) / (12 if (match[2] or '').lower().startswith('month') else 1)
+            requirement = ('Give the demographics age in years and weeks' if kind == 'demographics'
+                           else f'Every {kind} event must begin with At age N years and W weeks,')
+            raise OutputValidationError(requirement + ' (for example, 50 years and 21 weeks)')
+        age = tuple(map(int, match.groups()))
+        if not 0 <= age[1] <= 51:
+            raise OutputValidationError('Use integer weeks from 0 through 51 after the whole years')
+        if kind == 'demographics':
+            previous = age
+            continue
         if previous is not None and age < previous:
-            raise OutputValidationError(f'Events are out of chronological order: age {age:g} follows {previous:g}')
+            raise OutputValidationError(
+                f'Events are out of chronological order: age {age[0]} years and {age[1]} weeks '
+                f'follows {previous[0]} years and {previous[1]} weeks')
         previous = age
         if re.search(r'\b(?:study (?:entry|enrollment)|trial (?:screening|enrollment)|(?:this|the) trial)\b', text, re.I):
             raise OutputValidationError('Remove references to trial screening, study entry, or enrollment')
 
 
+def seed_diagnosis_ages(seed_text):
+    """Read the explicit diagnosis ages without imposing a prose sentence template."""
+    ages = re.findall(r'(?<!\w)(-?\d+(?:\.\d+)?) years?(?: and (-?\d+(?:\.\d+)?) weeks?)?',
+                      seed_text, re.I)
+    if not ages or any(not years.isdigit() or not weeks.isdigit() or not 0 <= int(weeks) <= 51
+                       for years, weeks in ages):
+        raise OutputValidationError(
+            'Give each diagnosis age in nonnegative whole years and weeks from 0 through 51 '
+            '(for example, 50 years and 21 weeks)')
+    return {(int(years), int(weeks)) for years, weeks in ages}
+
+
 def parse_seeds(answer):
     sections = [s.strip() for s in answer.split('<new_patient>') if s.strip()]
-    # A single outer markdown fence is harmless; never reinterpret event tags.
+    # A single outer markdown fence is harmless; seed content remains prose.
     if answer.strip().startswith('```') and answer.strip().endswith('```'):
         return parse_seeds(answer.strip().split('\n', 1)[1].rsplit('```', 1)[0])
     if len(sections) != PATIENTS_PER_CLASS:
         raise OutputValidationError(f'Expected five patient seeds; got {len(sections)}')
     seeds = []
-    demographics = set()
+    seen = set()
     for section in sections:
-        events = tagged_events(section)
-        kinds = Counter(kind for kind, _ in events)
-        if kinds['demographics'] != 1 or kinds['diagnosis'] < 1 or set(kinds) - {'demographics', 'diagnosis'}:
-            raise OutputValidationError('Each seed needs exactly one demographics line and diagnosis lines only')
-        if events[0][0] != 'demographics':
-            raise OutputValidationError('Begin each seed with its demographics line')
-        if events[0][1] in demographics:
-            raise OutputValidationError('The five seeds must have distinct patient identities')
-        demographics.add(events[0][1])
-        check_event_order(events)
-        seeds.append('\n'.join(f'<{kind}> {text}' for kind, text in events))
+        if re.search(r'</?\w+>', section):
+            raise OutputValidationError('Each seed must be short prose without event tags')
+        seed = ' '.join(section.split())
+        if seed.casefold() in seen:
+            raise OutputValidationError('The five patient seeds must be distinct')
+        seen.add(seed.casefold())
+        seed_diagnosis_ages(seed)
+        seeds.append(seed)
     return seeds
 
 
@@ -173,21 +200,22 @@ def parse_patient_history(answer, seed_text):
     if '<new_patient>' in answer:
         raise OutputValidationError('Generate exactly one patient, without a new_patient separator')
     events = tagged_events(answer)
-    required = tagged_events(seed_text)
     if events[0][0] != 'demographics' or sum(kind == 'demographics' for kind, _ in events) != 1:
         raise OutputValidationError('Generate one patient with one initial demographics line')
-    # A missing terminal sentence period is formatting, not a different seed.
-    # Restore the saved seed spelling after comparison; all factual text must
-    # still match, including names, ages, stages, and biomarkers.
-    identity = lambda event: (event[0], event[1].rstrip('.'))
-    counts = Counter(map(identity, events))
-    if any(counts[identity(event)] != 1 for event in required):
-        raise OutputValidationError('Copy every supplied seed demographics/diagnosis line verbatim exactly once')
+    if not any(kind == 'diagnosis' for kind, _ in events):
+        raise OutputValidationError('Include diagnosis events for the supplied prose seed')
     if not REPORT_TYPES.intersection(kind for kind, _ in events):
         raise OutputValidationError('The patient history needs report events for note generation')
     check_event_order(events)
-    originals = {identity(event): event for event in required}
-    return [originals.get(identity(event), event) for event in events]
+    diagnosis_ages = {tuple(map(int, re.match(r'At age (\d+) years? and (\d+) weeks?,', text, re.I).groups()))
+                     for kind, text in events if kind == 'diagnosis'}
+    missing = seed_diagnosis_ages(seed_text) - diagnosis_ages
+    if missing:
+        ages = ', '.join(f'{years} years and {weeks} weeks' for years, weeks in sorted(missing))
+        raise OutputValidationError(f'Include the seed diagnoses at their assigned ages: {ages}')
+    # Free prose has no reliable exact-text identity or clinical-fact comparison.
+    # Those facts are preserved by the prompt and assessed in output review.
+    return events
 
 
 def validate_completion(answer, metadata, stage, seed_text=None):
@@ -266,9 +294,12 @@ class Generator:
         sources = ['generate_synthetic_data.py', '1a_make_synthetic_enrollee_prompts.py',
                    '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
                    'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py']
-        value = dict(version='synthetic-seeds-patient-events-notes-v2', input_sha256=sha_file(self.args.input_csv),
+        value = dict(version='synthetic-prose-seeds-patient-events-notes-v3', input_sha256=sha_file(self.args.input_csv),
                      source_sha256={name: sha_file(HERE / name) for name in sources},
                      sampling=asdict(self.sampling), tokenizer=self.args.tokenizer_model or self.args.model,
+                     chat_template_kwargs=resolve_chat_template_kwargs(self.args.tokenizer_model or self.args.model),
+                     transport=('chat_completions' if resolve_parser_name(self.args.tokenizer_model or self.args.model,
+                                self.args.reasoning_parser) == 'beam' else 'completions'),
                      chat_template_sha256=hashlib.sha256(str(self.tokenizer.chat_template).encode()).hexdigest(),
                      seed=self.args.seed, enable_thinking=True, patients_per_space_per_class=5,
                      seed_max_tokens=self.args.seed_max_tokens,
@@ -291,25 +322,28 @@ class Generator:
             else:
                 messages = module.build_patient_messages(criteria, item['seed_text'])
                 max_tokens = self.args.event_max_tokens
-            prompt = self.tokenizer.apply_chat_template(
-                conversation=messages, add_generation_prompt=True, tokenize=False, enable_thinking=True)
         else:
             # Preserve the exact step-2 prompt. The larger limit prevents its
             # legacy head/tail truncation; reject an overlong context below.
-            prompt = self.notes.build_prompts([item['masked_text']], self.tokenizer,
+            messages = self.notes.build_messages([item['masked_text']], self.tokenizer,
                                              max_ctx_tokens=self.args.max_model_len,
                                              model_name=self.args.tokenizer_model or self.args.model)[0]
             max_tokens = self.args.note_max_tokens
+        template_kwargs = resolve_chat_template_kwargs(self.args.tokenizer_model or self.args.model)
+        prompt = self.tokenizer.apply_chat_template(
+            conversation=messages, add_generation_prompt=True, tokenize=False, **template_kwargs)
         length = len(self.tokenizer.encode(prompt, add_special_tokens=False))
         if length + max_tokens + 256 > self.args.max_model_len:
             raise ValueError(f'Full {stage} prompt and output budget exceed context for {item["key"]}')
         return dict(prompt=prompt, max_tokens=max_tokens, enable_thinking=True,
                     include_completion_metadata=True, include_raw_text=True, stage=stage,
-                    key=item['key'], source_messages=messages, seed_text=item.get('seed_text'))
+                    key=item['key'], source_messages=messages, messages=messages,
+                    chat_template_kwargs=template_kwargs, seed_text=item.get('seed_text'))
 
     def completion_work(self, directory):
         parser = resolve_parser_name(self.args.tokenizer_model or self.args.model, self.args.reasoning_parser)
-        base_work = make_completion_work_fn(self.sampling, parser, self.tokenizer)
+        base_work = (make_chat_completion_work_fn(self.sampling) if parser == 'beam'
+                     else make_completion_work_fn(self.sampling, parser, self.tokenizer))
 
         async def work(client, payload):
             reasoning, answer, metadata = await base_work(client, payload)
@@ -328,17 +362,21 @@ class Generator:
                     messages = payload['source_messages'] + [{'role': 'user', 'content':
                         'The previous response failed validation: ' + str(exc) + '\n'
                         'Regenerate the complete requested output from the original instructions. '
-                        'Keep the exact assigned seed lines if a seed was supplied.'}]
+                        'Preserve the facts and diagnosis ages in the assigned prose seed if one was supplied.'}]
                     payload['prompt'] = await asyncio.to_thread(
                         self.tokenizer.apply_chat_template, conversation=messages,
-                        add_generation_prompt=True, tokenize=False, enable_thinking=True)
+                        add_generation_prompt=True, tokenize=False, **resolve_chat_template_kwargs(self.args.tokenizer_model or self.args.model))
+                    payload['messages'] = messages
                 raise
             if payload['stage'] == 'seeds':
                 answer = '\n<new_patient>\n'.join(parse_seeds(answer))
             elif payload['stage'] == 'patient_events':
                 answer = '\n'.join(f'<{kind}> {text}' for kind, text in
                                    parse_patient_history(answer, payload['seed_text']))
-            return dict(reasoning=reasoning, answer=answer, raw_response=metadata['raw_text'],
+            raw_response = (json.dumps(metadata['response_json']) if 'response_json' in metadata
+                            else metadata['raw_text'])
+            return dict(reasoning=reasoning, answer=answer, raw_response=raw_response,
+                        transport=metadata.get('transport', 'completions'),
                         finish_reason=metadata['finish_reason'], model=self.args.model,
                         endpoint=str(client.base_url), generated_at=now(),
                         prompt_sha256=hashlib.sha256(payload['prompt'].encode()).hexdigest())
@@ -673,9 +711,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     with (out / 'generation.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_model or args.model,
-                                                  cache_dir=args.download_dir)
+        tokenizer = load_generation_tokenizer(args.tokenizer_model or args.model,
+                                              cache_dir=args.download_dir)
         generator = Generator(args, tokenizer)
         try:
             asyncio.run(generator.run())

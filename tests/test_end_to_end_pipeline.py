@@ -130,6 +130,33 @@ def test_dates_preserve_supplied_timestamps_and_label_ordinal_fallback():
         prepare.ordered_dates([(1, 2, 50, None), (2, 8, 52, '2023-03-04')], '2025-01-01')
 
 
+def test_preparation_preserves_week_intervals(tmp_path):
+    source, spaces = synthetic_files(tmp_path)
+    frame = pd.read_parquet(source)
+    frame['event_text'] = frame.event_number.map({
+        2: 'At age 50 years and 21 weeks, cancer was diagnosed.',
+        8: 'At age 50 years and 24 weeks, treatment began.',
+    })
+    frame.to_parquet(source, index=False)
+    notes, patients = tmp_path / 'prepared.parquet', tmp_path / 'patients.parquet'
+    prepare.prepare_notes(source, spaces, notes, patients)
+    for _, group in pd.read_parquet(notes).sort_values('event_number').groupby('patient_id'):
+        assert (pd.to_datetime(group.date).iloc[1] - pd.to_datetime(group.date).iloc[0]).days == 21
+        assert group.date_provenance.eq('synthetic_age_and_event_order').all()
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('At age 50 years and 21 weeks, diagnosed.', 50 + 147 / 365.2425),
+    ('At age 0 years and 26 weeks, diagnosed.', 182 / 365.2425),
+    ('At age 61 years and 0 weeks, diagnosed.', 61),
+    ('At age 18 months, diagnosed.', 1.5),
+    ('At age 50.5 years, diagnosed.', 50.5),
+    ('At age 50, diagnosed.', 50),
+])
+def test_age_parsing_supports_weeks_and_legacy_formats(text, expected):
+    assert prepare.age_years(text) == pytest.approx(expected)
+
+
 def test_summarization_loads_only_note_text_ids_and_dates(tmp_path, monkeypatch):
     from generate_synthetic_data import load_stage
     summary = load_stage('6_summarize_patients.py')

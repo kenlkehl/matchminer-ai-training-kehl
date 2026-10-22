@@ -438,6 +438,8 @@ repetition penalty 1.0. Top-k/min-p filtering and presence penalty are neutraliz
 Both reasoning and tool-call parsers resolve to `beam`. Explicit sampling
 overrides still win, and no task output budget is changed. Beam always reasons;
 its template uses `reasoning_effort`, not Gemma's boolean thinking switch.
+The shared workspace default is `medium`, overriding the upstream template's
+`max`, for trial extraction, synthetic seeds/events/notes, and downstream teachers.
 Use a vLLM build with Beam support when serving or parsing raw local completions.
 Remote `0b` uses Beam's server-side chat parser, so the client does not need that
 specialized vLLM build. It saves the returned reasoning separately from the answer.
@@ -617,7 +619,7 @@ instructions. JSON syntax errors include the decoder's location and explanation.
 Thinking is enabled initially; after every two invalid responses for one trial,
 the next retry switches thinking on/off. The completion parser receives the same
 thinking mode as the rendered prompt. Transport failures do not advance this
-counter. Beam always reasons, so its retries alternate max/low reasoning effort
+counter. Beam always reasons, so its retries alternate medium/low reasoning effort
 instead of toggling thinking off. Only the latest answer (up to 12,000 characters) enters retry context;
 complete rejected outputs, reasoning, finish reasons, errors, mode changes, and
 recovery events are recorded in each stage's `validation_failures.jsonl`.
@@ -797,7 +799,8 @@ options. The sampling receipt records the exact NCT IDs and space count.
 
 `generate_synthetic_data.py` creates five matching and five near-miss patients
 per sampled space in two stages. For each class, one call creates five diverse
-seeds containing only demographics and diagnosis lines. After that seed batch
+short prose seeds containing names, sex, diagnoses, and ages at each diagnosis.
+After that seed batch
 is saved, five independent calls each expand exactly one patient's chronology.
 The clinical instructions, including chronology/anatomy and trial-reference
 rules, remain in the import-only modules `1a_make_synthetic_enrollee_prompts.py`
@@ -808,23 +811,41 @@ feed `build_seed_messages` and `build_patient_messages`; shared stage framing
 lives in `synthetic_event_prompts.py`. A positive patient's eligibility takes
 precedence over the optional second-primary diversity request.
 
+Both seed and patient prompts express ages as whole years plus additional weeks
+(for example, `50 years and 21 weeks`, with weeks from 0 through 51). This applies
+to diagnosis ages in seeds and to demographics and every event timestamp in
+histories; chronology validation compares both
+parts, and downstream synthetic dates preserve the week intervals. The warning
+blocks in both prompt modules also prohibit imaging findings, including claims
+of absence, for organs outside the specified scan's field of view.
+
 Seed and patient calls share one continuous adaptive endpoint pool. Patient
 expansion starts as soon as its own seeds are saved, without waiting for all
-seed calls to finish. Each expansion receives only its assigned seed and must
-preserve its demographics and diagnosis lines. The runner validates five seeds,
-one patient per expansion, seed preservation, increasing event ages, report
-events, and common target-trial references. Invalid or truncated responses retry
+seed calls to finish. Each expansion receives its assigned prose seed and the
+trial criteria, then generates all tagged events, including demographics and
+diagnoses. The prompt requires preservation of seed facts without verbatim
+copying. The demographics line comes first and gives the age at the earliest
+event. The runner validates five distinct prose seeds with diagnosis ages,
+one patient per expansion, a diagnosis event at each seed age, nondecreasing
+event ages, report events, and common target-trial references. It does not
+automatically compare names, sex, or all clinical facts across free prose;
+these require output review. Invalid or truncated responses retry
 with the specific validation error. These checks do not establish clinical or
 biological coherence. Thinking remains enabled and both stages save raw output,
 reasoning, model, endpoint, and prompt hashes.
+Beam uses the server's chat-completion parser for seeds, histories, and notes,
+so the local environment need not install Beam's matching vLLM build. Its full
+chat-response JSON is saved in `raw_response`, alongside separate reasoning and
+answer fields; other models retain raw completion text. The pinned Beam fast
+tokenizer renders prompts locally for context-budget checks and provenance.
 
 `patient_seeds/` contains durable parent responses; `patient_events/` contains
 individually checkpointed histories with stable patient numbers and seed hashes.
 Resumption reuses both and requests only missing patients. Five histories are
 reassembled in patient-number order for the established positive/negative CSV
 schema. The run manifest is versioned and pins all prompt/helper source files;
-use a fresh output directory after changing them. Old multi-patient event
-checkpoints cannot be mixed into this format.
+use a fresh output directory after changing them. The v3 prose-seed manifest
+rejects reuse of tagged-seed or old multi-patient event checkpoints.
 
 After event generation completes, the unchanged step-2 prompt expands clinical,
 imaging, pathology, and NGS report events into notes. `--stop-after-events` on the

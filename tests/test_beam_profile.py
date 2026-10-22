@@ -37,6 +37,7 @@ def test_beam_teacher_request_uses_shared_profile(monkeypatch):
     assert request['temperature'] == .7 and request['top_p'] == .99
     assert request['extra_body']['top_k'] == -1
     assert 'reasoning_effort' not in request
+    assert request['extra_body']['chat_template_kwargs'] == {'reasoning_effort': 'medium'}
 
 
 def test_direct_extractor_request_uses_beam_profile_and_served_alias(monkeypatch):
@@ -55,6 +56,7 @@ def test_direct_extractor_request_uses_beam_profile_and_served_alias(monkeypatch
     assert request['model'] == 'opaque-alias'
     assert request['temperature'] == .7 and request['top_p'] == .99
     assert request['top_k'] == -1 and request['repetition_penalty'] == 1.0
+    assert request['chat_template_kwargs'] == {'reasoning_effort': 'medium'}
 
 
 def test_primary_runner_selects_beam_reasoning_and_tool_parsers():
@@ -75,3 +77,35 @@ def test_direct_extractor_server_selects_beam_parser_and_keeps_overrides():
     assert common.inject_reasoning_args(args, explicit) == explicit
     args.reasoning_parser = "none"
     assert common.inject_reasoning_args(args, []) == []
+
+
+def test_beam_template_effort_defaults_and_overrides():
+    from vllm_reasoning_utils import resolve_chat_template_kwargs
+    assert resolve_chat_template_kwargs(MODEL) == {"reasoning_effort": "medium"}
+    assert resolve_chat_template_kwargs(MODEL, enable_thinking=False) == {"reasoning_effort": "low"}
+    assert resolve_chat_template_kwargs(MODEL, reasoning_effort="max") == {"reasoning_effort": "max"}
+
+
+@pytest.mark.parametrize('stage', ['screening', 'extraction'])
+def test_beam_checkpoint_manifest_rejects_old_effort(tmp_path, stage):
+    import json
+    from tests.test_trial_selection import load_script
+    from trial_treatment_screening import check_screening_manifest
+
+    args = SimpleNamespace(model=MODEL, work_dir=str(tmp_path), max_model_len=100000,
+        temperature=.7, top_p=.99, top_k=-1, min_p=0., presence_penalty=0.,
+        repetition_penalty=1., max_tokens=32000, screening_max_tokens=8000)
+    if stage == 'screening':
+        check = lambda: check_screening_manifest(args, 'beam', tmp_path)
+    else:
+        script = load_script('beam_manifest_spaces', '0b_create_trial_spaces.py')
+        check = lambda: script.check_extraction_manifest(args, 'beam')
+    check()
+    path = tmp_path / f'{stage}_manifest.json'
+    manifest = json.loads(path.read_text())
+    assert manifest['chat_template_kwargs'] == {'reasoning_effort': 'medium'}
+    check()
+    manifest['chat_template_kwargs']['reasoning_effort'] = 'max'
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match='changed'):
+        check()

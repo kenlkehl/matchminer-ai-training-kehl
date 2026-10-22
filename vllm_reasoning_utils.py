@@ -74,6 +74,23 @@ SAMPLING_KEYS = (
 )
 
 
+def resolve_chat_template_kwargs(model: str, *, enable_thinking=True, **overrides) -> dict:
+    """Use the shared Beam effort default for local rendering and chat requests.
+
+    Beam always reasons; repair calls requesting thinking off use low effort.
+    Explicit template overrides win. Other families retain their thinking switch.
+    """
+    from matchminer_ai.llm.model_profiles import REFLECTION_BEAM
+
+    if REFLECTION_BEAM.matches(str(model or "")):
+        template = dict(REFLECTION_BEAM.chat_template_kwargs)
+        if not enable_thinking:
+            template["reasoning_effort"] = "low"
+    else:
+        template = {"enable_thinking": enable_thinking}
+    return {**template, **overrides}
+
+
 def resolve_sampling_defaults(model: str, *, fallback=None, enable_thinking=True, **overrides) -> dict:
     """Text sampling from the shared inference profile, with explicit overrides.
 

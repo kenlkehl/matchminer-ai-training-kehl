@@ -148,6 +148,8 @@ def load_screening_results(trials, input_path, work_dir):
 
 def check_screening_manifest(args, reasoning_parser, work_dir):
     """Input identity is guarded by 0b's parent trial-selection manifest."""
+    from vllm_reasoning_utils import resolve_chat_template_kwargs
+
     path = Path(work_dir) / "screening_manifest.json"
     identity = {
         "prompt_sha256": hashlib.sha256(SCREENING_PROMPT.encode()).hexdigest(),
@@ -161,6 +163,8 @@ def check_screening_manifest(args, reasoning_parser, work_dir):
     }
     if getattr(args, "tokenizer_model", None):
         identity["tokenizer_model"] = args.tokenizer_model
+    if reasoning_parser == "beam":
+        identity["chat_template_kwargs"] = resolve_chat_template_kwargs("beam")
     if path.exists():
         if json.loads(path.read_text()) != identity:
             raise ValueError("Treatment screening configuration changed; use a new --work-dir.")

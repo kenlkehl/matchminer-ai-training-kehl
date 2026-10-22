@@ -278,7 +278,7 @@ def test_per_node_context_budget_and_beam_effort():
     fallback = _prepare_payload(
         request, Tokenizer(), 45000, bounded_context, beam=True, failures=2
     )
-    assert first["chat_template_kwargs"] == {"reasoning_effort": "max"}
+    assert first["chat_template_kwargs"] == {"reasoning_effort": "medium"}
     assert fallback["chat_template_kwargs"] == {"reasoning_effort": "low"}
     assert (
         fallback["max_tokens"]

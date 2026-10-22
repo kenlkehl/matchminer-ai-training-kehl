@@ -28,7 +28,7 @@ def worker_count(concurrency):
 
 def sampling_parameters(model, *, thinking=True, temperature=None):
     """Resolved request settings, also recorded in generation manifests."""
-    from vllm_reasoning_utils import resolve_sampling_defaults
+    from vllm_reasoning_utils import resolve_sampling_defaults, resolve_chat_template_kwargs
     from matchminer_ai.llm.sampling import vendor_defaults
 
     settings = resolve_sampling_defaults(model, fallback={"temperature": 0.2},
@@ -36,7 +36,7 @@ def sampling_parameters(model, *, thinking=True, temperature=None):
     extra_keys = {"top_k", "min_p", "repetition_penalty"}
     params = {key: value for key, value in settings.items() if key not in extra_keys}
     extra = {key: value for key, value in settings.items() if key in extra_keys}
-    _, template = vendor_defaults(model, template={"enable_thinking": thinking})
+    _, template = vendor_defaults(model, template=resolve_chat_template_kwargs(model, enable_thinking=thinking))
     extra["chat_template_kwargs"] = template
     return {**params, "extra_body": extra}
 

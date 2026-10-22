@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 
 import pandas as pd
+from vllm_reasoning_utils import resolve_chat_template_kwargs
 
 from trial_hierarchy import (
     VERSION,
@@ -40,11 +41,7 @@ def _prepare_payload(
     messages=None,
 ):
     thinking = retry_thinking(True, failures, max_attempts)
-    template = (
-        {"reasoning_effort": "max" if thinking else "low"}
-        if beam
-        else {"enable_thinking": thinking}
-    )
+    template = resolve_chat_template_kwargs("beam" if beam else "", enable_thinking=thinking)
     messages = messages or request.messages
     prompt = tokenizer.apply_chat_template(
         conversation=messages, add_generation_prompt=True, tokenize=False, **template

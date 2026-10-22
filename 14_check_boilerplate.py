@@ -25,6 +25,7 @@ Notes
 """
 
 from matchminer_ai.llm.reasoning import reasoning_system_prompt
+from vllm_reasoning_utils import resolve_chat_template_kwargs
 
 import argparse
 import os
@@ -70,7 +71,7 @@ def build_prompts(patient_boilerplates: List[str], trial_boilerplates: List[str]
                 "No introductory text or concluding text after that final answer."
             )}
         ]
-        prompt = tokenizer.apply_chat_template(conversation=messages, add_generation_prompt=True, tokenize=False, enable_thinking=True)
+        prompt = tokenizer.apply_chat_template(conversation=messages, add_generation_prompt=True, tokenize=False, **resolve_chat_template_kwargs(getattr(tokenizer, "name_or_path", "")))
         prompts.append(prompt)
     return prompts
 

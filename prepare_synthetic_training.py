@@ -43,12 +43,18 @@ def load_spaces(path):
 
 
 def age_years(text):
-    match = re.search(r'\bage(?:d)?\s+(\d+(?:\.\d+)?)\s*(months?|years?)?', str(text), re.I)
+    match = re.search(r'\bage(?:d)?\s+(\d+(?:\.\d+)?)\s*(months?|years?)?'
+                      r'(?:\s+and\s+(\d+)\s+weeks?\b)?', str(text), re.I)
     if not match:
         return None
     age = float(match[1])
     if (match[2] or '').lower().startswith('month'):
         age /= 12
+    if match[3] is not None:
+        if not (match[2] or '').lower().startswith('year') or not 0 <= int(match[3]) <= 51:
+            raise ValueError('Expected whole years plus 0 through 51 additional weeks')
+        # ordered_dates converts years back to days; one explicit week is seven days.
+        age += int(match[3]) * 7 / 365.2425
     return age if 0 <= age <= 130 else None
 
 

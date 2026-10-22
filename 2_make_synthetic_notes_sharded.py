@@ -26,6 +26,7 @@ Notes:
 """
 
 from matchminer_ai.llm.reasoning import reasoning_system_prompt
+from vllm_reasoning_utils import resolve_chat_template_kwargs
 
 import os
 import re
@@ -261,7 +262,7 @@ def replace_generics_with_alternatives(text: str, patterns, rng: np.random.Gener
 # Worker: one process per (GPU group), one vLLM instance inside
 # ------------------------------
 
-def build_prompts(masked_texts: List[str], tokenizer, max_ctx_tokens: int = 40000, *, model_name: str | None = None) -> List[str]:
+def build_messages(masked_texts: List[str], tokenizer, max_ctx_tokens: int = 40000, *, model_name: str | None = None) -> List[List[dict]]:
     prompts = []
     for masked_text in masked_texts:
         # Trim very long histories by taking head+tail
@@ -291,9 +292,14 @@ CRITICAL: Do not invent treatments that are not included in the semi-structured 
 Within clinical notes, sometimes patients should have adverse events of therapy and/or comorbidities described that are consistent with their clinical trajectories.
 Do not include any disclaimers or notes about the fact that the document is synthetic; this is all for research purposes only.
 Here is the list of events:\n""" + masked_text + """\nNow, generate the synthetic document corresponding to the notated event."""}]
-        prompt = tokenizer.apply_chat_template(conversation=messages, add_generation_prompt=True, tokenize=False, enable_thinking=True)
-        prompts.append(prompt)
+        prompts.append(messages)
     return prompts
+
+
+def build_prompts(masked_texts: List[str], tokenizer, max_ctx_tokens: int = 40000, *, model_name: str | None = None) -> List[str]:
+    return [tokenizer.apply_chat_template(conversation=messages, add_generation_prompt=True,
+                tokenize=False, **resolve_chat_template_kwargs(model_name or getattr(tokenizer, "name_or_path", "")))
+            for messages in build_messages(masked_texts, tokenizer, max_ctx_tokens, model_name=model_name)]
 
 
 def _find_existing_shard(shards_dir: str, global_lo: int, global_hi: int) -> str:

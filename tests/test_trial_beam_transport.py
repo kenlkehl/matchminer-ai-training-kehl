@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from openai.types.chat import ChatCompletion
 
 from remote_vllm_pool import CompletionSampling, make_chat_completion_work_fn
 from tests.test_trial_selection import load_script
@@ -27,8 +28,9 @@ def test_beam_server_parser_and_feedback_respect_context_and_effort(tmp_path):
             'is_cancer_treatment_trial': True, 'rationale': 'Tests direct anticancer treatment.'})
         # Current Beam vLLM uses `reasoning`; other server versions may use
         # `reasoning_content`. Neither requires importing a local Beam parser.
-        return SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop',
-            message=SimpleNamespace(content=final, reasoning='Reasoning trace'))])
+        return ChatCompletion.model_validate(dict(id='test', object='chat.completion', created=0,
+            model='reflection/Beam-1.0-501B-A23B-NVFP4', choices=[dict(index=0, finish_reason='stop',
+                message=dict(role='assistant', content=final, reasoning='Reasoning trace'))]))
 
     async def scenario():
         tokenizer = Tokenizer()
@@ -40,8 +42,8 @@ def test_beam_server_parser_and_feedback_respect_context_and_effort(tmp_path):
         messages = spaces.build_screening_messages('Synthetic anticancer trial')
         payload = dict(nct_id='NCT00000001', trial_text='Synthetic anticancer trial',
             max_tokens=45000, messages=messages,
-            chat_template_kwargs={'reasoning_effort': 'max'},
-            prompt=tokenizer.apply_chat_template(messages, reasoning_effort='max',
+            chat_template_kwargs={'reasoning_effort': 'medium'},
+            prompt=tokenizer.apply_chat_template(messages, reasoning_effort='medium',
                 tokenize=False, add_generation_prompt=True))
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
         budgets = []
@@ -56,7 +58,7 @@ def test_beam_server_parser_and_feedback_respect_context_and_effort(tmp_path):
         assert [c['max_tokens'] for c in calls] == budgets
 
     asyncio.run(scenario())
-    assert [c['extra_body']['chat_template_kwargs']['reasoning_effort'] for c in calls] == ['max', 'max', 'low']
+    assert [c['extra_body']['chat_template_kwargs']['reasoning_effort'] for c in calls] == ['medium', 'medium', 'low']
     for call in calls:
         assert 'enable_thinking' not in call['extra_body']['chat_template_kwargs']
         assert call['temperature'] == .7 and call['top_p'] == .99
