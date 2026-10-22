@@ -3,9 +3,9 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from openai.types.chat import ChatCompletion
+from openai.types.completion import Completion
 
-from remote_vllm_pool import CompletionSampling, make_chat_completion_work_fn
+from remote_vllm_pool import CompletionSampling, make_completion_work_fn
 from tests.test_trial_selection import load_script
 
 spaces = load_script('beam_trial_spaces', '0b_create_trial_spaces.py')
@@ -19,24 +19,24 @@ class Tokenizer:
         return json.dumps(conversation) + json.dumps(kwargs)
 
 
-def test_beam_server_parser_and_feedback_respect_context_and_effort(tmp_path):
+def test_beam_native_parser_and_feedback_respect_context_and_effort(tmp_path):
     calls = []
 
     async def create(**kwargs):
         calls.append(kwargs)
         final = 'bad JSON' if len(calls) < 3 else json.dumps({
             'is_cancer_treatment_trial': True, 'rationale': 'Tests direct anticancer treatment.'})
-        # Current Beam vLLM uses `reasoning`; other server versions may use
-        # `reasoning_content`. Neither requires importing a local Beam parser.
-        return ChatCompletion.model_validate(dict(id='test', object='chat.completion', created=0,
+        raw = ('<|channel|>analysis<|message|>Reasoning trace<|end|>'
+               '<|start|>assistant<|channel|>final<|message|>' + final + '<|return|>')
+        return Completion.model_validate(dict(id='test', object='text_completion', created=0,
             model='reflection/Beam-1.0-501B-A23B-NVFP4', choices=[dict(index=0, finish_reason='stop',
-                message=dict(role='assistant', content=final, reasoning='Reasoning trace'))]))
+                text=raw, logprobs=None)]))
 
     async def scenario():
         tokenizer = Tokenizer()
-        completion = make_chat_completion_work_fn(CompletionSampling(
+        completion = make_completion_work_fn(CompletionSampling(
             model='reflection/Beam-1.0-501B-A23B-NVFP4', temperature=.7,
-            top_p=.99, top_k=-1, repetition_penalty=1.0))
+            top_p=.99, top_k=-1, repetition_penalty=1.0), 'beam', tokenizer)
         work = spaces.make_trial_completion_work_fn(completion, tokenizer, tmp_path,
             screening=True, max_model_len=6000, always_reasons=True)
         messages = spaces.build_screening_messages('Synthetic anticancer trial')
@@ -45,7 +45,7 @@ def test_beam_server_parser_and_feedback_respect_context_and_effort(tmp_path):
             chat_template_kwargs={'reasoning_effort': 'medium'},
             prompt=tokenizer.apply_chat_template(messages, reasoning_effort='medium',
                 tokenize=False, add_generation_prompt=True))
-        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        client = SimpleNamespace(completions=SimpleNamespace(create=create))
         budgets = []
         for _ in range(3):
             budgets.append(6000 - len(payload['prompt']) - 256)
@@ -58,13 +58,14 @@ def test_beam_server_parser_and_feedback_respect_context_and_effort(tmp_path):
         assert [c['max_tokens'] for c in calls] == budgets
 
     asyncio.run(scenario())
-    assert [c['extra_body']['chat_template_kwargs']['reasoning_effort'] for c in calls] == ['medium', 'medium', 'low']
-    for call in calls:
-        assert 'enable_thinking' not in call['extra_body']['chat_template_kwargs']
+    for call, effort in zip(calls, ['medium', 'medium', 'low'], strict=True):
+        assert f'"reasoning_effort": "{effort}"' in call['prompt']
+        assert '"enable_thinking"' not in call['prompt']
+        assert call['extra_body']['skip_special_tokens'] is False
         assert call['temperature'] == .7 and call['top_p'] == .99
         assert call['extra_body']['top_k'] == -1
-    assert 'failed validation' in calls[1]['messages'][-1]['content']
-    assert calls[1]['messages'][-2]['content'] == 'bad JSON'
+    assert 'failed validation' in calls[1]['prompt']
+    assert 'bad JSON' in calls[1]['prompt']
     audit = [json.loads(line) for line in (tmp_path/'validation_failures.jsonl').read_text().splitlines()]
     assert audit[1]['next_reasoning_effort'] == 'low'
 

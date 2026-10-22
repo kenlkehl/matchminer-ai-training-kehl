@@ -8,7 +8,7 @@ from functools import partial
 from pathlib import Path
 
 import pandas as pd
-from vllm_reasoning_utils import resolve_chat_template_kwargs
+from vllm_reasoning_utils import load_tokenizer, resolve_chat_template_kwargs
 
 from trial_hierarchy import (
     VERSION,
@@ -141,18 +141,15 @@ def _save_results(states, trials, directory, output_name, *, raise_errors=True):
 
 
 def remote_main(args, trials, reasoning_parser):
-    from transformers import AutoTokenizer
-
     from remote_vllm_pool import (
         CompletionSampling,
         OutputValidationError,
         RequestSession,
         build_registry_from_args,
-        make_chat_completion_work_fn,
         make_completion_work_fn,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = load_tokenizer(
         getattr(args, "tokenizer_model", None) or args.model,
         cache_dir=args.download_dir or None,
         trust_remote_code=True,
@@ -173,11 +170,7 @@ def remote_main(args, trials, reasoning_parser):
         },
         request_timeout=float(getattr(args, "request_timeout", 600)),
     )
-    completion_fn = (
-        make_chat_completion_work_fn(sampling)
-        if beam
-        else make_completion_work_fn(sampling, reasoning_parser, tokenizer)
-    )
+    completion_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
     registry = build_registry_from_args(args)
     cache = ResponseCache(
         Path(args.work_dir) / "hierarchy_nodes",

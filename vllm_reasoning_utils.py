@@ -74,6 +74,15 @@ SAMPLING_KEYS = (
 )
 
 
+def load_tokenizer(model, cache_dir=None, **kwargs):
+    """Load Beam's published tokenizer without requiring its model architecture."""
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+    from matchminer_ai.llm.model_profiles import REFLECTION_BEAM
+
+    loader = PreTrainedTokenizerFast if REFLECTION_BEAM.matches(model) else AutoTokenizer
+    return loader.from_pretrained(model, cache_dir=cache_dir, **kwargs)
+
+
 def resolve_chat_template_kwargs(model: str, *, enable_thinking=True, **overrides) -> dict:
     """Use the shared Beam effort default for local rendering and chat requests.
 

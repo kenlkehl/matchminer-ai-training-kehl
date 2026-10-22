@@ -399,17 +399,16 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     import asyncio
     import glob
     import re
-    from transformers import AutoTokenizer
+    from vllm_reasoning_utils import load_tokenizer
     from remote_vllm_pool import (
         CompletionSampling,
         make_completion_work_fn,
-        make_chat_completion_work_fn,
         run_pool,
         build_registry_from_args,
     )
 
     print(f"[remote] loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = load_tokenizer(
         getattr(args, "tokenizer_model", None) or args.model,
         cache_dir=args.download_dir or None,
         trust_remote_code=True,
@@ -420,10 +419,10 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
     trials["_work_id"] = np.arange(len(trials), dtype=np.int64)
     trial_texts = trials["trial_text"].astype(str).tolist()
     print(f"[remote] building {len(trial_texts)} prompts...")
-    # Beam's raw parser requires a specialized local vLLM build. Let the serving
-    # instance parse its own output; keep local rendering for token accounting.
-    use_chat = reasoning_parser == "beam"
-    template_kwargs = resolve_chat_template_kwargs("beam" if use_chat else "")
+    # The shared native Beam parser handles raw completions locally, matching
+    # event/note generation and retaining the complete raw response.
+    beam = reasoning_parser == "beam"
+    template_kwargs = resolve_chat_template_kwargs("beam" if beam else "")
     prompts = [
         tokenizer.apply_chat_template(
             conversation=(build_screening_messages(t) if screening else build_messages(t, getattr(args, "tokenizer_model", None) or args.model)),
@@ -467,7 +466,7 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
           "trial_text": trial_texts[i], "nct_id": str(trials.iloc[i]["nct_id"]),
           **({"messages": (build_screening_messages(trial_texts[i]) if screening
                            else build_messages(trial_texts[i], getattr(args, "tokenizer_model", None) or args.model)),
-              "chat_template_kwargs": template_kwargs} if use_chat else {})})
+              "chat_template_kwargs": template_kwargs} if beam else {})})
         for i in range(len(trials))
         if int(trials.iloc[i]["_work_id"]) not in done_ids
     ]
@@ -487,12 +486,11 @@ def remote_main(args, trials: pd.DataFrame, base_cols, reasoning_parser: str, *,
         repetition_penalty=float(args.repetition_penalty),
         request_timeout=float(getattr(args, "request_timeout", 600.0)),
     )
-    completion_fn = (make_chat_completion_work_fn(sampling) if use_chat else
-                     make_completion_work_fn(sampling, reasoning_parser, tokenizer))
+    completion_fn = make_completion_work_fn(sampling, reasoning_parser, tokenizer)
 
     work_fn = make_trial_completion_work_fn(
         completion_fn, tokenizer, args.work_dir, screening=screening,
-        max_model_len=args.max_model_len, always_reasons=use_chat,
+        max_model_len=args.max_model_len, always_reasons=beam,
         model_name=getattr(args, "tokenizer_model", None) or args.model,
     )
     registry = build_registry_from_args(args)
@@ -639,7 +637,7 @@ def check_extraction_manifest(args, reasoning_parser):
         "model": args.model, "reasoning_parser": reasoning_parser,
         "enable_thinking": True,
         "max_model_len": args.max_model_len,
-        "transport": "chat_completions" if reasoning_parser == "beam" else "completions",
+        "transport": "completions",
         "sampling": {key: getattr(args, key) for key in (
             "temperature", "top_p", "top_k", "min_p", "presence_penalty",
             "repetition_penalty", "max_tokens")},

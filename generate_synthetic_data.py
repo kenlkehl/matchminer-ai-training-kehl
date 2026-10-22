@@ -30,6 +30,7 @@ from remote_vllm_pool import (
     add_remote_cli_args, build_registry_from_args, make_completion_work_fn,
 )
 from vllm_reasoning_utils import resolve_parser_name, resolve_sampling_defaults, resolve_chat_template_kwargs
+from vllm_reasoning_utils import load_tokenizer as load_generation_tokenizer
 
 HERE = Path(__file__).resolve().parent
 EVENT_TYPES = {'demographics', 'diagnosis', 'systemic', 'surgery', 'radiation',
@@ -43,16 +44,6 @@ def load_stage(filename):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def load_generation_tokenizer(model, cache_dir=None):
-    from transformers import AutoTokenizer, PreTrainedTokenizerFast
-    from matchminer_ai.llm.model_profiles import REFLECTION_BEAM
-
-    # Beam publishes a complete tokenizers backend. Loading it directly avoids
-    # requiring local Transformers to recognize the server's Beam architecture.
-    loader = PreTrainedTokenizerFast if REFLECTION_BEAM.matches(model) else AutoTokenizer
-    return loader.from_pretrained(model, cache_dir=cache_dir)
 
 
 def now():
