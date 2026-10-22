@@ -164,8 +164,13 @@ def check_event_order(events):
 
 
 def seed_diagnosis_ages(seed_text):
-    """Read the explicit diagnosis ages without imposing a prose sentence template."""
-    ages = re.findall(r'(?<!\w)(-?\d+(?:\.\d+)?) years?(?: and (-?\d+(?:\.\d+)?) weeks?)?',
+    """Read explicit patient ages, excluding remission and other elapsed durations."""
+    # Seeds also mention durations such as "in remission for 4 years and 48
+    # weeks" or "disease-free interval 1 year and 37 weeks". Only an age cue
+    # makes a time expression a diagnosis anchor; small pediatric ages remain
+    # valid, and malformed ages must still fail validation.
+    age_cue = r'\b(?:at\s+(?:(?:the\s+)?age\s+(?:of\s+)?)?|aged\s+|ages?\s+(?:of\s+)?)'
+    ages = re.findall(age_cue + r'(-?\d+(?:\.\d+)?) years?(?: and (-?\d+(?:\.\d+)?) weeks?)?',
                       seed_text, re.I)
     if not ages or any(not years.isdigit() or not weeks.isdigit() or not 0 <= int(weeks) <= 51
                        for years, weeks in ages):

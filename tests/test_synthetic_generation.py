@@ -241,6 +241,32 @@ def test_prose_seed_can_mention_prior_diagnosis_after_current_diagnosis():
     assert generation.seed_diagnosis_ages(seeds[0]) == {(60, 0), (40, 21)}
 
 
+@pytest.mark.parametrize('duration', [
+    'The disease-free interval was 1 year and 37 weeks.',
+    'The prior cancer has been in remission for 4 years and 48 weeks.',
+    'There has been no recurrence for 5 years.',
+])
+def test_seed_durations_do_not_require_extra_diagnosis_events(duration):
+    seed = generation.parse_seeds(SEEDS)[0] + ' ' + duration
+    assert generation.seed_diagnosis_ages(seed) == {(60, 0)}
+    assert len(generation.parse_patient_history(expand_seed(generation.parse_seeds(SEEDS)[0]), seed)) == 4
+
+
+@pytest.mark.parametrize('age_cue', ['at', 'at age', 'at age of', 'at the age of', 'aged', 'age'])
+def test_pediatric_age_is_required_even_when_seed_also_contains_a_duration(age_cue):
+    seed = (f'Patient 0 was diagnosed with leukemia {age_cue} 1 year and 37 weeks. '
+            'Remission lasted 4 years and 49 weeks.')
+    assert generation.seed_diagnosis_ages(seed) == {(1, 37)}
+    with pytest.raises(OutputValidationError, match='assigned ages: 1 years and 37 weeks'):
+        generation.parse_patient_history(expand_seed(generation.parse_seeds(SEEDS)[0]), seed)
+
+
+def test_duration_cannot_substitute_for_a_missing_or_malformed_diagnosis_age():
+    for diagnosis in ['Patient 0 has lung cancer.', 'Patient 0 was diagnosed at 60 years.']:
+        with pytest.raises(OutputValidationError, match='Give each diagnosis age'):
+            generation.seed_diagnosis_ages(diagnosis + ' Remission lasted 4 years and 49 weeks.')
+
+
 @pytest.mark.parametrize('next_age,valid', [
     ('60 years and 10 weeks', False),
     ('60 years and 21 weeks', True),
