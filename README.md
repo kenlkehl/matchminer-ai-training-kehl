@@ -38,6 +38,26 @@ including formatting repairs. This policy is recorded in the extraction
 manifest and requires fresh checkpoints when changed. Without the flag, repeated
 formatting failures can still use the existing non-thinking repair fallback.
 
+For an explicit, separate review of completed spaces, use `review_trial_spaces.py`.
+Its input is a JSON list of objects with `case_id`, `nct_id`, `trial_text`, and
+`space_text` (one completed current-format space per object). For example:
+
+```bash
+python review_trial_spaces.py --input review_cases.json --output-dir review_results \
+  --endpoint http://SERVER:8000/v1 --model SERVED_MODEL --tokenizer TOKENIZER_PATH
+```
+
+The prompt includes the full authored primer and review directives first, the
+original trial text second, and the current space last, so spaces from the same
+trial share a cacheable prefix. The refinement prompt and validator are mirrored
+from inference. Results can be unchanged, refined (including a necessary split),
+or flagged for review. All attempts retain thinking, and malformed responses get
+the exact validation error on retry. The output directory retains inputs, exact
+rendered prompts, reasoning, final responses, and separate proposed revisions;
+compatible reruns resume completed reviews. This experiment is not automatically
+enabled in `0b` or `run_pipeline.py` and does not replace production outputs or
+repair boilerplate.
+
 When every trial-population branch is pruned, a separate study-scope review
 checks whether the study truly lacks a therapeutic cancer population. A review
 that does not confirm rejection now triggers up to two automatic recovery rounds
