@@ -844,6 +844,11 @@ seed calls to finish. Before generation, the runner raises its soft open-file
 limit as needed to accommodate `--pending-requests`, idle connections, and
 checkpoint writes. If the existing hard limit is too low, it exits before
 loading the tokenizer or creating output and reports the required limit.
+Fleet supervisors can use `adaptive_controller.py` to derive concurrency
+ceilings from vLLM scheduler metrics and write the pool's live concurrency
+control file. Throughput comparisons require uninterrupted, sufficiently loaded
+windows; idle workers, missing metrics, and server restarts discard those
+comparisons. Cache pressure and request preemptions still trigger backoff.
 Each expansion receives only its assigned prose seed and the clinical/formatting
 instructions, then generates all tagged events, including demographics and
 diagnoses. Trial criteria, general exclusions, and matching/near-miss objectives
