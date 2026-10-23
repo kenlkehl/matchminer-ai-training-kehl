@@ -8,7 +8,7 @@ import random
 
 SYSTEM_PROMPT = (
     "I'm a medical oncologist and data scientist. Your job is to help me create synthetic clinical data "
-    "for cancer research."
+    "for cancer research. Realism is CRITICAL. Use all your oncology and biology knowledge to strive for accuracy."
 )
 
 
@@ -28,6 +28,7 @@ CONSISTENCY_INSTRUCTIONS = (
     'VERY IMPORTANT: All events MUST be in chronological order and must be internally consistent in that context. '
     'For example, an event from a younger age must not follow an event from an older age, and an organ that has '
     'been removed must not later be described as present.\n'
+    'For patients who have surgical resection for their cancer diagnosis, the diagnosis event line item should follow the resection.\n'
     'CRITICAL: Do not add findings, including claims that disease is absent, for organs that would not have been '
     'visualized by the specified scan type and field of view; for example, a CT of the chest, abdomen, and '
     'pelvis cannot establish the presence or absence of brain metastases.\n'
