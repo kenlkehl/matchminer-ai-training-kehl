@@ -840,7 +840,11 @@ of absence, for organs outside the specified scan's field of view.
 
 Seed and patient calls share one continuous adaptive endpoint pool. Patient
 expansion starts as soon as its own seeds are saved, without waiting for all
-seed calls to finish. Each expansion receives only its assigned prose seed and the clinical/formatting
+seed calls to finish. Before generation, the runner raises its soft open-file
+limit as needed to accommodate `--pending-requests`, idle connections, and
+checkpoint writes. If the existing hard limit is too low, it exits before
+loading the tokenizer or creating output and reports the required limit.
+Each expansion receives only its assigned prose seed and the clinical/formatting
 instructions, then generates all tagged events, including demographics and
 diagnoses. Trial criteria, general exclusions, and matching/near-miss objectives
 are confined to the seed call. Event expansion cannot repair a seed toward the

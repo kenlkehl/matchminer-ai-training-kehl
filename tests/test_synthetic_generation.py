@@ -51,6 +51,30 @@ def args_for(tmp_path):
         max_attempts=2, request_timeout=7200, reasoning_parser='gemma4')
 
 
+@pytest.mark.parametrize('limits,expected_change', [
+    ((4096, 1048576), (34816, 1048576)),
+    ((131072, 1048576), None),
+    ((generation.resource.RLIM_INFINITY, generation.resource.RLIM_INFINITY), None),
+    ((4096, generation.resource.RLIM_INFINITY), (34816, generation.resource.RLIM_INFINITY)),
+])
+def test_fleet_generation_reserves_socket_and_checkpoint_capacity(monkeypatch, limits, expected_change):
+    changes = []
+    monkeypatch.setattr(generation.resource, 'getrlimit', lambda kind: limits)
+    monkeypatch.setattr(generation.resource, 'setrlimit', lambda kind, value: changes.append(value))
+    generation.ensure_file_descriptor_capacity(16384)
+    assert changes == ([] if expected_change is None else [expected_change])
+
+
+def test_insufficient_hard_file_limit_fails_before_loading_or_creating_output(tmp_path, monkeypatch):
+    output = tmp_path / 'generation'
+    monkeypatch.setattr(generation, 'parse_args', lambda: SimpleNamespace(
+        pending_requests=16384, output_dir=str(output)))
+    monkeypatch.setattr(generation.resource, 'getrlimit', lambda kind: (4096, 8192))
+    with pytest.raises(RuntimeError, match='Raise the hard limit or reduce --pending-requests'):
+        generation.main()
+    assert not output.exists()
+
+
 @pytest.mark.parametrize('model,backend', [
     ('reflection/Beam-1.0-501B-A23B-NVFP4', 'fast'),
     ('/tmp/tokenizers/Beam-1.0-501B-A23B-NVFP4', 'fast'),

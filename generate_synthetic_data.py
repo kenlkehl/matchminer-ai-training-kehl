@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 import random
 import re
+import resource
 import uuid
 
 import pandas as pd
@@ -87,6 +88,23 @@ def checkpoint_paths(directory):
     # Keep each directory small on NFS while retaining flat-checkpoint readability.
     return sorted([*directory.glob('shard_*.parquet'), *directory.glob('*/shard_*.parquet')],
                   key=lambda path: path.name)
+
+
+def ensure_file_descriptor_capacity(pending_requests):
+    """Reserve sockets plus checkpoint/idle-connection headroom before generation."""
+    if pending_requests < 1:
+        raise ValueError('--pending-requests must be positive')
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    required = 2 * pending_requests + 2048
+    if soft == resource.RLIM_INFINITY or soft >= required:
+        return soft
+    if hard != resource.RLIM_INFINITY and hard < required:
+        raise RuntimeError(
+            f'--pending-requests={pending_requests} needs an open-file limit of at least '
+            f'{required}, but the hard limit is {hard}. Raise the hard limit or reduce '
+            '--pending-requests before starting generation.')
+    resource.setrlimit(resource.RLIMIT_NOFILE, (required, hard))
+    return required
 
 
 def parse_histories(answer):
@@ -701,6 +719,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    ensure_file_descriptor_capacity(args.pending_requests)
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     with (out / 'generation.lock').open('a') as lock:
