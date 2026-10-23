@@ -8,7 +8,8 @@ import review_trial_spaces
 from trial_space_refinement import format_space
 
 
-def test_review_transport_retries_with_feedback_and_resumes_saved_response(tmp_path, monkeypatch):
+@pytest.mark.parametrize("task", ["refinement", "residual-exclusions", "residual-criteria"])
+def test_review_transport_retries_with_feedback_and_resumes_saved_response(tmp_path, monkeypatch, task):
     import openai
     import remote_vllm_pool
     import vllm_reasoning_utils as reasoning
@@ -19,9 +20,9 @@ def test_review_transport_retries_with_feedback_and_resumes_saved_response(tmp_p
     input_file = tmp_path / "input.json"
     input_file.write_text(json.dumps([dict(case_id="synthetic-1", nct_id="SYNTHETIC",
                                          trial_text="Synthetic adult lung study.", space_text=format_space(space))]))
-    args = SimpleNamespace(input=input_file, output_dir=tmp_path / "results", endpoint="http://synthetic/v1",
+    args = SimpleNamespace(task=task, input=input_file, output_dir=tmp_path / "results", endpoint="http://synthetic/v1",
                            model="synthetic", tokenizer="synthetic", concurrency=1, max_attempts=4,
-                           max_tokens=1000, max_model_len=10000, timeout=10, api_key_env="SYNTHETIC_KEY")
+                           max_tokens=1000, max_model_len=10000, timeout=10, api_key_env="SYNTHETIC_KEY", max_refinements=3)
     calls = []
 
     class Tokenizer:
@@ -49,8 +50,16 @@ def test_review_transport_retries_with_feedback_and_resumes_saved_response(tmp_p
         async def work(client, payload):
             calls.append(payload)
             assert payload["enable_thinking"] is True
-            spaces = [] if len(calls) == 1 else [space]
-            final = json.dumps(dict(status="unchanged", spaces=spaces, explanation="Faithful to source."))
+            if task == "refinement":
+                spaces = [] if len(calls) == 1 else [space]
+                final = json.dumps(dict(status="unchanged", spaces=spaces, explanation="Faithful to source."))
+            elif task == "residual-exclusions":
+                final = json.dumps({"exclusions": [42] if len(calls) == 1 else ["ECOG performance status greater than 1."]})
+                assert "boilerplate" not in payload["prompt"].lower()
+                assert "FULL AUTHORED PRIMER" not in payload["prompt"]
+            else:
+                final = json.dumps({"criteria": [42] if len(calls) == 1 else []})
+                assert "AUTHORED CORE SPACE DEFINITIONS" in payload["prompt"]
             return "Saved reasoning", final, {"finish_reason": "stop", "raw_text": final}
         return work
 
@@ -61,14 +70,20 @@ def test_review_transport_retries_with_feedback_and_resumes_saved_response(tmp_p
     monkeypatch.setattr(remote_vllm_pool, "make_completion_work_fn", make_work)
     asyncio.run(review_trial_spaces.run(args))
     assert len(calls) == 2
-    assert "cannot silently remove a space" in calls[1]["prompt"]
+    expected_error = {"refinement": "cannot silently remove a space",
+                      "residual-exclusions": "nonempty single-line string",
+                      "residual-criteria": "Each criterion must contain"}[task]
+    assert expected_error in calls[1]["prompt"]
     case_dir = args.output_dir / "case_0000"
-    assert json.loads((case_dir / "attempt_02.json").read_text())["reasoning"] == "Saved reasoning"
+    call_dir = case_dir / "check_00" if task == "residual-criteria" else case_dir
+    assert json.loads((call_dir / "attempt_02.json").read_text())["reasoning"] == "Saved reasoning"
     # Restore from a validated raw response if interrupted before final result save.
     (case_dir / "result.json").unlink()
+    if task == "residual-criteria":
+        (call_dir / "result.json").unlink()
     asyncio.run(review_trial_spaces.run(args))
     assert len(calls) == 2
-    assert json.loads((case_dir / "result.json").read_text())["attempts"] == 2
+    assert json.loads((call_dir / "result.json").read_text())["attempts"] == 2
     asyncio.run(review_trial_spaces.run(args))
     assert len(calls) == 2
     args.max_tokens = 999

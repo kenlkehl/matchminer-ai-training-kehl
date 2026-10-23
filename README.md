@@ -58,6 +58,29 @@ compatible reruns resume completed reviews. This experiment is not automatically
 enabled in `0b` or `run_pipeline.py` and does not replace production outputs or
 repair boilerplate.
 
+Select `--task residual-exclusions` on the same command to pilot space-specific
+residual exclusions. That internal name is not sent to the model: its prompt
+contains only a short request for a JSON exclusion list, the original trial text,
+and the exact completed space. No primer, field-classification instructions, or
+existing exclusion output is supplied. This task includes additional inclusion
+requirements phrased as exclusions and omits criteria irrelevant to the supplied
+population (such as pregnancy requirements for a male-restricted space). It has
+its own prompt/version identity and requires a separate output directory.
+
+Select `--task residual-criteria --max-refinements 3` for the bounded, combined
+experiment. Each check receives the original trial, one current space, and the
+authored core-field definitions with the boilerplate task removed. It returns
+remaining inclusions and exclusions in their original polarity, with source
+quotes and an indicator of whether each belongs in a core field. A separate call
+adds the missing core requirements, then checks the updated space again. The
+default permits at most three updates and four checks, with at most four attempts
+per call. An unchanged update or a repeated version stops the loop early.
+Every stop returns the latest valid space and its remaining criteria, even when
+some are still classified as core; `stop_reason` distinguishes convergence from
+the cap or a cycle. There is no human-review queue. All stages save prompts,
+reasoning, outputs, and successive space versions, and resume from checkpoints.
+This remains a separate pilot: it does not modify or resume production extraction.
+
 When every trial-population branch is pruned, a separate study-scope review
 checks whether the study truly lacks a therapeutic cancer population. A review
 that does not confirm rejection now triggers up to two automatic recovery rounds
