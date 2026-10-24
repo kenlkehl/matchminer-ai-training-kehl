@@ -291,6 +291,33 @@ def test_duration_cannot_substitute_for_a_missing_or_malformed_diagnosis_age():
             generation.seed_diagnosis_ages(diagnosis + ' Remission lasted 4 years and 49 weeks.')
 
 
+def test_dated_treatment_completion_is_not_an_extra_diagnosis():
+    seed = ('A synthetic patient was diagnosed with pancreatic cancer at 58 years and 4 weeks; '
+            'received adjuvant chemotherapy completed at 58 years and 40 weeks, '
+            'subsequently diagnosed with liver metastasis at 59 years and 12 weeks.')
+    assert generation.seed_diagnosis_ages(seed) == {(58, 4), (59, 12)}
+    answer = ('<demographics> Synthetic patient, male, aged 58 years and 4 weeks.\n'
+              '<diagnosis> At age 58 years and 4 weeks, pancreatic cancer.\n'
+              '<systemic> At age 58 years and 40 weeks, completed adjuvant chemotherapy.\n'
+              '<diagnosis> At age 59 years and 12 weeks, metastatic recurrence.\n'
+              '<clinical_note> At age 59 years and 13 weeks, treatment discussion.')
+    assert len(generation.parse_patient_history(answer, seed)) == 5
+    with pytest.raises(OutputValidationError, match='treatment/procedure events'):
+        generation.parse_patient_history(answer.replace('58 years and 40 weeks', '58 years and 41 weeks'), seed)
+    with pytest.raises(OutputValidationError, match='seed diagnoses'):
+        generation.parse_patient_history(answer.replace('59 years and 12 weeks', '59 years and 11 weeks'), seed)
+
+
+def test_procedure_age_does_not_invent_a_diagnosis_timestamp():
+    seed = 'Synthetic patient underwent prostatectomy at 75 years and 4 weeks; pathology confirmed prostate cancer.'
+    assert generation.seed_age_anchors(seed) == (set(), {(75, 4)})
+    answer = ('<demographics> Synthetic patient, male, aged 75 years and 4 weeks.\n'
+              '<surgery> At age 75 years and 4 weeks, prostatectomy.\n'
+              '<pathology_report> At age 75 years and 5 weeks, prostate cancer.\n'
+              '<diagnosis> At age 75 years and 5 weeks, prostate cancer.')
+    assert len(generation.parse_patient_history(answer, seed)) == 4
+
+
 @pytest.mark.parametrize('next_age,valid', [
     ('60 years and 10 weeks', False),
     ('60 years and 21 weeks', True),
@@ -401,10 +428,12 @@ def test_partial_resume_keeps_seeds_and_completed_individual_patients(tmp_path, 
         return 'reasoning', answer, dict(finish_reason='stop', raw_text=answer)
 
     fake_session(monkeypatch, complete)
-    with pytest.raises(ExceptionGroup, match='TaskGroup'):
+    with pytest.raises(RuntimeError, match='1 generation items remain unresolved'):
         asyncio.run(instance.generate_patient_events(spaces))
     saved = pd.concat([pd.read_parquet(p) for p in generation.checkpoint_paths(tmp_path / 'patient_events')])
     assert set(saved.key) >= {'positive:0:0', 'positive:0:1', 'positive:0:2'}
+    assert len(saved) == 9
+    assert (tmp_path / 'generation_failures/positive_0_3.json').exists()
     before = calls.copy()
     fail[0] = False
     asyncio.run(generation.Generator(args, Tokenizer()).generate_patient_events(spaces))
@@ -413,6 +442,7 @@ def test_partial_resume_keeps_seeds_and_completed_individual_patients(tmp_path, 
     assert not set(saved.key).intersection(key for stage, key in resumed)
     saved = pd.concat([pd.read_parquet(p) for p in generation.checkpoint_paths(tmp_path / 'patient_events')])
     assert len(saved) == saved.key.nunique() == 10
+    assert not list((tmp_path / 'generation_failures').glob('*.json'))
 
 
 def test_patient_expansion_does_not_wait_for_all_seed_groups(tmp_path, monkeypatch):

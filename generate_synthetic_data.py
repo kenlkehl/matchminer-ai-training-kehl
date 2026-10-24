@@ -174,21 +174,39 @@ def check_event_order(events):
             raise OutputValidationError('Remove references to trial screening, study entry, or enrollment')
 
 
-def seed_diagnosis_ages(seed_text):
-    """Read explicit patient ages, excluding remission and other elapsed durations."""
+def seed_age_anchors(seed_text):
+    """Separate explicit diagnosis ages from clearly dated treatment/procedure events."""
     # Seeds also mention durations such as "in remission for 4 years and 48
     # weeks" or "disease-free interval 1 year and 37 weeks". Only an age cue
     # makes a time expression a diagnosis anchor; small pediatric ages remain
     # valid, and malformed ages must still fail validation.
     age_cue = r'\b(?:at\s+(?:(?:the\s+)?age\s+(?:of\s+)?)?|aged\s+|ages?\s+(?:of\s+)?)'
-    ages = re.findall(age_cue + r'(-?\d+(?:\.\d+)?) years?(?: and (-?\d+(?:\.\d+)?) weeks?)?',
-                      seed_text, re.I)
+    matches = list(re.finditer(age_cue + r'(-?\d+(?:\.\d+)?) years?(?: and (-?\d+(?:\.\d+)?) weeks?)?',
+                              seed_text, re.I))
+    ages = [match.groups(default='') for match in matches]
     if not ages or any(not years.isdigit() or not weeks.isdigit() or not 0 <= int(weeks) <= 51
                        for years, weeks in ages):
         raise OutputValidationError(
             'Give each diagnosis age in nonnegative whole years and weeks from 0 through 51 '
             '(for example, 50 years and 21 weeks)')
-    return {(int(years), int(weeks)) for years, weeks in ages}
+    diagnoses, other = set(), set()
+    previous_end = 0
+    for match, (years, weeks) in zip(matches, ages):
+        context = seed_text[previous_end:match.start()]
+        cues = list(re.finditer(
+            r'\b(diagnos\w*|developed|presented|completed|finished|began|started|received|underwent|stopped|discontinued)\b',
+            context, re.I))
+        # Ambiguous prose retains the stricter diagnosis check. Only an explicit
+        # non-diagnostic action changes the required event category.
+        treatment = cues and cues[-1].group().lower() in {
+            'completed', 'finished', 'began', 'started', 'received', 'underwent', 'stopped', 'discontinued'}
+        (other if treatment else diagnoses).add((int(years), int(weeks)))
+        previous_end = match.end()
+    return diagnoses, other
+
+
+def seed_diagnosis_ages(seed_text):
+    return seed_age_anchors(seed_text)[0]
 
 
 def parse_seeds(answer):
@@ -225,10 +243,17 @@ def parse_patient_history(answer, seed_text):
     check_event_order(events)
     diagnosis_ages = {tuple(map(int, re.match(r'At age (\d+) years? and (\d+) weeks?,', text, re.I).groups()))
                      for kind, text in events if kind == 'diagnosis'}
-    missing = seed_diagnosis_ages(seed_text) - diagnosis_ages
+    required_diagnoses, required_events = seed_age_anchors(seed_text)
+    missing = required_diagnoses - diagnosis_ages
     if missing:
         ages = ', '.join(f'{years} years and {weeks} weeks' for years, weeks in sorted(missing))
         raise OutputValidationError(f'Include the seed diagnoses at their assigned ages: {ages}')
+    event_ages = {tuple(map(int, re.match(r'At age (\d+) years? and (\d+) weeks?,', text, re.I).groups()))
+                 for kind, text in events if kind != 'demographics'}
+    missing = required_events - event_ages
+    if missing:
+        ages = ', '.join(f'{years} years and {weeks} weeks' for years, weeks in sorted(missing))
+        raise OutputValidationError(f'Include the seed treatment/procedure events at their assigned ages: {ages}')
     # Free prose has no reliable exact-text identity or clinical-fact comparison.
     # Those facts are preserved by the prompt and assessed in output review.
     return events
@@ -486,6 +511,9 @@ class Generator:
             raise ValueError('Patient checkpoint contains keys outside the frozen input cohort')
         next_shard = max((int(path.stem.split('_')[-1]) for path in files), default=-1) + 1
         completed, seeds_completed = len(done), 0
+        failed = {}
+        failure_directory = self.out / 'generation_failures'
+        failure_directory.mkdir(exist_ok=True)
         buffer, lock = [], asyncio.Lock()
         pending = asyncio.Semaphore(self.args.pending_requests)
         iterator = iter((dict(row, patient_class=kind, key=f'{kind}:{int(row["space_index"])}')
@@ -496,7 +524,18 @@ class Generator:
                               seeds_completed=seeds_completed, expected_seed_batches=2 * len(spaces),
                               stage_completed=completed - len(buffer), stage_expected=len(expected_keys),
                               completed_patient_histories=completed,
-                              buffered_patient_histories=len(buffer))
+                              buffered_patient_histories=len(buffer), unresolved_items=len(failed))
+
+        def failure_path(key):
+            return failure_directory / (key.replace(':', '_') + '.json')
+
+        async def record_failure(item, exc):
+            failed[item['key']] = str(exc)
+            await asyncio.to_thread(save_json, failure_path(item['key']),
+                dict(key=item['key'], error=str(exc), at=now(),
+                     seed_text=item.get('seed_text'), nct_id=item['nct_id']))
+            print(f'[generation] isolated failed item {item["key"]}: {exc}', flush=True)
+            progress()
 
         async def commit_buffer():
             nonlocal next_shard
@@ -532,7 +571,12 @@ class Generator:
                     return
                 child = dict(item, key=key, seed_key=item['key'], patient_number=patient,
                              seed_text=seed, seed_sha256=seed_hash)
-                result = await request(child, 'patient_events')
+                try:
+                    result = await request(child, 'patient_events')
+                except RuntimeError as exc:
+                    await record_failure(child, exc)
+                    return
+                failure_path(key).unlink(missing_ok=True)
                 # Avoid copying the full trial text into every patient checkpoint.
                 record = {key: child[key] for key in ('key', 'seed_key', 'patient_number', 'seed_text',
                           'seed_sha256', 'space_index', 'patient_class', 'nct_id')}
@@ -556,11 +600,16 @@ class Generator:
                     else:
                         if any(f'{item["key"]}:{i}' in done for i in range(PATIENTS_PER_CLASS)):
                             raise ValueError(f'Missing parent seed checkpoint: {path}')
-                        result = await request(item, 'seeds')
+                        try:
+                            result = await request(item, 'seeds')
+                        except RuntimeError as exc:
+                            await record_failure(item, exc)
+                            continue
                         saved = {**{k: item[k] for k in ('key', 'space_index', 'patient_class', 'nct_id')}, **result}
                         saved.update({k: item[k] for k in ('cohort_trial_id', 'trial_representation') if k in item})
                         path.parent.mkdir(parents=True, exist_ok=True)
                         await asyncio.to_thread(save_json, path, saved)
+                    failure_path(item['key']).unlink(missing_ok=True)
                     seeds = parse_seeds(saved['answer'])
                     seeds_completed += 1
                     if seeds_completed % 32 == 0:
@@ -580,6 +629,8 @@ class Generator:
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 await flush()
+        if failed:
+            raise RuntimeError(f'{len(failed)} generation items remain unresolved; other items were completed and saved. See generation_failures/')
         if completed != len(expected_keys) or seeds_completed != 2 * len(spaces):
             raise ValueError('Seed/patient checkpoint coverage mismatch')
 
