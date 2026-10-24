@@ -40,7 +40,7 @@ EVENT_TYPES = {'demographics', 'diagnosis', 'systemic', 'surgery', 'radiation',
                'adverse_event', 'clinical_note', 'imaging_report', 'pathology_report', 'ngs_report'}
 REPORT_TYPES = {'clinical_note', 'imaging_report', 'pathology_report', 'ngs_report'}
 PATIENTS_PER_CLASS = 5
-VALIDATION_REVISION = 'dated-seed-events-v2-chronology-warnings'
+VALIDATION_REVISION = 'dated-seed-events-v3-ambiguous-recurrence-intervals'
 
 
 def load_stage(filename):
@@ -178,7 +178,7 @@ def check_event_order(events):
     return warnings
 
 
-def seed_age_anchors(seed_text):
+def seed_age_anchors(seed_text, *, warnings=None):
     """Require diagnosis tags only for explicit diagnostic clauses.
 
     Other dated seed facts still need an event at that age. Free prose cannot
@@ -204,7 +204,7 @@ def seed_age_anchors(seed_text):
                    r'\b(?:completed|finished|began|started|received|underwent|stopped|discontinued|'
                    r'administered|initiated|treated|resected|implanted|performed|transplant(?:ation)?|'
                    r'\w*ectomy|current(?:ly)?|status|progress\w*|remission|response|menopause|'
-                   r'scan|imaging|CT|MRI)\b')
+                   r'recurr\w*|relaps\w*|scan|imaging|CT|MRI)\b')
     for index, (match, (years, weeks)) in enumerate(zip(matches, ages)):
         # Do not carry a diagnosis cue across a sentence/semicolon from a prior
         # fact. Decimal numbers and codes do not end a sentence.
@@ -217,7 +217,20 @@ def seed_age_anchors(seed_text):
             after = re.split(r'[;.!?](?=\s|$)', seed_text[match.end():end])[0]
             cue = re.search(cue_pattern, after, re.I)
         explicit_diagnosis = cue is not None and cue.group('diagnosis') is not None
-        (diagnoses if explicit_diagnosis else other).add((int(years), int(weeks)))
+        age = (int(years), int(weeks))
+        explicit_age = re.search(r'\b(?:age|ages|aged)\b', match[0], re.I)
+        # "Diagnosed at 61 ... recurred at 2 years" can describe an elapsed
+        # interval. Do not force an invented age-two event into the history.
+        # Explicit age statements and pediatric ages remain exact anchors.
+        ambiguous_interval = (not explicit_age and not explicit_diagnosis and diagnoses
+            and age < max(diagnoses) and cue is not None
+            and re.fullmatch(r'(?:recurr\w*|relaps\w*|progress\w*)', cue[0], re.I))
+        if ambiguous_interval:
+            if warnings is not None:
+                warnings.append(f'Ambiguous recurrence interval in seed: {years} years and {weeks} weeks; '
+                                'not enforced as an absolute patient age')
+        else:
+            (diagnoses if explicit_diagnosis else other).add(age)
         previous_end = match.end()
     return diagnoses, other
 
@@ -262,7 +275,7 @@ def parse_patient_history(answer, seed_text, *, warnings=None):
         warnings.extend(order_warnings)
     diagnosis_ages = {tuple(map(int, re.match(r'At age (\d+) years? and (\d+) weeks?,', text, re.I).groups()))
                      for kind, text in events if kind == 'diagnosis'}
-    required_diagnoses, required_events = seed_age_anchors(seed_text)
+    required_diagnoses, required_events = seed_age_anchors(seed_text, warnings=warnings)
     missing = required_diagnoses - diagnosis_ages
     if missing:
         ages = ', '.join(f'{years} years and {weeks} weeks' for years, weeks in sorted(missing))

@@ -68,3 +68,23 @@ def test_registration_rejects_prompt_input_and_coordinator_changes(tmp_path, mon
     with pytest.raises(ValueError, match='cannot change'):
         upgrade.register(run)
     assert not (run / 'event_validation_upgrade.json').exists()
+
+
+def test_standalone_followup_preserves_prior_approval_and_coordinator_identity(tmp_path, monkeypatch):
+    repo, run, original = fixture_run(tmp_path, monkeypatch)
+    prior = upgrade.register(run)
+    request = run / 'pipeline/requests/generate-synthetic.json'
+    before = request.read_bytes()
+    (repo / 'run_pipeline.py').write_text('new unrelated training orchestration')
+    (repo / 'generate_synthetic_data.py').write_text('second validator correction')
+    receipt = upgrade.register(run, standalone=True)
+    assert request.read_bytes() == before
+    assert json.loads((run / 'manifest.json').read_text()) == original
+    assert receipt == upgrade.register(run, standalone=True)
+    assert receipt['execution_mode'] == 'recorded-generator-only'
+    assert receipt['previous_receipt_sha256'] == upgrade.digest(prior)
+    archived = run / 'event_validation_upgrade_backup/receipts' / (upgrade.digest(prior) + '.json')
+    assert json.loads(archived.read_text()) == prior
+    (repo / 'prompt.py').write_text('unauthorized prompt change')
+    with pytest.raises(ValueError, match='cannot change'):
+        upgrade.register(run, standalone=True)

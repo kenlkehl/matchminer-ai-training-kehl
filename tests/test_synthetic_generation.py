@@ -318,6 +318,23 @@ def test_procedure_age_does_not_invent_a_diagnosis_timestamp():
     assert len(generation.parse_patient_history(answer, seed)) == 4
 
 
+def test_ambiguous_recurrence_interval_is_warned_without_inventing_childhood_event():
+    seed = ('Synthetic patient diagnosed with lung cancer at 61 years and 22 weeks. '
+            'After treatment the disease recurred at 2 years and 10 weeks.')
+    answer = ('<demographics> Synthetic patient, aged 61 years and 22 weeks.\n'
+              '<diagnosis> At age 61 years and 22 weeks, lung cancer.\n'
+              '<clinical_note> At age 63 years and 32 weeks, recurrent disease.')
+    warnings = generation.validate_completion(answer, {'finish_reason': 'stop'}, 'patient_events', seed)
+    assert len(warnings) == 1 and 'Ambiguous recurrence interval' in warnings[0]
+    assert generation.seed_age_anchors(seed) == ({(61, 22)}, set())
+    # Explicit ages, pediatric ages, and backwards non-recurrence facts retain
+    # their exact-date requirements; no general small-age cutoff is introduced.
+    for explicit in (seed.replace('recurred at 2', 'recurred at age 2'),
+                     seed.replace('61 years and 22 weeks', '0 years and 22 weeks'),
+                     seed.replace('disease recurred', 'patient underwent surgery')):
+        assert (2, 10) in generation.seed_age_anchors(explicit)[1]
+
+
 @pytest.mark.parametrize('dated_fact,event_kind', [
     ('Current status at 62 years and 4 weeks shows progressing cancer.', 'clinical_note'),
     ('Current age 62 years and 4 weeks.', 'clinical_note'),

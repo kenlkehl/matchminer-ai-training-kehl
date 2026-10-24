@@ -21,7 +21,7 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def register(run_dir, pipeline_dir=None):
+def register(run_dir, pipeline_dir=None, *, standalone=False):
     from run_pipeline import file_record
 
     run_dir = Path(run_dir).resolve()
@@ -48,6 +48,40 @@ def register(run_dir, pipeline_dir=None):
         request_path = pipeline_dir / 'requests/generate-synthetic.json'
         receipt_path = run_dir / 'event_validation_upgrade.json'
         backup = run_dir / 'event_validation_upgrade_backup'
+        if standalone:
+            # Resume only the recorded generator command when the orchestration
+            # code has independently moved on. Never approve those coordinator
+            # changes or rewrite its request identity as a validator upgrade.
+            request = json.loads(request_path.read_text())
+            identity = {key: request[key] for key in ('command', 'inputs', 'sources')}
+            if digest(identity) != request['fingerprint']:
+                raise ValueError('Invalid recorded generator request fingerprint')
+            if any(file_record(row['path'], {}) != row for row in identity['inputs']):
+                raise ValueError('Validation upgrade cannot change generation inputs')
+            saved = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
+            if saved:
+                prior = {**original, 'source_sha256': {**original['source_sha256'],
+                    'generate_synthetic_data.py': saved['approved_generator_sha256']}}
+                if (saved['original_manifest_sha256'] != digest(original)
+                        or saved['approved_manifest_sha256'] != digest(prior)):
+                    raise ValueError('Invalid prior validation approval')
+                if (saved.get('execution_mode') == 'recorded-generator-only'
+                        and saved['approved_manifest_sha256'] == digest(approved)
+                        and saved['kind'] == VALIDATION_REVISION):
+                    return saved
+                (backup / 'receipts').mkdir(parents=True, exist_ok=True)
+                save_json(backup / 'receipts' / (digest(saved) + '.json'), saved)
+            backup.mkdir(parents=True, exist_ok=True)
+            save_json(backup / 'manifest.json', original)
+            receipt = dict(kind=VALIDATION_REVISION, registered_at=now(),
+                execution_mode='recorded-generator-only', command=identity['command'],
+                original_manifest_sha256=digest(original), approved_manifest_sha256=digest(approved),
+                original_generator_sha256=original['source_sha256']['generate_synthetic_data.py'],
+                approved_generator_sha256=approved['source_sha256']['generate_synthetic_data.py'],
+                preserved_patient_identity=digest(original), changed_sources=['generate_synthetic_data.py'],
+                previous_receipt_sha256=digest(saved) if saved else None)
+            save_json(receipt_path, receipt)
+            return receipt
         prior_request = backup / 'pipeline_request.json'
         request = json.loads((prior_request if prior_request.exists() else request_path).read_text())
         identity = {key: request[key] for key in ('command', 'inputs', 'sources')}
@@ -103,5 +137,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-dir', required=True, type=Path)
     parser.add_argument('--pipeline-dir', type=Path)
+    parser.add_argument('--standalone', action='store_true',
+                        help='Approve only the recorded generator command; leave coordinator identities untouched')
     args = parser.parse_args()
-    print(json.dumps(register(args.run_dir, args.pipeline_dir), indent=2))
+    print(json.dumps(register(args.run_dir, args.pipeline_dir, standalone=args.standalone), indent=2))
