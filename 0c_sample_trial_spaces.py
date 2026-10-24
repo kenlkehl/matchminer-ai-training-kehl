@@ -118,6 +118,7 @@ def sample_trial_spaces(input_csv, output_csv, dfci_csv, *, n_trials=5000, seed=
     assert output.groupby('nct_id').size().to_dict() == {trial: counts[trial] for trial in sampled}
     if native:
         output = complete_cohort_criteria(output)
+        output['trial_representation'] = REPRESENTATION
         validate_cohort_rows(output)
     else:
         assert clean_trial_spaces(output).all()

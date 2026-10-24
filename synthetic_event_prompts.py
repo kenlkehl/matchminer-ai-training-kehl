@@ -13,7 +13,7 @@ SEED_FORMAT_EXAMPLE = (
 
 def seed_messages(*, system, criteria, patient_class, diagnosis, diversity,
                   consistency, second_primary=''):
-    population = ('could meet all of these criteria at the end of their histories'
+    population = ('meet all of these criteria at the end of their histories'
                   if patient_class == 'positive' else
                   'would narrowly miss at least one of these criteria at the end of their histories')
     content = (
@@ -31,8 +31,11 @@ def seed_messages(*, system, criteria, patient_class, diagnosis, diversity,
         'Include relevant cancer site, histology, stage, and biomarkers in the '
         'prose. If a prior unrelated cancer is included, describe its diagnosis '
         'and its own age at diagnosis. Keep each seed brief and limited to these '
-        'facts. Treatment, progression, and report events will be generated in a '
-        'separate call for each patient; do not generate them here.\n'
+        'facts plus the concise clinical facts needed to establish the patient\'s '
+        'state at the end of the history against these criteria, including prior '
+        'treatment/response, performance status, organ function, and comorbidities '
+        'when relevant. Do not write a full event chronology or reports here. '
+        'A separate call will expand each seed into its clinical events.\n'
         + diagnosis + diversity + consistency
     )
     if second_primary:
@@ -43,8 +46,11 @@ def seed_messages(*, system, criteria, patient_class, diagnosis, diversity,
         + ('For these positive examples, all eligibility criteria take precedence '
            'over diversity requests: omit a prior unrelated cancer when it would '
            'violate the supplied exclusions.\n' if patient_class == 'positive' else
-           'These are near-miss examples; preserve a plausible clinical history '
-           'even when choosing a characteristic that does not meet the criteria.\n')
+           'Each negative seed must contain concrete clinical facts that violate '
+           'at least one supplied inclusion or exclusion requirement while '
+           'remaining a plausible near-miss case.\n')
+        + 'Express these features as patient facts; do not mention eligibility, '
+        'screening, enrollment, or positive/negative labels in the seed.\n'
         + '\nThe following is one hypothetical prose seed, provided only to '
         'illustrate formatting. Do not copy this example into your output or '
         'reuse its patient identity. Generate five new patients. '
@@ -67,7 +73,9 @@ def patient_messages(*, system, seed, instructions, consistency):
         'the complete tagged event list. Generate the wording of every event, '
         'including demographics and diagnoses. Preserve the seed\'s name, sex, '
         'diagnoses, ages at diagnosis, cancer sites, histologies, and biomarker '
-        'facts. Include each seed diagnosis as a <diagnosis> event at its assigned '
+        'facts, including any specified prior treatment/response, performance '
+        'status, organ function, comorbidities, and final clinical state. '
+        'Include each seed diagnosis as a <diagnosis> event at its assigned '
         'age, in its correct chronological position. '
         'Begin the output with exactly one <demographics> line giving name, sex, '
         'and age at the earliest event in the generated history. Keep this line '

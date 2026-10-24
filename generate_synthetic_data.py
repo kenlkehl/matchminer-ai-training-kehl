@@ -311,7 +311,7 @@ class Generator:
                    '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
                    'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py',
                    'trial_cohort_format.py']
-        value = dict(version='synthetic-seed-only-patient-events-notes-v4', input_sha256=sha_file(self.args.input_csv),
+        value = dict(version='synthetic-cohort-seeds-patient-events-notes-v5', input_sha256=sha_file(self.args.input_csv),
                      source_sha256={name: sha_file(HERE / name) for name in sources},
                      sampling=asdict(self.sampling), tokenizer=self.args.tokenizer_model or self.args.model,
                      chat_template_kwargs=resolve_chat_template_kwargs(self.args.tokenizer_model or self.args.model),
@@ -536,6 +536,7 @@ class Generator:
                 # Avoid copying the full trial text into every patient checkpoint.
                 record = {key: child[key] for key in ('key', 'seed_key', 'patient_number', 'seed_text',
                           'seed_sha256', 'space_index', 'patient_class', 'nct_id')}
+                record.update({key: child[key] for key in ('cohort_trial_id', 'trial_representation') if key in child})
                 async with lock:
                     buffer.append({**record, **result})
                     completed += 1
@@ -548,13 +549,16 @@ class Generator:
                     path = self.seed_path(item)
                     if path.exists():
                         saved = await asyncio.to_thread(lambda: json.loads(path.read_text()))
-                        if any(saved[k] != item[k] for k in ('key', 'space_index', 'patient_class', 'nct_id')):
+                        identity_keys = ['key', 'space_index', 'patient_class', 'nct_id']
+                        identity_keys += [k for k in ('cohort_trial_id', 'trial_representation') if k in item]
+                        if any(saved.get(k) != item[k] for k in identity_keys):
                             raise ValueError(f'Seed checkpoint identity mismatch: {path}')
                     else:
                         if any(f'{item["key"]}:{i}' in done for i in range(PATIENTS_PER_CLASS)):
                             raise ValueError(f'Missing parent seed checkpoint: {path}')
                         result = await request(item, 'seeds')
                         saved = {**{k: item[k] for k in ('key', 'space_index', 'patient_class', 'nct_id')}, **result}
+                        saved.update({k: item[k] for k in ('cohort_trial_id', 'trial_representation') if k in item})
                         path.parent.mkdir(parents=True, exist_ok=True)
                         await asyncio.to_thread(save_json, path, saved)
                     seeds = parse_seeds(saved['answer'])

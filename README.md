@@ -447,7 +447,7 @@ Outputs under `data/no_phi` are:
   `cohort_trial_id`, `trial_id`/`nct_id`, zero-based `cohort_number`, `cohort_count`,
   `cohort_index`, full `cohort_eligibility_criteria`, separate specific/common
   criteria, and source metadata. Single-population criteria retain the original
-  title, brief summary, and eligibility text. Rejected trials have no cohort rows.
+  eligibility field verbatim, without the title or brief summary. Rejected trials have no cohort rows.
 
 `--work-dir` stores per-trial compressed checkpoints with raw answers, reasoning,
 validation attempts and response endpoint provenance. Resume validates input,
@@ -469,7 +469,7 @@ file. Use registry caps for this stage. Neither serving nor training is launched
 
 `trial_cohort_format.py` explicitly adapts cohort rows for existing training
 internals (`cohort_index` → `space_index`, complete criteria → `this_space`).
-It preserves native IDs and marks `trial_representation=trial-treatment-cohorts-v2`.
+It preserves native IDs and marks `trial_representation=trial-treatment-cohorts-v3`.
 Common criteria may include inclusions as well as exclusions and are **not** copied
 to `trial_boilerplate_text`; that column is empty because this API does not extract
 separate boilerplate. Synthetic seeds use the complete cohort criteria. Existing
@@ -555,7 +555,7 @@ retries truncated or empty answers. Outputs remain `trials_with_spaces.csv` and
 ### Trial selection in 0a/0b
 
 Run `0a_parse_ctgov_json.py --input <export.json> --output ../data/no_phi/ctgov_trials.csv`
-to retain the original trial text plus ClinicalTrials.gov `designModule.studyType`
+to retain the original eligibility field plus ClinicalTrials.gov `designModule.studyType`
 and `designModule.phases` as `study_type` and a JSON-array `phases` column.
 The CSV is replaced atomically only after parsing and writing finish.
 
@@ -909,7 +909,7 @@ For cohort inputs, step 0c first keeps only `cancer_treatment_trial="yes"`, then
 applies the DFCI holdout and samples distinct trial IDs. The output CSV has one
 row per cohort per selected trial. Its `cohort_eligibility_criteria` column joins
 the specific and common eligibility strings; for a single cohort it retains the
-original `trial_text`. Separate specific/common fields and source metadata also
+original `eligibility_criteria` field (without the title or summary). Separate specific/common fields and source metadata also
 remain available. The sampler rebuilds the combined field from these sources
 when present, rather than trusting a stale combined column.
 
@@ -921,6 +921,21 @@ python 0c_sample_trial_spaces.py \
   --output-csv ../data/no_phi/sample_trial_cohort_lineitems.csv
 ```
 
+For production exports made before the single-cohort correction, first run:
+
+```bash
+python repair_single_cohort_criteria.py \
+  --extraction-dir ../data/no_phi/ctgov_treatment_cohorts_since2020_gemma4_31b_20261023
+```
+
+The repair replaces only derived single-cohort text and its source marker, backs
+up the original JSONL, and writes `cohort_rows_repair.json` with before/after
+hashes. Raw model decisions, reasoning, checkpoints, and the frozen extraction
+code remain the historical audit. Regenerate the sample after repair, retaining
+the same seed and holdout settings. Older v2 sample files must be refreshed before
+synthetic generation; saved seed/chronology checkpoints from that representation
+must not be reused with v3 inputs.
+
 This mode checks the saved combined decisions, all cohort rows, and the original
 `inputs.parquet` against each other before sampling. It preserves existing source
 splits or assigns them once per trial using seed 42. The sampling receipt includes
@@ -928,7 +943,14 @@ rejected trial IDs, DFCI exclusions, the extraction run identity, and source has
 
 `generate_synthetic_data.py` creates five matching and five near-miss patients
 per sampled cohort in two stages. For each class, one call creates five diverse
-short prose seeds containing names, sex, diagnoses, and ages at each diagnosis.
+short prose seeds containing names, sex, diagnoses, ages at each diagnosis, and
+concise patient facts needed to establish the final clinical state against the
+criteria. Positive and negative seeds use **two separate LLM calls per cohort**,
+with five seeds in each response. Each positive seed must meet all supplied
+criteria; each negative seed must contain clinical facts violating at least one
+requirement. Multi-cohort inputs join specific and common criteria; single-cohort
+inputs use only the original eligibility field. The full trial title and summary
+are not supplied as eligibility. Seed checkpoints retain native cohort IDs.
 Both classes receive a hypothetical prose format example with explicit
 instructions not to reproduce the example or reuse its patient identity.
 After that seed batch

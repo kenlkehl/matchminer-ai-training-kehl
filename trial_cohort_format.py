@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPRESENTATION = 'trial-treatment-cohorts-v2'
+REPRESENTATION = 'trial-treatment-cohorts-v3'
 COHORT_REQUIRED = {'trial_id', 'cohort_trial_id', 'cohort_number', 'cohort_count',
                    'cohort_eligibility_criteria', 'cancer_treatment_trial', 'multiple_cohorts'}
 
@@ -18,7 +18,7 @@ def is_cohort_table(frame):
 
 
 def complete_cohort_criteria(frame):
-    """Rebuild complete text from specific/common fields or original trial text.
+    """Rebuild complete text from specific/common fields or original eligibility.
 
 Older cohort CSVs containing only the already-combined criteria remain readable.
 When source fields are present they are authoritative, even if combined text is
@@ -38,16 +38,21 @@ stale. Missing common text represents no shared criteria, not a missing cohort.
                 raise ValueError('Common criteria must be text')
             return (f'Cohort-specific eligibility criteria:\n{specific}\n\n'
                     f'Common eligibility criteria:\n{common}') if common else specific
-        if row.multiple_cohorts == 'no' and 'trial_text' in frame:
-            if not isinstance(row.trial_text, str) or not row.trial_text.strip():
-                raise ValueError('Missing original trial text for a single cohort')
-            return row.trial_text
-        if row.multiple_cohorts == 'no' and {'title', 'brief_summary', 'eligibility_criteria'} <= set(frame):
-            return '\n'.join('' if pd.isna(row[name]) else row[name]
-                             for name in ('title', 'brief_summary', 'eligibility_criteria'))
+        if row.multiple_cohorts == 'no':
+            if 'eligibility_criteria' in frame:
+                eligibility = row.eligibility_criteria
+            elif row.get('cohort_criteria_source') == 'eligibility_criteria':
+                eligibility = row.cohort_eligibility_criteria
+            else:
+                raise ValueError('Single cohort requires original eligibility_criteria; full trial text is not eligible input')
+            if not isinstance(eligibility, str) or not eligibility.strip():
+                raise ValueError('Missing original eligibility_criteria for a single cohort')
+            return eligibility
         return row.cohort_eligibility_criteria
     if not frame.empty:
         frame['cohort_eligibility_criteria'] = frame.apply(text, axis=1)
+        if frame.multiple_cohorts.eq('no').any():
+            frame.loc[frame.multiple_cohorts.eq('no'), 'cohort_criteria_source'] = 'eligibility_criteria'
     return frame
 
 
@@ -64,7 +69,7 @@ def load_production_cohorts(directory, *, seed=42):
 
     Decisions supply authoritative expected cohort counts, so a missing JSONL
     row cannot be mistaken for a smaller but complete trial. Source rows supply
-    original text and registry metadata. Splits are assigned before filtering.
+    original eligibility and registry metadata. Splits are assigned before filtering.
     """
     directory = Path(directory)
     status = json.loads((directory / 'status.json').read_text())
@@ -111,13 +116,19 @@ def load_production_cohorts(directory, *, seed=42):
     frame = frame.sort_values(['trial_id', 'cohort_number']).reset_index(drop=True)
     complete = complete_cohort_criteria(frame)
     if not complete.cohort_eligibility_criteria.eq(frame.cohort_eligibility_criteria).all():
-        raise ValueError('Saved full criteria disagree with specific/common criteria or original trial text')
+        raise ValueError('Saved full criteria disagree with specific/common criteria or original eligibility_criteria; repair the export first')
+    if not frame.loc[frame.multiple_cohorts.eq('no'), 'cohort_criteria_source'].eq('eligibility_criteria').all():
+        raise ValueError('Single cohort provenance must identify eligibility_criteria')
     complete['trial_representation'] = REPRESENTATION
     provenance = dict(source_trials=len(source), cancer_treatment_trials=len(counts),
         excluded_non_cancer_trials=sorted(rejected), extraction_directory=str(directory.resolve()),
         extraction_run_identity=json.loads((directory / 'manifest.json').read_text())['run_identity'],
         source_sha256={name: file_sha256(directory / name) for name in
             ('inputs.parquet', 'combined_outputs.json', 'cohorts.jsonl', 'manifest.json')})
+    repair = directory / 'cohort_rows_repair.json'
+    if repair.exists():
+        provenance['cohort_rows_repair'] = str(repair.resolve())
+        provenance['source_sha256'][repair.name] = file_sha256(repair)
     return complete, provenance
 
 
@@ -168,9 +179,9 @@ def training_rows(frame):
     if not is_cohort_table(frame):
         return frame.copy()
     validate_cohort_rows(frame)
-    frame = frame.copy()
     if 'trial_representation' in frame and not frame.trial_representation.eq(REPRESENTATION).all():
-        raise ValueError('Conflicting trial representation')
+        raise ValueError('Conflicting trial representation; repair/regenerate the cohort CSV before generation')
+    frame = complete_cohort_criteria(frame)
     aliases = {'nct_id': frame.trial_id, 'this_space': frame.cohort_eligibility_criteria}
     if 'cohort_index' in frame:
         aliases['space_index'] = frame.cohort_index

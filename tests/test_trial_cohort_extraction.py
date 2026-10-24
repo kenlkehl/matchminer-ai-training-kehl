@@ -1,5 +1,6 @@
 import gzip
 import json
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -87,7 +88,7 @@ def test_public_api_combined_decisions_complete_rows_and_resume(tmp_path, backen
     assert len(rows) == 3 and len(audit) == 3
     assert rows.nct_id.tolist() == ['NCT00000002', 'NCT00000003', 'NCT00000003']
     assert rows.cohort_count.tolist() == [1, 2, 2]
-    assert rows.cohort_eligibility_criteria.iloc[0] == 'Trial 2\nPublic trial summary.\nAdults with cancer.'
+    assert rows.cohort_eligibility_criteria.iloc[0] == 'Adults with cancer.'
     assert rows.cohort_eligibility_criteria.iloc[1:].str.contains('Age >= 18; exclude active infection.', regex=False).all()
     assert rows.last_update_post_date.eq('2026-10').all()
     assert json.loads(args.output_json.read_text()) == dict(zip([f'NCT{i:08}' for i in range(1, 4)], decisions))
@@ -123,6 +124,8 @@ def test_failure_is_not_rejection_or_sampleable_output_and_only_failed_trial_ret
 def cohort_rows(trial, count=2):
     return [dict(nct_id=trial, trial_id=trial, cohort_trial_id=f'{trial}-cohort-{i}', cohort_number=i,
         cohort_count=count, cohort_index=i, cohort_eligibility_criteria=f'Specific {i}. Common: age >= 18; no infection.',
+        eligibility_criteria=f'Specific {i}. Common: age >= 18; no infection.',
+        cohort_criteria_source='eligibility_criteria' if count == 1 else 'llm',
         cancer_treatment_trial='yes', multiple_cohorts='yes' if count > 1 else 'no', split='train') for i in range(count)]
 
 
@@ -250,8 +253,8 @@ def production_export(tmp_path):
                 cohort_specific_eligibility_criteria=decision['cohorts'][i] if multiple else None,
                 common_eligibility_criteria=decision.get('common_eligibility_criteria'),
                 cohort_eligibility_criteria=(f'Cohort-specific eligibility criteria:\n{decision["cohorts"][i]}\n\n'
-                    f'Common eligibility criteria:\n{decision["common_eligibility_criteria"]}') if multiple else src['trial_text'],
-                cohort_criteria_source='llm' if multiple else 'trial_text'))
+                    f'Common eligibility criteria:\n{decision["common_eligibility_criteria"]}') if multiple else src['eligibility_criteria'],
+                cohort_criteria_source='llm' if multiple else 'eligibility_criteria'))
     pd.DataFrame(cohorts).to_json(run / 'cohorts.jsonl', orient='records', lines=True)
     (run / 'combined_outputs.json').write_text(json.dumps(decisions))
     (run / 'status.json').write_text(json.dumps(dict(state='complete', errors=0, total=4, rejected=1, cohort_rows=4)))
@@ -268,7 +271,8 @@ def test_sample_completed_production_export(tmp_path):
     assert set(first.nct_id) == {'NCT00000002', 'NCT00000003'}
     assert len(first) == 3 and first.cancer_treatment_trial.eq('yes').all()
     single = first.loc[first.multiple_cohorts.eq('no')].iloc[0]
-    assert single.cohort_eligibility_criteria == single.trial_text
+    assert single.cohort_eligibility_criteria == single.eligibility_criteria
+    assert single.trial_text != single.eligibility_criteria
     for row in first.loc[first.multiple_cohorts.eq('yes')].itertuples():
         assert row.cohort_specific_eligibility_criteria in row.cohort_eligibility_criteria
         assert row.common_eligibility_criteria in row.cohort_eligibility_criteria
@@ -291,7 +295,7 @@ def test_production_import_rejects_missing_cohort_or_mixed_source_text(tmp_path)
         load_production_cohorts(run)
     cohorts.loc[cohorts.multiple_cohorts.eq('no'), 'cohort_eligibility_criteria'] = 'Different source'
     cohorts.to_json(run / 'cohorts.jsonl', orient='records', lines=True)
-    with pytest.raises(ValueError, match='original trial text'):
+    with pytest.raises(ValueError, match='original eligibility_criteria'):
         load_production_cohorts(run)
 
 
@@ -308,7 +312,7 @@ def test_csv_sampler_explicitly_filters_cancer_and_rebuilds_combined_text(tmp_pa
     result = sample.sample_trial_spaces(inputs, output, dfci, n_trials=2, chunksize=1)
     assert len(result) == 3 and set(result.nct_id) == {'NCT00000002', 'NCT00000003'}
     assert not result.cohort_eligibility_criteria.eq('Stale combined text').any()
-    assert result.loc[result.multiple_cohorts.eq('no'), 'cohort_eligibility_criteria'].iloc[0].startswith('Trial 2\n')
+    assert result.loc[result.multiple_cohorts.eq('no'), 'cohort_eligibility_criteria'].iloc[0] == 'Adults with cancer.'
     assert json.loads(output.with_suffix('.sampling.json').read_text())['excluded_non_cancer_trials'] == ['NCT00000001']
 
 
@@ -320,3 +324,80 @@ def test_legacy_sample_also_honors_explicit_cancer_treatment_decisions(tmp_path)
     pd.DataFrame(columns=['nct_id', 'open_date', 'close_date', 'status']).to_csv(dfci, index=False)
     result = sample.sample_trial_spaces(inputs, output, dfci, n_trials=1)
     assert result.nct_id.tolist() == ['NCT00000002']
+
+
+def test_single_cohort_requires_eligibility_not_title_summary_fallback():
+    from trial_cohort_format import REPRESENTATION
+    from matchminer_ai.trials.cohorts import COHORT_REPRESENTATION_VERSION
+    assert REPRESENTATION == COHORT_REPRESENTATION_VERSION
+    frame = pd.DataFrame(cohort_rows('NCT00000001', 1))
+    frame['trial_text'] = 'Title and summary plus criteria'
+    frame['cohort_eligibility_criteria'] = frame.trial_text
+    fixed = complete_cohort_criteria(frame)
+    assert fixed.cohort_eligibility_criteria.iloc[0] == frame.eligibility_criteria.iloc[0]
+    assert fixed.cohort_criteria_source.iloc[0] == 'eligibility_criteria'
+    frame = frame.drop(columns='eligibility_criteria')
+    frame['cohort_criteria_source'] = 'trial_text'
+    with pytest.raises(ValueError, match='requires original eligibility_criteria'):
+        complete_cohort_criteria(frame)
+
+
+def test_repair_changes_only_single_rows_and_is_idempotent(tmp_path):
+    from repair_single_cohort_criteria import repair
+    from trial_cohort_format import file_sha256, load_production_cohorts
+    run, _ = production_export(tmp_path)
+    rows = pd.read_json(run / 'cohorts.jsonl', lines=True)
+    source = pd.read_parquet(run / 'inputs.parquet').set_index('nct_id')
+    mask = rows.multiple_cohorts.eq('no')
+    rows.loc[mask, 'cohort_eligibility_criteria'] = rows.loc[mask, 'trial_id'].map(source.trial_text)
+    rows.loc[mask, 'cohort_criteria_source'] = 'trial_text'
+    rows.to_json(run / 'cohorts.jsonl', orient='records', lines=True)
+    original = (run / 'cohorts.jsonl').read_text()
+    decisions = (run / 'combined_outputs.json').read_bytes()
+    receipt = repair(run)
+    assert receipt['changed_single_cohort_rows'] == 2
+    assert Path(receipt['backup']).read_text() == original
+    before_multi = [line for line in original.splitlines() if json.loads(line)['multiple_cohorts'] == 'yes']
+    after_multi = [line for line in (run / 'cohorts.jsonl').read_text().splitlines() if json.loads(line)['multiple_cohorts'] == 'yes']
+    assert before_multi == after_multi
+    assert (run / 'combined_outputs.json').read_bytes() == decisions
+    assert repair(run) == receipt
+    frame, provenance = load_production_cohorts(run)
+    single = frame.multiple_cohorts.eq('no')
+    assert frame.loc[single, 'cohort_eligibility_criteria'].eq(frame.loc[single, 'eligibility_criteria']).all()
+    assert provenance['source_sha256']['cohorts.jsonl'] == file_sha256(run / 'cohorts.jsonl')
+    assert 'cohort_rows_repair.json' in provenance['source_sha256']
+
+
+def test_generation_calls_five_positive_and_five_negative_seeds_separately_per_cohort(tmp_path, monkeypatch):
+    import generate_synthetic_data as generation
+    from trial_cohort_format import load_production_cohorts
+    from tests.test_synthetic_generation import fake_session, SEEDS, expand_seed
+    run, _ = production_export(tmp_path)
+    frame, _ = load_production_cohorts(run)
+    frame = frame[frame.nct_id.isin(['NCT00000002', 'NCT00000003'])].reset_index(drop=True)
+    frame['cohort_index'] = frame.index
+    frame = training_rows(frame)
+    instance = Generator(args_for(tmp_path), Tokenizer())
+    calls = []
+    async def complete(client, payload):
+        calls.append(payload)
+        answer = SEEDS if payload['stage'] == 'seeds' else expand_seed(payload['seed_text'])
+        return 'reasoning', answer, dict(finish_reason='stop', raw_text=answer)
+    fake_session(monkeypatch, complete)
+    asyncio.run(instance.generate_patient_events(frame))
+    seeds = [p for p in calls if p['stage'] == 'seeds']
+    assert len(seeds) == 2 * len(frame) == 6
+    for row in frame.to_dict('records'):
+        for kind in ('positive', 'negative'):
+            payload = next(p for p in seeds if p['key'] == f'{kind}:{row["space_index"]}')
+            assert row['cohort_eligibility_criteria'] in payload['prompt']
+            assert 'exactly five patients' in payload['prompt']
+            assert 'Trial 2' not in payload['prompt'] and 'Public trial summary.' not in payload['prompt']
+            assert ('meet all of these criteria' if kind == 'positive' else 'would narrowly miss at least one') in payload['prompt']
+            saved = json.loads(instance.seed_path(dict(row, patient_class=kind)).read_text())
+            assert len(generation.parse_seeds(saved['answer'])) == 5
+            assert saved['cohort_trial_id'] == row['cohort_trial_id']
+    histories = pd.concat([pd.read_parquet(p) for p in generation.checkpoint_paths(tmp_path / 'patient_events')])
+    assert len(histories) == 30
+    assert histories.groupby(['cohort_trial_id', 'patient_class']).size().eq(5).all()

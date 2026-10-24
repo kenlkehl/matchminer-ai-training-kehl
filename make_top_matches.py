@@ -306,7 +306,9 @@ def load_retrieval_tables(args):
     if args.patients_parquet:
         patient_source = read_table(args.patients_parquet, patient_columns)
         trial_source = training_rows(read_table(args.trials_file,
-            trial_columns + sorted(COHORT_REQUIRED) + ['cohort_index', 'trial_representation']))
+            trial_columns + sorted(COHORT_REQUIRED) + ['cohort_index', 'trial_representation',
+                'eligibility_criteria', 'cohort_criteria_source',
+                'cohort_specific_eligibility_criteria', 'common_eligibility_criteria']))
     else:
         patient_source = trial_source = read_table(args.parquet, list(dict.fromkeys(patient_columns + trial_columns)))
     patients = patient_source.dropna(subset=["patient_summary"]).copy()
