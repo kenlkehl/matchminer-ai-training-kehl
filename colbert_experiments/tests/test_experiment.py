@@ -393,6 +393,8 @@ def test_teacher_makes_five_separate_calls_and_resumes_only_failed_question(tmp_
     results = asyncio.run(labeling.label(args))
     assert len(prompts) == 6 and len(results) == 5
     assert {r['task'] for r in results} == set(TASKS)
+    assert all(r['messages'] and r['rendered_prompt'] and 'reasoning' in r for r in results)
+    assert len(list((args.output / 'responses').glob('*/*.json'))) == 5
     args.max_tokens += 1
     with pytest.raises(ValueError, match='identity changed'):
         asyncio.run(labeling.label(args))

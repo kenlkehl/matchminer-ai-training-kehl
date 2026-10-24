@@ -1,9 +1,12 @@
 # Cohort ColBERT experiment
 
-This isolated experiment trains `lightonai/GTE-ModernColBERT-v1` for five clinical
-matching questions in **both retrieval directions**. It does not replace the
-production TrialSpace pipeline or any downstream checker. Use synthetic/non-PHI
-inputs for experiments unless the selected endpoint is authorized for the data.
+This package contains the shared native `lightonai/GTE-ModernColBERT-v1`
+implementation and the original five-question experiments in **both retrieval
+directions**. The production entrypoint `../trialspace_training.py` and
+`../train_from_summaries.py` now use its gated regression trainer and question
+contracts, with distributed disk-backed mining. The experimental CLI retains
+its original binary-task default for controlled comparisons. Use synthetic/non-PHI
+inputs unless the selected endpoint is authorized for the data.
 
 ## Gated score regression experiment
 

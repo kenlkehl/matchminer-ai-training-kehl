@@ -83,14 +83,22 @@ of the named drug overrides disease-benefit literature, while prior receipt of
 a different drug in the class does not. The TrialChecker adaptation is pinned
 to its source rubric fingerprint and fails if that rubric changes before review.
 
-Teachers may reason internally. Only completed final response content is saved;
-separate reasoning fields are ignored and explicit thought-channel wrappers are
-stripped. The student sees only the final summary or **the full letter plus
+Teachers may reason internally. Returned reasoning, complete raw responses,
+request messages and retry attempts are retained in local teacher archives for
+future distillation. They are kept separate from the validated final answer.
+Separate reasoning fields are excluded from supervised targets and explicit
+thought-channel wrappers are stripped. The student sees only the final summary or **the full letter plus
 explanation**. Prompt tokens are masked; all final answer tokens, including the
 initial letter, are supervised. Malformed answers, incomplete thinking blocks,
 truncated completions, missing responses, and overlong examples fail validation.
 There is no target or input truncation and no conversion of old reasoning traces
 into student targets. `convert_to_think_tags.py` is retired.
+
+Raw pooled requests are archived before validation in `teacher_attempts/`,
+including token-limited or malformed responses. Successful `responses/` records
+retain their reasoning and attempt records too. Older generation manifests that
+discarded reasoning cannot resume as trace-preserving runs; use a new directory.
+The production orchestrator records archive locations in `reasoning_archives.json`.
 
 ## Commands
 

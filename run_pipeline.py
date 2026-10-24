@@ -103,7 +103,16 @@ def resolve_paths(args):
     return args
 
 
+def training_arguments(args):
+    # The upstream extraction contains the full denominator. Training follows
+    # the sampled trial/cohort table that actually seeded synthetic generation.
+    if args.start_at == 'train':
+        return args
+    return argparse.Namespace(**{**vars(args), 'trial_spaces': args.sampled_spaces})
+
+
 def training_command(args):
+    args = training_arguments(args)
     command = [sys.executable, str(ROOT / 'train_from_summaries.py')]
     for action in training.parser()._actions:
         if action.dest in ('help', 'dry_run'):
@@ -195,8 +204,8 @@ def build_plan(args):
         Stage('prepare-training', [py, str(ROOT / 'prepare_synthetic_training.py'), 'summaries',
               '--input', str(raw_summaries), '--patients', str(patient_map), '--output', str(args.patient_summaries)],
               [raw_summaries, patient_map], [args.patient_summaries], source('prepare_synthetic_training.py')),
-        Stage('train', training_command(args), list(training.input_paths(args).values()),
-              training.stages(args)[-1].outputs, source('train_from_summaries.py')),
+        Stage('train', training_command(args), list(training.input_paths(training_arguments(args)).values()),
+              training.stages(training_arguments(args))[-1].outputs, source('train_from_summaries.py')),
     ]
     return candidates[STAGES.index(args.start_at):STAGES.index(args.stop_after) + 1]
 
@@ -306,7 +315,9 @@ def execute(args, plan):
                     for output in stage.outputs:
                         output.parent.mkdir(parents=True, exist_ok=True)
                     with log.open('a') as stream:
-                        subprocess.run(stage.command, cwd=ROOT, env=env, check=True, stdout=stream, stderr=subprocess.STDOUT)
+                        stage_env = dict(env, MMAI_LLM_TRACE_DIR=str(args.pipeline_dir / 'llm_traces' / stage.name),
+                                         MMAI_LLM_TRACE_STAGE=stage.name)
+                        subprocess.run(stage.command, cwd=ROOT, env=stage_env, check=True, stdout=stream, stderr=subprocess.STDOUT)
                 outputs = [file_record(p, cache) for p in stage.outputs]
                 atomic_json(receipt, dict(fingerprint=fingerprint, outputs=outputs))
                 atomic_json(cache_path, cache)
@@ -324,7 +335,8 @@ def main(argv=None):
     if args.dry_run:
         display = []
         for stage in plan:
-            display.extend([asdict(s) for s in training.stages(args)] if stage.name == 'train' else [asdict(stage)])
+            display.extend([asdict(s) for s in training.stages(training_arguments(args))]
+                           if stage.name == 'train' else [asdict(stage)])
         print(json.dumps(display, default=str, indent=2))
     elif args.start_at == args.stop_after == 'train':
         # Preserve the established trainer's own locking, identities and resume.

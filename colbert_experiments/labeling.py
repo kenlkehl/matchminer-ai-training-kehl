@@ -34,7 +34,8 @@ def label_key(row):
 
 
 def questions(pairs, patients, cohorts, *, sources=None):
-    patients, cohorts = {r['id']: r for r in patients}, {r['id']: r for r in cohorts}
+    patients = patients if isinstance(patients, dict) else {r['id']: r for r in patients}
+    cohorts = cohorts if isinstance(cohorts, dict) else {r['id']: r for r in cohorts}
     seen = set()
     for pair in pairs:
         p, c = patients[pair['patient_id']], cohorts[pair['cohort_id']]
@@ -95,7 +96,7 @@ async def _label(args, output):
             server_models[endpoint] = served
         reasoning, answer, metadata = await base(client, payload)
         trace = dict(endpoint=endpoint, served_model=server_models[endpoint], reasoning=reasoning,
-                     raw_answer=answer, **metadata)
+                     raw_answer=answer, rendered_prompt=payload['prompt'], **metadata)
         try:
             if metadata['finish_reason'] != 'stop':
                 raise ValueError('Incomplete teacher output: ' + metadata['finish_reason'])
@@ -107,24 +108,32 @@ async def _label(args, output):
         return dict(**result, **trace, generated_at=datetime.now(timezone.utc).isoformat())
 
     registry = build_registry_from_args(args)
+    pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
     def groups():
         seen = set()
         for pair in pairs:
             key = (pair['patient_id'], pair['cohort_id'])
             if key not in seen:
                 seen.add(key)
-                yield list(questions([pair], patients, cohorts, sources=sources))
+                yield list(questions([pair], pmap, cmap, sources=sources))
     iterator = iter(groups() if gated else questions(pairs, patients, cohorts, sources=sources))
     completed, failures, scores = {}, {}, {}
     async with RequestSession(registry, work, max_attempts=args.max_attempts) as session:
         async def ask(item):
-            path = checkpoint_dir / (item['key'] + '.json')
+            path = checkpoint_dir / item['key'][:2] / (item['key'] + '.json')
+            legacy = checkpoint_dir / (item['key'] + '.json')
+            if legacy.exists():
+                path = legacy
             if path.exists():
                 row = json.loads(path.read_text())
                 if row['key'] != item['key'] or row['prompt_sha256'] != digest(item['messages']):
                     raise ValueError('Checkpoint key or clinical text mismatch')
                 parse_judgment(json.dumps({k: row[k] for k in ('answer', 'evidence_status', 'reason')}))
-                completed[item['key']] = row
+                if 'messages' not in row:
+                    row['messages'] = item['messages']
+                    row['sampling'] = asdict(sampling)
+                    write_json(path, row)
+                completed[item['key']] = path
                 return row
             prompt = tokenizer.apply_chat_template(item['messages'], tokenize=False,
                 add_generation_prompt=True, **resolve_chat_template_kwargs(args.teacher_tokenizer))
@@ -136,11 +145,13 @@ async def _label(args, output):
             if not isinstance(result, dict):
                 failures[item['key']] = str(result)
                 return None
-            row = {k: v for k, v in item.items() if k != 'messages'}
+            # Keep the exact question and complete clinical input alongside the
+            # reasoning, rather than requiring corpus reconstruction to distill it.
+            row = dict(item)
             row.update(result, prompt_sha256=digest(item['messages']), contract=signature['contract'],
-                       teacher_model=args.teacher_model)
+                       teacher_model=args.teacher_model, rendered_prompt=prompt, sampling=asdict(sampling))
             write_json(path, row)
-            completed[item['key']] = row
+            completed[item['key']] = path
             write_json(output / 'status.json', dict(state='labeling', completed=len(completed), failures=failures))
             return row
 
@@ -165,7 +176,7 @@ async def _label(args, output):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-    write_jsonl(output / 'labels.jsonl', [completed[k] for k in sorted(completed)])
+    write_jsonl(output / 'labels.jsonl', (json.loads(completed[k].read_text()) for k in sorted(completed)))
     if gated:
         from .regression import score_balance
         write_jsonl(output / 'scores.jsonl', [scores[k] for k in sorted(scores)])
@@ -175,4 +186,5 @@ async def _label(args, output):
                                           **(dict(scored_pairs=len(scores)) if gated else {})))
     if failures:
         raise RuntimeError(f'{len(failures)} unresolved teacher labels; resume this command to retry')
-    return list(completed.values())
+    return ([json.loads(completed[k].read_text()) for k in sorted(completed)]
+            if getattr(args, 'return_records', True) else None)

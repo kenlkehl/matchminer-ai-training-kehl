@@ -44,9 +44,10 @@ def sampling_parameters(model, *, thinking=True, temperature=None):
 class TeacherPool:
     def __init__(self, urls=(), model=DEFAULT_TEACHER, *, registry=None, per_server=96,
                  max_tokens=16384, thinking=True, temperature=None, timeout=7200,
-                 recovery_timeout=86400):
+                 recovery_timeout=86400, trace_dir=None):
         self.pool = EndpointPool(urls, registry=registry, per_server=per_server,
             timeout=timeout, recovery_timeout=recovery_timeout,
+            trace_dir=trace_dir,
             api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"))
         self.parameters = dict(model=model, max_tokens=max_tokens,
                                **sampling_parameters(model, thinking=thinking, temperature=temperature))

@@ -2,6 +2,7 @@
 from collections import defaultdict
 from contextlib import nullcontext
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -55,11 +56,16 @@ def build_groups(patients, cohorts, labels, *, split='train'):
 def train(args):
     world, rank, local_rank = (int(os.environ.get(k, default)) for k, default in
                               [('WORLD_SIZE', '1'), ('RANK', '0'), ('LOCAL_RANK', '0')])
-    if not torch.cuda.is_available():
+    cpu = getattr(args, 'device', 'cuda') == 'cpu'
+    if not cpu and not torch.cuda.is_available():
         raise RuntimeError('Training requires an explicitly selected CUDA device')
-    torch.cuda.set_device(local_rank)
+    if not cpu:
+        torch.cuda.set_device(local_rank)
     if world > 1:
-        dist.init_process_group('nccl', device_id=torch.device('cuda', local_rank))
+        if cpu:
+            dist.init_process_group('gloo')
+        else:
+            dist.init_process_group('nccl', device_id=torch.device('cuda', local_rank))
     try:
         _train(args, world, rank, local_rank)
     finally:
@@ -68,7 +74,8 @@ def train(args):
 
 
 def _train(args, world, rank, local_rank):
-    if args.steps < 1 or args.accumulation < 1 or args.documents_per_class < 1 or args.save_steps < 1:
+    device = torch.device('cpu' if getattr(args, 'device', 'cuda') == 'cpu' else f'cuda:{local_rank}')
+    if (args.steps is not None and args.steps < 1) or args.accumulation < 1 or args.documents_per_class < 1 or args.save_steps < 1:
         raise ValueError('Training step, accumulation and group sizes must be positive')
     patients, cohorts = load_corpus(args.corpus)
     labels = [row for path in args.labels for row in read_jsonl(path)]
@@ -83,6 +90,10 @@ def _train(args, world, rank, local_rank):
     val_groups, val_report = group_builder(patients, cohorts, labels, split='val')
     if not groups:
         raise ValueError('No usable labeled training queries')
+    if args.steps is None:
+        if not math.isfinite(args.epochs) or args.epochs <= 0:
+            raise ValueError('Expected query sampling passes must be positive')
+        args.steps = max(1, math.ceil(len(groups) * args.epochs / (world * args.accumulation)))
     probes = {split: probe_builder(rows, per_stratum=args.eval_groups_per_stratum,
                                 documents_per_class=args.documents_per_query if regression else 2, seed=args.seed)
               for split, rows in [('train', groups), ('val', val_groups)]} if args.eval_every else {}
@@ -94,7 +105,7 @@ def _train(args, world, rank, local_rank):
     output.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
     model = ColBERT(args.model, revision=args.revision, query_length=args.query_length,
-                   document_length=args.document_length, cache_dir=args.cache_dir, checkpointing=True).to(local_rank)
+                   document_length=args.document_length, cache_dir=args.cache_dir, checkpointing=True).to(device)
     identity = dict(contract=contract_hash(), patients=digest(patients), cohorts=digest(cohorts), labels=digest(labels),
         base=model.fingerprint(), world_size=world, steps=args.steps, accumulation=args.accumulation,
         documents_per_class=args.documents_per_class, learning_rate=args.learning_rate,
@@ -104,6 +115,8 @@ def _train(args, world, rank, local_rank):
         identity.update(contract=continuous.score_contract(), loss='mse_normalized_gated_score',
                         documents_per_query=args.documents_per_query, prediction_link=args.prediction_link,
                         normalization=5, query_instruction=continuous.INSTRUCTION)
+    if device.type == 'cpu':
+        identity['execution_device'] = 'cpu'
     manifest = output / 'training_manifest.json'
     if manifest.exists() and json.loads(manifest.read_text()) != identity:
         raise ValueError('Training identity changed; use a new round directory')
@@ -125,7 +138,7 @@ def _train(args, world, rank, local_rank):
             write_json(output / 'fixed_probes.json', probes)
             if regression:
                 write_json(output / 'baseline_metrics.json', continuous.constant_baselines(groups, probes))
-    wrapped = DistributedDataParallel(model, device_ids=[local_rank]) if world > 1 else model
+    wrapped = DistributedDataParallel(model, device_ids=[local_rank] if device.type == 'cuda' else None) if world > 1 else model
     wrapped.train()
     start = time.monotonic()
 
@@ -158,7 +171,7 @@ def _train(args, world, rank, local_rank):
 
     for current in range(step, args.steps):
         optimizer.zero_grad(set_to_none=True)
-        loss_sum = torch.zeros((), device=local_rank)
+        loss_sum = torch.zeros((), device=device)
         for micro in range(args.accumulation):
             index = (current * args.accumulation + micro) * world + rank
             rng = random.Random(args.seed + index)
@@ -174,7 +187,7 @@ def _train(args, world, rank, local_rank):
                 texts = [d['text'] for d in positives + negatives]
                 targets = [1] * len(positives) + [0] * len(negatives)
             sync = wrapped.no_sync() if world > 1 and micro + 1 < args.accumulation else nullcontext()
-            with sync, torch.autocast('cuda', dtype=torch.bfloat16):
+            with sync, torch.autocast('cuda', dtype=torch.bfloat16, enabled=device.type == 'cuda'):
                 scores = wrapped(group['query'], texts)
                 loss = (continuous.regression_loss(scores, targets, link=args.prediction_link) if regression
                         else grouped_loss(scores, targets, args.temperature))
@@ -198,14 +211,17 @@ def _train(args, world, rank, local_rank):
         if (current + 1) % args.save_steps == 0 or current + 1 == args.steps:
             checkpoint(current + 1)
     if rank == 0:
-        model.save(output / 'model')
+        model_output = Path(getattr(args, 'output_model', None) or output / 'model')
+        model.save(model_output)
         if regression:
-            write_json(output / 'model' / 'regression_scoring.json', dict(contract=continuous.score_contract(),
+            write_json(model_output / 'regression_scoring.json', dict(contract=continuous.score_contract(),
                 score='mean_maxsim', prediction_link=args.prediction_link,
                 sigmoid_scale=20, sigmoid_center=.5, output_scale=5, query_instruction=continuous.INSTRUCTION,
                 semantics='gated potential-eligibility plus specificity score; not a probability'))
         write_json(output / 'metrics.json', dict(history=history, evaluations=evaluations, groups=group_report,
-            gpu_count=world, gpu_name=torch.cuda.get_device_name(local_rank), max_memory_allocated=torch.cuda.max_memory_allocated(local_rank)))
-        write_json(output / 'status.json', dict(state='complete', steps=args.steps, model=str(output / 'model')))
+            gpu_count=world if device.type == 'cuda' else 0,
+            gpu_name=torch.cuda.get_device_name(local_rank) if device.type == 'cuda' else 'cpu',
+            max_memory_allocated=torch.cuda.max_memory_allocated(local_rank) if device.type == 'cuda' else 0))
+        write_json(output / 'status.json', dict(state='complete', steps=args.steps, model=str(model_output)))
     if world > 1:
         dist.barrier()

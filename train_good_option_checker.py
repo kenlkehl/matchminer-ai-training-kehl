@@ -240,6 +240,8 @@ def configure_teacher(args: argparse.Namespace) -> MMAIConfig:
     if args.max_concurrent_requests < 0:
         raise ValueError("Concurrency must be zero (automatic) or positive")
     config = load_config(args.config) if args.config else load_default_preset()
+    if getattr(args, 'catalog_checkpoint_dir', None):
+        config.remote['trace_dir'] = str(Path(args.catalog_checkpoint_dir).resolve() / 'llm_traces')
     urls = [
         value.strip()
         for value in str(getattr(args, "server_urls", "") or "").split(",")

@@ -44,6 +44,9 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert plan[4].outputs[0] == plan[5].inputs[0]
     assert plan[5].outputs[0] == plan[6].inputs[0]
     assert plan[6].outputs[0] == training.input_paths(args)['patient_summaries']
+    assert args.sampled_spaces in plan[-1].inputs
+    train_command = plan[-1].command
+    assert train_command[train_command.index('--trial-spaces') + 1] == str(args.sampled_spaces)
     for stage in (plan[1], plan[3], plan[5]):
         assert stage.command[stage.command.index('--model') + 1] == 'gemma4-31b'
         assert stage.command[stage.command.index('--tokenizer-model') + 1] == 'vendor/tokenizer'
@@ -68,6 +71,14 @@ def test_training_only_retains_original_default_identity(tmp_path):
     assert '--synthetic-notes' not in command
     assert '--teacher-servers-file' not in command
     assert len(pipeline.build_plan(args)) == 1
+
+
+def test_full_dry_run_shows_the_sampled_cohort_input(tmp_path, capsys):
+    pipeline.main(['--start-at', 'sample-trials', '--data-dir', str(tmp_path), '--dry-run'])
+    stages = {stage['name']: stage for stage in json.loads(capsys.readouterr().out)}
+    sample = stages['sample-trials']['outputs'][0]
+    prepare_command = stages['prepare-trialspace']['command']
+    assert prepare_command[prepare_command.index('--cohorts') + 1] == sample
 
 
 @pytest.mark.parametrize('wrapper', ['train_all.sh', 'train_all_gcp.sh', 'temp_train_gcp.sh'])

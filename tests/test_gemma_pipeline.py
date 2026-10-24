@@ -114,7 +114,8 @@ def test_pool_round_robins_the_same_teacher_with_thinking(tmp_path):
 def test_integrated_plan_starts_with_base_mining_and_trains_only_two_models():
     args = runner.parser().parse_args([])
     plan = runner.stages(args)
-    assert plan[0].name == "mine-1" and args.embedding_model in plan[0].command
+    assert plan[0].name == 'prepare-trialspace'
+    assert args.embedding_model in next(s.command for s in plan if s.name == 'mine-1')
     assert [stage.name for stage in plan if stage.name.startswith("train-")] == [
         "train-trialspace-1", "train-trialspace-2", "train-oncoreasoning"]
     assert plan[-1].command[-3:] == ["--fsdp", "--resume-from-checkpoint", "auto"]
@@ -143,10 +144,9 @@ def test_shell_entrypoints_forward_explicit_run_filenames(tmp_path, wrapper):
     output = subprocess.check_output(['bash', str(runner.ROOT / wrapper), '--dry-run', *flags],
                                      text=True, env={**os.environ, 'PYTHON': sys.executable})
     plan = {stage['name']: stage['command'] for stage in json.loads(output)}
-    for iteration in (1, 2, 3):
-        command = plan[f'mine-{iteration}']
-        assert command[command.index('--trials-file') + 1] == str(inputs['trial_spaces'])
-        assert command[command.index('--patients-parquet') + 1] == str(inputs['patient_summaries'])
+    command = plan['prepare-trialspace']
+    assert command[command.index('--cohorts') + 1] == str(inputs['trial_spaces'])
+    assert command[command.index('--patients') + 1] == str(inputs['patient_summaries'])
     command = plan['prepare-oncoreasoning']
     assert command[command.index('--notes') + 1] == str(inputs['synthetic_notes'])
     args = runner.parser().parse_args(flags)
@@ -158,7 +158,7 @@ def test_default_pipeline_filenames_remain_compatible():
     assert runner.input_paths(args) == {
         'patient_summaries': args.data_dir / 'patient_summaries_with_spaces.parquet',
         'synthetic_notes': args.data_dir / 'all_synthetic_notes.parquet',
-        'trial_spaces': args.data_dir / 'trial_space_lineitems.csv',
+        'trial_spaces': args.data_dir / 'trial_cohort_lineitems.csv',
     }
 
 
@@ -183,7 +183,7 @@ def test_shared_teacher_label_concurrency_survives_both_labeling_rounds():
     args = runner.parser().parse_args(["--label-concurrency-per-server", "288"])
     plan = runner.stages(args)
     labels = [stage for stage in plan if stage.name.startswith("label-")]
-    assert len(labels) == 4
+    assert len(labels) == 2  # Each canonical pair is judged once across both directions.
     for stage in labels:
         assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "288"
     assert args.teacher_concurrency == 0
@@ -200,10 +200,8 @@ def test_trialspace_refinement_uses_previous_weights_and_only_current_labels():
         mine = plan[f'mine-{iteration}'].command
         fit = plan[f'train-trialspace-{iteration}'].command
         assert mine[mine.index('--model') + 1] == str(previous)
-        assert fit[fit.index('--base-model') + 1] == str(previous)
-        inputs = [fit[i + 1] for i, flag in enumerate(fit) if flag == '--input-parquet']
-        assert inputs == [str(args.run_dir / f'top_{direction}_tocheck_round{iteration}_labels/labels.parquet')
-                          for direction in ('cohorts', 'patients')]
+        assert fit[fit.index('--model') + 1] == str(previous)
+        assert fit[fit.index('--labels') + 1] == str(args.run_dir / f'trialspace_round{iteration}/teacher/scores.jsonl')
         previous = args.models_dir / f'trialspace_round{iteration}'
     mine = plan['mine-3'].command
     assert mine[mine.index('--model') + 1] == str(previous)
@@ -259,7 +257,7 @@ def test_external_alias_keeps_hf_tokenizers_and_two_gpu_batch(tmp_path, monkeypa
         if stage.teacher:
             assert 'gemma4-31b' in stage.command
     label = next(stage for stage in plan if stage.name.startswith('label-')).command
-    assert label[label.index('--tokenizer-model') + 1] == DEFAULT_TEACHER
+    assert label[label.index('--teacher-tokenizer') + 1] == DEFAULT_TEACHER
     distill = next(stage for stage in plan if stage.name == 'distill-oncoreasoning').command
     assert distill[distill.index('--teacher-tokenizer') + 1] == DEFAULT_TEACHER
     train = plan[-1].command

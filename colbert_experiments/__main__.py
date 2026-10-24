@@ -69,6 +69,7 @@ def parser():
     train.add_argument('--corpus', required=True)
     train.add_argument('--labels', nargs='+', required=True)
     train.add_argument('--output', required=True)
+    train.add_argument('--device', choices=['cuda', 'cpu'], default='cuda', help='CPU is for explicit small smoke tests')
     train.add_argument('--objective', choices=['binary', 'gated_regression'], default='binary')
     train.add_argument('--documents-per-query', type=int, default=4)
     train.add_argument('--prediction-link', choices=['identity', 'sigmoid'], default='identity')

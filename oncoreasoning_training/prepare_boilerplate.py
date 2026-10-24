@@ -45,16 +45,22 @@ def validate_criteria(source, criteria):
     return criteria
 
 
-def extract(source, teacher):
+def extract(source, teacher, *, return_trace=False):
+    from matchminer_ai.llm.traces import response_record
     messages = [{"role": "system", "content": INSTRUCTION}, {"role": "user", "content": source}]
+    traces = []
     for attempt in range(3):
         try:
-            result = teacher(messages).choices[0]
+            response = teacher(messages)
+            traces.append(response_record(response, messages=messages))
+            result = response.choices[0]
             if result.finish_reason != "stop":
                 raise ValueError("Incomplete extraction")
             answer = c.final_answer_only(result.message.content)
             answer = re.sub(r"^```(?:json)?\s*|\s*```$", "", answer)
-            return validate_criteria(source, json.loads(answer)["criteria"])
+            criteria = validate_criteria(source, json.loads(answer)["criteria"])
+            return dict(criteria=criteria, messages=messages, reasoning=traces[-1]['reasoning'],
+                        teacher_attempts=traces, trace_version=traces[-1]['trace_version']) if return_trace else criteria
         except Exception:
             if attempt == 2:
                 raise RuntimeError("Boilerplate extraction failed validation after three attempts") from None
@@ -70,12 +76,13 @@ def main():
     p.add_argument("--concurrency", type=int, default=0)
     p.add_argument("--concurrency-per-server", type=int, default=96)
     args = p.parse_args()
-    check_manifest(args.output_dir, "manifest.json", {"version": "verbatim-boilerplate-v1", "instruction": INSTRUCTION,
+    check_manifest(args.output_dir, "manifest.json", {"version": "verbatim-boilerplate-v2-traces", "instruction": INSTRUCTION,
                    "teacher": args.teacher_model, "sampling": sampling_parameters(args.teacher_model)},
                    transport_keys=("servers",))
     # Structurally patient-free: read only public trial IDs and exclusions.
     frame = pd.concat([pd.read_parquet(path, columns=["nct_id", "trial_boilerplate_text"]) for path in args.candidates]).drop_duplicates()
-    teacher = TeacherPool(model=args.teacher_model, registry=args.server_urls_file, per_server=args.concurrency_per_server)
+    teacher = TeacherPool(model=args.teacher_model, registry=args.server_urls_file, per_server=args.concurrency_per_server,
+                          trace_dir=args.output_dir / 'teacher_attempts')
     def worker(task):
         row = task["row"]
         source = str(row.trial_boilerplate_text or "").strip()
@@ -89,7 +96,8 @@ def main():
                 raise ValueError("Boilerplate source changed")
             validate_criteria(source, record["criteria"])
             return
-        atomic_json(path, {"trial_id": str(row.nct_id), "source": source, "criteria": extract(source, teacher)})
+        atomic_json(path, {"trial_id": str(row.nct_id), "source": source,
+                           **extract(source, teacher, return_trace=True)})
     from oncoreasoning_training.scheduling import run_tasks
     tasks = ({"id": str(index), "row": row} for index, row in enumerate(frame.itertuples(index=False)))
     run_tasks(tasks, worker, concurrency=worker_count(args.concurrency),

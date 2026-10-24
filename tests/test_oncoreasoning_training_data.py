@@ -170,13 +170,17 @@ def test_malformed_or_unfinished_targets_rejected(bad):
         c.validate_answer(bad, "clinical_qa")
 
 
-def test_teacher_ignores_separate_reasoning_and_retries_truncation():
+def test_teacher_archives_reasoning_but_keeps_answer_target_separate():
     task = {"id": "synthetic-id", "category": "clinical_qa", "split": "train"}
     messages = [{"role": "user", "content": "Fabricated question"}]
     replies = iter([response("A\nPartial answer", finish="length"), response("B\nComplete answer")])
     result = pipeline.invoke_teacher(task, messages, lambda _: next(replies))
     assert result["answer"] == "B\nComplete answer"
-    assert "TEACHER SECRET" not in json.dumps(result)
+    assert 'TEACHER SECRET' in json.dumps(result['teacher_attempts'])
+    assert 'TEACHER SECRET' not in result['answer']
+    assert result['reasoning'] == 'TEACHER SECRET REASONING'
+    assert len(result['teacher_attempts']) == 2
+    assert result['teacher_attempts'][0]['raw_response']['choices'][0]['finish_reason'] == 'length'
     with pytest.raises(RuntimeError, match="no target saved"):
         pipeline.invoke_teacher(task, messages, lambda _: response(None), attempts=1)
 

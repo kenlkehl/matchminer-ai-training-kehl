@@ -25,7 +25,7 @@ from oncoreasoning_training.teacher import DEFAULT_TEACHER
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "75a14df89d27698c504ef81e61d652822f1faea9"
+INFERENCE_COMMIT = "2a139b0b2f406afeaa967b2e142d59b688af75cc"
 
 
 @dataclass
@@ -40,13 +40,13 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-dir", type=Path, default=ROOT.parent / "data/no_phi")
     p.add_argument("--trial-spaces", "--trial-cohorts", dest="trial_spaces", type=Path,
-                   help="Cohort CSV/parquet or historical space export; training-only default: DATA_DIR/trial_space_lineitems.csv")
+                   help="Complete accepted cohort CSV/parquet; default: DATA_DIR/trial_cohort_lineitems.csv")
     p.add_argument("--patient-summaries", type=Path,
                    help="Summarized synthetic patients; default: DATA_DIR/patient_summaries_with_spaces.parquet")
     p.add_argument("--synthetic-notes", type=Path,
                    help="Generated synthetic notes; default: DATA_DIR/all_synthetic_notes.parquet")
-    p.add_argument("--run-dir", type=Path, default=ROOT.parent / "data/no_phi/gemma_pipeline_v2")
-    p.add_argument("--models-dir", type=Path, default=ROOT.parent / "models/gemma_pipeline_v2")
+    p.add_argument("--run-dir", type=Path, default=ROOT.parent / "data/no_phi/colbert_pipeline_v1")
+    p.add_argument("--models-dir", type=Path, default=ROOT.parent / "models/colbert_pipeline_v1")
     p.add_argument("--inference-repo", type=Path, default=ROOT.parent / "matchminer-ai-inference-kehl")
     p.add_argument("--teacher-model", default=DEFAULT_TEACHER)
     p.add_argument("--teacher-served-model", help="API model alias; --teacher-model remains the underlying HF model")
@@ -57,10 +57,24 @@ def parser():
     p.add_argument("--teacher-concurrency-file", type=Path,
                    help="Live per-server limits for TrialSpace labeling.")
     p.add_argument("--student-model", default=DEFAULT_MODEL_NAME)
-    p.add_argument("--embedding-model", default="google/embeddinggemma-2")
+    p.add_argument("--embedding-model", default="lightonai/GTE-ModernColBERT-v1")
+    p.add_argument('--trialspace-context', type=int, default=8192)
+    p.add_argument('--trialspace-steps', type=int, help='Explicit optimizer updates per fit; otherwise derive from query count')
+    p.add_argument('--trialspace-epochs', type=float, default=3, help='Expected query-group sampling passes per fit')
+    p.add_argument('--trialspace-accumulation', type=int, default=4)
+    p.add_argument('--trialspace-learning-rate', type=float, default=1e-5)
+    p.add_argument('--trialspace-candidate-limit', type=int, default=256)
+    p.add_argument('--trialspace-top-k', type=int, default=20)
+    p.add_argument('--trialspace-lexical-k', type=int, default=5)
+    p.add_argument('--trialspace-random-k', type=int, default=5)
+    p.add_argument('--trialspace-encode-batch-size', type=int, default=16)
+    p.add_argument('--trialspace-score-batch-size', type=int, default=16)
+    p.add_argument('--trialspace-label-workers', type=int, default=1024)
+    p.add_argument('--trialspace-extra-pairs', type=Path, help='Additional independent/challenge candidate JSONL')
+    p.add_argument('--trialspace-cache-dir', type=Path, help='Local Hugging Face model cache')
     p.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     p.add_argument("--vllm", default=str(Path(sys.executable).parent / "vllm"))
-    p.add_argument("--teacher-max-context", type=int, default=262144)
+    p.add_argument("--teacher-max-context", type=int, default=250000)
     p.add_argument("--teacher-port", type=int, default=8100)
     p.add_argument("--teacher-concurrency", type=int, default=0,
                    help="Total downstream teacher request limit; 0 uses live per-server capacities")
@@ -77,7 +91,7 @@ def parser():
 def input_paths(args):
     """Use the same explicit filenames in validation, manifests, and every stage."""
     defaults = dict(patient_summaries="patient_summaries_with_spaces.parquet",
-                    synthetic_notes="all_synthetic_notes.parquet", trial_spaces="trial_space_lineitems.csv")
+                    synthetic_notes="all_synthetic_notes.parquet", trial_spaces="trial_cohort_lineitems.csv")
     return {key: (getattr(args, key, None) or args.data_dir / filename).expanduser().resolve()
             for key, filename in defaults.items()}
 
@@ -90,42 +104,57 @@ def stages(args):
     gpu_count = len(args.gpus.split(','))
     teacher_model = args.teacher_served_model or args.teacher_model
     launch = [py, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={gpu_count}"]
-    result = []
+    corpus = run / 'trialspace_corpus'
+    result = [Stage('prepare-trialspace', [py, 'trialspace_training.py', 'prepare',
+        '--patients', str(inputs['patient_summaries']), '--cohorts', str(inputs['trial_spaces']),
+        '--output', str(corpus)], [corpus / 'prepared.json'])]
+    common = ['--corpus', str(corpus), '--query-length', str(args.trialspace_context),
+              '--document-length', str(args.trialspace_context)]
+    if args.trialspace_cache_dir:
+        common += ['--cache-dir', str(args.trialspace_cache_dir)]
     embedding = args.embedding_model
     for iteration in (1, 2, 3):
-        candidates = [run / f"top_{direction}_tocheck_round{iteration}.parquet" for direction in ("cohorts", "patients")]
-        result.append(Stage(f"mine-{iteration}", [py, "make_top_matches.py",
-            "--patients-parquet", str(inputs['patient_summaries']),
-            "--trials-file", str(inputs['trial_spaces']),
-            "--model", str(embedding), "--gpus", args.gpus,
-            "--sample_trials_per_patient", "500", "--sample_patients_per_trial", "20000",
-            "--top_k_spaces", "20", "--top_k_patients", "40",
-            "--encode_batch_size", "32", "--max_seq_length", "2500",
-            "--out_cohorts_parquet", str(candidates[0]), "--out_patients_parquet", str(candidates[1])], candidates))
+        round_dir = run / f'trialspace_round{iteration}'
+        mining = round_dir / 'mining'
+        candidates = [mining / f'{direction}.parquet' for direction in ('patient_to_cohort', 'cohort_to_patient')]
+        mine = launch + ['trialspace_training.py', 'mine', *common, '--model', str(embedding),
+            '--output', str(mining), '--candidate-limit', str(args.trialspace_candidate_limit),
+            '--proposal-strategy', 'lexical_random', '--top-k', str(args.trialspace_top_k),
+            '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
+            '--document-batch-size', str(args.trialspace_encode_batch_size),
+            '--query-batch-size', str(args.trialspace_encode_batch_size),
+            '--score-batch-size', str(args.trialspace_score_batch_size)]
+        if args.trialspace_extra_pairs:
+            mine += ['--extra-pairs', str(args.trialspace_extra_pairs)]
+        result.append(Stage(f'mine-{iteration}', mine, [mining / 'complete.json', mining / 'candidates.jsonl', *candidates]))
         if iteration == 3:
             break
-        labels = []
-        for candidate in candidates:
-            directory = run / (candidate.stem + "_labels")
-            output = directory / "labels.parquet"
-            result.append(Stage(f"label-{candidate.stem}", [py, "llm_check_trials.py",
-                "--input_parquet", str(candidate), "--out_dir", str(directory),
-                "--final_output", "labels.parquet", "--server_urls_file", str(servers),
-                "--model", teacher_model, "--tokenizer-model", args.teacher_model,
-                "--reasoning-parser", resolve_parser_name(args.teacher_model),
-                "--max_concurrent_per_server", str(args.label_concurrency_per_server),
-                "--max_attempts", "5"], [output], True))
-            labels.append(output)
-            if getattr(args, 'teacher_concurrency_file', None):
-                result[-1].command += ['--concurrency-control-file', str(args.teacher_concurrency_file)]
+        directory = round_dir / 'teacher'
+        scores = directory / 'scores.jsonl'
+        label = [py, 'trialspace_training.py', 'label', '--gated-regression', '--corpus', str(corpus),
+            '--candidates', str(mining / 'candidates.jsonl'), '--output', str(directory),
+            '--server_urls_file', str(servers), '--teacher-model', teacher_model,
+            '--teacher-tokenizer', args.teacher_model, '--teacher-context', str(args.teacher_max_context),
+            '--max_concurrent_per_server', str(args.label_concurrency_per_server),
+            '--initial-concurrent-per-server', str(min(16, args.label_concurrency_per_server)),
+            '--pending-requests', str(args.trialspace_label_workers), '--max_attempts', '5']
+        if args.trialspace_cache_dir:
+            label += ['--cache-dir', str(args.trialspace_cache_dir)]
+        if args.teacher_concurrency_file:
+            label += ['--concurrency-control-file', str(args.teacher_concurrency_file)]
+        result.append(Stage(f'label-trialspace-{iteration}', label,
+                            [scores, directory / 'labels.jsonl', directory / 'labeling_manifest.json'], True))
         previous_embedding = embedding
         embedding = models / f"trialspace_round{iteration}"
-        command = launch + ["finetune_embedder.py", "--base-model", str(previous_embedding),
-            "--ckpt-dir", str(models / f"trialspace_round{iteration}_checkpoints"),
-            "--output-model", str(embedding)]
-        for path in labels:
-            command += ["--input-parquet", str(path)]
-        result.append(Stage(f"train-trialspace-{iteration}", command, [embedding / "modules.json"]))
+        command = launch + ['trialspace_training.py', 'train', *common, '--model', str(previous_embedding),
+            '--labels', str(scores), '--output', str(round_dir / 'fit'), '--output-model', str(embedding),
+            '--objective', 'gated_regression', '--prediction-link', 'identity',
+            '--accumulation', str(args.trialspace_accumulation), '--learning-rate', str(args.trialspace_learning_rate),
+            '--eval-every', '100', '--eval-groups-per-stratum', '32']
+        command += (['--steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
+                    else ['--epochs', str(args.trialspace_epochs)])
+        result.append(Stage(f'train-trialspace-{iteration}', command,
+                            [embedding / 'regression_scoring.json', embedding / 'model.safetensors']))
     catalog = run / "good_option_catalog"
     result.append(Stage("catalog", [py, "train_good_option_checker.py", "catalog",
         "--catalog", str(catalog), "--catalog-checkpoint-dir", str(run / "catalog_checkpoints"),
@@ -331,7 +360,8 @@ def main():
     args = parser().parse_args()
     for key in ("data_dir", "run_dir", "models_dir", "inference_repo"):
         setattr(args, key, getattr(args, key).expanduser().resolve())
-    for key in ("trial_spaces", "patient_summaries", "synthetic_notes", "teacher_servers_file", "teacher_concurrency_file"):
+    for key in ("trial_spaces", "patient_summaries", "synthetic_notes", "teacher_servers_file", "teacher_concurrency_file",
+                'trialspace_extra_pairs', 'trialspace_cache_dir'):
         if getattr(args, key) is not None:
             setattr(args, key, getattr(args, key).expanduser().resolve())
     if args.teacher_servers_file and args.teacher_url:
@@ -358,16 +388,35 @@ def main():
                 "training_commit": git_revision(ROOT), "inference_commit": INFERENCE_COMMIT,
                 "trial_rubric_digest": TRIAL_RUBRIC_DIGEST,
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}
+    from colbert_experiments.regression import score_contract
+    identity['trialspace_contract'] = score_contract()
+    source_paths = [ROOT / 'train_from_summaries.py', ROOT / 'trialspace_training.py',
+                    ROOT / 'train_good_option_checker.py',
+                    *sorted((ROOT / 'colbert_experiments').glob('*.py')),
+                    *sorted((ROOT / 'colbert_experiments/prompts').glob('*.txt')),
+                    ROOT / 'oncoreasoning_training/create_all_training_data.py',
+                    ROOT / 'oncoreasoning_training/prepare_boilerplate.py',
+                    ROOT / 'oncoreasoning_training/teacher.py',
+                    args.inference_repo / 'src/matchminer_ai/llm/traces.py',
+                    args.inference_repo / 'src/matchminer_ai/llm/endpoint_pool.py']
+    identity['production_sources'] = [source_record(path) for path in source_paths]
     if manifest_path.exists():
         from oncoreasoning_training.pipeline_upgrade import compatible_identity
         identity = compatible_identity(json.loads(manifest_path.read_text()), identity, args.run_dir, ROOT)
     atomic_json(manifest_path, identity)
+    atomic_json(args.run_dir / 'reasoning_archives.json', dict(
+        policy='Preserve returned reasoning and complete responses; answer-only targets remain separate.',
+        pooled_teacher_traces=str(args.run_dir / 'llm_traces'),
+        colbert_question_traces=[str(args.run_dir / f'trialspace_round{i}/teacher/responses') for i in (1, 2)],
+        distillation_traces=str(args.run_dir / 'oncoreasoning/teacher_attempts'),
+        distillation_validated_responses=str(args.run_dir / 'oncoreasoning/responses'),
+        exclusion_traces=str(args.run_dir / 'boilerplate_components/teacher_attempts')))
     fingerprint = digest(identity)
     os.environ["PYTHONPATH"] = str(args.inference_repo / "src") + os.pathsep + str(ROOT)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ.setdefault("OMP_NUM_THREADS", "8")
     os.environ["PYTHONUNBUFFERED"] = "1"
-    # Mining selects physical devices itself; torchrun selects the visible ranks.
+    # Distributed mining and fitting use ranks within the selected visible GPUs.
     pool = None
     try:
         for stage in plan:
@@ -389,6 +438,8 @@ def main():
             # Each command emits progress but no clinical rows to its own log.
             with (args.run_dir / "logs" / (stage.name + ".log")).open("a") as log:
                 env = dict(os.environ)
+                env['MMAI_LLM_TRACE_DIR'] = str(args.run_dir / 'llm_traces' / stage.name)
+                env['MMAI_LLM_TRACE_STAGE'] = stage.name
                 if "torch.distributed.run" in stage.command:
                     env["CUDA_VISIBLE_DEVICES"] = args.gpus
                 subprocess.run(stage.command, cwd=ROOT, env=env, check=True, stdout=log, stderr=subprocess.STDOUT)

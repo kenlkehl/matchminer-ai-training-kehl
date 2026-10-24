@@ -11,11 +11,19 @@ import train_from_summaries as runner
 
 def test_correction_preserves_all_other_stage_commands():
     args = runner.parser().parse_args([])
-    new = [vars(stage) for stage in runner.stages(args)]
-    old = deepcopy(new)
-    fit = next(s for s in old if s['name'] == 'train-trialspace-2')['command']
-    fit[fit.index('--base-model') + 1] = args.embedding_model
-    fit += ['--input-parquet', str(args.run_dir / 'top_cohorts_tocheck_round1_labels/labels.parquet')]
+    # This narrowly scoped receipt upgrades historical pooled-vector runs.
+    # Keep that historical plan explicit now production uses the ColBERT CLI.
+    old = [dict(name=name, command=['python', name]) for name in
+           ('mine-2', 'label-top_cohorts_tocheck_round2', 'catalog', 'train-oncoreasoning')]
+    old.append(dict(name='train-trialspace-2', command=[
+        'python', 'finetune_embedder.py', '--base-model', 'google/embeddinggemma-2',
+        '--input-parquet', str(args.run_dir / 'top_cohorts_tocheck_round1_labels/labels.parquet'),
+        '--input-parquet', str(args.run_dir / 'top_patients_tocheck_round1_labels/labels.parquet')]))
+    new = deepcopy(old)
+    new[-1]['command'] = ['python', 'finetune_embedder.py', '--base-model',
+                         str(args.models_dir / 'trialspace_round1')]
+    for direction in ('cohorts', 'patients'):
+        new[-1]['command'] += ['--input-parquet', str(args.run_dir / f'top_{direction}_tocheck_round2_labels/labels.parquet')]
     validate_plan_change(old, new, args)
     for name in ('mine-2', 'label-top_cohorts_tocheck_round2', 'catalog', 'train-oncoreasoning'):
         changed = deepcopy(new)

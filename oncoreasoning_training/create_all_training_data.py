@@ -353,20 +353,25 @@ def task_messages(task, sources, response_dir):
 
 
 def invoke_teacher(task, messages, call, *, attempts=3):
-    """Reasoning stays in the teacher response object; only final content survives.
+    """Keep teacher reasoning in archives; supervise only the validated final.
 
     Retry the original request, never train on an error-correction conversation.
     Truncated completions are invalid even when their first letter is correct.
     """
+    from matchminer_ai.llm.traces import response_record
+    traces = []
     for attempt in range(attempts):
         try:
             result = call(messages)
+            traces.append(response_record(result, messages=messages))
             choice = result.choices[0]
             if choice.finish_reason != "stop":
                 raise ValueError("Teacher completion did not finish normally")
             answer = c.validate_answer(choice.message.content, task["category"])
             return {"id": task["id"], "category": task["category"], "split": task["split"],
-                    "messages": messages, "answer": answer}
+                    "messages": messages, "answer": answer,
+                    "reasoning": traces[-1]['reasoning'], "teacher_attempts": traces,
+                    "trace_version": traces[-1]['trace_version']}
         except Exception:
             if attempt + 1 == attempts:
                 # Do not echo server exceptions: they can contain clinical text.
@@ -388,6 +393,8 @@ def generate(args, tokenizer=None, call=None):
               "enable_thinking": args.teacher_thinking, "max_tokens": args.teacher_max_tokens,
               "max_context": args.teacher_context, "temperature": args.temperature,
               "sampling": sampling}
+    from matchminer_ai.llm.traces import TRACE_VERSION
+    config['trace_version'] = TRACE_VERSION
     check_manifest(directory, "generation_manifest.json", config, transport_keys=("server_urls",))
     atomic_json(directory / "teacher_execution.json", {"server_urls": urls,
         "registry": str(args.server_urls_file) if args.server_urls_file else None,
@@ -399,7 +406,7 @@ def generate(args, tokenizer=None, call=None):
         call = TeacherPool(urls, args.teacher_model, max_tokens=args.teacher_max_tokens,
                            thinking=args.teacher_thinking, temperature=args.temperature, timeout=args.timeout,
                            registry=args.server_urls_file, per_server=args.concurrency_per_server,
-                           recovery_timeout=args.recovery_timeout)
+                           recovery_timeout=args.recovery_timeout, trace_dir=directory / 'teacher_attempts')
     def worker(task):
         messages = task_messages(task, manifest["sources"], response_dir)
         path = response_path(response_dir, task['id'])
@@ -408,6 +415,8 @@ def generate(args, tokenizer=None, call=None):
             if record["id"] != task["id"] or record["messages"] != messages:
                 raise ValueError("Cached response no longer matches its prepared request")
             c.validate_answer(record["answer"], task["category"])
+            if record.get('trace_version') != TRACE_VERSION or not record.get('teacher_attempts'):
+                raise ValueError('Cached response lacks saved reasoning/raw traces; use a new generation directory')
             return
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
                                                **sampling["extra_body"]["chat_template_kwargs"])

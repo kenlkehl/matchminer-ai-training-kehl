@@ -36,7 +36,13 @@ def test_primary_runner_uses_nemotron_parsers():
     assert command[command.index('--reasoning-parser') + 1] == 'nemotron_v3'
     assert command[command.index('--tool-call-parser') + 1] == 'qwen3_coder'
     labels = [stage for stage in runner.stages(args) if stage.name.startswith('label-')]
-    assert labels and all(stage.command[stage.command.index('--reasoning-parser') + 1] == 'nemotron_v3' for stage in labels)
+    assert labels
+    for stage in labels:
+        # The ColBERT labeler resolves the parser from the underlying tokenizer,
+        # independently of any endpoint's served-model alias.
+        tokenizer = stage.command[stage.command.index('--teacher-tokenizer') + 1]
+        assert tokenizer == MODEL
+        assert resolve_parser_name(tokenizer) == 'nemotron_v3'
 
 
 def test_teacher_sampling_preserves_explicit_temperature(monkeypatch):

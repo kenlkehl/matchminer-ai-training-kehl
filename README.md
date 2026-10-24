@@ -1,195 +1,180 @@
 # matchminer-ai-training
 
-The active pipeline trains text-only GemmaEmbedding 2 TrialSpace,
-then two OncoReasoning LoRA adapters on the same frozen Gemma 4 E4B text model:
-one for patient summarization and one for individual TrialChecker,
-BoilerplateChecker, and GoodOption questions.
-The separate ModernBERT TrialChecker and BoilerplateChecker trainers have been
-removed. GoodOption catalog construction remains part of training.
+The production TrialSpace path trains **ColBERT with gated score regression**,
+starting from `lightonai/GTE-ModernColBERT-v1`. It uses complete patient histories
+and cohort eligibility criteria in both retrieval directions. The pipeline then
+builds the GoodOption evidence catalog and trains the existing answer-only
+OncoReasoning summarization and clinical-QA adapters.
 
-Use a venv on local disk (`~/thisenv` on the development machine), never inside
-this network-mounted checkout. On the training VM, install the project and the
-sibling inference repository into a uv venv, then run:
+`train_all.sh`, `train_all_gcp.sh`, and `temp_train_gcp.sh` invoke
+`run_pipeline.py`; its training stage invokes `train_from_summaries.py`.
+`trialspace_training.py` is the production preparation/mining/labeling/training
+entrypoint. It shares the tested ColBERT implementation and question contracts
+with [`colbert_experiments`](colbert_experiments/README.md); production fixes the
+objective to gated regression.
+
+Use a local-disk virtual environment, outside the network-mounted checkout, and
+install this repository plus the sibling `matchminer-ai-inference-kehl` package.
+The inference revision is pinned by `INFERENCE_COMMIT` in
+`train_from_summaries.py`. The manifest also hashes the actual production sources
+and prompt contract, so an uncommitted code or prompt change cannot silently
+resume incompatible work.
 
 ```bash
 ~/thisenv/bin/python train_from_summaries.py --dry-run
 PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
-```
 
-All three shell entrypoints use `run_pipeline.py`. By default they start at
-`train_from_summaries.py`, preserving existing training commands and checkpoints.
-Select `--start-at` to include data production, and `--stop-after` to stop before
-later stages. The training portion expects eight GPUs and a
-sibling `matchminer-ai-inference-kehl` checkout pinned to
-`75a14df89d27698c504ef81e61d652822f1faea9`. Review the pin and prompt contracts
-before adopting changes in that dependency. The default teacher for every
-label, catalog stage, exclusion extraction, and distillation request is
-`nvidia/Gemma-4-31B-IT-NVFP4`. Eight text-only vLLM workers serve it on localhost;
-they are stopped before student training. A separate vLLM executable can be
-selected with `--vllm` when serving dependencies need their own environment.
-TrialSpace labeling allows up to 96 concurrent requests per teacher GPU
-(768 total), and each vLLM worker permits 96 active sequences. The labeler's
-adaptive limiter ramps up after successful requests and backs off on errors.
-Cataloging, exclusion extraction and distillation share a live endpoint pool.
-
-The active data-production extractor is `0b_extract_trial_cohorts.py`. It calls
-`matchminer_ai.trials.summarize_trials` from the sibling inference-kehl checkout:
-one prompt screens for cancer treatment and, when appropriate, extracts distinct
-eligibility cohorts. Step 0c samples **5,000 trials**, retaining every cohort and
-excluding trials open at DFCI during 2025 or 2026. Historical space extraction is
-available separately as `legacy_trial_space_extraction.py` for older evaluation
-workflows; it is not part of the active synthetic-data pipeline.
-
-To run the pipeline against an existing teacher, supply its OpenAI-compatible
-endpoint instead of starting local vLLM workers:
-
-```bash
+# Use an existing teacher pool and explicit prepared data.
 ~/thisenv/bin/python train_from_summaries.py \
-  --teacher-url http://sn4622130540:8000/v1 \
-  --teacher-served-model gemma4-31b --gpus 0,1 \
-  --label-concurrency-per-server 288
+  --patient-summaries ../data/no_phi/patient_summaries_with_spaces.parquet \
+  --trial-cohorts ../data/no_phi/synthetic_generation/sample_trial_cohort_lineitems.csv \
+  --teacher-servers-file ../data/no_phi/live_pool/servers.json \
+  --teacher-served-model gemma4-31b --gpus 2,3
 ```
 
-Repeat `--teacher-url` for multiple servers. The runner verifies the served model
-and context capacity, writes the shared endpoint registry, and leaves external
-server processes running between stages. Mining and student fine-tuning still
-use the selected GPUs on the machine running the pipeline. If the teacher has a
-smaller context, set `--teacher-max-context` to its supported limit.
-`--label-concurrency-per-server` persists the TrialSpace labeling ceiling across
-stage transitions and restarts; the default remains 96 per endpoint. The shared
-teacher above has been measured at 288. Catalog and long-context distillation use
-the separate `--teacher-concurrency` setting (default `0`, automatic). Automatic
-scheduling can fill the sum of the registry's `upstream_concurrency` caps, up to
-1,536 pending workers; entries without a cap default to 96. An explicit positive
-value limits total concurrent chains. The current primary/H200/Camus/cloud caps
-are 288/64/32/96 per server. Registry additions and removals take effect during
-each stage. Singleton catalog calls share the pool instead of repeatedly using
-the first server. Transient connection, rate-limit and server failures retry
-on healthy workers for up to 24 hours, allowing Spot workers to return. Endpoint
-addresses are execution metadata and do not invalidate saved model responses.
-Requests allow 7,200 seconds; `scripts/teacher_proxy.py` allows 7,260 seconds and
-cancels upstream work when a caller disconnects. The run identity records the exact
-trial-scoring rubric digest; changing that rubric requires discarding old labels
-and resetting dependent stages rather than resuming mixed-prompt outputs.
-The scoring instructions precede both summaries to provide a reusable cache
-prefix. Required biomarkers follow the rubric's tested/standard-of-care inference
-rules and its exception for novel screening biomarkers. Specificity requires
-support for the complete applicable requirement. Binary TrialChecker questions
-reuse the relevant current reasonableness clauses and specificity guidance;
-their instructions and answer options also precede patient and trial context.
-Prior-treatment specificity explicitly requires an on-therapy response when the
-trial calls for it, matching the aggregate scoring rubric.
-For a served alias, the server must report `--teacher-model` as its underlying
-root; tokenizers still load from that HF model. OncoReasoning accumulation scales
-with GPU count (32 steps on two GPUs, 8 on eight) to retain a batch of 64 examples
-per optimizer step when the GPU count divides 64.
+Use `--teacher-url` repeatedly for fixed endpoints instead of a managed registry.
+External servers remain running; select available local GPUs for mining and
+training. Without external endpoints, the runner starts one text-only vLLM
+teacher per selected GPU and stops those workers before student computation.
+The default teacher is `nvidia/Gemma-4-31B-IT-NVFP4`, with vendor sampling and
+thinking enabled. The approved Gemma 4 31B FP8/NVFP4 variants remain traceable by
+actual endpoint and model root. `--teacher-max-context` defaults to 250,000;
+`--vllm` selects a separate serving executable when needed.
 
-An existing local run can send TrialSpace fitting to the eight-GPU GCP VM through
-an explicitly scoped `.mmai_cache/remote_trialspace.json` execution configuration.
-The adapter leaves teacher traces in the local label artifacts, transfers the
-unchanged columns used by the embedder, and waits for a durable cloud job.
-Cloud teachers stop while fitting owns those GPUs and return afterward. The
-Spot job resumes the latest complete checkpoint, saves every 500 steps, and
-stores checkpoints on persistent disk. The local stage completes only after the
-trained SentenceTransformer artifact has been copied back and checked. The
-ordinary trainer retains its 2,500-step checkpoint interval; `--save-steps`
-can override it.
+TrialSpace labeling uses the existing adaptive request pool. The default
+`--label-concurrency-per-server` ceiling is 96, with a starting limit of 16 and
+1,024 pending pair chains (`--trialspace-label-workers`). A failed eligibility
+gate ends its chain; eligible pairs ask their specificity questions separately.
+`--teacher-concurrency-file` adjusts per-server limits during a run, and the live
+registry admits/removes endpoints. Other teacher stages retain the independent
+`--teacher-concurrency` setting (0 means automatic capacity-based scheduling).
 
-For the active run, `scripts/register_downstream_upgrade.py` records the reviewed
-teacher transport/prompt update while preserving the original completed-stage
-fingerprints and prior round 2 correction. Register it with the local coordinator
-stopped, then restart that coordinator. The durable cloud fit keeps running on
-its recorded revision; its execution pins must remain unchanged until it finishes.
+## Cohort and patient inputs
 
-The run starts from `../data/no_phi/patient_summaries_with_spaces.parquet` and
-`trial_space_lineitems.csv`, mines candidates with the base embedding model,
-labels them, and trains TrialSpace round 1 from the base model. Round 2 mines
-with that trained model, labels those candidates, and continues from the round 1
-weights using only round 2 labels. Each fit has a fresh optimizer and learning-rate
-schedule; checkpoints resume only interruptions within that fit. A third mining
-round uses the trained round 2 model to supply OncoReasoning candidates.
-For each patient, mining samples 500 **distinct NCT IDs**, expands all their
-spaces, and keeps 20 spaces. For each trial space it samples up to 20,000
-patients and keeps 40. Sampling is within original train/validation co-splits;
-test rows are excluded and TrialSpace trains only on the train split.
+`0b_extract_trial_cohorts.py` calls the inference package's combined
+cancer-treatment/cohort extraction API. `0c_sample_trial_spaces.py` samples
+**5,000 cancer-treatment trials**, excluding trials open at DFCI in 2025 or 2026,
+and keeps every cohort. When upstream data production is selected, training
+consumes this sampled cohort file, not the full extraction denominator.
 
-The pipeline then builds and validates fresh drug and class evidence, extracts
-individual exclusions, and distills summarization from `all_synthetic_notes.parquet`
-plus all three QA families. Catalog web research receives public trial/drug
-information only. Patient-bearing teacher requests use the configured local
-workers or explicitly supplied teacher endpoints.
-OncoReasoning trains the adapters sequentially with FSDP2 across eight GPUs.
-Each starts from the original base and trains only on its own task category;
-their data volumes do not compete in a mixed training objective. Defaults are
-rank 64, alpha 128, all text-model linear layers, dropout 0.05, learning rate
-5e-5 with 3% warmup and cosine decay, gradient clipping at 1.0, and one epoch.
-Variable 10K–50K-token summary chunks and final answers without teacher
-reasoning are unchanged. Outputs are `oncoreasoning/summarization` and
-`oncoreasoning/clinical_qa`, each with its own checkpoints and validation metrics.
-See the [OncoReasoning instructions](oncoreasoning_training/README.md) for the
-answer-first contract and configurable student model.
+The production corpus requires native cohort IDs and complete accepted cohort
+sets. Multi-cohort text concatenates cohort-specific and common eligibility.
+Single-cohort text uses only the original eligibility criteria, without the title
+or summary. Patient cancer history and the prior boilerplate field become one
+summary with an **Other relevant history:** bridge. Original patient, NCT, cohort,
+and split IDs are preserved. Sibling cohorts and known synthetic patient/source
+trial relationships cannot cross splits; conflicts fail explicitly. Test rows
+remain in the corpus but are excluded from mining, labeling and optimization.
 
-Outputs default to `../data/no_phi/gemma_pipeline_v2` and
-`../models/gemma_pipeline_v2`. `status.json`, per-stage logs, manifests, and
-completion markers live in the run directory. Rerun the identical command to
-resume after interruption: completed stages are checked, teacher outputs resume,
-and student trainers restore their latest checkpoints. Source hashes, code
-revisions, and settings must match. Keep these directories on persistent disk
-on Spot VMs. A new run or changed inputs require fresh output directories.
-For an existing run with unchanged inputs, `--skip-input-validation` reuses its
-recorded source identities without reading or rehashing the input files. It does
-not override prompt/settings compatibility or permit reuse of stale labels.
+The training-only defaults are `DATA_DIR/patient_summaries_with_spaces.parquet`,
+`DATA_DIR/trial_cohort_lineitems.csv`, and `DATA_DIR/all_synthetic_notes.parquet`.
+Override the cohort path with the sampled file when those differ. Historical
+trial-space exports do not supply the new cohort contract.
 
-To correct a run stopped at round 2 training from the older cumulative-label
-pipeline, stop its local runner and cloud job, archive the incorrect round 2
-job directory and checkpoints on both machines, deploy this commit, and run
-`~/thisenv/bin/python scripts/register_trialspace_upgrade.py --run-dir <run-dir>`.
-The scoped receipt preserves completed mining, labels, and round 1 artifacts
-while allowing only the round 2 weight/input change. Resume the original runner
-with `--skip-input-validation`. Cloud execution must use a new operation ID and
-the deployed commit; it must not reuse the old job or optimizer checkpoints.
+## Labels and regression objective
 
-For an already-running pre-adapter pipeline, pull this update without restarting
-the service, then run:
+For each canonical patient/cohort pair, the teacher first answers:
 
-```bash
-~/thisenv/bin/python scripts/register_oncoreasoning_upgrade.py \
-  --run-dir ../data/no_phi/gemma_pipeline_v2
-```
+> Is this patient potentially eligible, meaning there is no clear evidence of ineligibility?
 
-The pending training entrypoint
-automatically trains both adapters when reached. The explicit upgrade receipt
-also permits restart after a Spot interruption while preserving the original
-manifest and completion fingerprints. Registration rejects changes outside the
-adapter update and changes to the earlier stage semantics; only the two teacher
-batching limits may change. Registration must happen before OncoReasoning
-training begins. Applying new batching limits requires draining and restarting
-the teacher/labeling processes; saved label shards are reused.
+A **no** yields score 0 and skips all specificity calls. A **yes** triggers four
+separate calls: matching cancer type, disease burden, prior treatment, and a
+required biomarker condition documented in the patient/tumor. Python counts the
+yes answers, including potential eligibility, giving scores 1–5 for eligible
+pairs. Skipped answers are null; failed calls leave the pair unscored and retry
+on resume. The brief answer justification and the model's separate reasoning
+trace are both preserved. Unknown information alone does not make the patient
+ineligible; specificity requires the support described by its own rubric.
 
-## TrialSpace embedding model
+The student minimizes `MSE(mean_MaxSim(query, document), yes_count / 5)`.
+The production prediction link is identity: no sigmoid transforms labels or
+predictions. This assumes equal spacing between the five positive scores; the
+score is not a probability. One aggregate retrieval instruction precedes the
+complete query text. The complete opposite-side text is the document. Training
+groups labeled candidates by query and direction, retains constant-score groups,
+and never treats unjudged/in-batch documents as negatives.
 
-TrialSpace fine-tunes `google/embeddinggemma-2` with only its text encoder
-(`vision_config=None`, `audio_config=None`). Google documents these settings and
-the input prefixes in its [Hugging Face model card](https://huggingface.co/google/embeddinggemma-2#best-practices).
-Use `sentence-transformers>=6.1` and `transformers>=5.19` (`uv sync --group training`).
+## Mining, fitting and artifacts
 
-Patient summaries and trial spaces both receive
-`task: sentence similarity | query: `, Google's symmetric similarity prefix,
-because either side can be the retrieval query. The trainer adds the prefix once
-to raw text before tokenization. The 2,500-token limit includes that prefix and
-special tokens. Google's mean pooling (including prompt tokens), normalization,
-and full 768-dimensional output are retained. Training uses float32 weights
-with bfloat16 mixed precision on supported CUDA devices; float16 is disabled.
+The production round sequence is:
 
-The saved SentenceTransformer sets `SentenceSimilarity` as its default prompt
-and saves the same prefix under `query` and `document`. Encode raw summaries
-with `model.encode(texts)` or `model.encode(texts, prompt_name="query")`.
-`prompt="query"` would prepend the literal word, so it must not be used to
-select a named prompt. Evaluation and mining scripts honor the saved prefix.
+1. Prepare the complete cohort/patient corpus once.
+2. Mine with the base ColBERT model, label the canonical pair union, and fit round 1.
+3. Mine with round 1, label new candidates, and fit round 2 from round 1 weights
+   using only round 2 labels and a fresh optimizer.
+4. Mine with round 2 to supply complete cohort/patient tables to catalog and
+   OncoReasoning preparation.
 
-The integrated runner saves the final TrialSpace artifact as
-`../models/gemma_pipeline_v2/trialspace_round2`. Regenerate patient and trial
-embeddings for the new model; older vectors and indexes are incompatible.
+Each fit defaults to three **expected query-group sampling passes**, with random
+sampling within direction/query groups. `--trialspace-steps` overrides that
+budget. Defaults are learning rate 1e-5, accumulation 4 per GPU, up to four labeled
+documents per query, BF16 on CUDA, and gradient checkpointing. `--gpus` controls
+both distributed mining and DistributedDataParallel fitting. Checkpoints resume
+interruptions within the same fit, with strict source/model/label identities.
+
+Both query and document limits are **8,192 tokens**, including markers. Full text
+is never silently truncated. The model uses its published projection, Q/D markers,
+and document punctuation mask. All encoding and mining score calculations are
+batched. Distributed miners share atomic token-cache shards on disk; each worker
+holds a bounded LRU cache instead of loading the entire corpus into memory.
+Per-query checkpoints allow mining to resume without repeating completed work.
+
+The default candidate pool is 256 lexical/random proposals per query. Exact
+MaxSim selects 20 within that pool; five TF-IDF and five random proposals from
+the whole split are also included. Known source-trial relationships and optional
+`--trialspace-extra-pairs` add independent/challenge candidates without assuming
+positive labels. This is bounded candidate mining, not exhaustive corpus search.
+`--trialspace-candidate-limit`, `--trialspace-top-k`, `--trialspace-lexical-k`,
+`--trialspace-random-k`, and batching controls expose those choices. Both retrieval
+directions are scored independently; directional MaxSim is never transposed.
+
+Every 100 optimizer updates, fixed train/validation groups measure normalized
+MSE, MAE/RMSE in 0–5 units, unequal-label ordering accuracy, and tie-aware NDCG.
+Zero and train-only constant-mean baselines expose apparent gains caused solely
+by score calibration or zero-heavy labels. These are fixed candidate-pool
+diagnostics, not full-corpus recall estimates.
+
+New defaults are `../data/no_phi/colbert_pipeline_v1` and
+`../models/colbert_pipeline_v1`. Final models are `trialspace_round1` and
+`trialspace_round2` under the models directory, including
+`regression_scoring.json` and `experiment_encoding.json`. Load them with the
+native ColBERT implementation; pooled SentenceTransformer embeddings and the
+legacy remote TrialSpace adapter are incompatible. The older pooled-vector
+scripts remain for historical reproduction and are not invoked by production.
+Runtime inference presets and published models are not switched by this training
+change. Regenerate every token index when adopting a new checkpoint.
+
+Use fresh run/model directories for this architecture. Old pooled-vector stage
+markers, label schemas, checkpoints, and upgrade receipts cannot migrate a run
+into ColBERT. `--skip-input-validation` only reuses already recorded source hashes
+for an otherwise identical run.
+
+## Reasoning archives
+
+All production LLM stages preserve returned reasoning for later distillation:
+
+| Stage | Durable archive |
+| --- | --- |
+| Trial cohort extraction | Per-trial checkpoints with attempts, answers, reasoning and source metadata; pooled raw-response sidecars |
+| Synthetic seeds, events and notes | Original generation checkpoints/shards with reasoning and raw responses |
+| Serial patient summarization | Per-chunk summary shards with reasoning, prior summary and source chunk linkage |
+| ColBERT labels | `trialspace_round*/teacher/responses/<prefix>/*.json` plus `labels.jsonl`, containing exact messages, rendered prompt, sampling, raw answer/response, reasoning and endpoint identity |
+| Catalog and other pooled teacher calls | `llm_traces/<stage>/<prefix>/*.json`, written before validation, including incomplete/malformed attempts |
+| Exclusion extraction and OncoReasoning | `teacher_attempts/` raw sidecars plus validated records retaining returned reasoning and retry attempts |
+
+`reasoning_archives.json` records the downstream locations. Upstream pooled
+sidecars live under `PIPELINE_DIR/llm_traces`. Raw generation and summarization
+artifacts remain intact when prepared tables select only final text. Archives
+contain input text and stay in the authorized non-PHI run directories. Headers
+and credentials are excluded. A model returning no separate reasoning leaves an
+empty field and an intact raw response; no reasoning is invented.
+
+Reasoning retention does **not** change the existing answer-only OncoReasoning
+supervision: only the validated final summary or answer/explanation becomes a
+training target. Parent summary chains also consume only prior final summaries.
+Old distillation responses that discarded reasoning require a fresh generation
+directory; they are not silently presented as complete trace archives. See the
+[OncoReasoning instructions](oncoreasoning_training/README.md).
 
 ## GoodOption evidence catalog
 
@@ -474,8 +459,8 @@ Common criteria may include inclusions as well as exclusions and are **not** cop
 to `trial_boilerplate_text`; that column is empty because this API does not extract
 separate boilerplate. Synthetic seeds use the complete cohort criteria. Existing
 space-generation artifacts, trained models and saved embeddings are not thereby
-converted or validated for this representation. Training-only execution retains
-its historical default filenames and separately reviewed inference commit pin.
+converted or validated for this representation. Training-only execution now
+requires this native cohort format and the reviewed inference commit pin.
 
 ## Legacy trial-space extraction reference
 
@@ -1202,12 +1187,13 @@ added only for GPT-OSS model identities. Gemma, Nemotron, Qwen, and other famili
 use their configured chat-template/API thinking controls; task instructions are
 preserved without the GPT-OSS header. Unknown model identities receive no header.
 
-### Isolated ColBERT experiments
+### ColBERT experiments and shared implementation
 
 [`colbert_experiments`](colbert_experiments/README.md) explores native token-level
 late interaction with `lightonai/GTE-ModernColBERT-v1`, complete patient/cohort
 text, and bidirectional retrieval. It supports both five independent binary
 tasks and a separate gated 0–5 regression experiment: ask potential eligibility
 first, ask four specificity questions separately only after yes, then count yes
-answers in Python and train MaxSim against `score / 5` with MSE. The experiment
-does not change the production TrialSpace or synthetic-generation pipelines.
+answers in Python and train MaxSim against `score / 5` with MSE. The production
+entrypoint now uses this gated regression implementation; the original binary
+experiment remains available for controlled comparisons.
