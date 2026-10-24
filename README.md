@@ -967,8 +967,9 @@ precedence over the optional second-primary diversity request.
 Both seed and patient prompts express ages as whole years plus additional weeks
 (for example, `50 years and 21 weeks`, with weeks from 0 through 51). This applies
 to diagnosis ages in seeds and to demographics and every event timestamp in
-histories; chronology validation compares both
-parts, and downstream synthetic dates preserve the week intervals. The warning
+histories; chronology checks compare both parts and record reversals as warnings
+without rejecting, sorting, or changing the event list. Downstream synthetic
+dates preserve the week intervals. The warning
 blocks in both prompt modules also prohibit imaging findings, including claims
 of absence, for organs outside the specified scan's field of view.
 
@@ -1005,8 +1006,12 @@ the diagnosis follows the workup establishing it, at its seed-assigned age.
 Both event examples illustrate workup before diagnosis. Findings must follow
 the procedures or tests that establish them, including within the same week.
 The runner validates five distinct prose seeds with diagnosis ages,
-one patient per expansion, a diagnosis event at each seed age, nondecreasing
-event ages, report events, and common target-trial references. It does not
+one patient per expansion, diagnosis events at explicitly stated diagnosis ages,
+other clinical events at other dated seed facts, valid age formats, report
+events, and common target-trial references. Current status, progression scans,
+treatment, and procedure ages do not require invented diagnosis tags.
+Chronology reversals are saved in `validation_warnings` alongside the validation
+revision, including in the exported patient provenance. The validator does not
 automatically compare names, sex, or all clinical facts across free prose;
 these require output review. Invalid or truncated responses retry
 with the specific validation error. These checks do not establish clinical or
@@ -1027,6 +1032,19 @@ schema. The run manifest is versioned and pins all prompt/helper source files;
 use a fresh output directory after changing them. The v5 cohort-seed event manifest
 rejects reuse of previous trial-conditioned event, tagged-seed, or multi-patient
 checkpoints.
+
+On resume, failed patients first try their saved rejected LLM attempts against
+the current validator. Recovery prefers attempts without chronology warnings,
+preserves the original response, endpoint, timestamp, and prompt hash, and writes
+an `event_recoveries/` receipt. If none pass, the ordinary LLM retry path runs.
+For the v5 validation-only correction, stop the generation coordinator and
+worker gracefully, then run
+`python scripts/register_event_validation_upgrade.py --run-dir <generation-dir>`
+before resuming the original pipeline command. Registration requires both writer
+locks, checks that inputs and every prompt/helper except the generator remain
+unchanged, and backs up the old pipeline request and failures. The original
+generation manifest and patient-ID namespace remain unchanged. This exception
+does not authorize resuming with different prompts, sampling, or input data.
 
 After event generation completes, the unchanged step-2 prompt expands clinical,
 imaging, pathology, and NGS report events into notes. `--stop-after-events` on the
@@ -1183,3 +1201,13 @@ Model-specific reasoning text: the literal `Reasoning: high` system header is
 added only for GPT-OSS model identities. Gemma, Nemotron, Qwen, and other families
 use their configured chat-template/API thinking controls; task instructions are
 preserved without the GPT-OSS header. Unknown model identities receive no header.
+
+### Isolated ColBERT experiments
+
+[`colbert_experiments`](colbert_experiments/README.md) explores native token-level
+late interaction with `lightonai/GTE-ModernColBERT-v1`, complete patient/cohort
+text, and bidirectional retrieval. It supports both five independent binary
+tasks and a separate gated 0–5 regression experiment: ask potential eligibility
+first, ask four specificity questions separately only after yes, then count yes
+answers in Python and train MaxSim against `score / 5` with MSE. The experiment
+does not change the production TrialSpace or synthetic-generation pipelines.

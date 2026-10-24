@@ -40,6 +40,7 @@ EVENT_TYPES = {'demographics', 'diagnosis', 'systemic', 'surgery', 'radiation',
                'adverse_event', 'clinical_note', 'imaging_report', 'pathology_report', 'ngs_report'}
 REPORT_TYPES = {'clinical_note', 'imaging_report', 'pathology_report', 'ngs_report'}
 PATIENTS_PER_CLASS = 5
+VALIDATION_REVISION = 'dated-seed-events-v2-chronology-warnings'
 
 
 def load_stage(filename):
@@ -150,7 +151,9 @@ def tagged_events(text):
 
 
 def check_event_order(events):
+    """Validate event syntax; retain order problems as reviewable warnings."""
     previous = None
+    warnings = []
     age_pattern = r'(\d+) years? and (\d+) weeks?'
     for kind, text in events:
         match = (re.search(r'\b' + age_pattern + r'\b', text, re.I) if kind == 'demographics'
@@ -166,16 +169,22 @@ def check_event_order(events):
             previous = age
             continue
         if previous is not None and age < previous:
-            raise OutputValidationError(
+            warnings.append(
                 f'Events are out of chronological order: age {age[0]} years and {age[1]} weeks '
                 f'follows {previous[0]} years and {previous[1]} weeks')
         previous = age
         if re.search(r'\b(?:study (?:entry|enrollment)|trial (?:screening|enrollment)|(?:this|the) trial)\b', text, re.I):
             raise OutputValidationError('Remove references to trial screening, study entry, or enrollment')
+    return warnings
 
 
 def seed_age_anchors(seed_text):
-    """Separate explicit diagnosis ages from clearly dated treatment/procedure events."""
+    """Require diagnosis tags only for explicit diagnostic clauses.
+
+    Other dated seed facts still need an event at that age. Free prose cannot
+    reliably assign a clinical event type from an age alone. In particular,
+    current status, progression, procedures, and treatment are not new diagnoses.
+    """
     # Seeds also mention durations such as "in remission for 4 years and 48
     # weeks" or "disease-free interval 1 year and 37 weeks". Only an age cue
     # makes a time expression a diagnosis anchor; small pediatric ages remain
@@ -191,16 +200,24 @@ def seed_age_anchors(seed_text):
             '(for example, 50 years and 21 weeks)')
     diagnoses, other = set(), set()
     previous_end = 0
-    for match, (years, weeks) in zip(matches, ages):
-        context = seed_text[previous_end:match.start()]
-        cues = list(re.finditer(
-            r'\b(diagnos\w*|developed|presented|completed|finished|began|started|received|underwent|stopped|discontinued)\b',
-            context, re.I))
-        # Ambiguous prose retains the stricter diagnosis check. Only an explicit
-        # non-diagnostic action changes the required event category.
-        treatment = cues and cues[-1].group().lower() in {
-            'completed', 'finished', 'began', 'started', 'received', 'underwent', 'stopped', 'discontinued'}
-        (other if treatment else diagnoses).add((int(years), int(weeks)))
+    cue_pattern = (r'\b(?P<diagnosis>diagnosed|diagnosis|diagnoses)\b|'
+                   r'\b(?:completed|finished|began|started|received|underwent|stopped|discontinued|'
+                   r'administered|initiated|treated|resected|implanted|performed|transplant(?:ation)?|'
+                   r'\w*ectomy|current(?:ly)?|status|progress\w*|remission|response|menopause|'
+                   r'scan|imaging|CT|MRI)\b')
+    for index, (match, (years, weeks)) in enumerate(zip(matches, ages)):
+        # Do not carry a diagnosis cue across a sentence/semicolon from a prior
+        # fact. Decimal numbers and codes do not end a sentence.
+        before = re.split(r'[;.!?](?=\s|$)', seed_text[previous_end:match.start()])[-1]
+        cues = list(re.finditer(cue_pattern, before, re.I))
+        cue = cues[-1] if cues else None
+        if cue is None and not before.strip(' ,:'):
+            # In "At age ..., she received ...", the action follows the age.
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(seed_text)
+            after = re.split(r'[;.!?](?=\s|$)', seed_text[match.end():end])[0]
+            cue = re.search(cue_pattern, after, re.I)
+        explicit_diagnosis = cue is not None and cue.group('diagnosis') is not None
+        (diagnoses if explicit_diagnosis else other).add((int(years), int(weeks)))
         previous_end = match.end()
     return diagnoses, other
 
@@ -230,7 +247,7 @@ def parse_seeds(answer):
     return seeds
 
 
-def parse_patient_history(answer, seed_text):
+def parse_patient_history(answer, seed_text, *, warnings=None):
     if '<new_patient>' in answer:
         raise OutputValidationError('Generate exactly one patient, without a new_patient separator')
     events = tagged_events(answer)
@@ -240,7 +257,9 @@ def parse_patient_history(answer, seed_text):
         raise OutputValidationError('Include diagnosis events for the supplied prose seed')
     if not REPORT_TYPES.intersection(kind for kind, _ in events):
         raise OutputValidationError('The patient history needs report events for note generation')
-    check_event_order(events)
+    order_warnings = check_event_order(events)
+    if warnings is not None:
+        warnings.extend(order_warnings)
     diagnosis_ages = {tuple(map(int, re.match(r'At age (\d+) years? and (\d+) weeks?,', text, re.I).groups()))
                      for kind, text in events if kind == 'diagnosis'}
     required_diagnoses, required_events = seed_age_anchors(seed_text)
@@ -253,13 +272,14 @@ def parse_patient_history(answer, seed_text):
     missing = required_events - event_ages
     if missing:
         ages = ', '.join(f'{years} years and {weeks} weeks' for years, weeks in sorted(missing))
-        raise OutputValidationError(f'Include the seed treatment/procedure events at their assigned ages: {ages}')
+        raise OutputValidationError(f'Include the other dated seed events at their assigned ages: {ages}')
     # Free prose has no reliable exact-text identity or clinical-fact comparison.
     # Those facts are preserved by the prompt and assessed in output review.
     return events
 
 
 def validate_completion(answer, metadata, stage, seed_text=None):
+    warnings = []
     if metadata.get('finish_reason') != 'stop':
         raise OutputValidationError(f"Incomplete completion: {metadata.get('finish_reason')}")
     if not answer.strip() or answer.lstrip().startswith('ERROR:'):
@@ -269,7 +289,42 @@ def validate_completion(answer, metadata, stage, seed_text=None):
     elif stage == 'seeds':
         parse_seeds(answer)
     elif stage == 'patient_events':
-        parse_patient_history(answer, seed_text)
+        parse_patient_history(answer, seed_text, warnings=warnings)
+    return warnings
+
+
+def recover_saved_history(candidates, seed_text, model):
+    """Revalidate original LLM attempts; never synthesize or retag clinical facts."""
+    acceptable = []
+    for path, trace in candidates:
+        try:
+            warnings = validate_completion(trace['answer'], trace, 'patient_events', seed_text)
+        except OutputValidationError:
+            continue
+        events = parse_patient_history(trace['answer'], seed_text)
+        record = dict(reasoning=trace['reasoning'],
+                      answer='\n'.join(f'<{kind}> {text}' for kind, text in events),
+                      raw_response=(json.dumps(trace['response_json']) if 'response_json' in trace
+                                    else trace['raw_text']),
+                      transport=trace.get('transport', 'completions'), finish_reason=trace['finish_reason'],
+                      model=model, endpoint=trace['endpoint'], generated_at=trace['at'],
+                      prompt_sha256=trace['prompt_sha256'], validation_revision=VALIDATION_REVISION,
+                      validation_warnings=json.dumps(warnings), recovered_from=str(path))
+        acceptable.append((len(warnings), trace['at'], record))
+    # Prefer an attempt without chronology warnings, then the earliest one:
+    # later attempts may have received misleading feedback from the old validator.
+    return min(acceptable, key=lambda row: row[:2])[2] if acceptable else None
+
+
+def compatible_validation_upgrade(previous, current, receipt):
+    """Allow only an explicitly registered validator change, retaining patient IDs."""
+    expected = {**previous, 'source_sha256': {
+        **previous['source_sha256'],
+        'generate_synthetic_data.py': current['source_sha256']['generate_synthetic_data.py']}}
+    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    return (current == expected and receipt.get('kind') == VALIDATION_REVISION
+            and receipt.get('original_manifest_sha256') == digest(previous)
+            and receipt.get('approved_manifest_sha256') == digest(current))
 
 
 def event_rows(records, run_identity):
@@ -347,9 +402,18 @@ class Generator:
                      event_max_tokens=self.args.event_max_tokens, note_max_tokens=self.args.note_max_tokens,
                      context_limit=self.args.max_model_len, spaces_per_note_chunk=self.args.spaces_per_note_chunk)
         path = self.out / 'manifest.json'
-        if path.exists() and json.loads(path.read_text()) != value:
-            raise ValueError('Generation manifest changed; use a fresh output directory')
-        save_json(path, value)
+        if path.exists():
+            previous = json.loads(path.read_text())
+            if previous != value:
+                receipt_path = self.out / 'event_validation_upgrade.json'
+                receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
+                if not compatible_validation_upgrade(previous, value, receipt):
+                    raise ValueError('Generation manifest changed; use a fresh output directory or register the validation-only upgrade')
+            # The original run identity also defines patient IDs. Preserve it
+            # across the recorded validation-only upgrade.
+            value = previous
+        else:
+            save_json(path, value)
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
     def build_payload(self, item, stage):
@@ -388,8 +452,8 @@ class Generator:
         async def work(client, payload):
             reasoning, answer, metadata = await base_work(client, payload)
             try:
-                await asyncio.to_thread(validate_completion, answer, metadata,
-                                        payload['stage'], payload.get('seed_text'))
+                warnings = await asyncio.to_thread(validate_completion, answer, metadata,
+                                                   payload['stage'], payload.get('seed_text'))
             except OutputValidationError as exc:
                 failure = dict(at=now(), stage=payload['stage'], key=payload['key'],
                                endpoint=str(client.base_url), error=str(exc),
@@ -419,6 +483,8 @@ class Generator:
                         transport=metadata.get('transport', 'completions'),
                         finish_reason=metadata['finish_reason'], model=self.args.model,
                         endpoint=str(client.base_url), generated_at=now(),
+                        validation_revision=VALIDATION_REVISION,
+                        validation_warnings=json.dumps(warnings),
                         prompt_sha256=hashlib.sha256(payload['prompt'].encode()).hexdigest())
         return work
 
@@ -510,10 +576,24 @@ class Generator:
         if set(done) - expected_keys:
             raise ValueError('Patient checkpoint contains keys outside the frozen input cohort')
         next_shard = max((int(path.stem.split('_')[-1]) for path in files), default=-1) + 1
-        completed, seeds_completed = len(done), 0
-        failed = {}
+        completed, seeds_completed, recovered = len(done), 0, 0
         failure_directory = self.out / 'generation_failures'
         failure_directory.mkdir(exist_ok=True)
+        failure_records = {record['key']: record for path in failure_directory.glob('*.json')
+                           if (record := json.loads(path.read_text()))['key'] not in done}
+        failed = {key: record['error'] for key, record in failure_records.items()}
+        recovery_directory = self.out / 'event_recoveries'
+
+        def cached_failures():
+            candidates = {}
+            if failed:
+                for path in directory.glob('invalid_*.json'):
+                    trace = json.loads(path.read_text())
+                    if trace.get('stage') == 'patient_events' and trace['key'] in failed:
+                        candidates.setdefault(trace['key'], []).append((path, trace))
+            return candidates
+
+        cached = await asyncio.to_thread(cached_failures)
         buffer, lock = [], asyncio.Lock()
         pending = asyncio.Semaphore(self.args.pending_requests)
         iterator = iter((dict(row, patient_class=kind, key=f'{kind}:{int(row["space_index"])}')
@@ -524,6 +604,7 @@ class Generator:
                               seeds_completed=seeds_completed, expected_seed_batches=2 * len(spaces),
                               stage_completed=completed - len(buffer), stage_expected=len(expected_keys),
                               completed_patient_histories=completed,
+                              recovered_patient_histories=recovered,
                               buffered_patient_histories=len(buffer), unresolved_items=len(failed))
 
         def failure_path(key):
@@ -562,20 +643,38 @@ class Generator:
                 return result
 
             async def expand(item, seed, patient):
-                nonlocal completed
+                nonlocal completed, recovered
                 key = f'{item["key"]}:{patient}'
                 seed_hash = hashlib.sha256(seed.encode()).hexdigest()
                 if key in done:
                     if done[key] != seed_hash:
                         raise ValueError(f'Saved patient seed changed: {key}')
+                    failure_path(key).unlink(missing_ok=True)
                     return
                 child = dict(item, key=key, seed_key=item['key'], patient_number=patient,
                              seed_text=seed, seed_sha256=seed_hash)
-                try:
-                    result = await request(child, 'patient_events')
-                except RuntimeError as exc:
-                    await record_failure(child, exc)
-                    return
+                candidates = cached.pop(key, [])
+                if candidates and failure_records[key].get('seed_text') != seed:
+                    raise ValueError(f'Saved failed-patient seed changed: {key}')
+                result = (await asyncio.to_thread(recover_saved_history, candidates, seed, self.args.model)
+                          if candidates else None)
+                if result is not None:
+                    recovery_directory.mkdir(exist_ok=True)
+                    await asyncio.to_thread(save_json, recovery_directory / (key.replace(':', '_') + '.json'),
+                        dict(key=key, seed_sha256=seed_hash, recovered_at=now(),
+                             source=result['recovered_from'], source_sha256=sha_file(result['recovered_from']),
+                             answer_sha256=hashlib.sha256(result['answer'].encode()).hexdigest(),
+                             original_error=failed.get(key), validation_revision=VALIDATION_REVISION,
+                             validation_warnings=json.loads(result['validation_warnings'])))
+                    recovered += 1
+                    print(f'[generation] recovered saved attempt for {key}', flush=True)
+                else:
+                    try:
+                        result = await request(child, 'patient_events')
+                    except RuntimeError as exc:
+                        await record_failure(child, exc)
+                        return
+                failed.pop(key, None)
                 failure_path(key).unlink(missing_ok=True)
                 # Avoid copying the full trial text into every patient checkpoint.
                 record = {key: child[key] for key in ('key', 'seed_key', 'patient_number', 'seed_text',
@@ -610,6 +709,7 @@ class Generator:
                         path.parent.mkdir(parents=True, exist_ok=True)
                         await asyncio.to_thread(save_json, path, saved)
                     failure_path(item['key']).unlink(missing_ok=True)
+                    failed.pop(item['key'], None)
                     seeds = parse_seeds(saved['answer'])
                     seeds_completed += 1
                     if seeds_completed % 32 == 0:
@@ -651,8 +751,10 @@ class Generator:
             for kind in ('positive', 'negative'):
                 key = f'{kind}:{int(row["space_index"])}'
                 patients = [read_shard(locations[f'{key}:{i}'])[f'{key}:{i}'] for i in range(PATIENTS_PER_CLASS)]
-                provenance = [{k: patient[k] for k in ('key', 'patient_number', 'endpoint', 'model',
-                              'prompt_sha256', 'seed_sha256', 'generated_at')} for patient in patients]
+                provenance = [{**{k: patient[k] for k in ('key', 'patient_number', 'endpoint', 'model',
+                              'prompt_sha256', 'seed_sha256', 'generated_at')},
+                              **{k: patient[k] for k in ('validation_revision', 'validation_warnings', 'recovered_from')
+                                 if k in patient}} for patient in patients]
                 yield dict(key=key, space_index=row['space_index'], patient_class=kind,
                            answer='\n<new_patient>\n'.join(p['answer'] for p in patients),
                            raw_response='\n<new_patient>\n'.join(p['raw_response'] for p in patients),

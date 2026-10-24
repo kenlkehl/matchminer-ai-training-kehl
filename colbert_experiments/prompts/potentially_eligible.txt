@@ -1,0 +1,11 @@
+Question: Is this patient potentially eligible for this trial cohort, defined as yes if there is no clear evidence the patient is ineligible?
+
+Apply ALL inclusion and exclusion criteria together, including age, sex, cancer type/histology, stage and current disease status, prior treatment and response, required and excluded biomarkers, performance status, organ function, comorbidities, other cancers, infections, reproductive criteria, and any other supplied requirement. Include the criteria common across cohorts as well as cohort-specific criteria.
+
+Answer yes if there is no clear evidence of ineligibility. Answer no only when the available patient evidence clearly establishes an unmet requirement or an applicable exclusion; identify that evidence and the relevant criterion. Missing or uncertain information, an unperformed test, an unreported result, or a need for additional screening is not by itself evidence of ineligibility. When such uncertainty is material and no clear disqualifying evidence exists, answer yes with evidence_status=insufficient_information. Mild, resolved, low-grade, or merely mentioned conditions do not establish an exclusion without satisfying its actual threshold and exceptions. Potentially eligible does not mean confirmed eligible.
+
+Preserve required treatment lines, response, resistance, relapse, duration, and timing. Progression on treatment requires progression while receiving that treatment. A washout interval may be satisfied by waiting; do not confuse washout with a required response duration or relapse interval.
+
+A required biomarker known to be absent, or an excluded biomarker known to be present, can clearly establish ineligibility. Do not assume a biomarker is absent merely because its result is unreported or its testing would normally be standard care. Any inference of a mismatch must be clearly supported by documented patient facts. Biomarker matching concerns eligibility requirements, not the treatment's mechanism of action.
+
+Examples: an unknown required biomarker result alone yields yes with insufficient_information; a documented negative result for a required biomarker yields no. An unknown neutrophil count alone yields yes with insufficient_information; a documented count below the trial's required threshold yields no, subject to any stated exceptions.

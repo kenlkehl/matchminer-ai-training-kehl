@@ -302,7 +302,7 @@ def test_dated_treatment_completion_is_not_an_extra_diagnosis():
               '<diagnosis> At age 59 years and 12 weeks, metastatic recurrence.\n'
               '<clinical_note> At age 59 years and 13 weeks, treatment discussion.')
     assert len(generation.parse_patient_history(answer, seed)) == 5
-    with pytest.raises(OutputValidationError, match='treatment/procedure events'):
+    with pytest.raises(OutputValidationError, match='other dated seed events'):
         generation.parse_patient_history(answer.replace('58 years and 40 weeks', '58 years and 41 weeks'), seed)
     with pytest.raises(OutputValidationError, match='seed diagnoses'):
         generation.parse_patient_history(answer.replace('59 years and 12 weeks', '59 years and 11 weeks'), seed)
@@ -318,8 +318,70 @@ def test_procedure_age_does_not_invent_a_diagnosis_timestamp():
     assert len(generation.parse_patient_history(answer, seed)) == 4
 
 
+@pytest.mark.parametrize('dated_fact,event_kind', [
+    ('Current status at 62 years and 4 weeks shows progressing cancer.', 'clinical_note'),
+    ('Current age 62 years and 4 weeks.', 'clinical_note'),
+    ('Primary resected at 62 years and 4 weeks.', 'surgery'),
+    ('Renal transplant at 62 years and 4 weeks.', 'surgery'),
+    ('A pacemaker was implanted at 62 years and 4 weeks.', 'surgery'),
+    ('Bilateral oophorectomy at 62 years and 4 weeks.', 'surgery'),
+    ('She entered menopause at 62 years and 4 weeks.', 'clinical_note'),
+    ('A scan at 62 years and 4 weeks demonstrated progression.', 'imaging_report'),
+    ('The last dose was administered at 62 years and 4 weeks.', 'systemic'),
+    ('At 62 years and 4 weeks, she received radiation.', 'radiation'),
+    ('At age 62 years and 4 weeks, she began chemotherapy.', 'systemic'),
+    ('She suffered an infarction at 62 years and 4 weeks.', 'adverse_event'),
+])
+def test_non_diagnostic_seed_dates_require_events_without_inventing_diagnoses(dated_fact, event_kind):
+    seed = generation.parse_seeds(SEEDS)[0] + ' ' + dated_fact
+    assert generation.seed_age_anchors(seed) == ({(60, 0)}, {(62, 4)})
+    answer = expand_seed(generation.parse_seeds(SEEDS)[0]) + f'\n<{event_kind}> At age 62 years and 4 weeks, {dated_fact}'
+    assert generation.parse_patient_history(answer, seed)[-1][0] == event_kind
+    with pytest.raises(OutputValidationError, match='other dated seed events'):
+        generation.parse_patient_history(answer.replace('At age 62 years and 4 weeks,', 'At age 62 years and 5 weeks,'), seed)
+
+
+def test_leading_age_explicit_diagnosis_remains_required_and_clauses_do_not_bleed():
+    seed = ('At age 50 years and 2 weeks, the patient was diagnosed with breast cancer. '
+            'At 51 years and 4 weeks, she received radiation. '
+            'At 52 years and 6 weeks, metastases were diagnosed.')
+    assert generation.seed_age_anchors(seed) == ({(50, 2), (52, 6)}, {(51, 4)})
+
+
+def test_order_warnings_preserve_content_and_still_enforce_diagnosis_ages():
+    seed = generation.parse_seeds(SEEDS)[0]
+    answer = expand_seed(seed).replace('At age 60 years and 0 weeks, EGFR', 'At age 59 years and 3 weeks, EGFR')
+    warnings = generation.validate_completion(answer, {'finish_reason': 'stop'}, 'patient_events', seed)
+    assert len(warnings) == 1 and 'chronological order' in warnings[0]
+    assert generation.parse_patient_history(answer, seed)[-1][1].startswith('At age 59 years and 3 weeks,')
+    with pytest.raises(OutputValidationError, match='seed diagnoses'):
+        generation.parse_patient_history(answer.replace('<diagnosis> At age 60 years', '<diagnosis> At age 61 years'), seed)
+
+
+def test_saved_attempt_recovery_revalidates_and_retains_original_provenance():
+    seed = generation.parse_seeds(SEEDS)[0]
+    trace = dict(answer=expand_seed(seed), reasoning='original thinking', raw_text='original raw response',
+                 endpoint='http://test/v1/', at='2026-10-24T12:00:00+00:00',
+                 prompt_sha256='original-prompt', finish_reason='stop')
+    incomplete = dict(trace, finish_reason='length')
+    wrong_diagnosis = dict(trace, answer=trace['answer'].replace('<diagnosis> At age 60 years', '<diagnosis> At age 61 years'))
+    disordered = dict(trace, answer=trace['answer'].replace('At age 60 years and 0 weeks, EGFR', 'At age 59 years and 3 weeks, EGFR'))
+    candidates = [(Path('truncated.json'), incomplete), (Path('wrong.json'), wrong_diagnosis),
+                  (Path('disordered.json'), disordered), (Path('valid.json'), trace)]
+    result = generation.recover_saved_history(candidates, seed, 'gemma4-31b')
+    assert result['recovered_from'] == 'valid.json'
+    assert result['answer'] == trace['answer']
+    assert result['raw_response'] == 'original raw response'
+    assert result['prompt_sha256'] == 'original-prompt'
+    assert result['generated_at'] == trace['at']
+    assert json.loads(result['validation_warnings']) == []
+    assert generation.recover_saved_history(candidates[:2], seed, 'gemma4-31b') is None
+    warned = generation.recover_saved_history(candidates[2:3], seed, 'gemma4-31b')
+    assert len(json.loads(warned['validation_warnings'])) == 1
+
+
 @pytest.mark.parametrize('next_age,valid', [
-    ('60 years and 10 weeks', False),
+    ('60 years and 10 weeks', True),
     ('60 years and 21 weeks', True),
     ('60 years and 51 weeks', True),
     ('61 years and 0 weeks', True),
@@ -337,7 +399,6 @@ def test_patient_chronology_compares_years_and_weeks(next_age, valid):
 
 
 @pytest.mark.parametrize('change,message', [
-    (lambda s: s.replace('At age 60 years and 0 weeks, EGFR', 'At age 45 years and 0 weeks, EGFR'), 'chronological order'),
     (lambda s: s + '\n<new_patient>\n' + s, 'exactly one patient'),
     (lambda s: s + '\n<clinical_note> At age 61 years and 0 weeks, evaluated for study entry.', 'study entry'),
 ])
@@ -371,8 +432,10 @@ def test_patient_preserves_diagnosis_age_anchors_and_demographics_start_age():
               '<diagnosis> At age 40 years and 21 weeks, breast cancer.\n'
               + expand_seed(generation.parse_seeds(SEEDS)[0]).split('\n', 1)[1])
     assert len(generation.parse_patient_history(answer, seed)) == 5
-    with pytest.raises(OutputValidationError, match='chronological order'):
-        generation.parse_patient_history(answer.replace('aged 40 years and 21 weeks', 'aged 60 years and 0 weeks'), seed)
+    warnings = []
+    generation.parse_patient_history(answer.replace('aged 40 years and 21 weeks', 'aged 60 years and 0 weeks'),
+                                     seed, warnings=warnings)
+    assert len(warnings) == 1 and 'chronological order' in warnings[0]
 
 
 @pytest.mark.parametrize('change,message', [
@@ -445,6 +508,74 @@ def test_partial_resume_keeps_seeds_and_completed_individual_patients(tmp_path, 
     assert not list((tmp_path / 'generation_failures').glob('*.json'))
 
 
+@pytest.mark.parametrize('changed_seed', [False, True])
+def test_resume_recovers_failed_attempt_without_another_llm_call(tmp_path, monkeypatch, changed_seed):
+    spaces = pd.DataFrame([dict(nct_id='NCT1', this_space=SPACE, trial_boilerplate_text='', space_index=0)])
+    instance = generation.Generator(args_for(tmp_path), Tokenizer())
+    seed = generation.parse_seeds(SEEDS)[0]
+    failures = tmp_path / 'generation_failures'
+    failures.mkdir()
+    generation.save_json(failures / 'positive_0_0.json', dict(key='positive:0:0', error='old validation',
+                         seed_text='different original seed' if changed_seed else seed))
+    traces = tmp_path / 'patient_events'
+    traces.mkdir()
+    generation.save_json(traces / 'invalid_test.json', dict(key='positive:0:0', stage='patient_events',
+        answer=expand_seed(seed), reasoning='saved', raw_text='ORIGINAL', finish_reason='stop',
+        endpoint='http://original/v1/', at='2026-10-24T12:00:00+00:00', prompt_sha256='original'))
+    calls = []
+    async def complete(client, payload):
+        calls.append(payload['key'])
+        return '', SEEDS if payload['stage'] == 'seeds' else expand_seed(payload['seed_text']), dict(finish_reason='stop', raw_text='new')
+    fake_session(monkeypatch, complete)
+    if changed_seed:
+        with pytest.raises(ExceptionGroup, match='unhandled errors') as error:
+            asyncio.run(instance.generate_patient_events(spaces))
+        def messages(exc):
+            return [str(exc)] + [message for child in getattr(exc, 'exceptions', ()) for message in messages(child)]
+        assert any('Saved failed-patient seed changed' in message for message in messages(error.value))
+        assert not (tmp_path / 'event_recoveries/positive_0_0.json').exists()
+        return
+    asyncio.run(instance.generate_patient_events(spaces))
+    assert 'positive:0:0' not in calls and len(calls) == 11
+    frame = pd.concat([pd.read_parquet(p) for p in generation.checkpoint_paths(traces)])
+    assert len(frame) == frame.key.nunique() == 10
+    recovered = frame.loc[frame.key.eq('positive:0:0')].iloc[0]
+    assert recovered.raw_response == 'ORIGINAL' and recovered.endpoint == 'http://original/v1/'
+    assert (tmp_path / 'event_recoveries/positive_0_0.json').exists()
+    assert not list(failures.glob('*.json'))
+    assert instance.status['recovered_patient_histories'] == 1
+    assert instance.status['unresolved_items'] == 0
+
+
+def test_manifest_validation_upgrade_preserves_ids_and_rejects_other_changes(tmp_path):
+    from copy import deepcopy
+    import hashlib
+    (tmp_path / 'sample.csv').write_text('space_index\n0\n')
+    instance = generation.Generator(args_for(tmp_path), Tokenizer())
+    instance.manifest()
+    path = tmp_path / 'manifest.json'
+    current = json.loads(path.read_text())
+    previous = deepcopy(current)
+    previous['source_sha256']['generate_synthetic_data.py'] = 'old-validator'
+    generation.save_json(path, previous)
+    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    receipt = dict(kind=generation.VALIDATION_REVISION, original_manifest_sha256=digest(previous),
+                   approved_manifest_sha256=digest(current))
+    with pytest.raises(ValueError, match='manifest changed'):
+        instance.manifest()
+    generation.save_json(tmp_path / 'event_validation_upgrade.json', receipt)
+    unchanged = path.read_bytes()
+    assert instance.manifest() == digest(previous)
+    assert path.read_bytes() == unchanged
+    for changed in (dict(current, seed=123), dict(current, event_max_tokens=100)):
+        forged = dict(receipt, approved_manifest_sha256=digest(changed))
+        assert not generation.compatible_validation_upgrade(previous, changed, forged)
+    changed = deepcopy(current)
+    changed['source_sha256']['synthetic_event_prompts.py'] = 'different-prompt'
+    forged = dict(receipt, approved_manifest_sha256=digest(changed))
+    assert not generation.compatible_validation_upgrade(previous, changed, forged)
+
+
 def test_patient_expansion_does_not_wait_for_all_seed_groups(tmp_path, monkeypatch):
     spaces = pd.DataFrame([dict(nct_id=f'NCT{i}', this_space=SPACE, trial_boilerplate_text='', space_index=i) for i in range(2)])
 
@@ -469,7 +600,7 @@ def test_patient_expansion_does_not_wait_for_all_seed_groups(tmp_path, monkeypat
 def test_validation_retry_contains_exact_error_and_same_seed(tmp_path, monkeypatch, model):
     seed = generation.parse_seeds(SEEDS)[0]
     async def complete(client, payload):
-        return '', expand_seed(seed).replace('At age 60 years and 0 weeks, EGFR', 'At age 40 years and 0 weeks, EGFR'), dict(finish_reason='stop', raw_text='invalid')
+        return '', expand_seed(seed).replace('At age 60 years and 0 weeks, EGFR', 'At age 60 years and 52 weeks, EGFR'), dict(finish_reason='stop', raw_text='invalid')
     fake_session(monkeypatch, complete)
     tokenizer = Tokenizer()
     tokenizer.name_or_path = model
@@ -478,11 +609,11 @@ def test_validation_retry_contains_exact_error_and_same_seed(tmp_path, monkeypat
     instance = generation.Generator(args, tokenizer)
     payload = instance.build_payload(dict(key='positive:0:0', space_index=0, this_space=SPACE,
         trial_boilerplate_text='', patient_class='positive', seed_text=seed), 'patient_events')
-    with pytest.raises(OutputValidationError, match='age 40 years and 0 weeks follows 60 years and 0 weeks'):
+    with pytest.raises(OutputValidationError, match='weeks from 0 through 51'):
         asyncio.run(instance.completion_work(tmp_path)(SimpleNamespace(base_url='http://test/v1/'), payload))
-    assert 'age 40 years and 0 weeks follows 60 years and 0 weeks' in payload['prompt']
+    assert 'weeks from 0 through 51' in payload['prompt']
     assert seed in payload['prompt']
-    assert 'age 40 years and 0 weeks follows 60 years and 0 weeks' in payload['messages'][-1]['content']
+    assert 'weeks from 0 through 51' in payload['messages'][-1]['content']
     assert len(list(tmp_path.glob('invalid_*.json'))) == 1
 
 

@@ -111,6 +111,13 @@ def make_app(config_path):
     async def models(request):
         return web.json_response(app['models'])
 
+    async def metrics(request):
+        # The production pool needs the actual vLLM scheduler/cache metrics even
+        # when requests use a model-alias proxy. Do not take a generation slot.
+        async with app['client'].get(upstream + '/metrics', timeout=ClientTimeout(total=10)) as response:
+            return web.Response(status=response.status, body=await response.read(),
+                                content_type=response.content_type)
+
     async def forward(request):
         body = await request.json()
         if body.get('stream') or body.get('model') != config['served_model']:
@@ -133,6 +140,7 @@ def make_app(config_path):
     app.cleanup_ctx.append(resources)
     app.router.add_get('/status', status)
     app.router.add_get('/v1/models', models)
+    app.router.add_get('/metrics', metrics)
     app.router.add_post('/v1/completions', forward)
     app.router.add_post('/v1/chat/completions', forward)
     return app

@@ -1,0 +1,2 @@
+Question: Does this cohort require a specific biomarker condition that the patient or tumor is documented to satisfy?
+Answer yes only for a complete documented match, including thresholds, AND/OR combinations, and exceptions. No requirement yields no (not_applicable), an unknown required status yields no (insufficient_information), and a conflicting status yields no (contradicted). This asks about required eligibility biomarkers, not whether the study treatment targets a biomarker. Assess independently of other eligibility dimensions.

@@ -1,0 +1,2 @@
+Question: Does this cohort specifically name a cancer type or histology matching the patient's active cancer?
+Answer yes for a documented match to a specifically allowed cancer type/histology. Broad solid-tumor or all-cancer eligibility alone yields no (not_applicable). A contradictory match yields no (contradicted); inadequate information yields no (insufficient_information). Assess this specificity independently of other eligibility dimensions.
