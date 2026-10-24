@@ -8,7 +8,8 @@ from remote_vllm_pool import OutputValidationError
 
 
 from matchminer_ai.trials.cohort_schema import (
-    build_cohort_messages, load_cohort_prompt, parse_cohort_response,
+    COHORT_SCHEMA_VERSION, build_cohort_messages, load_cohort_prompt,
+    parse_cohort_response,
 )
 
 
@@ -29,8 +30,15 @@ def parse_screening_output(final, finish_reason=None, *, allow_legacy=True):
         ) from exc
     if isinstance(result, dict) and "cancer_treatment_trial" in result:
         try:
+            # Historical v1 audits contain repeated complete cohort criteria.
+            # Only read them explicitly; live requests must use the v2 split.
+            schema_version = COHORT_SCHEMA_VERSION
+            if (allow_legacy and result.get("multiple_cohorts") == "yes"
+                    and "common_eligibility_criteria" not in result):
+                schema_version = "trial-treatment-cohorts-v1"
             combined = parse_cohort_response(
                 final, (finish_reason or "stop") if allow_legacy else finish_reason,
+                schema_version=schema_version,
             )
         except ValueError as exc:
             raise OutputValidationError(str(exc)) from exc

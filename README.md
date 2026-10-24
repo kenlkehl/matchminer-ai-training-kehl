@@ -585,11 +585,12 @@ The separate authored screening prompt has been removed.
 `trial_treatment_screening.py` is now a compatibility adapter that imports the
 inference package's combined `trial.cohorts.user.txt` prompt and JSON validator.
 It classifies the studied intervention's intent using the supplied `trial_text`
-and, for accepted multi-population trials, also extracts complete cohort criteria.
+and, for accepted multi-population trials, extracts cohort-specific criteria and
+one shared-criteria string.
 The legacy 0b space workflow below still selects positive trials for its explicitly
 configured space extraction. New cohort consumers should call the public
 `matchminer_ai.trials.summarize_trials` API directly. The installed inference
-package must include the `trial-treatment-cohorts-v1` contract. It includes direct
+package must include the `trial-treatment-cohorts-v2` contract. It includes direct
 anti-cancer therapy (including early-phase safety/dose studies and adjuvant or
 maintenance treatment) and excludes diagnostic-only and supportive-care studies.
 Anti-cancer treatment studies qualify even when their only outcomes are PK/PD,
@@ -600,7 +601,10 @@ sampling without evaluation of an anti-cancer treatment remains excluded.
 Cancer patients receiving background anti-cancer therapy are not sufficient:
 the study must evaluate an anti-cancer treatment strategy. Insufficient textual
 evidence produces `{"cancer_treatment_trial": "no"}` without further fields.
-Accepted responses add `multiple_cohorts`, and add `cohorts` only when it is `yes`.
+Accepted responses add `multiple_cohorts`, and add `cohorts` followed by
+`common_eligibility_criteria` only when it is `yes`. Each cohort string together
+with the common string contains all applicable eligibility criteria. The public
+API combines them in code for complete cohort rows.
 
 Only positive decisions proceed to space extraction. `trial_treatment_screening.csv`
 is saved beside `--output-trials` by default, with all screened trials, boolean
@@ -611,7 +615,8 @@ CSV location with `--output-screening`. This audit covers trials
 that passed the metadata filter, not metadata-excluded rows. The two existing
 final CSV schemas are unchanged; if every trial is rejected, both contain only
 headers. `trial_cohort_output` retains the combined JSON. Historical Gemma audits with
-boolean decisions and model rationales remain readable; live requests require
+boolean decisions and model rationales, and v1 combined outputs with complete
+criteria repeated per cohort, remain readable; live requests require
 the new combined schema. `--screening-max-tokens` defaults to 50000, independently of extraction's
 `--max-tokens`.
 
