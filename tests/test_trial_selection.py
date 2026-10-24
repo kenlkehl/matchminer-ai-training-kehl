@@ -180,7 +180,7 @@ def test_main_filters_before_dispatch_and_keeps_metadata(tmp_path, monkeypatch, 
         out = trials.copy()
         if screening:
             from trial_treatment_screening import screening_record
-            record = screening_record('', json.dumps({'is_cancer_treatment_trial': True, 'rationale': 'Treatment study'}), 'stop')
+            record = screening_record('', json.dumps({'cancer_treatment_trial': 'yes', 'multiple_cohorts': 'no'}), 'stop')
             for name, value in record.items():
                 out[name] = value
             path = Path(args.work_dir)/'remote_output_shard_000000.parquet'

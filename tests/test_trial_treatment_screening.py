@@ -12,6 +12,13 @@ from trial_treatment_screening import load_screening_results, parse_screening_ou
 spaces = load_script('screened_trial_spaces', '0b_create_trial_spaces.py')
 
 
+def screen_payload(accepted):
+    if accepted:
+        return {"cancer_treatment_trial": "yes", "multiple_cohorts": "no"}
+    return {"cancer_treatment_trial": "no"}
+
+
+
 class FakeRequestSession:
     """Adapt these transport fixtures to the persistent per-request interface."""
 
@@ -84,7 +91,7 @@ def endpoint_run(tmp_path, monkeypatch, request):
 
     async def create(**kwargs):
         messages = json.loads(kwargs['prompt'])
-        screening = 'is_cancer_treatment_trial' in messages[0]['content']
+        screening = 'cancer_treatment_trial' in messages[0]['content']
         text = '\n'.join(m['content'] for m in messages if m['role'] == 'user')
         assert 'NEVER_SEND' not in text
         state.calls.append(('screen' if screening else 'extract', text))
@@ -95,9 +102,8 @@ def endpoint_run(tmp_path, monkeypatch, request):
         assert kwargs['presence_penalty'] == 0.0
         assert kwargs['extra_body']['repetition_penalty'] == 1.0
         if screening:
-            assert kwargs['max_tokens'] == 8192
-            final = json.dumps({'is_cancer_treatment_trial': 'ANTI_CANCER' in text and not state.reject_all,
-                                'rationale': 'Test treatment-intent decision.'})
+            assert kwargs['max_tokens'] == 50000
+            final = json.dumps(screen_payload('ANTI_CANCER' in text and not state.reject_all))
             if state.fail and 'DIAGNOSTIC' in text:
                 final = 'invalid response'
         else:
@@ -255,9 +261,7 @@ def saved_screening(tmp_path):
     ])
     rows = []
     for index, row in enumerate(trials.to_dict('records')):
-        rows.append({**row, **screening_record('', json.dumps({
-            'is_cancer_treatment_trial': index == 0, 'rationale': 'Test decision',
-        }), 'stop'), 'treatment_screen_model': 'screening-model'})
+        rows.append({**row, **screening_record('', json.dumps(screen_payload(index == 0)), 'stop'), 'treatment_screen_model': 'screening-model'})
     path = tmp_path/'screening.csv'
     pd.DataFrame(rows).to_csv(path, index=False)
     return trials, path, tmp_path
@@ -340,7 +344,8 @@ def test_resume_rejects_changed_inputs_or_screening_policy(endpoint_run, monkeyp
     state, path, argv = endpoint_run
     spaces.main()
     if change == 'prompt':
-        monkeypatch.setattr(screening, 'SCREENING_PROMPT', screening.SCREENING_PROMPT + '\nNew policy')
+        original = screening.load_cohort_prompt()
+        monkeypatch.setattr(screening, 'load_cohort_prompt', lambda: original + '\nNew policy')
     elif change == 'model':
         argv[argv.index('--model') + 1] = 'google/gemma-4-31b-it'
     elif change == 'sampling':
@@ -377,9 +382,9 @@ def test_local_screen_validates_before_persisting_and_reuses_completed_shards(tm
         def get_tokenizer(self):
             return SimpleNamespace(apply_chat_template=lambda conversation, **kwargs: json.dumps(conversation))
         def generate(self, prompts, sampling):
-            assert all('is_cancer_treatment_trial' in p for p in prompts)
+            assert all('cancer_treatment_trial' in p for p in prompts)
             return [SimpleNamespace(outputs=[SimpleNamespace(
-                text='{"is_cancer_treatment_trial": false, "rationale": "Diagnostic-only study"}',
+                text='{"cancer_treatment_trial": "no"}',
                 finish_reason=finish)]) for p in prompts]
 
     class Process:

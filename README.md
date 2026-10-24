@@ -581,8 +581,15 @@ before extracting any trial spaces. It uses the same `--server_urls` or
 and retry configuration as extraction. In local GPU mode it uses the same model
 and GPU groups, loading models separately for the two passes.
 
-The distinct prompt in `trial_treatment_screening.py` classifies the studied
-intervention's intent using the supplied `trial_text`. It includes direct
+The separate authored screening prompt has been removed.
+`trial_treatment_screening.py` is now a compatibility adapter that imports the
+inference package's combined `trial.cohorts.user.txt` prompt and JSON validator.
+It classifies the studied intervention's intent using the supplied `trial_text`
+and, for accepted multi-population trials, also extracts complete cohort criteria.
+The legacy 0b space workflow below still selects positive trials for its explicitly
+configured space extraction. New cohort consumers should call the public
+`matchminer_ai.trials.summarize_trials` API directly. The installed inference
+package must include the `trial-treatment-cohorts-v1` contract. It includes direct
 anti-cancer therapy (including early-phase safety/dose studies and adjuvant or
 maintenance treatment) and excludes diagnostic-only and supportive-care studies.
 Anti-cancer treatment studies qualify even when their only outcomes are PK/PD,
@@ -592,18 +599,20 @@ tumor biomarkers; clinical efficacy endpoints are not required. Biomarker-only
 sampling without evaluation of an anti-cancer treatment remains excluded.
 Cancer patients receiving background anti-cancer therapy are not sufficient:
 the study must evaluate an anti-cancer treatment strategy. Insufficient textual
-evidence produces a negative decision with an explanation, so the audit can also
-identify records needing richer source text or review.
+evidence produces `{"cancer_treatment_trial": "no"}` without further fields.
+Accepted responses add `multiple_cohorts`, and add `cohorts` only when it is `yes`.
 
 Only positive decisions proceed to space extraction. `trial_treatment_screening.csv`
 is saved beside `--output-trials` by default, with all screened trials, boolean
-decisions, rationales, parsed reasoning, final responses, finish reasons, status,
+decisions, code-generated decision descriptions, parsed reasoning, final responses, finish reasons, status,
 and `treatment_screen_model` (the requested `--model` ID or served alias). The
 model is also recorded in new local and remote screening shards. Override the
 CSV location with `--output-screening`. This audit covers trials
 that passed the metadata filter, not metadata-excluded rows. The two existing
 final CSV schemas are unchanged; if every trial is rejected, both contain only
-headers. `--screening-max-tokens` defaults to 8192, independently of extraction's
+headers. `trial_cohort_output` retains the combined JSON. Historical Gemma audits with
+boolean decisions and model rationales remain readable; live requests require
+the new combined schema. `--screening-max-tokens` defaults to 50000, independently of extraction's
 `--max-tokens`.
 
 Use `--screening-only` to save the screening CSV and stop before any trial-space
@@ -652,8 +661,8 @@ screening configuration.
 
 ### Hierarchical trial-space extraction
 
-0b now defaults to `--extraction-method hierarchical`. After the unchanged
-treatment screen, it branches through age, cancer primary site, sex, histology,
+0b defaults to `--extraction-method hierarchical`. After the combined-prompt
+treatment screen, this legacy space path branches through age, cancer primary site, sex, histology,
 disease state, prior treatment requirements, and biomarker requirements, in that order. Each request receives the whole trial text,
 one parent's fixed fields and its internal cohort context, and returns only
 alternatives for the next field. Cohort context preserves linked restrictions;

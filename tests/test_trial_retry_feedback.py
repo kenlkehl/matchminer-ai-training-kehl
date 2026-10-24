@@ -31,9 +31,9 @@ def test_pool_feedback_switches_thinking_and_preserves_failures(tmp_path, monkey
 
     async def create(**kwargs):
         requests.append(json.loads(kwargs['prompt']))
-        final = '{"is_cancer_treatment_trial": false, "rationale": unquoted}'
+        final = '{"cancer_treatment_trial": unquoted}'
         if recover and len(requests) == 3:
-            final = '{"is_cancer_treatment_trial": false, "rationale": "Supportive care"}'
+            final = '{"cancer_treatment_trial": "no"}'
         return SimpleNamespace(choices=[SimpleNamespace(text=final, finish_reason='stop')])
 
     async def scenario():
@@ -75,10 +75,10 @@ def test_pool_feedback_switches_thinking_and_preserves_failures(tmp_path, monkey
     assert parser_modes == expected == [r['thinking'] for r in requests]
     for r in requests[1:]:
         messages = r['messages']
-        assert len(messages) == 4  # No growing chain of failed answers.
-        assert 'Synthetic supportive study' in messages[1]['content']
-        assert 'unquoted' in messages[2]['content']
-        assert 'Expecting value: line 1 column' in messages[3]['content']
+        assert len(messages) == 3  # Combined prompt plus one failed answer/feedback pair.
+        assert 'Synthetic supportive study' in messages[0]['content']
+        assert 'unquoted' in messages[1]['content']
+        assert 'Expecting value: line 1 column' in messages[2]['content']
     records = [json.loads(line) for line in (tmp_path/'validation_failures.jsonl').read_text().splitlines()]
     assert records[0]['raw_text'].endswith('unquoted}')
     assert records[0]['finish_reason'] == 'stop'

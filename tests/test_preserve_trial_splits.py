@@ -20,7 +20,7 @@ def test_subset_reuses_screening_with_original_splits(tmp_path, monkeypatch, pro
     ]).assign(study_type='INTERVENTIONAL', phases='["PHASE2"]', study_first_post_date='2021-01-01')
     audit = rows.copy()
     record = screening_record('', json.dumps({
-        'is_cancer_treatment_trial': True, 'rationale': 'Treatment trial',
+        'cancer_treatment_trial': 'yes', 'multiple_cohorts': 'no',
     }), 'stop')
     for name, value in record.items():
         audit[name] = value

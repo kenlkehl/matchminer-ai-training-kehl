@@ -25,7 +25,7 @@ def test_beam_native_parser_and_feedback_respect_context_and_effort(tmp_path):
     async def create(**kwargs):
         calls.append(kwargs)
         final = 'bad JSON' if len(calls) < 3 else json.dumps({
-            'is_cancer_treatment_trial': True, 'rationale': 'Tests direct anticancer treatment.'})
+            'cancer_treatment_trial': 'yes', 'multiple_cohorts': 'no'})
         raw = ('<|channel|>analysis<|message|>Reasoning trace<|end|>'
                '<|start|>assistant<|channel|>final<|message|>' + final + '<|return|>')
         return Completion.model_validate(dict(id='test', object='text_completion', created=0,
@@ -38,7 +38,7 @@ def test_beam_native_parser_and_feedback_respect_context_and_effort(tmp_path):
             model='reflection/Beam-1.0-501B-A23B-NVFP4', temperature=.7,
             top_p=.99, top_k=-1, repetition_penalty=1.0), 'beam', tokenizer)
         work = spaces.make_trial_completion_work_fn(completion, tokenizer, tmp_path,
-            screening=True, max_model_len=6000, always_reasons=True)
+            screening=True, max_model_len=20000, always_reasons=True)
         messages = spaces.build_screening_messages('Synthetic anticancer trial')
         payload = dict(nct_id='NCT00000001', trial_text='Synthetic anticancer trial',
             max_tokens=45000, messages=messages,
@@ -48,7 +48,7 @@ def test_beam_native_parser_and_feedback_respect_context_and_effort(tmp_path):
         client = SimpleNamespace(completions=SimpleNamespace(create=create))
         budgets = []
         for _ in range(3):
-            budgets.append(6000 - len(payload['prompt']) - 256)
+            budgets.append(20000 - len(payload['prompt']) - 256)
             try:
                 result = await work(client, payload)
             except ValueError:

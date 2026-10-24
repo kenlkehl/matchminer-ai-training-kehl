@@ -364,8 +364,9 @@ def make_trial_completion_work_fn(completion_fn, tokenizer, work_dir, *, screeni
                 "Do not explain the correction or include Markdown fences. "
             )
             if screening:
-                feedback += ('Return exactly one JSON object with a boolean is_cancer_treatment_trial '
-                             'and a nonempty double-quoted rationale string; escape quotes inside the string.')
+                feedback += ('Return the combined JSON schema with cancer_treatment_trial as yes/no; '
+                             'stop after that field for no. For yes include multiple_cohorts as yes/no; '
+                             'include the cohorts string list only when both are yes. No rationale field.')
             else:
                 feedback += "Return the complete numbered trial spaces followed by 'Boilerplate exclusions:' and the exclusions."
             messages += [{"role": "assistant", "content": rejected},
@@ -850,7 +851,7 @@ def main():
     screening_mode.add_argument("--screening-input", default=None,
                                 help="Reuse a complete screening CSV for identical selected inputs; "
                                      "--model and endpoint settings apply only to extraction")
-    parser.add_argument("--screening-max-tokens", type=int, default=8192,
+    parser.add_argument("--screening-max-tokens", type=int, default=50000,
                         help="Reasoning plus final-output token budget for the separate treatment screen")
     parser.add_argument("--output-spaces", default="../data/no_phi/trial_space_lineitems.csv")
     parser.add_argument("--extraction-method", choices=["hierarchical", "one-shot"], default="hierarchical",
