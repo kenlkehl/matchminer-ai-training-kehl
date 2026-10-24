@@ -36,9 +36,13 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, List, Optional, Sequence, Tuple
 
+import httpx
 from openai import AsyncOpenAI
+
+from adaptive_controller import Controller, now, parse_metrics
 
 
 class OutputValidationError(ValueError):
@@ -89,6 +93,18 @@ def add_remote_cli_args(parser: argparse.ArgumentParser) -> None:
              "concurrency limit. Below half of max_concurrent_per_server the "
              "limit doubles per streak (slow start); above it grows by "
              "--concurrency_increase_step.",
+    )
+    g.add_argument(
+        "--scheduler-adaptive-concurrency", action=argparse.BooleanOptionalAction, default=False,
+        help="Adjust each endpoint's concurrency using vLLM queue/cache/preemption and throughput metrics, in addition to request-error backoff.",
+    )
+    g.add_argument(
+        "--initial-concurrent-per-server", type=int, default=128,
+        help="Starting concurrency for scheduler adaptation, bounded by the per-server ceiling.",
+    )
+    g.add_argument(
+        "--scheduler-metrics-file", default=None,
+        help="Optional live JSON snapshot of scheduler metrics and adaptive concurrency limits.",
     )
     g.add_argument(
         "--concurrency_increase_step", type=int, default=2,
@@ -251,6 +267,9 @@ class DynamicServerRegistry:
         refresh_seconds: float = 15.0,
         api_key: str = "not-needed",
         concurrency_file: Optional[str] = None,
+        scheduler_adaptive_concurrency: bool = False,
+        initial_concurrent_per_server: int = 128,
+        scheduler_metrics_file: Optional[str] = None,
     ):
         if not servers_file and not static_urls:
             raise ValueError("Either servers_file or static_urls must be set.")
@@ -266,6 +285,12 @@ class DynamicServerRegistry:
         self._concurrency_backoff_factor = concurrency_backoff_factor
         self._request_timeout = request_timeout
         self._api_key = api_key or "not-needed"
+        self._scheduler_enabled = scheduler_adaptive_concurrency
+        self._scheduler_initial = max(1, initial_concurrent_per_server)
+        self._scheduler_metrics_file = scheduler_metrics_file
+        self._scheduler_controllers: dict[str, Controller] = {}
+        self._scheduler_ceilings: dict[str, int] = {}
+        self._scheduler_task: Optional[asyncio.Task] = None
 
         self._entries: dict[str, ServerEntry] = {}
         self._lock = asyncio.Lock()
@@ -275,19 +300,23 @@ class DynamicServerRegistry:
 
     async def start(self) -> None:
         # Idempotent: safe to call multiple times.
-        if self._reconcile_task is not None:
+        if self._reconcile_task is not None or self._scheduler_task is not None:
             return
         # Always reconcile once synchronously so callers see initial set.
         await self._reconcile_once()
         if self._servers_file or self._concurrency_file:
             self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+        if self._scheduler_enabled:
+            self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
     async def stop(self) -> None:
         self._stop_event.set()
-        if self._reconcile_task:
-            self._reconcile_task.cancel()
+        for task in (self._reconcile_task, self._scheduler_task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self._reconcile_task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
         # Close all clients
@@ -375,6 +404,13 @@ class DynamicServerRegistry:
             # Add new
             for url, info in desired.items():
                 maximum = self._per_server_max_concurrent.get(url, self._effective_max_concurrent)
+                if self._scheduler_enabled:
+                    if self._scheduler_ceilings.get(url) != maximum:
+                        old = self._scheduler_controllers.get(url)
+                        initial = old.cap if old is not None else self._scheduler_initial
+                        self._scheduler_controllers[url] = Controller(min(initial, maximum), maximum)
+                        self._scheduler_ceilings[url] = maximum
+                    maximum = self._scheduler_controllers[url].cap
                 if url in self._entries:
                     semaphore = self._entries[url].semaphore
                     if semaphore.max_limit != maximum:
@@ -385,6 +421,8 @@ class DynamicServerRegistry:
                         # Server came back; un-retire and reset stats
                         self._entries[url].retired = False
                         self._entries[url].first_seen_at = time.monotonic()
+                        if self._scheduler_enabled:
+                            self._scheduler_controllers[url].reset_observations()
                         changed = True
                     continue
                 client = self._make_client(url)
@@ -409,6 +447,59 @@ class DynamicServerRegistry:
 
         if changed:
             self._change_event.set()
+
+    async def _sample_scheduler_once(self, client):
+        """Tune endpoints independently; unavailable metrics retain error-based adaptation."""
+        async def sample(entry):
+            controller = self._scheduler_controllers[entry.url]
+            result = {"url": entry.url}
+            try:
+                response = await client.get(entry.url.rstrip('/').removesuffix('/v1') + '/metrics')
+                response.raise_for_status()
+                metrics = parse_metrics(response.text)
+                # A live registry update may retire or reconfigure this endpoint during I/O.
+                if entry.retired or self._scheduler_controllers.get(entry.url) is not controller:
+                    return None
+                event = controller.observe(metrics)
+                await entry.semaphore.set_max_limit(controller.cap)
+                if event is not None:
+                    print('[adaptive_concurrency] ' + json.dumps({"url": entry.url, **event}), flush=True)
+                    self._change_event.set()
+                result['metrics'] = metrics
+            except Exception as exc:
+                controller.reset_observations()
+                result['metrics_error'] = str(exc)
+            result.update(entry.semaphore.stats(), configured_ceiling=self._scheduler_ceilings[entry.url],
+                          scheduler_ceiling=controller.upper, successful_requests=entry.ok_count,
+                          request_errors=entry.err_count, validation_errors=entry.output_validation_err_count)
+            return result
+
+        entries = await self.active_entries()
+        results = await asyncio.gather(*(sample(entry) for entry in entries))
+        snapshot = dict(updated_at=now(), scheduler_adaptive_concurrency=True,
+                        servers=[result for result in results if result is not None])
+        if self._scheduler_metrics_file:
+            def write_snapshot():
+                path = Path(self._scheduler_metrics_file)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_suffix(path.suffix + '.tmp')
+                temporary.write_text(json.dumps(snapshot, indent=2) + '\n')
+                temporary.replace(path)
+            await asyncio.to_thread(write_snapshot)
+        return snapshot
+
+    async def _scheduler_loop(self):
+        async with httpx.AsyncClient(timeout=15, trust_env=False,
+                                     headers={'Authorization': 'Bearer ' + self._api_key}) as client:
+            while not self._stop_event.is_set():
+                try:
+                    await self._sample_scheduler_once(client)
+                except Exception as exc:
+                    print(f'[adaptive_concurrency] metrics update failed: {exc}', flush=True)
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=self._refresh_seconds)
+                except asyncio.TimeoutError:
+                    continue
 
     async def _reconcile_loop(self) -> None:
         try:
@@ -1240,4 +1331,7 @@ def build_registry_from_args(args) -> DynamicServerRegistry:
         refresh_seconds=float(getattr(args, "server_urls_refresh", 15.0)),
         api_key=api_key,
         concurrency_file=getattr(args, "concurrency_control_file", None) or None,
+        scheduler_adaptive_concurrency=bool(getattr(args, "scheduler_adaptive_concurrency", False)),
+        initial_concurrent_per_server=int(getattr(args, "initial_concurrent_per_server", 128)),
+        scheduler_metrics_file=getattr(args, "scheduler_metrics_file", None) or None,
     )

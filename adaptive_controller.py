@@ -41,6 +41,11 @@ def now():
 def read_metrics(session, endpoint):
     response = session.get(endpoint.removesuffix("/v1") + "/metrics", timeout=15)
     response.raise_for_status()
+    return parse_metrics(response.text)
+
+
+def parse_metrics(text):
+    """Share scheduler metric parsing between sync supervisors and the async pool."""
     names = {
         "vllm:num_requests_running": "running",
         "vllm:num_requests_waiting": "waiting",
@@ -49,7 +54,7 @@ def read_metrics(session, endpoint):
         "vllm:generation_tokens_total": "tokens",
     }
     values = {}
-    for line in response.text.splitlines():
+    for line in text.splitlines():
         if not line or line.startswith("#"):
             continue
         name = line.split("{", 1)[0].split()[0]
@@ -143,6 +148,7 @@ class Controller:
               and self.cap < self.upper):
             new = min(self.upper, max(self.cap + 32, int(self.cap * 1.5) // 32 * 32))
             reason = "sustained scheduler and cache headroom"
+        new = min(self.upper, new)
         event = {"at": now(), "old_cap": self.cap, "new_cap": new,
                  "generation_tokens_per_second": rate, "reason": reason, "metrics": sample}
         self.previous_cap = self.cap if new > self.cap else None

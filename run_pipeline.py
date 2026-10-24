@@ -58,6 +58,8 @@ def parser():
     p.add_argument('--download-dir', type=Path)
     p.add_argument('--generation-context', type=int, default=250000)
     p.add_argument('--generation-concurrency-per-server', type=int, default=1024)
+    p.add_argument('--generation-scheduler-adaptive-concurrency', action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument('--generation-initial-concurrency-per-server', type=int, default=128)
     p.add_argument('--generation-pending-requests', type=int, default=2560)
     p.add_argument('--generation-request-timeout', type=float, default=7200)
     p.add_argument('--generation-max-attempts', type=int, default=16)
@@ -169,11 +171,14 @@ def build_plan(args):
               '--output-dir', str(g), '--seed', str(args.data_seed), '--max-model-len', str(args.generation_context),
               '--seed-max-tokens', str(args.generation_seed_max_tokens),
               '--event-max-tokens', str(args.generation_event_max_tokens),
+              '--scheduler-adaptive-concurrency' if args.generation_scheduler_adaptive_concurrency else '--no-scheduler-adaptive-concurrency',
+              '--initial-concurrent-per-server', str(args.generation_initial_concurrency_per_server),
               '--pending-requests', str(args.generation_pending_requests), *model, *cache, *remote],
               [args.sampled_spaces], generated,
               source('generate_synthetic_data.py', '1a_make_synthetic_enrollee_prompts.py',
                      '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
-                     'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py', 'trial_cohort_format.py')),
+                     'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py', 'trial_cohort_format.py',
+                     'adaptive_controller.py')),
         Stage('prepare-notes', [py, str(ROOT / 'prepare_synthetic_training.py'), 'notes',
               '--input', str(args.raw_synthetic_notes), '--sampled-spaces', str(args.sampled_spaces),
               '--output', str(args.synthetic_notes), '--patients', str(patient_map),

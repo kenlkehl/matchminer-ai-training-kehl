@@ -310,7 +310,7 @@ class Generator:
         sources = ['generate_synthetic_data.py', '1a_make_synthetic_enrollee_prompts.py',
                    '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
                    'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py',
-                   'trial_cohort_format.py']
+                   'trial_cohort_format.py', 'adaptive_controller.py']
         value = dict(version='synthetic-cohort-seeds-patient-events-notes-v5', input_sha256=sha_file(self.args.input_csv),
                      source_sha256={name: sha_file(HERE / name) for name in sources},
                      sampling=asdict(self.sampling), tokenizer=self.args.tokenizer_model or self.args.model,
@@ -720,8 +720,12 @@ def parse_args():
     parser.add_argument('--pending-requests', type=int, default=1536)
     parser.add_argument('--stop-after-events', action='store_true', help='Save seeds and patient histories without starting notes')
     add_remote_cli_args(parser)
-    parser.set_defaults(results_per_shard=128, max_attempts=16, request_timeout=1800)
-    return parser.parse_args()
+    parser.set_defaults(results_per_shard=128, max_attempts=16, request_timeout=1800,
+                        scheduler_adaptive_concurrency=True)
+    args = parser.parse_args()
+    if args.scheduler_adaptive_concurrency and not args.scheduler_metrics_file:
+        args.scheduler_metrics_file = str(Path(args.output_dir) / 'concurrency_status.json')
+    return args
 
 
 def main():

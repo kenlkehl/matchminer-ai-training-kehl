@@ -978,9 +978,19 @@ seed calls to finish. Before generation, the runner raises its soft open-file
 limit as needed to accommodate `--pending-requests`, idle connections, and
 checkpoint writes. If the existing hard limit is too low, it exits before
 loading the tokenizer or creating output and reports the required limit.
-Fleet supervisors can use `adaptive_controller.py` to derive concurrency
-ceilings from vLLM scheduler metrics and write the pool's live concurrency
-control file. Throughput comparisons require uninterrupted, sufficiently loaded
+The production generator enables `--scheduler-adaptive-concurrency` by default.
+The shared pool uses `adaptive_controller.py` directly, polling each server's
+vLLM scheduler metrics every `--server_urls_refresh` seconds. It starts at up to
+128 requests per server (`--initial-concurrent-per-server`), grows toward the
+configured ceiling, and lowers that limit on queue/cache pressure, preemptions,
+or measured throughput regression. Request errors independently reduce active
+concurrency; output-validation retries do not. Missing metrics retain the current
+limit and error-based adaptation. `concurrency_status.json` records each server's
+metrics, effective limit, in-flight requests, and error counts. Live concurrency
+files supply upper bounds. Use `--no-scheduler-adaptive-concurrency` when an
+external supervisor owns scheduler tuning. The pipeline exposes these settings
+as `--generation-scheduler-adaptive-concurrency` (and its `--no-` form) and
+`--generation-initial-concurrency-per-server`. Throughput comparisons require uninterrupted, sufficiently loaded
 windows; idle workers, missing metrics, and server restarts discard those
 comparisons. Cache pressure and request preemptions still trigger backoff.
 Each expansion receives only its assigned prose seed and the clinical/formatting
@@ -1014,7 +1024,7 @@ individually checkpointed histories with stable patient numbers and seed hashes.
 Resumption reuses both and requests only missing patients. Five histories are
 reassembled in patient-number order for the established positive/negative CSV
 schema. The run manifest is versioned and pins all prompt/helper source files;
-use a fresh output directory after changing them. The v4 seed-only event manifest
+use a fresh output directory after changing them. The v5 cohort-seed event manifest
 rejects reuse of previous trial-conditioned event, tagged-seed, or multi-patient
 checkpoints.
 
