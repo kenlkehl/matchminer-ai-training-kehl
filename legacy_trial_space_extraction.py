@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Parallel trial-space extraction with vLLM.
+Legacy trial-space extraction for historical matching/evaluation workflows.
+
+The active synthetic-data stage is 0b_extract_trial_cohorts.py.
 
 Usage examples
 --------------
 # One instance per GPU (model fits on a single GPU):
-python 0b_create_trial_spaces.py \
+python legacy_trial_space_extraction.py \
   --input ctgov_trials.csv \
   --start-year 2020 \
   --gpus 2,3 \

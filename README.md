@@ -32,20 +32,13 @@ TrialSpace labeling allows up to 96 concurrent requests per teacher GPU
 adaptive limiter ramps up after successful requests and backs off on errors.
 Cataloging, exclusion extraction and distillation share a live endpoint pool.
 
-Trial extraction in `0b_create_trial_spaces.py` accepts
-`--hierarchy-always-think` to keep reasoning enabled on all hierarchical calls,
-including formatting repairs. This policy is recorded in the extraction
-manifest and requires fresh checkpoints when changed. Without the flag, repeated
-formatting failures can still use the existing non-thinking repair fallback.
-
-When every trial-population branch is pruned, a separate study-scope review
-checks whether the study truly lacks a therapeutic cancer population. A review
-that does not confirm rejection now triggers up to two automatic recovery rounds
-for the pruned fields, using its explanation and the original field instructions.
-Corrective calls have new checkpoint keys; existing successful nodes, screening,
-and completed trials remain reusable. Exhausted recovery still flags the trial
-for intervention and prevents an incomplete final export. Recovery calls honor
-`--hierarchy-always-think` along with ordinary requests.
+The active data-production extractor is `0b_extract_trial_cohorts.py`. It calls
+`matchminer_ai.trials.summarize_trials` from the sibling inference-kehl checkout:
+one prompt screens for cancer treatment and, when appropriate, extracts distinct
+eligibility cohorts. Step 0c samples **5,000 trials**, retaining every cohort and
+excluding trials open at DFCI during 2025 or 2026. Historical space extraction is
+available separately as `legacy_trial_space_extraction.py` for older evaluation
+workflows; it is not part of the active synthetic-data pipeline.
 
 To run the pipeline against an existing teacher, supply its OpenAI-compatible
 endpoint instead of starting local vLLM workers:
@@ -414,7 +407,86 @@ prototype's filtering and audit policy. All label and catalog sources must be
 inside `data/no_phi`. Training uses the immutable prepared snapshot, saves the
 final epoch, and skips validation when none was reserved.
 
-## Nemotron 3.5 Super VL teacher and trial-space extraction
+## Extract trial cohorts with the inference API (0b)
+
+Run `0a_parse_ctgov_json.py` to create the parsed CT.gov CSV, then:
+
+```bash
+python 0b_extract_trial_cohorts.py \
+  --input ../data/no_phi/ctgov_trials.csv \
+  --server_urls http://sn4622130540:8000/v1 \
+  --model gemma4-31b --tokenizer-model nvidia/Gemma-4-31B-IT-NVFP4 \
+  --max_concurrent_per_server 768
+```
+
+The default selection includes trials first posted **in 2020 or later** with
+`study_type=INTERVENTIONAL` and early phase I through phase IV, including combined
+phases. Missing/N/A phases and invalid/missing first-posted dates are excluded.
+Recruitment status is not filtered. Source registry metadata and dates retain
+their original precision. Existing train/val/test splits are preserved; otherwise
+splits are assigned once per NCT ID with seed 42 and 80/10/10 probabilities.
+
+The script uses the current `trial.cohorts.user.txt` owned by inference-kehl.
+Arms and cohorts count only when their eligibility populations differ; treatment
+assignment alone does not create a cohort. The API handles strict JSON validation,
+outer Markdown fences, retries, single-population source retention, and joining
+cohort-specific and common criteria. There is no separate screen or cached-screen
+input. Defaults apply the inference package's Gemma 4 sampling profile and a
+50,000-token output budget. Use `--tokenizer-model` to identify the actual model
+family when `--model` is an endpoint alias.
+
+Outputs under `data/no_phi` are:
+
+- `trial_cohorts.json`: NCT ID → combined decision object, including rejections.
+  A rejection contains only `cancer_treatment_trial: "no"`; an accepted single
+  population adds `multiple_cohorts: "no"`; multiple populations also have a
+  `cohorts` list of specific criteria and `common_eligibility_criteria` string.
+- `trials_with_cohorts.csv`: one audit row per selected trial, including its
+  source fields, split, combined JSON, decision, cohort count, and error.
+- `trial_cohort_lineitems.csv`: one row per accepted population, retaining
+  `cohort_trial_id`, `trial_id`/`nct_id`, zero-based `cohort_number`, `cohort_count`,
+  `cohort_index`, full `cohort_eligibility_criteria`, separate specific/common
+  criteria, and source metadata. Single-population criteria retain the original
+  title, brief summary, and eligibility text. Rejected trials have no cohort rows.
+
+`--work-dir` stores per-trial compressed checkpoints with raw answers, reasoning,
+validation attempts and response endpoint provenance. Resume validates input,
+code, prompt, schema and configuration identities, then skips successful decisions
+and retries failed trials. Failures produce `.partial` exports and a nonzero exit,
+preventing the orchestrator from sampling an incomplete run. Use a fresh work/output
+directory for a new input, model, prompt or settings; old space/screening checkpoints
+are not reusable.
+
+Extraction uses inference-kehl's shared adaptive endpoint pool, with up to 1,536
+in-flight API calls (`--workers`). It ramps concurrency and backs off using request
+outcomes and vLLM metrics. Supply `--server_urls_file` for a live endpoint registry;
+per-entry `upstream_concurrency` sets each server's ceiling, otherwise
+`--max_concurrent_per_server` applies. Registry additions/removals take effect
+while running. The external supervisor owns endpoint verification and model
+identity; use registry entries with `model` and `model_root` for provenance.
+Extraction does not consume the separate training transport's concurrency-control
+file. Use registry caps for this stage. Neither serving nor training is launched.
+
+`trial_cohort_format.py` explicitly adapts cohort rows for existing training
+internals (`cohort_index` → `space_index`, complete criteria → `this_space`).
+It preserves native IDs and marks `trial_representation=trial-treatment-cohorts-v2`.
+Common criteria may include inclusions as well as exclusions and are **not** copied
+to `trial_boilerplate_text`; that column is empty because this API does not extract
+separate boilerplate. Synthetic seeds use the complete cohort criteria. Existing
+space-generation artifacts, trained models and saved embeddings are not thereby
+converted or validated for this representation. Training-only execution retains
+its historical default filenames and separately reviewed inference commit pin.
+
+## Legacy trial-space extraction reference
+
+The following historical selection, screening and hierarchy instructions apply to
+`legacy_trial_space_extraction.py`, formerly step 0b. They do not describe the active
+cohort extractor above; references to “0b” in this legacy section mean that retired
+space workflow. Its source and prompt contracts remain available for historical
+matching/evaluation consumers.
+
+### Nemotron 3.5 Super VL teacher and legacy trial-space extraction
+
 
 The shared inference package registers NVIDIA's text sampling profile for
 `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`, BF16, and the short alias
@@ -469,7 +541,7 @@ on 2026-10-16; no existing server or saved run is switched automatically.
 Example against an existing server (no local model startup):
 
 ```bash
-PYTHONPATH=../matchminer-ai-inference-kehl/src ~/thisenv/bin/python 0b_create_trial_spaces.py \
+PYTHONPATH=../matchminer-ai-inference-kehl/src ~/thisenv/bin/python legacy_trial_space_extraction.py \
   --input ../data/no_phi/ctgov_trials.csv \
   --server_urls http://sn4622130540:8000/v1 \
   --model nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 \
@@ -557,7 +629,7 @@ flowing while preserving prompts, reasoning traces, and existing checkpoints.
 
 ### Direct anti-cancer treatment screen in 0b
 
-The legacy extraction primer and closing instructions in `0b_create_trial_spaces.py`
+The legacy extraction primer and closing instructions in `legacy_trial_space_extraction.py`
 are complete snapshots of inference-kehl's `trial.user.primer.txt` and
 `trial.user.question.txt`, synchronized on 2026-10-17. They require exhaustive
 cancer-type/histology spaces for broad solid-tumor or hematologic trials, specific
@@ -605,6 +677,9 @@ Accepted responses add `multiple_cohorts`, and add `cohorts` followed by
 `common_eligibility_criteria` only when it is `yes`. Each cohort string together
 with the common string contains all applicable eligibility criteria. The public
 API combines them in code for complete cohort rows.
+The shared validator accepts one complete outer Markdown fence labeled `json`
+(case-insensitive) or unlabeled. Enclosed JSON still requires the same schema and
+a complete generation; audit columns preserve the original fenced response.
 
 Only positive decisions proceed to space extraction. `trial_treatment_screening.csv`
 is saved beside `--output-trials` by default, with all screened trials, boolean
@@ -821,15 +896,38 @@ compatible with existing v5 prompts and successful node checkpoints.
 
 ## Generate event lists and synthetic notes with existing servers
 
-After `0b` has completed, `0c_sample_trial_spaces.py` samples 3,000 trials
-(seed 42) and retains all their spaces. Its DFCI holdout excludes trials open
-during 2025–2026 using `dfci_trials_summary_10-18-26.csv`. A trial with an
-invalid space is excluded as a whole so sampling never silently drops one of
-its spaces. Input/output paths, sample size, seed, and holdout years are CLI
-options. The sampling receipt records the exact NCT IDs and space count.
+After `0b` has completed, `0c_sample_trial_spaces.py` samples 5,000 distinct NCT IDs
+(seed 42) and retains all their cohorts. Its DFCI holdout excludes trials open
+during 2025–2026 using `dfci_trials_summary_10-18-26.csv`. A trial with a
+missing or invalid cohort is excluded as a whole so sampling never silently drops
+one of its populations. Missing DFCI boundary dates are treated as unbounded;
+`OPEN TO ACCRUAL` status also triggers the holdout. Input/output paths, sample size,
+seed, and holdout years are CLI options. The sampling receipt records exact NCT IDs
+and cohort counts. Historical seven-field space files remain supported explicitly.
+
+For cohort inputs, step 0c first keeps only `cancer_treatment_trial="yes"`, then
+applies the DFCI holdout and samples distinct trial IDs. The output CSV has one
+row per cohort per selected trial. Its `cohort_eligibility_criteria` column joins
+the specific and common eligibility strings; for a single cohort it retains the
+original `trial_text`. Separate specific/common fields and source metadata also
+remain available. The sampler rebuilds the combined field from these sources
+when present, rather than trusting a stale combined column.
+
+To sample the completed production JSONL export without making any new LLM calls:
+
+```bash
+python 0c_sample_trial_spaces.py \
+  --extraction-dir ../data/no_phi/ctgov_treatment_cohorts_since2020_gemma4_31b_20261023 \
+  --output-csv ../data/no_phi/sample_trial_cohort_lineitems.csv
+```
+
+This mode checks the saved combined decisions, all cohort rows, and the original
+`inputs.parquet` against each other before sampling. It preserves existing source
+splits or assigns them once per trial using seed 42. The sampling receipt includes
+rejected trial IDs, DFCI exclusions, the extraction run identity, and source hashes.
 
 `generate_synthetic_data.py` creates five matching and five near-miss patients
-per sampled space in two stages. For each class, one call creates five diverse
+per sampled cohort in two stages. For each class, one call creates five diverse
 short prose seeds containing names, sex, diagnoses, and ages at each diagnosis.
 Both classes receive a hypothetical prose format example with explicit
 instructions not to reproduce the example or reuse its patient identity.
@@ -910,10 +1008,10 @@ boundaries, preserving clinical inequalities such as `PD-L1 <1%` or
 
 ```bash
 python 0c_sample_trial_spaces.py \
-  --input-csv /path/to/completed/trial_space_lineitems.csv \
-  --output-csv /path/to/new-run/sample_trial_space_lineitems.csv
+  --input-csv /path/to/completed/trial_cohort_lineitems.csv \
+  --output-csv /path/to/new-run/sample_trial_cohort_lineitems.csv
 python generate_synthetic_data.py \
-  --input-csv /path/to/new-run/sample_trial_space_lineitems.csv \
+  --input-csv /path/to/new-run/sample_trial_cohort_lineitems.csv \
   --output-dir /path/to/new-run \
   --model gemma4-31b \
   --tokenizer-model RedHatAI/Gemma-4-31B-IT-FP8-Dynamic \
@@ -962,8 +1060,8 @@ prompts remain owned by `1a`, `1b`, and `2` and are executed by
 | Stage name (`--start-at` / `--stop-after`) | Work and outputs |
 | --- | --- |
 | `parse-trials` | `0a`: CT.gov JSON → `ctgov_trials.csv` |
-| `extract-spaces` | `0b`: year/phase filtering, treatment screening, hierarchical extraction; compact `trial_space_lineitems.csv` plus full trial audit |
-| `sample-trials` | `0c`: 3,000 complete trials, all their spaces, existing DFCI holdout and sampling receipt |
+| `extract-cohorts` | `0b_extract_trial_cohorts.py`: year/phase filtering and public `summarize_trials` API; `trial_cohort_lineitems.csv`, trial audit, combined JSON |
+| `sample-trials` | `0c`: 5,000 complete trials, all their cohorts, DFCI 2025–2026 holdout and sampling receipt |
 | `generate-synthetic` | Existing `generate_synthetic_data.py`: event histories, then raw notes; all checkpoints/reasoning preserved |
 | `prepare-notes` | `prepare_synthetic_training.py notes`: dated/split notes plus `synthetic_patient_metadata.parquet` |
 | `summarize-patients` | Existing `6`: chronological serial summaries, retaining chunk reasoning and one final summary per patient |
@@ -987,10 +1085,14 @@ For a new complete run, first inspect the plan:
 
 Remove `--dry-run` to execute; `--stop-after prepare-training` produces the data
 without starting model training. `--start-year` defaults to 2020, inclusive;
-`--sample-trials` defaults to 3000 and `--data-seed` to 42. Supply
-`--screening-input` to reuse the previously generated treatment screen instead
-of screening with the extraction model. Starting at `sample-trials` accepts an
-existing compact `--trial-spaces` file, including `completed_` filenames.
+`--sample-trials` defaults to 5000 and `--data-seed` to 42. Starting at
+`sample-trials` accepts an existing complete `--trial-cohorts` file (`--trial-spaces`
+is retained as an alias). The default upstream file is `trial_cohort_lineitems.csv`;
+its sample is `synthetic_generation/sample_trial_cohort_lineitems.csv`.
+`--sampled-cohorts`/`--sampled-spaces` overrides the sample path. Cohort extraction
+has separate `--cohort-max-attempts` (3), `--cohort-max-tokens` (50000), and
+`--cohort-workers` (1536) controls; generation retry/context limits do not replace
+these. Screening and cohort extraction always use the same combined prompt.
 
 Upstream stages require an existing live `--server-urls-file`. The external pool
 supervisor owns VM recovery, tunnels and serving processes. The orchestrator does

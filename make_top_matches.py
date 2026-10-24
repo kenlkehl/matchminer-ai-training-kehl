@@ -292,6 +292,7 @@ def _normalized_split(series):
 
 def load_retrieval_tables(args):
     """Keep identity and source splits without needing old checker labels."""
+    from trial_cohort_format import COHORT_REQUIRED, training_rows
     def read_table(path, wanted):
         if str(path).endswith('.csv'):
             return pd.read_csv(path, usecols=lambda name: name in wanted)
@@ -304,7 +305,8 @@ def load_retrieval_tables(args):
         raise ValueError("Supply both --patients-parquet and --trials-file")
     if args.patients_parquet:
         patient_source = read_table(args.patients_parquet, patient_columns)
-        trial_source = read_table(args.trials_file, trial_columns)
+        trial_source = training_rows(read_table(args.trials_file,
+            trial_columns + sorted(COHORT_REQUIRED) + ['cohort_index', 'trial_representation']))
     else:
         patient_source = trial_source = read_table(args.parquet, list(dict.fromkeys(patient_columns + trial_columns)))
     patients = patient_source.dropna(subset=["patient_summary"]).copy()

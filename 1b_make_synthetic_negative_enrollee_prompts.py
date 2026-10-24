@@ -39,6 +39,8 @@ CONSISTENCY_INSTRUCTIONS = (
 
 
 ELIGIBILITY_INSTRUCTIONS = (
+    'Apply all supplied cohort-specific and common eligibility criteria together. Shared criteria can be '
+    'inclusion or exclusion requirements; do not interpret them all as exclusions. '
     'The "Prior treatment requirements" and "Biomarker requirements" fields each include both positive and '
     'negative conditions. Preserve each clause, its negation, AND/OR logic, and exceptions when interpreting '
     'eligibility.\n'

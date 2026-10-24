@@ -10,7 +10,7 @@ from remote_vllm_pool import (
 )
 from tests.test_trial_selection import load_script
 
-spaces = load_script('retry_trial_spaces', '0b_create_trial_spaces.py')
+spaces = load_script('retry_trial_spaces', 'legacy_trial_space_extraction.py')
 
 
 @pytest.mark.parametrize('initial_thinking', [True, False])

@@ -39,8 +39,8 @@ class Stage:
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-dir", type=Path, default=ROOT.parent / "data/no_phi")
-    p.add_argument("--trial-spaces", type=Path,
-                   help="0b space-level CSV/parquet, including completed_ exports; default: DATA_DIR/trial_space_lineitems.csv")
+    p.add_argument("--trial-spaces", "--trial-cohorts", dest="trial_spaces", type=Path,
+                   help="Cohort CSV/parquet or historical space export; training-only default: DATA_DIR/trial_space_lineitems.csv")
     p.add_argument("--patient-summaries", type=Path,
                    help="Summarized synthetic patients; default: DATA_DIR/patient_summaries_with_spaces.parquet")
     p.add_argument("--synthetic-notes", type=Path,

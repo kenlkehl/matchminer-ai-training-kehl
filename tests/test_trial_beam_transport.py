@@ -8,7 +8,7 @@ from openai.types.completion import Completion
 from remote_vllm_pool import CompletionSampling, make_completion_work_fn
 from tests.test_trial_selection import load_script
 
-spaces = load_script('beam_trial_spaces', '0b_create_trial_spaces.py')
+spaces = load_script('beam_trial_spaces', 'legacy_trial_space_extraction.py')
 
 
 class Tokenizer:

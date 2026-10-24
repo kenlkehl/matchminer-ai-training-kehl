@@ -9,7 +9,7 @@ from tests.test_trial_selection import load_script
 from trial_treatment_screening import screening_record
 
 
-spaces = load_script('preserve_trial_splits', '0b_create_trial_spaces.py')
+spaces = load_script('preserve_trial_splits', 'legacy_trial_space_extraction.py')
 
 
 @pytest.mark.parametrize('problem', [None, 'missing', 'invalid', 'empty', 'conflicting'])

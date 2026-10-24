@@ -9,7 +9,7 @@ import pytest
 from tests.test_trial_selection import REGISTRY_METADATA, load_script
 from trial_treatment_screening import load_screening_results, parse_screening_output, screening_record
 
-spaces = load_script('screened_trial_spaces', '0b_create_trial_spaces.py')
+spaces = load_script('screened_trial_spaces', 'legacy_trial_space_extraction.py')
 
 
 def screen_payload(accepted):

@@ -14,7 +14,7 @@ def load_script(name, filename):
     return module
 
 parse = load_script('ctgov_parse', '0a_parse_ctgov_json.py')
-spaces = load_script('trial_spaces_filter', '0b_create_trial_spaces.py')
+spaces = load_script('trial_spaces_filter', 'legacy_trial_space_extraction.py')
 
 REGISTRY_METADATA = {
     'overall_status': 'COMPLETED',
@@ -197,7 +197,7 @@ def test_main_filters_before_dispatch_and_keeps_metadata(tmp_path, monkeypatch, 
         out.to_parquet(path, index=False)
         return [str(path)]
     monkeypatch.setattr(spaces, f'{mode}_main', remote)
-    argv = ['0b_create_trial_spaces.py', '--input', str(source),
+    argv = ['legacy_trial_space_extraction.py', '--input', str(source),
         '--work-dir', str(tmp_path/'work'), '--output-trials', str(output_trials),
         '--output-spaces', str(output_spaces)]
     argv.extend(['--server_urls', 'http://unused/v1'] if mode == 'remote' else ['--gpus', '0'])

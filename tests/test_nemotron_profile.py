@@ -16,7 +16,7 @@ def test_training_uses_shared_model_profile():
 
 
 def test_remote_trial_spaces_do_not_reparse_reasoning(monkeypatch):
-    spec = importlib.util.spec_from_file_location('trial_spaces', Path(__file__).parents[1] / '0b_create_trial_spaces.py')
+    spec = importlib.util.spec_from_file_location('trial_spaces', Path(__file__).parents[1] / 'legacy_trial_space_extraction.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     def must_not_parse(*args):

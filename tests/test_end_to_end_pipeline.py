@@ -31,7 +31,15 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     plan = pipeline.build_plan(args)
     assert [s.name for s in plan] == list(pipeline.STAGES)
     assert plan[1].command[plan[1].command.index('--start-year') + 1] == '2020'
-    assert plan[2].command[plan[2].command.index('--n-trials') + 1] == '3000'
+    assert plan[2].command[plan[2].command.index('--n-trials') + 1] == '5000'
+    assert plan[1].command[1].endswith('0b_extract_trial_cohorts.py')
+    assert plan[1].outputs[0] == plan[2].inputs[0]
+    assert plan[2].outputs[0] == plan[3].inputs[0]
+    assert '--screening-input' not in plan[1].command
+    from generate_synthetic_data import load_stage
+    extraction = load_stage('0b_extract_trial_cohorts.py').parser().parse_args(plan[1].command[2:])
+    assert extraction.max_attempts == 3 and extraction.max_tokens == 50000
+    assert extraction.inference_repo == args.inference_repo
     assert plan[3].outputs[0] == plan[4].inputs[0]
     assert plan[4].outputs[0] == plan[5].inputs[0]
     assert plan[5].outputs[0] == plan[6].inputs[0]
@@ -40,7 +48,10 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
         assert stage.command[stage.command.index('--model') + 1] == 'gemma4-31b'
         assert stage.command[stage.command.index('--tokenizer-model') + 1] == 'vendor/tokenizer'
         assert stage.command[stage.command.index('--server_urls_file') + 1] == str(args.server_urls_file)
-        assert '--concurrency-control-file' in stage.command
+        if stage.name != 'extract-cohorts':
+            assert '--concurrency-control-file' in stage.command
+    # Extraction uses inference-owned adaptive limits and live registry caps.
+    assert '--max_concurrent_per_server' in plan[1].command
     downstream = training.stages(args)
     for stage in downstream:
         if stage.teacher:

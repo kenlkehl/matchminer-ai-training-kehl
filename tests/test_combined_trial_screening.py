@@ -20,11 +20,27 @@ def test_training_uses_the_same_combined_prompt():
     {"cancer_treatment_trial": "yes", "multiple_cohorts": "yes", "cohorts": ["A criteria", "B criteria"],
      "common_eligibility_criteria": "Shared inclusion and exclusion criteria."},
 ])
-def test_live_adapter_retains_full_combined_result(decision):
-    result = screening_record("", json.dumps(decision), "stop")
+@pytest.mark.parametrize("fenced", [False, True])
+def test_live_adapter_retains_full_combined_result(decision, fenced):
+    final = json.dumps(decision)
+    if fenced:
+        final = f"```json\n{final}\n```"
+    result = screening_record("", final, "stop")
     assert result["is_cancer_treatment_trial"] == (decision["cancer_treatment_trial"] == "yes")
     assert json.loads(result["trial_cohort_output"]) == decision
     assert result["treatment_screen_rationale"].startswith("Combined prompt")
+    assert result["treatment_screen_output"] == final
+
+
+@pytest.mark.parametrize("final,finish", [
+    ('```json\n{"cancer_treatment_trial":"no"}\n```', "length"),
+    ('```json\n{"cancer_treatment_trial":"no","rationale":"extra"}\n```', "stop"),
+    ('```json\n{"cancer_treatment_trial":"no","cancer_treatment_trial":"yes"}\n```', "stop"),
+    ('Explanation\n```json\n{"cancer_treatment_trial":"no"}\n```', "stop"),
+])
+def test_live_adapter_does_not_relax_validation_for_fences(final, finish):
+    with pytest.raises(ValueError):
+        screening_record("", final, finish)
 
 
 def test_historical_json_can_be_read_but_is_rejected_for_new_requests():

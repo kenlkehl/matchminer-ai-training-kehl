@@ -9,7 +9,7 @@ from remote_vllm_pool import OutputValidationError
 
 from matchminer_ai.trials.cohort_schema import (
     COHORT_SCHEMA_VERSION, build_cohort_messages, load_cohort_prompt,
-    parse_cohort_response,
+    parse_cohort_response, unwrap_json_fence,
 )
 
 
@@ -23,7 +23,7 @@ def parse_screening_output(final, finish_reason=None, *, allow_legacy=True):
     if finish_reason in {"length", "abort", "error"}:
         raise ValueError(f"Incomplete treatment-screen response: {finish_reason}")
     try:
-        result = json.loads(final)
+        result = json.loads(unwrap_json_fence(final))
     except (TypeError, ValueError) as exc:
         raise OutputValidationError(
             f"Treatment screen must return a JSON object: {exc}"

@@ -42,7 +42,7 @@ def test_generation_and_checking_headers_follow_teacher(model, expected, tmp_pat
     tokenizer = Tokenizer(model)
     notes = load_script('reasoning_policy_notes', '2_make_synthetic_notes_sharded.py')
     boilerplate = load_script('reasoning_policy_boilerplate', '14_check_boilerplate.py')
-    spaces = load_script('reasoning_policy_spaces', '0b_create_trial_spaces.py')
+    spaces = load_script('reasoning_policy_spaces', 'legacy_trial_space_extraction.py')
     args = args_for(tmp_path)
     args.model = 'served-alias'
     args.tokenizer_model = model

@@ -9,7 +9,7 @@ This refreshes the pre-embedded trial-space index that simulated_oa_run.py reads
      other real-time scripts access (database_secrets.txt, auto-resolved to
      ../../../data/phi/database_secrets.txt relative to this script).
   2. Drives ../../pull_spacify_and_embed_ctgov in NCT-ID mode, which pulls those
-     trials' current text from ClinicalTrials.gov, runs ../../0b_create_trial_spaces.py
+     trials' current text from ClinicalTrials.gov, runs ../../legacy_trial_space_extraction.py
      to extract trial spaces, and embeds them with embed_trial_spaces.py.
   3. Writes the embedded parquet (by default the canonical name read by
      simulated_oa_run.py) into ../../../data/phi/real_time.

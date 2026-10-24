@@ -19,6 +19,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from trial_cohort_format import training_rows
+
 
 def split_name(value):
     names = {'train': 'train', 'val': 'validation', 'validation': 'validation', 'test': 'test'}
@@ -28,7 +30,7 @@ def split_name(value):
 
 
 def load_spaces(path):
-    frame = pd.read_csv(path)
+    frame = training_rows(pd.read_csv(path))
     required = ['space_index', 'nct_id', 'this_space', 'split', 'trial_boilerplate_text']
     if any(c not in frame for c in required) or frame.empty:
         raise ValueError('Sampled spaces need IDs, text, boilerplate, and source trial splits')
@@ -170,6 +172,10 @@ def prepare_notes(source, spaces_path, destination, patients_path, *, anchor='20
             frame = pd.DataFrame(rows, columns=['pseudo_mrn', 'patient_id', 'space_index', 'patient_class', 'nct_id', 'split'])
             for name in ('this_space', 'trial_boilerplate_text'):
                 frame[name] = frame.space_index.map(spaces[name]).fillna('')
+            for name in ('cohort_trial_id', 'cohort_number', 'cohort_count', 'cohort_index',
+                         'cohort_eligibility_criteria', 'trial_representation'):
+                if name in spaces:
+                    frame[name] = frame.space_index.map(spaces[name])
             table = pa.Table.from_pandas(frame, preserve_index=False)
             if patient_writer is None:
                 patient_writer = pq.ParquetWriter(patient_temp, table.schema, compression='zstd')

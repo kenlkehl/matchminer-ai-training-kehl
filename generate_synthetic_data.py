@@ -26,6 +26,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from trial_cohort_format import training_rows, patient_generation_criteria
+
 from remote_vllm_pool import (
     CompletionSampling, OutputValidationError, RequestSession,
     add_remote_cli_args, build_registry_from_args, make_completion_work_fn,
@@ -307,7 +309,8 @@ class Generator:
     def manifest(self):
         sources = ['generate_synthetic_data.py', '1a_make_synthetic_enrollee_prompts.py',
                    '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
-                   'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py']
+                   'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py',
+                   'trial_cohort_format.py']
         value = dict(version='synthetic-seed-only-patient-events-notes-v4', input_sha256=sha_file(self.args.input_csv),
                      source_sha256={name: sha_file(HERE / name) for name in sources},
                      sampling=asdict(self.sampling), tokenizer=self.args.tokenizer_model or self.args.model,
@@ -329,7 +332,7 @@ class Generator:
         if stage in ('seeds', 'patient_events'):
             module = self.positive if item['patient_class'] == 'positive' else self.negative
             if stage == 'seeds':
-                criteria = item['this_space'] + '\nNo history of:\n' + item['trial_boilerplate_text']
+                criteria = patient_generation_criteria(item)
                 messages = module.build_seed_messages(criteria, rng=random.Random(self.args.seed + int(item['space_index'])))
                 max_tokens = self.args.seed_max_tokens
             else:
@@ -653,7 +656,7 @@ class Generator:
 
     async def run(self):
         identity = self.manifest()
-        spaces = pd.read_csv(self.args.input_csv)
+        spaces = training_rows(pd.read_csv(self.args.input_csv))
         if spaces.space_index.tolist() != list(range(len(spaces))):
             raise ValueError('Expected contiguous 0c space_index values')
         spaces['trial_boilerplate_text'] = spaces.trial_boilerplate_text.fillna('')

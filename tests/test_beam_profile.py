@@ -98,7 +98,7 @@ def test_beam_checkpoint_manifest_rejects_old_effort(tmp_path, stage):
     if stage == 'screening':
         check = lambda: check_screening_manifest(args, 'beam', tmp_path)
     else:
-        script = load_script('beam_manifest_spaces', '0b_create_trial_spaces.py')
+        script = load_script('beam_manifest_spaces', 'legacy_trial_space_extraction.py')
         check = lambda: script.check_extraction_manifest(args, 'beam')
     check()
     path = tmp_path / f'{stage}_manifest.json'

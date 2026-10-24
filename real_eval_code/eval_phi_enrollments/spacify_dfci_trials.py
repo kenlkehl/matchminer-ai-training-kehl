@@ -49,7 +49,7 @@ def main():
     if args.create_spaces_script is None:
         # Try common locations
         possible_paths = [
-            REPO_ROOT / "0b_create_trial_spaces.py",
+            REPO_ROOT / "legacy_trial_space_extraction.py",
             Path("/ksg/kehl_mm_data/meta/2024/v20/v20_training_code/0b_create_trial_spaces.py"),
         ]
         for p in possible_paths:

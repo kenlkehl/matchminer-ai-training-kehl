@@ -7,7 +7,7 @@ script location at ../../data/phi/database_secrets.txt) unless --input-spaces
 is supplied.
 
 Trial spaces come from the trial_spaces table (this_cohort column), or from a
-CSV/JSON/JSONL/parquet file such as the output of 0b_create_trial_spaces.py.
+CSV/JSON/JSONL/parquet file such as the output of legacy_trial_space_extraction.py.
 Embeddings are saved to a parquet file with an 'embedding' column (list of
 floats per row), following the same format as hfspaces/preembed_trials.py.
 
@@ -27,7 +27,7 @@ Examples:
     # Also write a browser-loadable JSON file for the Electron app
     python embed_trial_spaces.py /path/to/model --browser-json-output trial_space_embeddings.browser.json
 
-    # Embed spaces extracted offline by 0b_create_trial_spaces.py
+    # Embed spaces extracted offline by legacy_trial_space_extraction.py
     python embed_trial_spaces.py /path/to/model \
       --input-spaces trial_space_lineitems.csv \
       --browser-json-output trial_space_embeddings.browser.json
@@ -74,7 +74,7 @@ def parse_args():
                         help="Optional JSON output path for browser_app embedded trial index import")
     parser.add_argument("--input-spaces", type=str, default=None,
                         help="Optional CSV/JSON/JSONL/parquet file with trial spaces. "
-                             "Accepts 0b_create_trial_spaces.py columns "
+                             "Accepts legacy_trial_space_extraction.py columns "
                              "(nct_id, this_space, trial_boilerplate_text) and "
                              "real-time/browser import columns "
                              "(id, nct_id, this_cohort, boilerplate_text). "

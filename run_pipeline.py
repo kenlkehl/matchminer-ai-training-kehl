@@ -20,7 +20,7 @@ import train_from_summaries as training
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = ROOT.parent / 'data/no_phi'
-STAGES = ('parse-trials', 'extract-spaces', 'sample-trials', 'generate-synthetic',
+STAGES = ('parse-trials', 'extract-cohorts', 'sample-trials', 'generate-synthetic',
           'prepare-notes', 'summarize-patients', 'prepare-training', 'train')
 
 
@@ -41,10 +41,12 @@ def parser():
     p.add_argument('--pipeline-dir', type=Path, help='Upstream state/log directory; default RUN_DIR/upstream')
     p.add_argument('--ctgov-json', type=Path)
     p.add_argument('--parsed-trials', type=Path)
-    p.add_argument('--screening-input', type=Path)
     p.add_argument('--start-year', type=int, default=2020)
-    p.add_argument('--sampled-spaces', type=Path)
-    p.add_argument('--sample-trials', type=int, default=3000)
+    p.add_argument('--sampled-spaces', '--sampled-cohorts', dest='sampled_spaces', type=Path)
+    p.add_argument('--sample-trials', type=int, default=5000)
+    p.add_argument('--cohort-workers', type=int, default=1536)
+    p.add_argument('--cohort-max-attempts', type=int, choices=range(1, 11), default=3)
+    p.add_argument('--cohort-max-tokens', type=int, default=50000)
     p.add_argument('--data-seed', type=int, default=42)
     p.add_argument('--dfci-trials-csv', type=Path, default=DATA_ROOT / 'dfci_trials_summary_10-18-26.csv')
     p.add_argument('--generation-dir', type=Path)
@@ -77,7 +79,7 @@ def resolve_paths(args):
         if isinstance(value, Path):
             setattr(args, key, value.expanduser().resolve())
     defaults = dict(pipeline_dir=args.run_dir / 'upstream', parsed_trials=args.data_dir / 'ctgov_trials.csv',
-                    trial_spaces=args.data_dir / 'trial_space_lineitems.csv',
+                    trial_spaces=args.data_dir / 'trial_cohort_lineitems.csv',
                     generation_dir=args.data_dir / 'synthetic_generation',
                     synthetic_notes=args.data_dir / 'all_synthetic_notes.parquet',
                     patient_summaries=args.data_dir / 'patient_summaries_with_spaces.parquet')
@@ -86,7 +88,7 @@ def resolve_paths(args):
             continue
         if getattr(args, key) is None:
             setattr(args, key, value)
-    args.sampled_spaces = args.sampled_spaces or args.generation_dir / 'sample_trial_space_lineitems.csv'
+    args.sampled_spaces = args.sampled_spaces or args.generation_dir / 'sample_trial_cohort_lineitems.csv'
     args.raw_synthetic_notes = args.raw_synthetic_notes or args.generation_dir / 'all_synthetic_notes.parquet'
     args.generation_model = args.generation_model or args.teacher_served_model or args.teacher_model
     args.generation_tokenizer = args.generation_tokenizer or args.teacher_model
@@ -137,14 +139,16 @@ def build_plan(args):
     model = ['--model', args.generation_model, '--tokenizer-model', args.generation_tokenizer]
     cache = ['--download-dir', str(args.download_dir)] if args.download_dir else []
     source = lambda *names: [ROOT / name for name in names]
-    extraction = [py, str(ROOT / '0b_create_trial_spaces.py'), '--input', str(args.parsed_trials),
+    extraction = [py, str(ROOT / '0b_extract_trial_cohorts.py'), '--input', str(args.parsed_trials),
                   '--start-year', str(args.start_year), '--seed', str(args.data_seed),
-                  '--output-trials', str(d / 'trials_with_spaces.csv'), '--output-spaces', str(args.trial_spaces),
-                  '--output-screening', str(d / 'trial_treatment_screening.csv'),
-                  '--work-dir', str(work / 'extraction'), '--max-model-len', str(args.generation_context),
-                  *model, *cache, *remote]
-    if args.screening_input:
-        extraction += ['--screening-input', str(args.screening_input)]
+                  '--output-trials', str(d / 'trials_with_cohorts.csv'), '--output-cohorts', str(args.trial_spaces),
+                  '--output-json', str(d / 'trial_cohorts.json'), '--work-dir', str(work / 'extraction'),
+                  '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
+                  '--max-attempts', str(args.cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
+                  '--max_concurrent_per_server', str(args.generation_concurrency_per_server),
+                  '--request_timeout', str(args.generation_request_timeout), '--api-key-env', args.api_key_env,
+                  *model, *(['--server_urls_file', str(registry)] if registry else [])]
+    inference_sources = args.inference_repo / 'src/matchminer_ai'
     generated = [g / name for name in ('all_synthetic_notes.parquet', 'all_synthetic_events.parquet', 'manifest.json')]
     patient_map = d / 'synthetic_patient_metadata.parquet'
     raw_summaries = d / 'patient_summaries.parquet'
@@ -152,15 +156,15 @@ def build_plan(args):
         Stage('parse-trials', [py, str(ROOT / '0a_parse_ctgov_json.py'), '--input', str(args.ctgov_json),
                               '--output', str(args.parsed_trials)],
               [args.ctgov_json] if args.ctgov_json else [], [args.parsed_trials], source('0a_parse_ctgov_json.py', 'ctgov_metadata.py')),
-        Stage('extract-spaces', extraction, [args.parsed_trials] + ([args.screening_input] if args.screening_input else []),
-              [args.trial_spaces, d / 'trials_with_spaces.csv'],
-              source('0b_create_trial_spaces.py', 'trial_hierarchy.py', 'trial_hierarchy_runner.py',
-                     'trial_space_export.py', 'trial_treatment_screening.py') + sorted((ROOT / 'trial_prompts').glob('*.txt'))),
+        Stage('extract-cohorts', extraction, [args.parsed_trials],
+              [args.trial_spaces, d / 'trials_with_cohorts.csv', d / 'trial_cohorts.json'],
+              source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') +
+              sorted(p for p in inference_sources.rglob('*') if p.suffix in ('.py', '.txt', '.yaml'))),
         Stage('sample-trials', [py, str(ROOT / '0c_sample_trial_spaces.py'), '--input-csv', str(args.trial_spaces),
               '--output-csv', str(args.sampled_spaces), '--dfci-trials-csv', str(args.dfci_trials_csv),
               '--n-trials', str(args.sample_trials), '--seed', str(args.data_seed)],
               [args.trial_spaces, args.dfci_trials_csv], [args.sampled_spaces, args.sampled_spaces.with_suffix('.sampling.json')],
-              source('0c_sample_trial_spaces.py', 'trial_space_format.py')),
+              source('0c_sample_trial_spaces.py', 'trial_space_format.py', 'trial_cohort_format.py')),
         Stage('generate-synthetic', [py, str(ROOT / 'generate_synthetic_data.py'), '--input-csv', str(args.sampled_spaces),
               '--output-dir', str(g), '--seed', str(args.data_seed), '--max-model-len', str(args.generation_context),
               '--seed-max-tokens', str(args.generation_seed_max_tokens),
@@ -169,12 +173,12 @@ def build_plan(args):
               [args.sampled_spaces], generated,
               source('generate_synthetic_data.py', '1a_make_synthetic_enrollee_prompts.py',
                      '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
-                     'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py')),
+                     'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py', 'trial_cohort_format.py')),
         Stage('prepare-notes', [py, str(ROOT / 'prepare_synthetic_training.py'), 'notes',
               '--input', str(args.raw_synthetic_notes), '--sampled-spaces', str(args.sampled_spaces),
               '--output', str(args.synthetic_notes), '--patients', str(patient_map),
               '--date-anchor', args.synthetic_date_anchor],
-              [args.raw_synthetic_notes, args.sampled_spaces], [args.synthetic_notes, patient_map], source('prepare_synthetic_training.py')),
+              [args.raw_synthetic_notes, args.sampled_spaces], [args.synthetic_notes, patient_map], source('prepare_synthetic_training.py', 'trial_cohort_format.py')),
         Stage('summarize-patients', [py, str(ROOT / '6_summarize_patients.py'),
               '--input_parquet', str(args.synthetic_notes), '--output_parquet', str(d / 'patient_serial_summaries.parquet'),
               '--patient_summaries_parquet', str(raw_summaries), '--shard_dir', str(work / 'summaries'),
@@ -256,7 +260,7 @@ def execute(args, plan):
         raise ValueError('Generation writes raw notes inside --generation-dir; use --raw-synthetic-notes only when starting later')
     if any(stage.name == 'parse-trials' for stage in plan) and args.ctgov_json is None:
         raise ValueError('--ctgov-json is required when starting at parse-trials')
-    llm_stages = {stage.name for stage in plan} & {'extract-spaces', 'generate-synthetic', 'summarize-patients'}
+    llm_stages = {stage.name for stage in plan} & {'extract-cohorts', 'generate-synthetic', 'summarize-patients'}
     if llm_stages - ({'generate-synthetic'} if args.wait_for_generation else set()) and not (args.server_urls_file or args.teacher_servers_file):
         raise ValueError('Upstream LLM stages require --server-urls-file for an existing serving pool')
     args.pipeline_dir.mkdir(parents=True, exist_ok=True)
