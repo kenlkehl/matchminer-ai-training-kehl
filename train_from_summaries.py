@@ -23,6 +23,7 @@ from oncoreasoning_training.contracts import DEFAULT_MODEL_NAME, TRIAL_RUBRIC_DI
 from oncoreasoning_training.create_all_training_data import atomic_json, source_record
 from oncoreasoning_training.teacher import DEFAULT_TEACHER
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
+from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
 INFERENCE_COMMIT = "1f17ef0ee29d039befb1f13f4780674dc634dd2f"
@@ -79,18 +80,26 @@ def parser():
     p.add_argument('--trialspace-pair-batch-size', type=int, default=512)
     p.add_argument('--trialspace-score-query-batches', type=int, default=4)
     p.add_argument('--trialspace-device-cache-gb', type=float, default=8)
-    p.add_argument('--trialspace-label-workers', type=int, default=1024)
+    p.add_argument('--trialspace-label-workers', type=int, default=0,
+                   help='Concurrent pair chains; 0 scales automatically with the live teacher pool')
+    p.add_argument('--trialspace-label-max-auto-workers', type=int, default=DEFAULT_AUTO_WORKERS_MAX)
     p.add_argument('--trialspace-extra-pairs', type=Path, help='Additional independent/challenge candidate JSONL')
     p.add_argument('--trialspace-cache-dir', type=Path, help='Local Hugging Face model cache')
     p.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     p.add_argument("--vllm", default=str(Path(sys.executable).parent / "vllm"))
     p.add_argument("--teacher-max-context", type=int, default=250000)
+    p.add_argument('--teacher-max-num-seqs', type=int, choices=range(1, 1025),
+                   metavar='1..1024', default=256,
+                   help='Sequence capacity for locally launched vLLM servers; request concurrency adapts below it')
     p.add_argument("--teacher-port", type=int, default=8100)
     p.add_argument("--teacher-concurrency", type=int, default=0,
                    help="Total downstream teacher request limit; 0 uses live per-server capacities")
     p.add_argument("--label-concurrency-per-server", type=int, choices=range(1, 1025),
-                   metavar="1..1024", default=96,
-                   help="TrialSpace labeling concurrency per endpoint; use 288 for the shared sn4622130540 teacher.")
+                   metavar="1..1024", default=DEFAULT_CEILING,
+                   help="Adaptive TrialSpace labeling ceiling per endpoint; live per-server limits can lower it.")
+    p.add_argument('--label-initial-concurrency-per-server', type=int, choices=range(1, 1025),
+                   metavar='1..1024', default=DEFAULT_INITIAL,
+                   help='Starting target before automatic queue/cache/throughput adjustment')
     p.add_argument("--teacher-startup-timeout", type=int, default=1800)
     p.add_argument("--skip-input-validation", action="store_true",
                    help="Reuse source records from this run's existing manifest without reading or rehashing input files.")
@@ -158,8 +167,9 @@ def stages(args):
             '--server_urls_file', str(servers), '--teacher-model', teacher_model,
             '--teacher-tokenizer', args.teacher_model, '--teacher-context', str(args.teacher_max_context),
             '--max_concurrent_per_server', str(args.label_concurrency_per_server),
-            '--initial-concurrent-per-server', str(min(16, args.label_concurrency_per_server)),
-            '--pending-requests', str(args.trialspace_label_workers), '--max_attempts', '5']
+            '--initial-concurrent-per-server', str(min(args.label_initial_concurrency_per_server, args.label_concurrency_per_server)),
+            '--pending-requests', str(args.trialspace_label_workers),
+            '--max-auto-pending-requests', str(args.trialspace_label_max_auto_workers), '--max_attempts', '5']
         if args.trialspace_cache_dir:
             label += ['--cache-dir', str(args.trialspace_cache_dir)]
         if args.teacher_concurrency_file:
@@ -223,7 +233,7 @@ def teacher_command(args, index):
         "--port", str(args.teacher_port + index), "--tensor-parallel-size", "1",
         "--quantization", "modelopt", "--reasoning-parser", resolve_parser_name(args.teacher_model),
         "--language-model-only", "--max-model-len", str(args.teacher_max_context),
-        "--max-num-seqs", "96", "--gpu-memory-utilization", "0.90",
+        "--max-num-seqs", str(args.teacher_max_num_seqs), "--gpu-memory-utilization", "0.90",
         "--no-enable-log-requests"]
     tool_parser = resolve_tool_call_parser(args.teacher_model)
     if tool_parser:
@@ -357,7 +367,10 @@ def external_teacher_pool(args):
             if context and int(context) < args.teacher_max_context:
                 raise ValueError(f"Teacher {url} supports {context} tokens; lower --teacher-max-context")
             servers.append({"url": url, "kind": "remote",
-                            "upstream_concurrency": args.label_concurrency_per_server})
+                            # Other teacher stages use this as a fixed demand
+                            # hint; only the adaptive labeler uses the ceiling.
+                            "upstream_concurrency": min(args.label_initial_concurrency_per_server,
+                                                        args.label_concurrency_per_server)})
         if not servers:
             raise ValueError("Supply at least one --teacher-url")
         atomic_json(registry, {"ready": True, "servers": servers})

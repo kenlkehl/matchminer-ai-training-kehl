@@ -126,10 +126,13 @@ def test_integrated_plan_starts_with_base_mining_and_trains_only_two_models():
     assert "--boilerplate-components" in prepare.command and "--catalog" in prepare.command
     command = runner.teacher_command(args, 0)
     assert "127.0.0.1" in command and "modelopt" in command and "--language-model-only" in command
-    assert command[command.index("--max-num-seqs") + 1] == "96"
+    assert command[command.index("--max-num-seqs") + 1] == "256"
     for stage in plan:
         if stage.name.startswith("label-"):
-            assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "96"
+            assert stage.command[stage.command.index("--max_concurrent_per_server") + 1] == "768"
+    larger = runner.parser().parse_args(['--teacher-max-num-seqs', '768'])
+    command = runner.teacher_command(larger, 0)
+    assert command[command.index('--max-num-seqs') + 1] == '768'
 
 
 @pytest.mark.parametrize('wrapper', ['train_all.sh', 'train_all_gcp.sh', 'temp_train_gcp.sh'])

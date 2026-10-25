@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .data import read_jsonl, write_json
 from .model import BASE_MODEL
+from .label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 
 def model_args(parser):
@@ -59,10 +60,13 @@ def parser():
     label.add_argument('--cache-dir')
     label.add_argument('--max-tokens', type=int, default=8192)
     label.add_argument('--teacher-context', type=int, default=250000)
-    label.add_argument('--pending-requests', type=int, default=16)
+    label.add_argument('--pending-requests', type=int, default=0,
+                       help='Pair chains in flight; 0 automatically follows live endpoint capacity')
+    label.add_argument('--max-auto-pending-requests', type=int, default=DEFAULT_AUTO_WORKERS_MAX,
+                       help='Upper bound on automatic pair workers; explicit --pending-requests overrides it')
     label.add_argument('--gated-regression', action='store_true',
                        help='Ask potential eligibility first; only ask specificity after yes; save scores.jsonl')
-    label.set_defaults(max_concurrent_per_server=4, initial_concurrent_per_server=2,
+    label.set_defaults(max_concurrent_per_server=DEFAULT_CEILING, initial_concurrent_per_server=DEFAULT_INITIAL,
                        scheduler_adaptive_concurrency=True, request_timeout=7200, max_attempts=4)
     train = commands.add_parser('train', help='Train only explicit within-question positive/negative groups')
     model_args(train)

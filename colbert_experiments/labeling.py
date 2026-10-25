@@ -13,6 +13,7 @@ from vllm_reasoning_utils import (load_tokenizer, resolve_chat_template_kwargs,
                                  resolve_parser_name, resolve_sampling_defaults)
 from .contracts import TASKS, contract_hash, judge_messages, parse_judgment, prompt_sources
 from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl
+from .label_concurrency import DEFAULT_AUTO_WORKERS_MAX, run_workers, worker_target
 
 
 def validate_served_teacher(models, *, requested, tokenizer):
@@ -59,6 +60,8 @@ async def label(args):
 
 
 async def _label(args, output):
+    auto_maximum = getattr(args, 'max_auto_pending_requests', DEFAULT_AUTO_WORKERS_MAX)
+    worker_target(args.pending_requests, 0, auto_maximum)  # Validate before loading the corpus.
     timing = dict(started_at=datetime.now(timezone.utc).isoformat(), first_request_at=None,
                   attempts_started=0)
     patients, cohorts = load_corpus(args.corpus)
@@ -185,27 +188,26 @@ async def _label(args, output):
             completed[item['key']] = path
             return row
 
-        async def worker():
-            while (item := next(iterator, None)) is not None:
-                if not gated:
-                    await ask(item)
-                    continue
-                from .regression import gated_judgments, aggregate_pair
-                rows = await gated_judgments(item, ask)
-                if rows is not None:
-                    score = aggregate_pair(item[0], rows, question_contract=signature['contract'])
-                    scores[digest([score['patient_id'], score['cohort_id']])] = score
-                    score_counts[str(score['score'])] += 1
+        async def process(item):
+            if not gated:
+                await ask(item)
+                return
+            from .regression import gated_judgments, aggregate_pair
+            rows = await gated_judgments(item, ask)
+            if rows is not None:
+                score = aggregate_pair(item[0], rows, question_contract=signature['contract'])
+                scores[digest([score['patient_id'], score['cohort_id']])] = score
+                score_counts[str(score['score'])] += 1
+
+        def resized(target):
+            timing.update(pair_worker_limit=target,
+                          pair_worker_mode='fixed' if args.pending_requests else 'automatic')
 
         reporter = asyncio.create_task(report_progress())
-        tasks = [asyncio.create_task(worker()) for _ in range(args.pending_requests)]
         try:
-            await asyncio.gather(*tasks)
+            await run_workers(iterator, process, lambda: registry.request_capacity(),
+                              workers=args.pending_requests, maximum=auto_maximum, on_resize=resized)
         finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
             reporter.cancel()
             await asyncio.gather(reporter, return_exceptions=True)
             progress('incomplete')

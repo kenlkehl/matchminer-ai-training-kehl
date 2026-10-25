@@ -10,12 +10,13 @@ import time
 
 from .data import write_json
 from .model import BASE_MODEL
+from .label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 
 def semantic_commands(commands):
     """Endpoint routing and concurrency do not change the clinical label contract."""
     runtime = {'--max_concurrent_per_server', '--initial-concurrent-per-server',
-               '--pending-requests', '--concurrency-control-file', '--server_urls',
+               '--pending-requests', '--max-auto-pending-requests', '--concurrency-control-file', '--server_urls',
                '--server_urls_file', '--server_urls_refresh', '--teacher-served-model'}
     normalized = {}
     for stage, command in commands.items():
@@ -84,9 +85,10 @@ def main():
     p.add_argument('--teacher-model', required=True)
     p.add_argument('--teacher-served-model')
     p.add_argument('--teacher-tokenizer', required=True)
-    p.add_argument('--teacher-concurrency', type=int, default=4)
-    p.add_argument('--teacher-initial-concurrency', type=int, default=2)
-    p.add_argument('--teacher-pending-requests', type=int, default=16)
+    p.add_argument('--teacher-concurrency', type=int, default=DEFAULT_CEILING)
+    p.add_argument('--teacher-initial-concurrency', type=int, default=DEFAULT_INITIAL)
+    p.add_argument('--teacher-pending-requests', type=int, default=0)
+    p.add_argument('--teacher-max-auto-pending-requests', type=int, default=DEFAULT_AUTO_WORKERS_MAX)
     p.add_argument('--teacher-concurrency-file')
     p.add_argument('--steps', type=int, default=1000)
     p.add_argument('--accumulation', type=int, default=8)
@@ -139,7 +141,8 @@ def main():
         '--teacher-model', args.teacher_model, '--teacher-tokenizer', args.teacher_tokenizer,
         '--server_urls', ','.join(args.teacher_url), '--max_concurrent_per_server', str(args.teacher_concurrency),
         '--initial-concurrent-per-server', str(args.teacher_initial_concurrency),
-        '--pending-requests', str(args.teacher_pending_requests)]
+        '--pending-requests', str(args.teacher_pending_requests),
+        '--max-auto-pending-requests', str(args.teacher_max_auto_pending_requests)]
     if args.teacher_concurrency_file:
         label += ['--concurrency-control-file', str(Path(args.teacher_concurrency_file).resolve())]
     if args.teacher_served_model:

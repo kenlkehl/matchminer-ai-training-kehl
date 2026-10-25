@@ -43,8 +43,14 @@ actual endpoint and model root. `--teacher-max-context` defaults to 250,000;
 `--vllm` selects a separate serving executable when needed.
 
 TrialSpace labeling uses the existing adaptive request pool. The default
-`--label-concurrency-per-server` ceiling is 96, with a starting limit of 16 and
-1,024 pending pair chains (`--trialspace-label-workers`). A failed eligibility
+`--label-concurrency-per-server` ceiling is 768, with a starting limit of 96
+(`--label-initial-concurrency-per-server`). The pair queue defaults to automatic
+(`--trialspace-label-workers 0`): 125% of the live pool's adaptive capacity,
+bounded by `--trialspace-label-max-auto-workers` (16,384). It grows as endpoints
+join and shrinks between complete pair chains without cancelling active questions.
+A positive worker setting selects a fixed limit, such as 8,192 for a large pool.
+The process raises its soft open-file limit as needed, within the existing hard
+limit. A failed eligibility
 gate ends its chain; eligible pairs ask their specificity questions separately.
 `--teacher-concurrency-file` adjusts per-server limits during a run, and the live
 registry admits/removes endpoints. Labeling checkpoints await atomic response
@@ -63,6 +69,15 @@ reduce concurrency. Ordinary ceiling edits do not reset the active target.
 The shared client opens a fresh HTTP connection for each request to avoid idle
 keep-alive resets during long inference and checkpoint operations. Checkpoint
 reads run outside the event loop so resumed labeling can keep requests moving.
+These defaults also apply directly to `trialspace_training.py label` and
+`python -m colbert_experiments label`, without a VM supervisor or orchestration:
+use `--pending-requests 0`, `--max-auto-pending-requests`,
+`--initial-concurrent-per-server`, and `--max_concurrent_per_server` for overrides.
+`train_all.sh`, `train_all_gcp.sh`, and `run_pipeline.py` pass the same settings
+through to every labeling round. Both fixed URL lists and live registries work.
+Locally launched teachers allow 256 sequences by default; set
+`--teacher-max-num-seqs` for a different serving capacity. This is independent
+of the adaptive client target and does not reconfigure externally owned servers.
 Other teacher stages retain the independent
 `--teacher-concurrency` setting (0 means automatic capacity-based scheduling).
 

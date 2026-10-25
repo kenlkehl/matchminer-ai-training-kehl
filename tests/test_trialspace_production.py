@@ -32,6 +32,9 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
         if parsed.command == 'label':
             assert parsed.gated_regression and not parsed.return_records
             assert parsed.scheduler_adaptive_concurrency
+            assert parsed.max_concurrent_per_server == 768
+            assert parsed.initial_concurrent_per_server == 96
+            assert parsed.pending_requests == 0 and parsed.max_auto_pending_requests == 16384
             assert parsed.teacher_tokenizer == args.teacher_model
         elif parsed.command in ('mine', 'train'):
             assert parsed.objective == 'gated_regression'
@@ -61,6 +64,24 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
     assert downstream_prepare[downstream_prepare.index('--splits') + 1:] == ['train', 'validation', 'test']
     index = downstream_fit.index('--training-splits')
     assert downstream_fit[index + 1:index + 4] == ['train', 'validation', 'test']
+
+
+def test_direct_label_defaults_match_pipeline_and_explicit_limits_pass_through():
+    import run_pipeline
+    direct = production.parser().parse_args(['label', '--corpus', 'corpus', '--candidates', 'pairs',
+        '--output', 'labels', '--teacher-model', 'teacher', '--teacher-tokenizer', 'teacher'])
+    assert (direct.max_concurrent_per_server, direct.initial_concurrent_per_server,
+            direct.pending_requests, direct.max_auto_pending_requests) == (768, 96, 0, 16384)
+    for parser in (runner.parser, run_pipeline.parser):
+        args = parser().parse_args(['--label-concurrency-per-server', '64',
+            '--label-initial-concurrency-per-server', '48', '--trialspace-label-workers', '8192',
+            '--trialspace-label-max-auto-workers', '12000'])
+        for stage in runner.stages(args):
+            if not stage.name.startswith('label-trialspace'):
+                continue
+            child = production.parser().parse_args(stage.command[2:])
+            assert (child.max_concurrent_per_server, child.initial_concurrent_per_server,
+                    child.pending_requests, child.max_auto_pending_requests) == (64, 48, 8192, 12000)
 
 
 def test_explicit_holdout_experiment_preserves_original_partitions(tmp_path):

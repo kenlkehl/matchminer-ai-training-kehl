@@ -51,6 +51,9 @@ def test_round_concurrency_can_change_without_reusing_different_labels():
     from colbert_experiments.run_round import semantic_commands
     first = dict(labeling=['python', '--model', 'gemma', '--pending-requests', '16'], training=['train', '--steps', '500'])
     resized = dict(first, labeling=['python', '--model', 'gemma', '--pending-requests', '96'])
+    automatic = dict(first, labeling=['python', '--model', 'gemma', '--pending-requests', '0',
+                                      '--max-auto-pending-requests', '16384'])
+    assert semantic_commands(first) == semantic_commands(automatic)
     assert semantic_commands(first) == semantic_commands(resized)
     changed_model = dict(first, labeling=['python', '--model', 'other', '--pending-requests', '96'])
     assert semantic_commands(first) != semantic_commands(changed_model)
