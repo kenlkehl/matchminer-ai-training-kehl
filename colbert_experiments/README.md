@@ -24,6 +24,13 @@ The student uses one short aggregate retrieval instruction plus the complete
 patient or cohort text, in both directions. Training minimizes
 `MSE(mean_MaxSim, score / 5)` with explicit, labeled candidates grouped by query.
 Constant-label groups are retained. There are no implicit in-batch negatives.
+Regression update batches balance available direction/score anchors and retain
+the sampled query's score range. Production defaults are 32 query groups per GPU
+per update and up to eight documents per query (up to 1,024 labeled pairs on four
+GPUs); the experimental CLI keeps its smaller configurable defaults. Encoding is
+batched within each query, with gradient accumulation across queries. Rare scores
+are intentionally oversampled, not imputed. Actual update histograms and pair
+counts are logged, and the sampling policy is part of checkpoint identity.
 This is the token-level analogue of Sentence Transformers'
 [CosineSimilarityLoss](https://sbert.net/docs/package_reference/sentence_transformer/losses.html#cosinesimilarityloss),
 whose stock implementation instead compares pooled cosine embeddings.
@@ -45,7 +52,8 @@ labels, so it retains an ordering comparison. These fixed diagnostic subsets
 do not estimate the deployment score distribution.
 Better calibration alone does not establish better retrieval.
 `baseline_metrics.json` compares the same probes with zero and a train-only
-constant mean, weighted by direction and query like the training sampler.
+constant mean, weighted uniformly by direction and query before score-stratified
+training sampling.
 
 For an end-to-end fresh round, add `--objective gated_regression` to the
 `run_round` command below. It mines with the aggregate instruction, labels with

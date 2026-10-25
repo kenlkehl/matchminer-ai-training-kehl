@@ -90,6 +90,11 @@ def _train(args, world, rank, local_rank):
     val_groups, val_report = group_builder(patients, cohorts, labels, split='val')
     if not groups:
         raise ValueError('No usable labeled training queries')
+    batch_sampler = None
+    if regression:
+        from .batching import RegressionBatchSampler
+        batch_sampler = RegressionBatchSampler(groups)
+        group_report['batch_sampling'] = batch_sampler.report()
     if args.steps is None:
         if not math.isfinite(args.epochs) or args.epochs <= 0:
             raise ValueError('Expected query sampling passes must be positive')
@@ -114,7 +119,10 @@ def _train(args, world, rank, local_rank):
     if regression:
         identity.update(contract=continuous.score_contract(), loss='mse_normalized_gated_score',
                         documents_per_query=args.documents_per_query, prediction_link=args.prediction_link,
-                        normalization=5, query_instruction=continuous.INSTRUCTION)
+                        normalization=5, query_instruction=continuous.INSTRUCTION,
+                        batch_sampling=batch_sampler.report(),
+                        query_groups_per_update=world * args.accumulation,
+                        max_pairs_per_update=world * args.accumulation * args.documents_per_query)
     if device.type == 'cpu':
         identity['execution_device'] = 'cpu'
     manifest = output / 'training_manifest.json'
@@ -172,16 +180,23 @@ def _train(args, world, rank, local_rank):
     for current in range(step, args.steps):
         optimizer.zero_grad(set_to_none=True)
         loss_sum = torch.zeros((), device=device)
+        batch_score_counts = [0] * 6
+        if regression:
+            global_batch = batch_sampler.batch(query_groups=world * args.accumulation,
+                documents_per_query=args.documents_per_query, seed=args.seed, step=current)
+            update_batch = global_batch[rank::world]
         for micro in range(args.accumulation):
             index = (current * args.accumulation + micro) * world + rank
             rng = random.Random(args.seed + index)
             torch.manual_seed(args.seed + index)
-            group = rng.choice(buckets[strata[index % len(strata)]])
             if regression:
-                indices = rng.sample(range(len(group['documents'])), min(args.documents_per_query, len(group['documents'])))
+                group, indices = update_batch[micro]
                 texts = [group['documents'][i]['text'] for i in indices]
                 targets = [group['labels'][i] for i in indices]
+                for target in targets:
+                    batch_score_counts[target] += 1
             else:
+                group = rng.choice(buckets[strata[index % len(strata)]])
                 positives = rng.sample(group['positive'], min(args.documents_per_class, len(group['positive'])))
                 negatives = rng.sample(group['negative'], min(args.documents_per_class, len(group['negative'])))
                 texts = [d['text'] for d in positives + negatives]
@@ -200,9 +215,22 @@ def _train(args, world, rank, local_rank):
         if world > 1:
             dist.all_reduce(loss_sum)
             loss_sum /= world
+        batch_metrics = {}
+        if regression:
+            counts = torch.tensor(batch_score_counts, device=device, dtype=torch.long)
+            if world > 1:
+                dist.all_reduce(counts)
+            observed = counts.cpu().tolist()
+            present = [i for i, count in enumerate(observed) if count]
+            batch_metrics = dict(batch_pairs=sum(observed), batch_score_counts=dict(enumerate(observed)),
+                batch_min_score=min(present), batch_max_score=max(present),
+                batch_query_groups=world * args.accumulation,
+                batch_unique_query_groups=len({(g['direction'], g['query_id']) for g, _ in global_batch}),
+                batch_unique_directional_pairs=len({(g['direction'], g['query_id'], g['documents'][i]['id'])
+                    for g, indices in global_batch for i in indices}))
         if rank == 0:
             entry = dict(step=current + 1, loss=float(loss_sum), gradient_norm=float(norm),
-                         elapsed_seconds=round(time.monotonic() - start, 2))
+                         elapsed_seconds=round(time.monotonic() - start, 2), **batch_metrics)
             history.append(entry)
             write_json(output / 'status.json', dict(state='training', **entry))
             print(json.dumps(entry), flush=True)

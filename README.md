@@ -100,6 +100,22 @@ complete query text. The complete opposite-side text is the document. Training
 groups labeled candidates by query and direction, retains constant-score groups,
 and never treats unjudged/in-batch documents as negatives.
 
+Production fits use **32 query groups per GPU per optimizer update**, with up to
+**8 labeled candidates per query**: up to 256 scored pairs per GPU, or 1,024 on
+four GPUs. The global update is planned across available direction/score strata,
+so every available 0–5 score is represented when the group budget permits. Within
+a query, selection keeps its score range and distinct score levels before filling
+remaining slots. Rare scores are deliberately oversampled; absent scores are
+never invented, and constant-score queries remain eligible for sampling.
+
+Each full query and its candidates are encoded together; gradients accumulate
+across query groups to keep 8K texts within memory. This is a large optimizer
+batch, not 1,024 full texts held in one forward pass. Configure it with
+`--trialspace-accumulation` and `--trialspace-documents-per-query`. Every update
+logs its actual pair count, 0–5 histogram and score range. Batch policy and sizes
+are checkpointed and cannot silently change on resume. Validation probes remain
+unchanged by training's score-balanced sampling.
+
 ## Mining, fitting and artifacts
 
 The production round sequence is:
@@ -111,8 +127,9 @@ The production round sequence is:
 4. Mine with round 2 to supply complete cohort/patient tables to catalog and
    OncoReasoning preparation.
 
-Each fit defaults to three **expected query-group sampling passes**, with random
-sampling within direction/query groups. `--trialspace-steps` overrides that
+Each fit defaults to three **query-group sampling passes in aggregate**, with
+score-stratified sampling rather than uniform visitation of each query.
+`--trialspace-steps` overrides that
 budget. Defaults are learning rate 1e-5, accumulation 4 per GPU, up to four labeled
 documents per query, BF16 on CUDA, and gradient checkpointing. `--gpus` controls
 both distributed mining and DistributedDataParallel fitting. Checkpoints resume

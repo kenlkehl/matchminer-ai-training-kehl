@@ -365,9 +365,10 @@ def parser():
     sub.choices['mine'].add_argument('--top-k-cohort-to-patient', type=int, default=40,
         help='ColBERT patient picks per cohort; overrides --top-k for this direction')
     sub.choices['label'].set_defaults(gated_regression=True, return_records=False)
-    sub.choices['train'].set_defaults(objective='gated_regression', eval_every=100, eval_groups_per_stratum=32, steps=None)
+    sub.choices['train'].set_defaults(objective='gated_regression', eval_every=100, eval_groups_per_stratum=32,
+                                     steps=None, accumulation=32, documents_per_query=8)
     sub.choices['train'].add_argument('--epochs', type=float, default=3,
-        help='Expected query-group sampling passes; --steps overrides this')
+        help='Aggregate query-group sampling passes; --steps overrides this')
     sub.choices['train'].add_argument('--output-model', type=Path, help='Separate final model directory; checkpoints stay in --output')
     return p
 

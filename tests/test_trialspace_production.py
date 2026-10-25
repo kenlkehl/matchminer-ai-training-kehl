@@ -37,6 +37,7 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
             if parsed.command == 'train':
                 assert parsed.prediction_link == 'identity' and parsed.steps == 8
                 assert parsed.output_model.parent == args.models_dir
+                assert parsed.accumulation == 32 and parsed.documents_per_query == 8
             else:
                 assert parsed.device_token_cache
                 assert parsed.device_cache_gb == 8
@@ -283,6 +284,13 @@ def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_p
     training.train(production.parser().parse_args(command))
     metrics = json.loads((tmp_path / 'fit/metrics.json').read_text())
     assert len(metrics['history']) == 6
+    assert all(sum(entry['batch_score_counts'].values()) == entry['batch_pairs']
+               and entry['batch_query_groups'] == 2 for entry in metrics['history'])
+    manifest = json.loads((tmp_path / 'fit/training_manifest.json').read_text())
+    assert manifest['batch_sampling']['policy'] == 'direction_score_stratified_v1'
+    assert manifest['max_pairs_per_update'] == 16
+    with pytest.raises(ValueError, match='identity changed'):
+        training.train(production.parser().parse_args(command + ['--documents-per-query', '4']))
 
 
 def test_directional_mining_returns_twenty_cohorts_and_forty_patients(tmp_path):

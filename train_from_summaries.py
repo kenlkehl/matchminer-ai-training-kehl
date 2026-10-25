@@ -60,8 +60,11 @@ def parser():
     p.add_argument("--embedding-model", default="lightonai/GTE-ModernColBERT-v1")
     p.add_argument('--trialspace-context', type=int, default=8192)
     p.add_argument('--trialspace-steps', type=int, help='Explicit optimizer updates per fit; otherwise derive from query count')
-    p.add_argument('--trialspace-epochs', type=float, default=3, help='Expected query-group sampling passes per fit')
-    p.add_argument('--trialspace-accumulation', type=int, default=4)
+    p.add_argument('--trialspace-epochs', type=float, default=3, help='Aggregate query-group sampling passes per fit')
+    p.add_argument('--trialspace-accumulation', type=int, default=32,
+                   help='Query groups per GPU per optimizer update, sampled across available scores')
+    p.add_argument('--trialspace-documents-per-query', type=int, default=8,
+                   help='Full-text labeled candidates encoded together for each training query')
     p.add_argument('--trialspace-learning-rate', type=float, default=1e-5)
     p.add_argument('--trialspace-candidate-limit', type=int, default=256)
     p.add_argument('--trialspace-top-k', type=int, default=20)
@@ -162,6 +165,7 @@ def stages(args):
             '--labels', str(scores), '--output', str(round_dir / 'fit'), '--output-model', str(embedding),
             '--objective', 'gated_regression', '--prediction-link', 'identity',
             '--accumulation', str(args.trialspace_accumulation), '--learning-rate', str(args.trialspace_learning_rate),
+            '--documents-per-query', str(args.trialspace_documents_per_query),
             '--eval-every', '100', '--eval-groups-per-stratum', '32']
         command += (['--steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
                     else ['--epochs', str(args.trialspace_epochs)])

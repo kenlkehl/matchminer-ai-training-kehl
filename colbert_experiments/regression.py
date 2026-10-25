@@ -228,10 +228,11 @@ def summarize_probe_rows(rows):
 
 
 def constant_baselines(training_groups, probes):
-    """A train-only mean matching the trainer's equal direction/query weighting."""
+    """A train-only uniform-query reference, before score-stratified sampling."""
     mean = float(np.mean([np.mean([np.mean(g['labels']) for g in training_groups if g['direction'] == direction])
                           for direction in DIRECTIONS if any(g['direction'] == direction for g in training_groups)]))
-    result = dict(train_mean_score=mean, mean_weighting='equal directions, then equal query groups; train labels only')
+    result = dict(train_mean_score=mean, mean_weighting='equal directions, then equal query groups; '
+                  'train labels only, before score-stratified batch sampling')
     for name, value in [('zero', 0.), ('train_mean', mean)]:
         result[name] = {split: summarize_probe_rows([
             dict(stratum=p['stratum'], **score_statistics(torch.full((len(p['labels']),), value / 5), p['labels']))
