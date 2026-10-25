@@ -155,7 +155,7 @@ def test_gated_labeler_resumes_failed_specificity_without_reasking_gate(tmp_path
         gated_regression=True, scheduler_adaptive_concurrency=True)
     with pytest.raises(RuntimeError, match='1 unresolved'):
         asyncio.run(labeling.label(args))
-    assert args.scheduler_metrics_file == str(args.output / 'scheduler_metrics.json')
+    assert args.scheduler_metrics_file == str(args.output / 'concurrency_status.json')
     assert len(calls) == 6
     partial = read_jsonl(args.output / 'scores.jsonl')
     assert len(partial) == 1 and partial[0]['score'] == 0

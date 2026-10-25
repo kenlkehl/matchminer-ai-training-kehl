@@ -113,7 +113,7 @@ async def _label(args, output):
         return dict(**result, **trace, generated_at=datetime.now(timezone.utc).isoformat())
 
     if getattr(args, 'scheduler_adaptive_concurrency', False) and not getattr(args, 'scheduler_metrics_file', None):
-        args.scheduler_metrics_file = str(output / 'scheduler_metrics.json')
+        args.scheduler_metrics_file = str(output / 'concurrency_status.json')
     registry = build_registry_from_args(args)
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
     def groups():
