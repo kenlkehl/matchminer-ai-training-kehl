@@ -28,6 +28,30 @@ from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITI
 ROOT = Path(__file__).resolve().parent
 INFERENCE_COMMIT = "e3a2bba8137bed90a0dcda5c8e1243f6745c3e98"
 
+TRIALSPACE_OPERATIONAL_OPTIONS = {
+    'trialspace_save_steps', 'trialspace_save_total_limit', 'trialspace_stop_at', 'trialspace_pause_file',
+}
+
+
+def training_identity_arguments(args):
+    return {key: str(value) for key, value in vars(args).items()
+            if key not in {'dry_run', 'skip_input_validation', *TRIALSPACE_OPERATIONAL_OPTIONS}
+            and not (key in ('trial_spaces', 'patient_summaries', 'synthetic_notes',
+                             'teacher_servers_file', 'teacher_concurrency_file') and value is None)}
+
+
+def training_identity_command(command):
+    """Exclude only checkpoint cadence and pause controls from upstream resume identity."""
+    flags = {'--' + key.replace('_', '-') for key in TRIALSPACE_OPERATIONAL_OPTIONS}
+    result, index = [], 0
+    while index < len(command):
+        if command[index] in flags:
+            index += 2
+        else:
+            result.append(command[index])
+            index += 1
+    return result
+
 
 @dataclass
 class Stage:
@@ -62,13 +86,22 @@ def parser():
     p.add_argument('--synthetic-training-splits', nargs='+', choices=['train', 'val', 'test'],
                    default=['train', 'val', 'test'], help='Synthetic source partitions used by every student fit')
     p.add_argument('--trialspace-context', type=int, default=8192)
-    p.add_argument('--trialspace-steps', type=int, help='Explicit optimizer updates per fit; otherwise derive from query count')
-    p.add_argument('--trialspace-epochs', type=float, default=3, help='Aggregate query-group sampling passes per fit')
+    p.add_argument('--trialspace-steps', type=int, help='Explicit optimizer updates per fit; otherwise derive from complete epochs')
+    p.add_argument('--trialspace-epochs', type=float, default=3, help='Complete directional-pair epochs per ranking fit')
     p.add_argument('--trialspace-accumulation', type=int, default=32,
                    help='Query groups per GPU per optimizer update, sampled across available scores')
     p.add_argument('--trialspace-documents-per-query', type=int, default=8,
                    help='Full-text labeled candidates encoded together for each training query')
-    p.add_argument('--trialspace-learning-rate', type=float, default=1e-5)
+    p.add_argument('--trialspace-learning-rate', type=float, default=2e-5)
+    p.add_argument('--trialspace-loss', choices=['mse', 'cosent', 'legacy_ranking'], default='legacy_ranking')
+    p.add_argument('--trialspace-ranking-scale', type=float, default=20.)
+    p.add_argument('--trialspace-contrastive-weight', type=float, default=1.)
+    p.add_argument('--trialspace-lr-scheduler', choices=['constant', 'linear'], default='linear')
+    p.add_argument('--trialspace-warmup-ratio', type=float, default=.01)
+    p.add_argument('--trialspace-save-steps', type=int, default=100)
+    p.add_argument('--trialspace-save-total-limit', type=int, default=2)
+    p.add_argument('--trialspace-stop-at', help='Pause student training at an ISO timestamp with timezone offset')
+    p.add_argument('--trialspace-pause-file', type=Path, help='Pause student training when this file exists')
     p.add_argument('--trialspace-candidate-limit', type=int, default=256)
     p.add_argument('--trialspace-top-k', type=int, default=20)
     p.add_argument('--trialspace-top-k-patient-to-cohort', type=int)
@@ -181,12 +214,21 @@ def stages(args):
         command = launch + ['trialspace_training.py', 'train', *common, '--model', str(previous_embedding),
             '--labels', str(scores), '--output', str(round_dir / 'fit'), '--output-model', str(embedding),
             '--objective', 'gated_regression', '--prediction-link', 'identity',
+            '--loss', args.trialspace_loss, '--ranking-scale', str(args.trialspace_ranking_scale),
+            '--contrastive-weight', str(args.trialspace_contrastive_weight),
+            '--lr-scheduler', args.trialspace_lr_scheduler, '--warmup-ratio', str(args.trialspace_warmup_ratio),
             '--accumulation', str(args.trialspace_accumulation), '--learning-rate', str(args.trialspace_learning_rate),
             '--documents-per-query', str(args.trialspace_documents_per_query),
+            '--save-steps', str(args.trialspace_save_steps),
+            '--save-total-limit', str(args.trialspace_save_total_limit),
             '--training-splits', *training_splits,
             '--eval-every', '100', '--eval-groups-per-stratum', '32']
         command += (['--steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
                     else ['--epochs', str(args.trialspace_epochs)])
+        if args.trialspace_stop_at:
+            command += ['--stop-at', args.trialspace_stop_at]
+        if args.trialspace_pause_file:
+            command += ['--pause-file', str(args.trialspace_pause_file)]
         result.append(Stage(f'train-trialspace-{iteration}', command,
                             [embedding / 'regression_scoring.json', embedding / 'model.safetensors']))
     catalog = run / "good_option_catalog"
@@ -421,9 +463,7 @@ def main():
     if any(not path.is_relative_to(ROOT.parent / "data/no_phi") for path in files):
         raise ValueError("The integrated runner requires inputs in the authorized data/no_phi directory")
     manifest_path = args.run_dir / "pipeline_manifest.json"
-    identity = {"args": {key: str(value) for key, value in vars(args).items()
-                         if key not in ("dry_run", "skip_input_validation")
-                         and not (key in ("trial_spaces", "patient_summaries", "synthetic_notes", "teacher_servers_file", "teacher_concurrency_file") and value is None)},
+    identity = {"args": training_identity_arguments(args),
                 "training_commit": git_revision(ROOT), "inference_commit": INFERENCE_COMMIT,
                 "trial_rubric_digest": TRIAL_RUBRIC_DIGEST,
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}
@@ -446,6 +486,8 @@ def main():
         from oncoreasoning_training.pipeline_upgrade import compatible_identity
         identity = compatible_identity(json.loads(manifest_path.read_text()), identity, args.run_dir, ROOT)
     atomic_json(manifest_path, identity)
+    atomic_json(args.run_dir / 'trialspace_runtime_controls.json',
+                {key: str(getattr(args, key)) for key in TRIALSPACE_OPERATIONAL_OPTIONS})
     atomic_json(args.run_dir / 'reasoning_archives.json', dict(
         policy='Preserve returned reasoning and complete responses; answer-only targets remain separate.',
         pooled_teacher_traces=str(args.run_dir / 'llm_traces'),

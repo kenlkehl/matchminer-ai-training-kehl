@@ -3,10 +3,209 @@
 This package contains the shared native `lightonai/GTE-ModernColBERT-v1`
 implementation and the original five-question experiments in **both retrieval
 directions**. The production entrypoint `../trialspace_training.py` and
-`../train_from_summaries.py` now use its gated regression trainer and question
-contracts, with distributed disk-backed mining. The experimental CLI retains
+`../train_from_summaries.py` use its gated score labels and ordinal-ranking trainer
+(CoSENT plus known-negative contrast), with distributed disk-backed mining. The experimental CLI retains
 its original binary-task default for controlled comparisons. Use synthetic/non-PHI
 inputs unless the selected endpoint is authorized for the data.
+
+## One-off smoke test on two A6000 GPUs while production labels continue
+
+Run this on the machine with the two A6000s, from this training checkout, using
+its Python environment with the training dependencies installed:
+
+```bash
+python colbert_experiments/smoke_train_completed.py \
+  --output ../data/no_phi/colbert_completed_smoke_a6000_all \
+  --gpus 0,1
+```
+
+The default source is the current
+`synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025` run under
+the mounted workspace's `data/no_phi`. Override it with `--source-run PATH`.
+The script uses this machine's Python and GPU indices, and Hugging Face's normal
+cache location (`HF_HUB_CACHE` or `--cache-dir` can select a local disk cache).
+It imports the sibling inference checkout when available. It does not contact
+LLM servers or alter the production labeling/training workflow.
+The script itself starts `torchrun` with one DDP worker per selected GPU; invoke
+it with Python, without an additional distributed launcher. `--gpus 0,1`
+therefore already trains on both devices.
+
+Preparation includes **all completed train-patient pairs** and samples up to
+**2,000 completed validation-patient pairs**. It reads a compact completed-score
+archive sequentially, or the labeler's final `scores.jsonl` when available.
+The training host does **not** need to enumerate/open individual question files
+or scan the candidate table. A negative eligibility gate is complete;
+a positive gate requires all four specificity answers. Missing answers never
+become zero scores. Compact-score contracts, corpus hashes, gated answers and
+the archive checksum are validated during the sequential read. Source reasoning
+traces stay in place and remain linked by question keys and the source archive.
+The default `--train-pairs 0` includes every original-training-patient pair in
+the archive's fixed cutoff snapshot.
+Training defaults to three complete epochs over that snapshot, with no fixed
+update cap. An explicit positive `--train-pairs N` can still request a smaller experiment. A bounded,
+seeded reservoir is used only for validation and explicitly capped training samples.
+Counts, score distributions, the archive cutoff and any shortfall against the
+requested sample sizes are printed and recorded. `--prepare-only`
+creates the snapshot without loading a model or using GPUs.
+
+While labeling is still running and has not exported final scores, pack its
+already-published responses **once on the producing host** (Camus for this run):
+
+```bash
+python colbert_experiments/export_completed_scores.py --workers 8
+```
+
+The exporter validates question identities, full-text prompt hashes, corpus
+identity and completion status, then atomically publishes a compact JSONL plus
+manifest under `SOURCE_RUN/labels/completed_scores`. It uses separate CPU
+processes and leaves the active labeler and source reasoning untouched. This
+one-time producer-side scan avoids repeating millions of small-file reads over
+the remote NFS mount. Rerun the exporter when a newer cutoff is needed, then
+choose a fresh smoke-test output directory to include those additional labels.
+Use `--source-run PATH` on either script to select a different run, or
+`--score-archive PATH` on the training script to select a particular compact
+archive directory. The new default fails promptly if no compact/final scores
+exist; it does not silently start an hours-long inspection. Explicit
+`--inspect-checkpoints` retains the old individual-response reconstruction for
+diagnostics; `--candidate-multiplier` affects only that fallback's capped samples.
+
+A smoke process already doing the old inspection must be stopped and restarted
+to use this path. Existing completed snapshots are reused without any question
+inspection; unfinished preparations can restart in the same output directory.
+
+Only patients whose **original `source_split` is `train`** contribute optimizer
+updates. Original validation patients supply validation metrics; test patients
+are excluded. Production's pooled effective `split=train` is not used as a
+holdout assignment. Both patient-to-cohort and cohort-to-patient directions are
+trained/evaluated by default (`--direction` can restrict this). Cohorts can appear
+in both patient partitions: this is a patient holdout, not a cohort holdout.
+
+The student uses the production base model, complete 8,192-token inputs without
+silent truncation, gradient checkpointing, BF16 and two-rank DDP. By default it retains
+`MSE(mean_MaxSim, score / 5)`. Complete-pass batching visits every directional
+pair exactly once per epoch, mixes scores within each query, and spreads
+direction/score strata throughout the epoch without replacement sampling. Each
+forward pass encodes one query with up to **two candidates** together; 32
+accumulated query groups per GPU give up to **128 labeled pairs per update**.
+Validation also batches its encodings. These conservative defaults are intended
+for 48 GB A6000s; a particular hardware/software stack is not pre-benchmarked.
+For less memory, reduce `--documents-per-query` or `--eval-batch-size` rather than
+truncating the clinical text.
+
+Defaults run **3 complete epochs**, matching production's epoch setting. Every
+completed training pair contributes once per direction in each epoch. The actual
+update count is computed from the complete query chunks, two GPU ranks, and
+gradient accumulation, then printed before fitting. The final partial update is
+included; DDP padding has zero loss weight and does not duplicate training pairs.
+`--epochs` changes the number of full passes; `--steps` is available only as an
+explicit update-count override. Batch train loss prints every update.
+Before training, every **5 updates**, and at each epoch end, the console prints fixed-sample train
+loss, validation loss, and validation AUROC separately for each direction:
+
+```text
+[train 00005/TOTAL_UPDATES epoch=1] train_batch_loss=... pairs=...
+[eval 00005] train_loss=... val_loss=... val_auroc_patient_to_cohort=... val_auroc_cohort_to_patient=...
+```
+
+AUROC uses **raw continuous mean-MaxSim** as its predictor and **`score > 0` as
+the positive class**, with `score == 0` negative. Scores are neither thresholded
+nor passed through a sigmoid before AUROC. Fixed evaluation samples contain 256
+unique pairs per partition, selected independently of student predictions with
+approximately prevalence-preserving binary stratification; both classes must be
+present. For the default MSE objective, training and evaluation losses both weight actual labeled pairs equally
+within their batches; zero-weight DDP padding contributes neither loss nor sample
+count. These are diagnostics on the currently
+completed, retrieved pairs, not estimates of full-corpus matching performance.
+Use `--eval-every`, `--eval-pairs`, `--epochs`, `--train-pairs` and `--val-pairs` to
+change the smoke-test size. JSON metrics and individual validation predictions
+are saved under `OUTPUT/fit`.
+
+The snapshot is reused unchanged when the same command is repeated. Model and
+optimizer checkpoints are saved every 10 updates, keeping at most two, and the
+final model goes to `OUTPUT/model`. To pause with a checkpoint, create
+`OUTPUT/PAUSE`; remove it and rerun the same command to resume. `--stop-at` also
+accepts an ISO timestamp with an explicit timezone offset. Choose a new output
+directory for a fresh label snapshot or different training settings, including
+switching an already-started replacement-sampled fit to complete epochs. In particular,
+use a new output directory if an earlier run already froze a 12,000-pair snapshot;
+the script will not silently resume that capped snapshot as an all-pairs run.
+
+### Reusing the previous TrialSpace ranking recipe
+
+The sequence-embedding trainer in `../finetune_embedder.py` uses **CoSENT on
+numeric labels plus MultipleNegativesRankingLoss on positive pairs**. Those
+numeric labels specify relative order, rather than a target similarity for
+pointwise regression. The smoke script can adapt this to mean-MaxSim:
+
+```bash
+python colbert_experiments/smoke_train_completed.py \
+  --output ../data/no_phi/colbert_completed_ranking_a6000 \
+  --gpus 0,1 --loss legacy_ranking \
+  --learning-rate 2e-5 --lr-scheduler linear --warmup-ratio .01
+```
+
+This starts a separate experiment from the base ColBERT model. It uses all
+completed original-train pairs for three full epochs, retains the patient
+holdout and both retrieval directions, and makes no new LLM calls. The existing
+running MSE experiment remains unchanged. The production entrypoints now default
+to this ranking recipe as well. To compare
+exactly the same label cutoff and validation pairs, copy **only** the existing
+run's `snapshot/` directory into the new output directory before launching;
+do not copy `fit/`, since objective/settings changes must not resume an old fit.
+
+`--loss cosent` learns that a pair labeled 5 should score above a pair labeled 0
+or 2, without prescribing their absolute MaxSim values. It ignores tied labels
+and compares only pairs in the same retrieval direction. Any strictly increasing
+label transformation preserves this loss: no sigmoid or label normalization is
+needed. `--ranking-scale 20` is its inverse temperature.
+
+`--loss legacy_ranking` adds a within-query softmax loss: each positive (`score
+> 0`) competes with that query's **explicitly labeled zeros** in the effective
+batch. This is a deliberate adaptation of MNRL: unknown cross-query combinations
+do not become negatives, and multiple positives do not repel one another.
+`--contrastive-weight 1` controls the added term. CoSENT averages over directions
+with unequal labels; the contrastive component averages over queries containing
+both positive and zero labels. Zero-only groups still participate in the
+cross-query CoSENT comparisons. Batches with no applicable comparison have zero
+ranking gradient; JSON training logs include comparison/query counts.
+
+These losses compare across the **entire effective batch**, up to 128 directional
+pairs at the default two-GPU settings. Ordinary gradient accumulation alone
+would not achieve this. A no-grad pass caches scalar MaxSim scores across ranks,
+then a second pass replays the same seeded microbatches and backpropagates the
+full-batch loss gradients. This adds a forward pass while keeping activation
+memory bounded by one query/candidate microbatch. Replay consistency is checked;
+partial batches still have exact coverage and zero-weight padding.
+Collective pause polls occur every eight microbatches and at phase boundaries,
+rather than synchronizing workers before every short/long-text pair of batches.
+The small scalar-score loss runs on CPU, with its gradients copied back to the
+encoder GPUs, avoiding many tiny GPU operations. The objective, batch membership,
+random seeds and checkpoint identity are unchanged by these execution optimizations.
+Workers can still wait at phase/gradient synchronization, evaluation completion,
+and rank-zero checkpoint writes; VRAM occupancy alone does not measure GPU work.
+
+The optional linear LR schedule reproduces the older trainer's 2e-5 peak LR and
+1% warmup when used with the command above. Scheduler state is checkpointed and
+resumed along with optimizer/model state, retaining at most two checkpoints.
+The smoke script's original MSE defaults retain constant 1e-5 LR and remain resumable.
+`trialspace_training.py train` and both `train_all*.sh` paths default to
+`legacy_ranking`, 2e-5 LR and this linear schedule. They share the same loss and
+full-batch gradient cache, with 32 groups/GPU and up to 8 candidates/group;
+the smoke script uses 2 candidates/group for the A6000 memory budget.
+Production includes all synthetic source partitions; the smoke script retains
+its original-patient train/validation split. Direct production flags are
+`--loss`, `--ranking-scale`, `--contrastive-weight`, `--lr-scheduler`, and
+`--warmup-ratio`; the pipeline exposes them with a `--trialspace-` prefix.
+
+Console `train_loss` and `val_loss` now report the selected ranking objective;
+AUROCs still use raw MaxSim to predict `score > 0`. MSE is retained separately as
+`mse_diagnostic`, not as evidence of calibrated scores. CoSENT magnitude depends
+on the number of comparisons, so compare fixed validation probes over time,
+not its numeric value against MSE or differently sized batches. Export metadata
+marks ranking scores as uncalibrated and does not claim a 0–5 prediction scale.
+This objective change needs full-corpus retrieval checks as well as AUROC:
+it does not guarantee removal of candidate preferences, especially without
+fresh hard negatives from the current model.
 
 ## Gated score regression experiment
 
@@ -20,14 +219,14 @@ answers are saved as null. Failed required calls leave a pair unscored and are
 retried on resume; they never become zero labels. A gate error can therefore
 suppress useful specificity information, so inspect gate disagreements separately.
 
-The student uses one short aggregate retrieval instruction plus the complete
-patient or cohort text, in both directions. Training minimizes
+The MSE experiment uses one short aggregate retrieval instruction plus the complete
+patient or cohort text, in both directions. With `--loss mse`, training minimizes
 `MSE(mean_MaxSim, score / 5)` with explicit, labeled candidates grouped by query.
 Constant-label groups are retained. There are no implicit in-batch negatives.
 Regression update batches balance available direction/score anchors and retain
-the sampled query's score range. Production defaults are 32 query groups per GPU
-per update and up to eight documents per query (up to 1,024 labeled pairs on four
-GPUs); the experimental CLI keeps its smaller configurable defaults. Encoding is
+the sampled query's score range. The experimental CLI keeps its smaller
+configurable batch defaults; production ranking uses the complete-pass batching
+described above. Encoding is
 batched within each query, with gradient accumulation across queries. Rare scores
 are intentionally oversampled, not imputed. Actual update histograms and pair
 counts are logged, and the sampling policy is part of checkpoint identity.

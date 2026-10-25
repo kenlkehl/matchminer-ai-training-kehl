@@ -295,7 +295,9 @@ def execute(args, plan):
         for stage in plan:
             status_path = args.pipeline_dir / 'status.json'
             try:
-                identity = dict(command=stage.command, inputs=[file_record(p, cache) for p in stage.inputs],
+                identity = dict(command=(training.training_identity_command(stage.command)
+                                         if stage.name == 'train' else stage.command),
+                                inputs=[file_record(p, cache) for p in stage.inputs],
                                 sources=[file_record(p, cache) for p in [Path(__file__), *stage.sources]])
                 fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
                 request = args.pipeline_dir / 'requests' / f'{stage.name}.json'
@@ -308,7 +310,7 @@ def execute(args, plan):
                         raise ValueError(f'Changed or missing completed output for {stage.name}')
                     print(f'[skip] {stage.name}', flush=True)
                     continue
-                atomic_json(request, dict(fingerprint=fingerprint, **identity))
+                atomic_json(request, dict(fingerprint=fingerprint, **identity, execution_command=stage.command))
                 atomic_json(cache_path, cache)
                 atomic_json(status_path, dict(stage=stage.name, status='running'))
                 if stage.name == 'sample-trials' and generation_active(args.generation_dir):

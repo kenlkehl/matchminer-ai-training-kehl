@@ -241,8 +241,35 @@ def constant_baselines(training_groups, probes):
     return result
 
 
+def ranking_probe_summary(rows, *, objective, scale, contrastive_weight):
+    """Retain query-ranking diagnostics, but report the actual ordinal objective."""
+    from sklearn.metrics import roc_auc_score
+    from .ordinal_ranking import ranking_loss
+
+    def metrics(values, result):
+        scores = torch.tensor([s for row in values for s in row['scores']])
+        labels = [label for row in values for label in row['labels']]
+        directions = [row['stratum'] for row in values for _ in row['labels']]
+        query_ids = [row['query_id'] for row in values for _ in row['labels']]
+        loss, parts = ranking_loss(scores, labels, directions, query_ids, objective=objective,
+                                   scale=scale, contrastive_weight=contrastive_weight)
+        for name in ('loss', 'mae', 'mse_score', 'rmse'):
+            result['mse_diagnostic' if name == 'loss' else name + '_diagnostic'] = result.pop(name)
+        binary = [label > 0 for label in labels]
+        result.update(loss=float(loss), objective=objective,
+            auroc=float(roc_auc_score(binary, scores.numpy())) if len(set(binary)) == 2 else None,
+            **{k: float(v) if isinstance(v, torch.Tensor) else v for k, v in parts.items()})
+        return result
+
+    summary = metrics(rows, summarize_probe_rows(rows))
+    for name, values in summary['strata'].items():
+        metrics([r for r in rows if r['stratum'] == name], values)
+    return summary
+
+
 @torch.inference_mode()
-def evaluate_probes(model, probes, *, link='identity', rank=0, world=1, **unused):
+def evaluate_probes(model, probes, *, link='identity', rank=0, world=1,
+                    objective='mse', scale=20., contrastive_weight=1., **unused):
     import torch.distributed as dist
     was_training = model.training
     model.eval()
@@ -258,4 +285,11 @@ def evaluate_probes(model, probes, *, link='identity', rank=0, world=1, **unused
         gathered = [None] * world
         dist.all_gather_object(gathered, rows)
         rows = [row for values in gathered for row in values]
+    if objective != 'mse':
+        summary = ranking_probe_summary(rows, objective=objective, scale=scale, contrastive_weight=contrastive_weight)
+        for row in rows:
+            row['scaled_maxsim_diagnostic'] = row.pop('predictions')
+            for name in ('loss', 'mae', 'mse_score'):
+                row['mse_diagnostic' if name == 'loss' else name + '_diagnostic'] = row.pop(name)
+        return summary, rows
     return summarize_probe_rows(rows), rows

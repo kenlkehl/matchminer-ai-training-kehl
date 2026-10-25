@@ -1,6 +1,6 @@
 # matchminer-ai-training
 
-The production TrialSpace path trains **ColBERT with gated score regression**,
+The production TrialSpace path trains **ColBERT with ordinal ranking of gated scores**,
 starting from `lightonai/GTE-ModernColBERT-v1`. It uses complete patient histories
 and cohort eligibility criteria in both retrieval directions. The pipeline then
 builds the GoodOption evidence catalog and trains the existing answer-only
@@ -11,8 +11,8 @@ OncoReasoning summarization and clinical-QA adapters.
 `trialspace_training.py` is the production preparation/mining/labeling/training
 entrypoint. The native ColBERT encoder, retrieval instruction, and packed MaxSim
 scorer are owned by the inference dependency and imported by both production
-and [`colbert_experiments`](colbert_experiments/README.md). Production fixes the
-objective to gated regression.
+and [`colbert_experiments`](colbert_experiments/README.md). Production uses the
+gated 0–5 teacher labels with **CoSENT plus a contrastive loss on known negatives**.
 
 Use a local-disk virtual environment, outside the network-mounted checkout, and
 install this repository plus the sibling `matchminer-ai-inference-kehl` package.
@@ -108,6 +108,25 @@ or summary. Patient cancer history and the prior boilerplate field become one
 summary with an **Other relevant history:** bridge. Original patient, NCT, cohort,
 and source split IDs are preserved. Source assignments for sibling cohorts and
 known synthetic patient/source-trial relationships are validated before pooling.
+
+Audit saved patient summaries before repairing contaminated output with:
+
+```bash
+python scripts/check_patient_summaries.py \
+  --input ../data/no_phi/my_run/corpus_all/patients.jsonl \
+  --output ../data/no_phi/my_summary_quality_audit
+```
+
+This read-only command imports `patients.check_patient_summary` from the inference
+package and supports JSONL, CSV and Parquet. It writes flagged IDs, reason codes,
+line/character locations and counts to a new directory; `--include-text` explicitly
+includes flagged summary text in the local review files. It detects drafting or
+prompt commentary, raw reasoning markers, repeated cancer fields/sections and
+long repeated paragraphs. Repeated headings alone are valid for multiple primary
+cancers. Even identical core fields can represent distinct primaries, so those
+flags require review of extent and treatment history. The command does not edit
+the source, regenerate patients, invalidate labels or restart training.
+
 Production pools **all synthetic patients and cohorts** for both retrieval
 directions, labeling, and optimization. Original splits become `source_split`
 provenance; the effective corpus split is `train`. There are no synthetic patient
@@ -127,7 +146,7 @@ The training-only defaults are `DATA_DIR/patient_summaries_with_spaces.parquet`,
 Override the cohort path with the sampled file when those differ. Historical
 trial-space exports do not supply the new cohort contract.
 
-## Labels and regression objective
+## Labels and ranking objective
 
 For each canonical patient/cohort pair, the teacher first answers:
 
@@ -142,29 +161,66 @@ on resume. The brief answer justification and the model's separate reasoning
 trace are both preserved. Unknown information alone does not make the patient
 ineligible; specificity requires the support described by its own rubric.
 
-The student minimizes `MSE(mean_MaxSim(query, document), yes_count / 5)`.
-The production prediction link is identity: no sigmoid transforms labels or
-predictions. This assumes equal spacing between the five positive scores; the
-score is not a probability. One aggregate retrieval instruction precedes the
-complete query text. The complete opposite-side text is the document. Training
-groups labeled candidates by query and direction, retains constant-score groups,
-and never treats unjudged/in-batch documents as negatives.
+The default student loss, `legacy_ranking`, adapts the earlier TrialSpace
+CoSENT + MultipleNegativesRankingLoss recipe to **mean-MaxSim**. CoSENT requires
+higher-labeled pairs to score above lower-labeled pairs, separately in each
+retrieval direction. Tied labels do not impose an ordering. No sigmoid, label
+normalization, or equally spaced numeric predictions are required.
+The added contrastive term compares each positive (`score > 0`) only with
+explicitly labeled zeros for that same query. It does not assume cross-query
+documents are negative, and multiple positives do not repel one another.
+The default inverse temperature is 20 and the contrastive weight is 1.
+One aggregate retrieval instruction precedes the complete query text; the
+complete opposite-side text is the document. Existing gated labels and reasoning
+traces are reused without relabeling. Exported scores are uncalibrated ranking
+signals, not probabilities or predicted 0–5 scores.
 
 Production fits use **32 query groups per GPU per optimizer update**, with up to
 **8 labeled candidates per query**: up to 256 scored pairs per GPU, or 1,024 on
-four GPUs. The global update is planned across available direction/score strata,
-so every available 0–5 score is represented when the group budget permits. Within
-a query, selection keeps its score range and distinct score levels before filling
-remaining slots. Rare scores are deliberately oversampled; absent scores are
-never invented, and constant-score queries remain eligible for sampling.
+four GPUs. Complete-pass batching visits **every labeled directional pair once
+per epoch**, including zero-only query groups and the partial final update.
+It mixes scores within queries and distributes direction/score strata throughout
+each epoch without replacement. Actual score coverage depends on the labels
+available in that batch; absent scores are never invented.
 
-Each full query and its candidates are encoded together; gradients accumulate
-across query groups to keep 8K texts within memory. This is a large optimizer
-batch, not 1,024 full texts held in one forward pass. Configure it with
+Each full query and its candidates are encoded together. A first pass caches
+scalar scores across GPUs; a second replays seeded microbatches and applies the
+gradient of the **full effective batch** ranking loss. Ordinary accumulation
+alone would not compare scores across microbatches. This adds one forward pass
+while retaining only one microbatch's encoder activations at a time. The small
+score-vector loss runs on CPU and its gradients return to the encoder GPUs.
+Collective pause polls occur every eight ranking microbatches and at phase
+boundaries, allowing workers with different text lengths to progress independently
+between polls. Configure the effective batch with
 `--trialspace-accumulation` and `--trialspace-documents-per-query`. Every update
 logs its actual pair count, 0–5 histogram and score range. Batch policy and sizes
-are checkpointed and cannot silently change on resume. Fixed diagnostic probes
-remain unchanged by training's score-balanced sampling.
+are checkpointed and cannot silently change on resume. Logs also include counts
+of ordinal comparisons and queries with known positive/negative contrasts.
+
+ColBERT checkpoints contain model, optimizer, and LR-scheduler state. By default, at most
+two checkpoint payloads are retained, including a new save in progress; the
+previous committed checkpoint survives an interrupted write. Direct training
+accepts `--save-steps`, `--save-total-limit` (minimum two), `--stop-at` (an ISO
+timestamp with an explicit timezone offset), and `--pause-file`. The integrated
+runner exposes the same settings with a `--trialspace-` prefix. A pause request
+is coordinated across ranks at a polling boundary. Any partial accumulated
+update is discarded, the last completed update is checkpointed, and workers
+exit to release GPU memory. Paused CLI runs exit nonzero so downstream stages
+cannot consume an unfinished model. Resume with the same training arguments and
+output directory, removing the pause file and clearing or advancing the deadline;
+`latest.json` selects the saved state. These operational controls do not change
+the training identity.
+
+`scripts/label_to_trialspace.py` supports an explicitly configured handoff from
+an existing label workflow: require complete labels, stop its eight-VM fleet,
+stop its four registered Camus teachers, then launch one production DDP fit.
+It retains process identities, allows only registered teacher sessions to be
+stopped, and leaves unrelated GPU occupants untouched. Run its independent
+`watchdog` mode as well as `run`; a systemd training service also has a bounded
+runtime and kills its entire cgroup after the graceful checkpoint window. The
+deadline policy pauses unfinished labeling too if it overruns the GPU reservation.
+Do not treat this operator-specific handoff as a requirement for ordinary
+`train_all*.sh` runs.
 
 ## Mining, fitting and artifacts
 
@@ -177,13 +233,20 @@ The production round sequence is:
 4. Mine with round 2 to supply complete cohort/patient tables to catalog and
    OncoReasoning preparation.
 
-Each fit defaults to three **query-group sampling passes in aggregate**, with
-score-stratified sampling rather than uniform visitation of each query.
-`--trialspace-steps` overrides that
-budget. Defaults are learning rate 1e-5, accumulation 4 per GPU, up to four labeled
-documents per query, BF16 on CUDA, and gradient checkpointing. `--gpus` controls
+Each fit defaults to three **complete directional-pair epochs**.
+`--trialspace-steps` explicitly overrides that budget. Defaults are peak learning
+rate **2e-5**, **linear decay with 1% warmup**, accumulation **32 per GPU**, up to
+**eight** labeled documents per query, BF16 on CUDA, and gradient checkpointing. `--gpus` controls
 both distributed mining and DistributedDataParallel fitting. Checkpoints resume
 interruptions within the same fit, with strict source/model/label identities.
+The direct `trialspace_training.py train` command and both `train_all*.sh`
+entrypoints use these defaults. Controls are `--trialspace-loss`,
+`--trialspace-ranking-scale`, `--trialspace-contrastive-weight`,
+`--trialspace-learning-rate`, `--trialspace-lr-scheduler`, and
+`--trialspace-warmup-ratio` (omit the `trialspace-` prefix for direct training).
+`cosent` selects ordering only; `mse` retains the older regression experiment
+and its query-sampling behavior. Use a fresh fit directory when changing losses;
+MSE checkpoints cannot silently resume as ordinal-ranking checkpoints.
 
 Both query and document limits are **8,192 tokens**, including markers. Full text
 is never silently truncated. The model uses its published projection, Q/D markers,
@@ -223,10 +286,12 @@ positive labels. This is bounded candidate mining, not exhaustive corpus search.
 `--trialspace-random-k`, and batching controls expose those choices. Both retrieval
 directions are scored independently; directional MaxSim is never transposed.
 
-Every 100 optimizer updates, fixed training groups measure normalized
-MSE, MAE/RMSE in 0–5 units, unequal-label ordering accuracy, and tie-aware NDCG.
-Zero and training constant-mean baselines expose apparent gains caused solely
-by score calibration or zero-heavy labels. These are fixed candidate-pool
+Every 100 optimizer updates and at epoch ends, fixed training groups measure
+the actual ranking loss, raw-MaxSim binary AUROC (`score > 0`), unequal-label
+ordering accuracy, and tie-aware NDCG, with results per retrieval direction.
+MSE and MAE/RMSE remain explicitly named diagnostics, not calibration claims.
+CoSENT magnitude depends on comparison count; compare a fixed probe over time,
+not its loss against MSE or differently sized batches. These are fixed candidate-pool
 training diagnostics, not held-out validation or full-corpus recall estimates.
 An explicitly excluded validation partition enables separate held-out probes.
 
@@ -1366,8 +1431,8 @@ preserved without the GPT-OSS header. Unknown model identities receive no header
 [`colbert_experiments`](colbert_experiments/README.md) explores native token-level
 late interaction with `lightonai/GTE-ModernColBERT-v1`, complete patient/cohort
 text, and bidirectional retrieval. It supports both five independent binary
-tasks and a separate gated 0–5 regression experiment: ask potential eligibility
+tasks and gated 0–5 objectives: ask potential eligibility
 first, ask four specificity questions separately only after yes, then count yes
-answers in Python and train MaxSim against `score / 5` with MSE. The production
-entrypoint now uses this gated regression implementation; the original binary
-experiment remains available for controlled comparisons.
+answers in Python. The production entrypoint learns their ordering with CoSENT
+plus known-negative contrast, using the shared experimental loss implementation.
+The binary-task and MSE experiments remain available for controlled comparisons.

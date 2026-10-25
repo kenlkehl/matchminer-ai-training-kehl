@@ -77,6 +77,14 @@ def test_shell_training_defaults_use_fast_shared_colbert(tmp_path, wrapper):
         assert command[command.index('--device-cache-gb') + 1] == '8'
         assert command[command.index('--top-k-cohort-to-patient') + 1] == '40'
     assert mines[0][mines[0].index('--model') + 1] == 'lightonai/GTE-ModernColBERT-v1'
+    fits = [row['command'] for row in plan if row['name'].startswith('train-trialspace-')]
+    assert len(fits) == 2
+    for command in fits:
+        assert command[command.index('--loss') + 1] == 'legacy_ranking'
+        assert command[command.index('--learning-rate') + 1] == '2e-05'
+        assert command[command.index('--lr-scheduler') + 1] == 'linear'
+        assert command[command.index('--warmup-ratio') + 1] == '0.01'
+        assert command[command.index('--epochs') + 1] == '3'
 
 
 def test_training_only_retains_original_default_identity(tmp_path):

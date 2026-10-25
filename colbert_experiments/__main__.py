@@ -85,9 +85,19 @@ def parser():
     train.add_argument('--accumulation', type=int, default=8)
     train.add_argument('--documents-per-class', type=int, default=2)
     train.add_argument('--learning-rate', type=float, default=1e-5)
+    train.add_argument('--loss', choices=['mse', 'cosent', 'legacy_ranking'], default='mse',
+                       help='Student loss for gated scores; legacy_ranking uses CoSENT plus known-negative contrast')
+    train.add_argument('--ranking-scale', type=float, default=20.)
+    train.add_argument('--contrastive-weight', type=float, default=1.)
+    train.add_argument('--lr-scheduler', choices=['constant', 'linear'], default='constant')
+    train.add_argument('--warmup-ratio', type=float, default=.01)
     train.add_argument('--temperature', type=float, default=.05)
     train.add_argument('--seed', type=int, default=42)
     train.add_argument('--save-steps', type=int, default=100)
+    train.add_argument('--save-total-limit', type=int, default=2,
+                       help='Maximum checkpoint payloads retained, including an in-progress save; minimum two')
+    train.add_argument('--stop-at', help='Pause and checkpoint at this ISO timestamp with timezone offset')
+    train.add_argument('--pause-file', type=Path, help='Pause and checkpoint if this file exists; remove to resume')
     train.add_argument('--eval-every', type=int, default=0, help='Fixed train/validation ranking probes every N updates; zero disables')
     train.add_argument('--eval-groups-per-stratum', type=int, default=2)
     evaluate = commands.add_parser('evaluate', help='Evaluate against all judgments, including missed positives')
@@ -144,7 +154,8 @@ def main():
         asyncio.run(label(args))
     elif args.command == 'train':
         from .training import train
-        train(args)
+        if train(args) == 'paused':
+            raise SystemExit(75)
     elif args.command == 'aggregate-regression':
         from .regression import import_verified_judgments
         print(import_verified_judgments(args.corpus, args.candidates, args.source_teacher, args.output))

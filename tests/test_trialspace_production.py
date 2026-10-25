@@ -40,9 +40,13 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
             assert parsed.objective == 'gated_regression'
             assert parsed.query_length == parsed.document_length == 8192
             if parsed.command == 'train':
+                assert parsed.loss == 'legacy_ranking' and parsed.learning_rate == 2e-5
+                assert parsed.lr_scheduler == 'linear' and parsed.warmup_ratio == .01
+                assert parsed.ranking_scale == 20 and parsed.contrastive_weight == 1
                 assert parsed.prediction_link == 'identity' and parsed.steps == 8
                 assert parsed.output_model.parent == args.models_dir
                 assert parsed.accumulation == 32 and parsed.documents_per_query == 8
+                assert parsed.save_total_limit == 2
                 assert parsed.training_splits == ['train', 'val', 'test'] and parsed.require_complete_coverage
             else:
                 assert parsed.splits == ['train', 'val', 'test']
@@ -96,6 +100,32 @@ def test_explicit_holdout_experiment_preserves_original_partitions(tmp_path):
             assert parsed.training_splits == ['train']
         elif parsed.command == 'mine':
             assert parsed.splits == ['train', 'val']
+
+
+def test_pipeline_passes_training_pause_and_checkpoint_controls():
+    import run_pipeline
+    for parser in (runner.parser, run_pipeline.parser):
+        args = parser().parse_args(['--trialspace-save-steps', '25', '--trialspace-save-total-limit', '2',
+            '--trialspace-stop-at', '2026-10-26T08:50:00-04:00', '--trialspace-pause-file', '/tmp/PAUSE'])
+        for stage in runner.stages(args):
+            if stage.name.startswith('train-trialspace-'):
+                tail = stage.command[stage.command.index('trialspace_training.py') + 1:]
+                child = production.parser().parse_args(tail)
+                assert child.save_steps == 25 and child.save_total_limit == 2
+                assert child.stop_at == '2026-10-26T08:50:00-04:00'
+                assert child.pause_file == Path('/tmp/PAUSE')
+
+
+def test_deadline_and_checkpoint_changes_do_not_invalidate_pipeline_resume():
+    import run_pipeline
+    original = run_pipeline.parser().parse_args([])
+    paused = run_pipeline.parser().parse_args(['--trialspace-save-steps', '25',
+        '--trialspace-stop-at', '2026-10-26T08:50:00-04:00', '--trialspace-pause-file', '/tmp/PAUSE'])
+    assert runner.training_identity_arguments(original) == runner.training_identity_arguments(paused)
+    assert runner.training_identity_command(run_pipeline.training_command(original)) == runner.training_identity_command(
+        run_pipeline.training_command(paused))
+    changed_loss = run_pipeline.parser().parse_args(['--trialspace-learning-rate', '0.01'])
+    assert runner.training_identity_arguments(original) != runner.training_identity_arguments(changed_loss)
 
 
 def test_prepare_reconstructs_full_criteria_history_and_lineage(tmp_path):
@@ -317,6 +347,7 @@ def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_p
     monkeypatch.setattr(training, 'ColBERT', Student)
     command = ['train', '--device', 'cpu', '--corpus', str(corpus), '--labels', str(tmp_path / 'scores.jsonl'),
         '--output', str(tmp_path / 'fit'), '--output-model', str(tmp_path / 'model'),
+        '--loss', 'mse', '--lr-scheduler', 'constant', '--learning-rate', '1e-5',
         '--epochs', '1', '--accumulation', '2', '--eval-every', '2', '--save-steps', '2']
     training.train(production.parser().parse_args(command))
     status = json.loads((tmp_path / 'fit/status.json').read_text())
@@ -338,6 +369,88 @@ def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_p
     assert not manifest['validation_is_held_out']
     with pytest.raises(ValueError, match='identity changed'):
         training.train(production.parser().parse_args(command + ['--documents-per-query', '4']))
+
+
+@pytest.mark.parametrize('loss', ['legacy_ranking', 'cosent'])
+def test_production_ranking_defaults_cover_all_pairs_evaluate_and_resume(tmp_path, monkeypatch, loss):
+    from colbert_experiments import training
+    corpus = tmp_path/'corpus'
+    create_fixture(corpus)
+    grouped = {}
+    for row in read_jsonl(corpus/'reference_labels.jsonl'):
+        row['key'] = label_key(row)
+        grouped.setdefault((row['patient_id'], row['cohort_id']), []).append(row)
+    scores = [aggregate_pair(rows[0], rows) for rows in grouped.values()]
+    write_jsonl(tmp_path/'scores.jsonl', scores)
+
+    class Student(torch.nn.Module):
+        def __init__(self, *a, **kw):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(.9))
+        @property
+        def device(self): return self.weight.device
+        def fingerprint(self): return dict(toy='ranking')
+        def forward(self, query, documents):
+            assert query.startswith(INSTRUCTION)
+            return self.weight * torch.tensor([len(d) / 1000 for d in documents])
+        def save(self, path):
+            Path(path).mkdir(parents=True, exist_ok=True)
+            torch.save(self.state_dict(), Path(path)/'model.pt')
+    monkeypatch.setattr(training, 'ColBERT', Student)
+    command = ['train', '--device', 'cpu', '--corpus', str(corpus), '--labels', str(tmp_path/'scores.jsonl'),
+        '--output', str(tmp_path/'fit'), '--epochs', '1', '--documents-per-query', '3',
+        '--accumulation', '5', '--eval-every', '2', '--save-steps', '2']
+    if loss != 'legacy_ranking':
+        command += ['--loss', loss]
+    args = production.parser().parse_args(command)
+    assert args.loss == loss and args.learning_rate == 2e-5 and args.lr_scheduler == 'linear'
+    training.train(args)
+    manifest = json.loads((tmp_path/'fit/training_manifest.json').read_text())
+    assert manifest['loss'] == loss and 'normalization' not in manifest
+    assert manifest['batch_sampling']['policy'] == 'complete_query_pair_epochs_v1'
+    metrics = json.loads((tmp_path/'fit/metrics.json').read_text())
+    assert sum(r['batch_pairs'] for r in metrics['history']) == 2 * len(scores)
+    assert all(r['batch_unique_directional_pairs'] == r['batch_pairs'] for r in metrics['history'])
+    assert any(r['gradient_norm'] > 0 for r in metrics['history'])
+    assert all(r['replay_max_error'] == 0 for r in metrics['history'])
+    for evaluation in metrics['evaluations']:
+        assert 'val' not in evaluation  # Production includes every original split.
+        train = evaluation['train']
+        assert train['objective'] == loss and 'mse_diagnostic' in train and 'mae' not in train
+        assert all('auroc' in values for values in train['strata'].values())
+    scoring = json.loads((tmp_path/'fit/model/regression_scoring.json').read_text())
+    assert scoring['objective'] == loss and not scoring['calibrated'] and 'output_scale' not in scoring
+    # The inference dependency accepts ordinal metadata using the same native
+    # MaxSim and instruction, without requiring a regression calibration scale.
+    from matchminer_ai.embedding import late_interaction as runtime
+    def runtime_student(path, **kwargs):
+        model = Student()
+        model.folder = Path(path)
+        return model
+    monkeypatch.setattr(runtime, 'ColBERT', runtime_student)
+    loaded = runtime._model.__wrapped__(str(tmp_path/'fit/model'), None, 'cpu', 8192, 8192, None)
+    assert loaded.folder == tmp_path/'fit/model'
+    assert len(list((tmp_path/'fit').glob('checkpoint-*.pt'))) == 2
+    latest = json.loads((tmp_path/'fit/latest.json').read_text())
+    state = torch.load(tmp_path/'fit'/latest['path'], weights_only=True)
+    assert state['scheduler']['last_epoch'] == manifest['steps']
+    training.train(production.parser().parse_args(command))
+    resumed = torch.load(tmp_path/'fit/model/model.pt', weights_only=True)
+    torch.testing.assert_close(resumed['weight'], state['model']['weight'])
+    with pytest.raises(ValueError, match='identity changed'):
+        training.train(production.parser().parse_args(command + ['--loss', 'mse']))
+
+
+def test_standard_entrypoints_forward_explicit_ranking_overrides():
+    import run_pipeline
+    args = run_pipeline.parser().parse_args(['--trialspace-loss', 'cosent', '--trialspace-ranking-scale', '10',
+        '--trialspace-contrastive-weight', '.5', '--trialspace-learning-rate', '3e-5',
+        '--trialspace-lr-scheduler', 'constant', '--trialspace-warmup-ratio', '.02'])
+    for stage in runner.stages(args):
+        if stage.name.startswith('train-trialspace-'):
+            parsed = production.parser().parse_args(stage.command[stage.command.index('trialspace_training.py') + 1:])
+            assert parsed.loss == 'cosent' and parsed.ranking_scale == 10 and parsed.contrastive_weight == .5
+            assert parsed.learning_rate == 3e-5 and parsed.lr_scheduler == 'constant' and parsed.warmup_ratio == .02
 
 
 def test_directional_mining_returns_twenty_cohorts_and_forty_patients(tmp_path):

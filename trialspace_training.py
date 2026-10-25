@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Production TrialSpace: complete cohorts, gated question labels, ColBERT MSE.
+"""Production TrialSpace: complete cohorts, gated labels, ColBERT ordinal ranking.
 
 The experiment and production entrypoints share the tested native ColBERT,
-question contracts, adaptive teacher, and regression trainer. This entrypoint
-fixes the production objective and adds resumable, distributed disk-backed mining.
+question contracts, adaptive teacher, and student trainer. This entrypoint
+defaults to CoSENT plus known-negative contrast and adds disk-backed mining.
 """
 import argparse
 import asyncio
@@ -385,11 +385,13 @@ def parser():
     sub.choices['mine'].add_argument('--top-k-cohort-to-patient', type=int, default=40,
         help='ColBERT patient picks per cohort; overrides --top-k for this direction')
     sub.choices['label'].set_defaults(gated_regression=True, return_records=False)
-    sub.choices['train'].set_defaults(objective='gated_regression', eval_every=100, eval_groups_per_stratum=32,
+    sub.choices['train'].set_defaults(objective='gated_regression', loss='legacy_ranking',
+                                     learning_rate=2e-5, lr_scheduler='linear', warmup_ratio=.01,
+                                     eval_every=100, eval_groups_per_stratum=32,
                                      steps=None, accumulation=32, documents_per_query=8,
                                      training_splits=['train', 'val', 'test'], require_complete_coverage=True)
     sub.choices['train'].add_argument('--epochs', type=float, default=3,
-        help='Aggregate query-group sampling passes; --steps overrides this')
+        help='Complete directional-pair epochs for ranking; query sampling passes for MSE; --steps overrides')
     sub.choices['train'].add_argument('--output-model', type=Path, help='Separate final model directory; checkpoints stay in --output')
     return p
 
@@ -410,7 +412,8 @@ def main():
         if args.objective != 'gated_regression':
             raise ValueError('Production TrialSpace requires gated regression')
         from colbert_experiments.training import train
-        train(args)
+        if train(args) == 'paused':
+            raise SystemExit(75)
     else:
         raise ValueError('Use colbert_experiments for experimental/diagnostic subcommands')
 
