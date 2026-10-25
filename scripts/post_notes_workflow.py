@@ -95,6 +95,7 @@ class Workflow:
         self.status = dict(pid=os.getpid(), started_at=now(), phase='waiting_notes')
         self.child = None
         self.owned_teachers = {}
+        self.adopted_teachers = {}
         self.cancelled = False
 
     def update(self, phase=None, **values):
@@ -192,9 +193,36 @@ class Workflow:
 
     def restart_dead_teachers(self):
         for target in self.config['local_teachers']:
-            process = self.owned_teachers.get(str(target['gpu']))
+            gpu = str(target['gpu'])
+            expected = self.adopted_teachers.get(gpu)
+            if expected:
+                current = teacher_identity(expected['pid'])
+                if current is None:
+                    del self.adopted_teachers[gpu]
+                    self.launch_teacher(target)
+                elif current != expected:
+                    raise RuntimeError('Adopted local teacher identity changed')
+                continue
+            process = self.owned_teachers.get(gpu)
             if process is not None and process.poll() is not None:
                 self.launch_teacher(target)
+
+    def resume_labeling(self):
+        """Resume completed mining without releasing GPUs or stopping a label fleet."""
+        for name in ('summarizing', 'preparing_corpus', 'mining'):
+            if not (self.root / 'completed' / (name + '.json')).exists():
+                raise ValueError('Cannot resume labeling before all upstream stages complete')
+            self.run_stage(name)  # Verify the unchanged commands and saved outputs.
+        targets = {str(t['gpu']): t for t in self.config['local_teachers']}
+        for saved in self.config.get('adopt_teachers', []):
+            gpu, expected = str(saved['gpu']), saved['process']
+            if gpu not in targets or expected['command'] != targets[gpu]['command']:
+                raise ValueError('Adopted teacher does not match its configured GPU command')
+            current = teacher_identity(expected['pid'])
+            if current is not None and current != expected:
+                raise ValueError('Adopted teacher process identity changed')
+            if current is not None:
+                self.adopted_teachers[gpu] = expected
 
     def start_labelers(self):
         self.update('starting_labelers')
@@ -221,12 +249,15 @@ class Workflow:
         signal.signal(signal.SIGINT, halt)
         try:
             self.update()
-            self.wait_notes()
-            self.run_stage('summarizing')
-            self.stop_cloud()
-            self.release_gpus()
-            self.run_stage('preparing_corpus')
-            self.run_stage('mining')
+            if self.config.get('resume_labeling'):
+                self.resume_labeling()
+            else:
+                self.wait_notes()
+                self.run_stage('summarizing')
+                self.stop_cloud()
+                self.release_gpus()
+                self.run_stage('preparing_corpus')
+                self.run_stage('mining')
             self.start_labelers()
             self.run_stage('labeling')
             self.update('completed', completed_at=now())

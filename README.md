@@ -55,6 +55,11 @@ time; use scored-pair throughput for ETA because specificity calls are gated.
 Adaptive labeling also saves `concurrency_status.json` by default, containing
 per-endpoint concurrency limits, active requests, and vLLM scheduler metrics.
 Use it to exclude startup, pool changes, and concurrency ramps from pace estimates.
+The live concurrency control file can set a new active target for one endpoint:
+`"tuning": {"revision": "gb300-256", "endpoints": {"http://sn4622130540:8000/v1":
+{"cap": 256, "upper": 768}}}`. Each revision applies once, within the configured
+per-server ceiling; subsequent queue/cache pressure and request errors can still
+reduce concurrency. Ordinary ceiling edits do not reset the active target.
 Other teacher stages retain the independent
 `--teacher-concurrency` setting (0 means automatic capacity-based scheduling).
 
@@ -1076,6 +1081,11 @@ It warms the per-GPU teachers while retrieval finishes, admits healthy endpoints
 as they become available, and retries Spot failures throughout labeling. Completed
 notes do not stop this fleet; completed or failed labeling workflows do. Endpoint
 removal, repeated VM stop requests, and the expiring remote lease still apply.
+
+An explicitly configured `resume_labeling` workflow validates all upstream stage
+receipts, skips cloud shutdown/GPU release, and resumes existing label checkpoints.
+Register surviving local teachers in `adopt_teachers` with their PID, start ticks,
+and exact command so the replacement controller can safely monitor and restart them.
 
 For a handoff that retains the fleet for patient summarization, attach the
 explicit `workflow` record (status path, PID, and process start ticks) to the

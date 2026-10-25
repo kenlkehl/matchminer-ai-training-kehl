@@ -42,7 +42,7 @@ from typing import Any, Awaitable, Callable, Iterable, List, Optional, Sequence,
 import httpx
 from openai import AsyncOpenAI
 
-from adaptive_controller import Controller, now, parse_metrics
+from adaptive_controller import Controller, now, parse_metrics, apply_tuning
 
 
 class OutputValidationError(ValueError):
@@ -182,11 +182,11 @@ class AdaptiveSemaphore:
                 await self._cond.wait()
             self.in_flight += 1
 
-    async def set_max_limit(self, maximum):
+    async def set_max_limit(self, maximum, *, reset=False):
         """Resize without cancelling active requests or undoing error backoff."""
         async with self._cond:
             maximum = max(1, int(maximum))
-            self.limit = maximum if self.limit == self.max_limit else min(self.limit, maximum)
+            self.limit = maximum if reset or self.limit == self.max_limit else min(self.limit, maximum)
             self.max_limit = maximum
             self._slow_start_ceiling = max(2, maximum // 2)
             self._cond.notify_all()
@@ -240,6 +240,8 @@ class ServerEntry:
     err_count: int = 0
     first_seen_at: float = field(default_factory=time.monotonic)
     output_validation_err_count: int = 0
+    error_types: dict[str, int] = field(default_factory=dict)
+    last_error: Optional[dict] = None
 
 
 class DynamicServerRegistry:
@@ -291,6 +293,8 @@ class DynamicServerRegistry:
         self._scheduler_controllers: dict[str, Controller] = {}
         self._scheduler_ceilings: dict[str, int] = {}
         self._scheduler_task: Optional[asyncio.Task] = None
+        self._pending_tuning = None
+        self._applied_tuning_revision = None
 
         self._entries: dict[str, ServerEntry] = {}
         self._lock = asyncio.Lock()
@@ -383,6 +387,7 @@ class DynamicServerRegistry:
                     raise ValueError("per_server must map endpoint URLs to integers within the CLI ceiling")
                 self._effective_max_concurrent = maximum
                 self._per_server_max_concurrent = per_server
+                self._pending_tuning = control.get('tuning')
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 print(f"[remote_vllm_pool] retaining concurrency {self._effective_max_concurrent}: {exc}")
         if self._servers_file:
@@ -445,6 +450,19 @@ class DynamicServerRegistry:
                     entry.retired = True
                     changed = True
 
+            if self._scheduler_enabled and self._pending_tuning:
+                try:
+                    event = apply_tuning(self._scheduler_controllers, self._scheduler_ceilings,
+                                         self._pending_tuning, self._applied_tuning_revision)
+                    if event:
+                        for change in event['changes']:
+                            await self._entries[change['endpoint']].semaphore.set_max_limit(change['new_cap'], reset=True)
+                        self._applied_tuning_revision = event['revision']
+                        print('[concurrency_tuning] ' + json.dumps(event), flush=True)
+                        changed = True
+                except (ValueError, KeyError, TypeError) as error:
+                    print(f'[concurrency_tuning] retaining prior targets: {error}', flush=True)
+
         if changed:
             self._change_event.set()
 
@@ -471,7 +489,8 @@ class DynamicServerRegistry:
                 result['metrics_error'] = str(exc)
             result.update(entry.semaphore.stats(), configured_ceiling=self._scheduler_ceilings[entry.url],
                           scheduler_ceiling=controller.upper, successful_requests=entry.ok_count,
-                          request_errors=entry.err_count, validation_errors=entry.output_validation_err_count)
+                          request_errors=entry.err_count, validation_errors=entry.output_validation_err_count,
+                          error_types=dict(entry.error_types), last_error=entry.last_error)
             return result
 
         entries = await self.active_entries()
@@ -669,6 +688,12 @@ async def _dispatch_one(
         success = True
     except Exception as e:
         entry.err_count += 1
+        kind = type(e).__name__
+        entry.error_types[kind] = entry.error_types.get(kind, 0) + 1
+        # Error messages and response bodies can contain clinical inputs. Keep
+        # only transport/type metadata in shared operational telemetry.
+        entry.last_error = dict(at=now(), type=kind, http_status=getattr(e, 'status_code', None),
+                               cause_type=type(e.__cause__).__name__ if e.__cause__ else None)
         if isinstance(e, (OutputValidationError, json.JSONDecodeError)):
             # Content errors require another generation, not fewer requests.
             # They are neutral feedback, not successful work or server overload.

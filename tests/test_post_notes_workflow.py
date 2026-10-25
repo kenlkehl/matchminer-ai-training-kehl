@@ -62,6 +62,38 @@ def test_mining_failure_never_starts_labeling(tmp_path, monkeypatch):
     assert 'cloud_cleanup' in calls and runner.status['phase'] == 'failed'
 
 
+def test_labeling_resume_preserves_running_teachers_and_completed_mining(tmp_path, monkeypatch):
+    target = dict(gpu=0, command=['vllm', 'serve', 'model'])
+    identity = dict(pid=123, start_ticks=456, command=target['command'])
+    runner = workflow.Workflow(dict(resume_labeling=True, local_teachers=[target],
+        adopt_teachers=[dict(gpu=0, process=identity)]), tmp_path)
+    (tmp_path / 'completed').mkdir()
+    for stage in ('summarizing', 'preparing_corpus', 'mining'):
+        (tmp_path / 'completed' / (stage + '.json')).write_text('{}')
+    calls = []
+    monkeypatch.setattr(runner, 'run_stage', calls.append)
+    monkeypatch.setattr(runner, 'start_labelers', lambda: calls.append('start_labelers'))
+    for method in ('wait_notes', 'stop_cloud', 'release_gpus'):
+        monkeypatch.setattr(runner, method, lambda: pytest.fail('Must preserve the active label fleet'))
+    monkeypatch.setattr(workflow, 'teacher_identity', lambda pid: identity)
+    monkeypatch.setattr(workflow.signal, 'signal', lambda *args: None)
+    runner.run()
+    assert calls == ['summarizing', 'preparing_corpus', 'mining', 'start_labelers', 'labeling']
+    assert runner.adopted_teachers == {'0': identity}
+    monkeypatch.setattr(runner, 'launch_teacher', lambda target: calls.append('restarted'))
+    runner.restart_dead_teachers()
+    assert calls[-1] == 'labeling'
+    monkeypatch.setattr(workflow, 'teacher_identity', lambda pid: None)
+    runner.restart_dead_teachers()
+    assert calls[-1] == 'restarted' and not runner.adopted_teachers
+
+
+def test_label_resume_requires_completed_upstream_receipts(tmp_path):
+    runner = workflow.Workflow(dict(local_teachers=[]), tmp_path)
+    with pytest.raises(ValueError, match='before all upstream stages complete'):
+        runner.resume_labeling()
+
+
 def test_teacher_pid_reuse_is_never_signaled(tmp_path, monkeypatch):
     target = dict(gpu=2, port=8003, process=dict(pid=999, start_ticks=100, command=['vllm', 'serve', 'model', '--port', '8003']))
     monkeypatch.setattr(workflow, 'teacher_identity', lambda pid: {**target['process'], 'start_ticks': 101})

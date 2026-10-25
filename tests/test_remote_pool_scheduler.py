@@ -127,3 +127,42 @@ def test_production_generator_enables_scheduler_by_default(tmp_path, monkeypatch
     assert registry._scheduler_initial == 128 and registry._max_concurrent == 768
     monkeypatch.setattr(sys, 'argv', [*argv, '--no-scheduler-adaptive-concurrency'])
     assert not build_registry_from_args(generation.parse_args())._scheduler_enabled
+
+
+def test_live_target_changes_one_server_once_and_keeps_automatic_backoff(tmp_path, monkeypatch):
+    async def scenario():
+        first, second = 'http://gb300/v1', 'http://rtx/v1'
+        path = tmp_path / 'limits.json'
+        control = dict(max_concurrent_per_server=768, per_server={second: 256},
+                       tuning=dict(revision='raise-gb300', endpoints={first: dict(cap=256, upper=768)}))
+        path.write_text(json.dumps(control))
+        registry = DynamicServerRegistry(max_concurrent_per_server=768, request_timeout=60,
+            static_urls=[first, second], concurrency_file=str(path),
+            scheduler_adaptive_concurrency=True, initial_concurrent_per_server=32)
+        async def close(): pass
+        monkeypatch.setattr(registry, '_make_client', lambda url: SimpleNamespace(close=close))
+        await registry._reconcile_once()
+        a, b = await registry.active_entries()
+        assert a.semaphore.limit == 256 and b.semaphore.limit == 32
+        await a.semaphore.acquire()
+        await a.semaphore.release(success=False)
+        await registry._reconcile_once()
+        assert a.semaphore.limit == 128  # Same revision never undoes backoff.
+        control['tuning'] = dict(revision='raise-more', endpoints={first: dict(cap=512, upper=768)})
+        path.write_text(json.dumps(control))
+        await registry._reconcile_once()
+        assert a.semaphore.limit == 512 and b.semaphore.limit == 32
+        clock = [0]
+        monkeypatch.setattr(adaptive_controller.time, 'time', lambda: clock[0])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, text=metrics(running=512, cache=.95)))) as client:
+            for clock[0] in (0, 15, 30): await registry._sample_scheduler_once(client)
+        await registry._reconcile_once()
+        assert a.semaphore.limit < 512
+        previous = a.semaphore.limit
+        control['tuning'] = dict(revision='invalid', endpoints={first: dict(cap=769, upper=769)})
+        path.write_text(json.dumps(control))
+        await registry._reconcile_once()
+        assert a.semaphore.limit == previous
+        await registry.stop()
+    asyncio.run(scenario())
