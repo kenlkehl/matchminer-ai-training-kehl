@@ -31,6 +31,28 @@ def test_shutdown_tracks_actual_job_lifecycle(stage, alive, reason):
     assert fleet.terminal_reason(dict(stage=stage), alive) == reason
 
 
+@pytest.mark.parametrize('phase', ['preparing_corpus', 'mining', 'starting_labelers', 'labeling'])
+def test_label_fleet_keeps_teachers_during_retrieval_and_labeling(phase):
+    assert fleet.workflow_terminal_reason(dict(stage='completed'), False, dict(phase=phase), True,
+                                          mode='labeling') is None
+
+
+@pytest.mark.parametrize('phase,alive,reason', [
+    ('completed', False, 'labeling_finished'), ('completed', True, 'labeling_finished'),
+    ('failed', True, 'downstream_workflow_failed'), ('mining', False, 'downstream_controller_exited'),
+    ('labeling', False, 'downstream_controller_exited')])
+def test_label_fleet_stops_when_attached_workflow_finishes_or_fails(phase, alive, reason):
+    assert fleet.workflow_terminal_reason(dict(stage='completed'), False, dict(phase=phase), alive,
+                                          mode='labeling') == reason
+
+
+def test_label_fleet_requires_attached_workflow(tmp_path):
+    obj = instance(tmp_path)
+    obj.config['workflow_mode'] = 'labeling'
+    with pytest.raises(ValueError, match='attached workflow'):
+        fleet.Fleet(obj.config, tmp_path)
+
+
 def test_registry_merge_preserves_existing_servers_and_removes_only_owned_fleet():
     other = [dict(url='existing'), dict(url='unrelated-fleet', fleet_id='other')]
     current = dict(ready=True, servers=other + [dict(url='old-worker', fleet_id='this')])

@@ -1065,6 +1065,15 @@ the fleet configuration. Run this only for a user-authorized fleet:
 python scripts/gcp_note_fleet.py --config /absolute/path/to/fleet/config.json
 ```
 
+The same supervisor supports a fresh labeling fleet: set `workflow_mode` to
+`labeling`, attach the labeling workflow's PID/start identity and status path,
+and point `registry` to its live label-server file. Use a new fleet ID and run
+directory, preserving the explicit VM allowlist and pinned worker configuration.
+It warms the per-GPU teachers while retrieval finishes, admits healthy endpoints
+as they become available, and retries Spot failures throughout labeling. Completed
+notes do not stop this fleet; completed or failed labeling workflows do. Endpoint
+removal, repeated VM stop requests, and the expiring remote lease still apply.
+
 For a handoff that retains the fleet for patient summarization, attach the
 explicit `workflow` record (status path, PID, and process start ticks) to the
 fleet config and launch `scripts/post_notes_workflow.py --config <workflow.json>`.

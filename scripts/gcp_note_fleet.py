@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add a fixed Spot VM fleet to a live note job; stop it on failure/completion."""
+"""Attach Spot GPU teachers to notes, summaries, or labels; stop with the job."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import argparse
@@ -74,12 +74,20 @@ def terminal_reason(status, alive):
     return None
 
 
-def workflow_terminal_reason(generation, generator_alive, workflow, workflow_alive):
-    """An explicitly attached workflow can retain this fleet through summaries."""
+def workflow_terminal_reason(generation, generator_alive, workflow, workflow_alive, *, mode='summarization'):
+    """Watch the explicitly selected inference stage, including its preparation."""
+    if mode not in ('summarization', 'labeling'):
+        raise ValueError('Unknown fleet workflow mode')
     if workflow.get('phase') == 'failed':
         return 'downstream_workflow_failed'
+    if mode == 'labeling' and workflow.get('phase') == 'completed':
+        return 'labeling_finished'
     if not workflow_alive:
         return 'downstream_controller_exited'
+    if mode == 'labeling':
+        # The note generator has already completed. Keep teachers warming during
+        # retrieval, then serve the separate live labeling registry until done.
+        return None
     if workflow.get('phase') in ('stopping_cloud', 'releasing_gpus', 'preparing_corpus',
                                   'mining', 'starting_labelers', 'labeling', 'completed'):
         return 'patient_summarization_finished'
@@ -134,6 +142,9 @@ def startup_script(config, worker_source):
 class Fleet:
     def __init__(self, config, directory):
         self.config, self.root = config, Path(directory)
+        mode = config.get('workflow_mode', 'summarization')
+        if mode not in ('summarization', 'labeling') or (mode == 'labeling' and not config.get('workflow')):
+            raise ValueError('Labeling fleets require an attached workflow process identity')
         self.vms = config['vms']
         if (len(self.vms) != 8 or len({(v['project'], v['name']) for v in self.vms}) != 8
                 or any('rtx' not in v['name'] or v['project'] not in ('profile-notes', 'kehllab-caia-v2') for v in self.vms)):
@@ -344,7 +355,8 @@ class Fleet:
                     if workflow_config:
                         workflow = json.loads(Path(workflow_config['status']).read_text())
                         workflow_alive = process_identity(workflow_config['pid']) == workflow_config['start_ticks']
-                        reason = workflow_terminal_reason(status, alive, workflow, workflow_alive)
+                        reason = workflow_terminal_reason(status, alive, workflow, workflow_alive,
+                            mode=self.config.get('workflow_mode', 'summarization'))
                     else:
                         reason = terminal_reason(status, alive)
                     if self.stop or (self.root / 'STOP').exists():
@@ -369,7 +381,10 @@ class Fleet:
                         completed_notes=(status.get('stage_completed') if status['stage'] in ('notes', 'assembling', 'completed') else None),
                         expected_notes=status.get('expected_notes'),
                         healthy_gpu_servers=len(endpoints), expected_gpu_servers=64,
-                        automatic_vm_shutdown=True, shutdown_on=(['generator_or_workflow_failure', 'patient_summarization_complete', 'controller_lease_expiry']
+                        automatic_vm_shutdown=True, workflow_mode=self.config.get('workflow_mode', 'summarization'),
+                        shutdown_on=(['workflow_failure', 'labeling_complete', 'controller_lease_expiry']
+                            if self.config.get('workflow_mode') == 'labeling' else
+                            ['generator_or_workflow_failure', 'patient_summarization_complete', 'controller_lease_expiry']
                             if workflow_config else ['generator_failure', 'note_inference_complete', 'controller_lease_expiry'])))
                     time.sleep(10)
         except BaseException as error:
