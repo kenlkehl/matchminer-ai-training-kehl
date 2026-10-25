@@ -60,6 +60,22 @@ def busy_gpus(selected):
             if indices.get(uuid.strip()) in selected]
 
 
+def teacher_blockers(target):
+    """Permit only explicitly registered existing allocations, never PID reuse.
+
+    The operator must choose a memory-utilization cap that leaves those processes
+    room. They are not owned by this workflow and are never stopped by it.
+    """
+    allowed = {int(item['pid']): int(item['start_ticks'])
+               for item in target.get('allowed_cooccupants', [])}
+    blockers = []
+    for item in busy_gpus([str(target['gpu'])]):
+        identity = teacher_identity(item['pid'])
+        if identity is None or identity['start_ticks'] != allowed.get(item['pid']):
+            blockers.append(item)
+    return blockers
+
+
 def healthy_teacher(target):
     try:
         base = f'http://127.0.0.1:{target["port"]}'
@@ -151,18 +167,19 @@ class Workflow:
 
     def release_gpus(self):
         self.update('releasing_gpus')
-        for target in self.config['local_teachers']:
+        targets = self.config.get('release_teachers', self.config['local_teachers'])
+        for target in targets:
             stop_teacher(target, self.root / f'stopped_gpu_{target["gpu"]}.json')
         deadline = time.monotonic() + 180
-        while busy := busy_gpus(['2', '3']):
+        while busy := busy_gpus([str(target['gpu']) for target in targets]):
             self.interrupted()
             if time.monotonic() >= deadline:
-                raise RuntimeError('GPUs 2 and 3 are still occupied: ' + str(busy))
+                raise RuntimeError('Registered release GPUs are still occupied: ' + str(busy))
             time.sleep(5)
 
     def launch_teacher(self, target):
         gpu = str(target['gpu'])
-        if busy_gpus([gpu]):
+        if teacher_blockers(target):
             raise RuntimeError('Refusing to start a second server on busy GPU ' + gpu)
         log = self.root / 'logs' / f'label_teacher_gpu_{gpu}.log'
         env = {**os.environ, **target.get('environment', {}), 'CUDA_VISIBLE_DEVICES': gpu}

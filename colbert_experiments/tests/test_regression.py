@@ -161,7 +161,11 @@ def test_gated_labeler_resumes_failed_specificity_without_reasking_gate(tmp_path
     asyncio.run(labeling.label(args))
     assert len(calls) == 7 and calls[-1][1] == 'biomarker'
     assert sorted(s['score'] for s in read_jsonl(args.output / 'scores.jsonl')) == [0, 5]
-    assert json.loads((args.output / 'status.json').read_text())['scored_pairs'] == 2
+    progress = json.loads((args.output / 'status.json').read_text())
+    assert progress['scored_pairs'] == 2 and progress['total_pairs'] == 2
+    assert progress['completed'] == 6
+    assert progress['score_distribution']['0'] == progress['score_distribution']['5'] == 1
+    assert progress['updated_at'] >= progress['started_at']
     args.gated_regression = False
     with pytest.raises(ValueError, match='identity changed'):
         asyncio.run(labeling.label(args))

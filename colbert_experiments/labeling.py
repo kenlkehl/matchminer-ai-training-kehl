@@ -59,6 +59,8 @@ async def label(args):
 
 
 async def _label(args, output):
+    timing = dict(started_at=datetime.now(timezone.utc).isoformat(), first_request_at=None,
+                  attempts_started=0)
     patients, cohorts = load_corpus(args.corpus)
     pairs = read_jsonl(args.candidates)
     sources = prompt_sources()
@@ -94,6 +96,9 @@ async def _label(args, output):
             if served.get('max_model_len', args.teacher_context) < args.teacher_context:
                 raise ValueError('Teacher server context is smaller than the configured budget')
             server_models[endpoint] = served
+        if timing['first_request_at'] is None:
+            timing['first_request_at'] = datetime.now(timezone.utc).isoformat()
+        timing['attempts_started'] += 1
         reasoning, answer, metadata = await base(client, payload)
         trace = dict(endpoint=endpoint, served_model=server_models[endpoint], reasoning=reasoning,
                      raw_answer=answer, rendered_prompt=payload['prompt'], **metadata)
@@ -118,6 +123,20 @@ async def _label(args, output):
                 yield list(questions([pair], pmap, cmap, sources=sources))
     iterator = iter(groups() if gated else questions(pairs, patients, cohorts, sources=sources))
     completed, failures, scores = {}, {}, {}
+    score_counts = {str(i): 0 for i in range(6)}
+    def progress(state='labeling'):
+        # One consistent snapshot, throttled below. Per-response status writes
+        # otherwise serialize the entire async pool on a network filesystem.
+        write_json(output / 'status.json', dict(state=state, **timing,
+            updated_at=datetime.now(timezone.utc).isoformat(), total_pairs=len(pairs),
+            completed=len(completed), failures=failures,
+            **(dict(scored_pairs=len(scores), score_distribution=score_counts) if gated else {})))
+
+    async def report_progress():
+        while True:
+            progress()
+            await asyncio.sleep(10)
+
     async with RequestSession(registry, work, max_attempts=args.max_attempts) as session:
         async def ask(item):
             path = checkpoint_dir / item['key'][:2] / (item['key'] + '.json')
@@ -150,9 +169,10 @@ async def _label(args, output):
             row = dict(item)
             row.update(result, prompt_sha256=digest(item['messages']), contract=signature['contract'],
                        teacher_model=args.teacher_model, rendered_prompt=prompt, sampling=asdict(sampling))
-            write_json(path, row)
+            # Await durable response storage before accepting the answer, while
+            # other request chains continue. Reasoning archives remain complete.
+            await asyncio.to_thread(write_json, path, row)
             completed[item['key']] = path
-            write_json(output / 'status.json', dict(state='labeling', completed=len(completed), failures=failures))
             return row
 
         async def worker():
@@ -165,9 +185,9 @@ async def _label(args, output):
                 if rows is not None:
                     score = aggregate_pair(item[0], rows, question_contract=signature['contract'])
                     scores[digest([score['patient_id'], score['cohort_id']])] = score
-                    write_json(output / 'status.json', dict(state='labeling', completed=len(completed),
-                        scored_pairs=len(scores), failures=failures))
+                    score_counts[str(score['score'])] += 1
 
+        reporter = asyncio.create_task(report_progress())
         tasks = [asyncio.create_task(worker()) for _ in range(args.pending_requests)]
         try:
             await asyncio.gather(*tasks)
@@ -176,14 +196,15 @@ async def _label(args, output):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            reporter.cancel()
+            await asyncio.gather(reporter, return_exceptions=True)
+            progress('incomplete')
     write_jsonl(output / 'labels.jsonl', (json.loads(completed[k].read_text()) for k in sorted(completed)))
     if gated:
         from .regression import score_balance
         write_jsonl(output / 'scores.jsonl', [scores[k] for k in sorted(scores)])
         write_json(output / 'score_balance.json', score_balance(list(scores.values())))
-    write_json(output / 'status.json', dict(state='incomplete' if failures else 'complete',
-                                          completed=len(completed), failures=failures,
-                                          **(dict(scored_pairs=len(scores)) if gated else {})))
+    progress('incomplete' if failures else 'complete')
     if failures:
         raise RuntimeError(f'{len(failures)} unresolved teacher labels; resume this command to retry')
     return ([json.loads(completed[k].read_text()) for k in sorted(completed)]

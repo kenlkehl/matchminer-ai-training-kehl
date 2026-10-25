@@ -47,7 +47,12 @@ TrialSpace labeling uses the existing adaptive request pool. The default
 1,024 pending pair chains (`--trialspace-label-workers`). A failed eligibility
 gate ends its chain; eligible pairs ask their specificity questions separately.
 `--teacher-concurrency-file` adjusts per-server limits during a run, and the live
-registry admits/removes endpoints. Other teacher stages retain the independent
+registry admits/removes endpoints. Labeling checkpoints await atomic response
+writes in background threads, preserving reasoning without blocking other request
+chains. `status.json` refreshes every ten seconds with completed questions,
+scored pairs, total candidate pairs, score distribution, and the first request
+time; use scored-pair throughput for ETA because specificity calls are gated.
+Other teacher stages retain the independent
 `--teacher-concurrency` setting (0 means automatic capacity-based scheduling).
 
 ## Cohort and patient inputs

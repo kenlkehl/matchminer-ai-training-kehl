@@ -74,6 +74,28 @@ def test_teacher_pid_reuse_is_never_signaled(tmp_path, monkeypatch):
     assert signals == []
 
 
+def test_teacher_can_share_only_registered_unchanged_allocation(monkeypatch):
+    allocation = dict(gpu='0', pid=123)
+    monkeypatch.setattr(workflow, 'busy_gpus', lambda selected: [allocation])
+    monkeypatch.setattr(workflow, 'teacher_identity', lambda pid: dict(pid=pid, start_ticks=44))
+    target = dict(gpu=0, allowed_cooccupants=[dict(pid=123, start_ticks=44)])
+    assert workflow.teacher_blockers(target) == []
+    assert workflow.teacher_blockers(dict(gpu=0)) == [allocation]
+    target['allowed_cooccupants'][0]['start_ticks'] = 43
+    assert workflow.teacher_blockers(target) == [allocation]
+
+
+def test_four_label_teachers_do_not_expand_registered_shutdown_scope(tmp_path, monkeypatch):
+    old = [dict(gpu=2), dict(gpu=3)]
+    runner = workflow.Workflow(dict(release_teachers=old,
+        local_teachers=[dict(gpu=gpu) for gpu in range(4)]), tmp_path)
+    stopped, checked = [], []
+    monkeypatch.setattr(workflow, 'stop_teacher', lambda target, receipt: stopped.append(target['gpu']))
+    monkeypatch.setattr(workflow, 'busy_gpus', lambda selected: checked.append(selected) or [])
+    runner.release_gpus()
+    assert stopped == [2, 3] and checked == [['2', '3']]
+
+
 def test_truncated_summary_attempt_keeps_raw_reasoning(tmp_path):
     async def base(client, payload):
         return 'Thinking about the input', 'Partial summary', dict(finish_reason='length', raw_text='RAW REASONING AND PARTIAL ANSWER')
