@@ -223,6 +223,8 @@ class Fleet:
             url = f'http://127.0.0.1:{vm["base_port"] + gpu}/v1'
             try:
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with opener.open(url.removesuffix('/v1') + '/health', timeout=3) as response:
+                    response.read()
                 with opener.open(url + '/models', timeout=3) as response:
                     models = json.load(response)['data']
                 target = self.config['worker']
@@ -246,16 +248,26 @@ class Fleet:
             if result != current:
                 save(path, result)
 
+    def shutdown_record(self, filename, value):
+        # A full/unavailable checkpoint filesystem must not prevent cloud stops.
+        try:
+            save(self.root / filename, value)
+        except Exception as error:
+            print(json.dumps(dict(shutdown_record=filename, error=repr(error), value=value)), flush=True)
+
     def shutdown(self, reason):
         self.stop = True
-        save(self.root / 'shutdown_requested.json', dict(reason=reason, at=now()))
-        self.publish([])
+        self.shutdown_record('shutdown_requested.json', dict(reason=reason, at=now()))
+        try:
+            self.publish([])
+        except Exception as error:
+            self.shutdown_record('shutdown_registry_error.json', dict(at=now(), error=repr(error)))
         while True:
             try:
                 states = self.states()
                 active = [v for v in self.vms if states.get((v['project'], v['name']), {}).get('status') != 'TERMINATED']
                 if not active:
-                    save(self.root / 'shutdown_complete.json', dict(at=now(), reason=reason, all_terminated=True))
+                    self.shutdown_record('shutdown_complete.json', dict(at=now(), reason=reason, all_terminated=True))
                     return
                 def stop(vm):
                     try:
@@ -267,9 +279,9 @@ class Fleet:
                     except Exception as error:
                         return dict(name=vm['name'], error=repr(error))
                 with ThreadPoolExecutor(max_workers=8) as pool:
-                    save(self.root / 'shutdown_progress.json', dict(at=now(), results=list(pool.map(stop, active))))
+                    self.shutdown_record('shutdown_progress.json', dict(at=now(), results=list(pool.map(stop, active))))
             except Exception as error:
-                save(self.root / 'shutdown_progress.json', dict(at=now(), error=repr(error)))
+                self.shutdown_record('shutdown_progress.json', dict(at=now(), error=repr(error)))
             time.sleep(20)
 
     def serve(self):
@@ -303,7 +315,8 @@ class Fleet:
                     self.publish(endpoints)
                     save(self.root / 'status.json', dict(at=now(), state='running', supervisor_pid=os.getpid(),
                         generator_pid=self.config['generator_pid'], generation_stage=status['stage'],
-                        completed_notes=status.get('stage_completed'), expected_notes=status.get('expected_notes'),
+                        completed_notes=(status.get('stage_completed') if status['stage'] in ('notes', 'assembling', 'completed') else None),
+                        expected_notes=status.get('expected_notes'),
                         healthy_gpu_servers=len(endpoints), expected_gpu_servers=64,
                         automatic_vm_shutdown=True, shutdown_on=['generator_failure', 'note_inference_complete', 'controller_lease_expiry']))
                     time.sleep(10)

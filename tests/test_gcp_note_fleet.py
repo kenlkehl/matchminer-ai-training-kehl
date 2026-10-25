@@ -1,6 +1,7 @@
 import hashlib
 import base64
 import json
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -102,3 +103,39 @@ def test_reboot_with_expired_lease_has_time_to_reconnect(tmp_path):
     assert 'TimeoutStartSec=0' in installer
     assert '["systemctl","start","--no-block","mmai-gemma-note-guard.service"]' in installer
     assert '["systemctl","enable","--now"' not in installer
+
+
+@pytest.mark.parametrize('healthy', [True, False])
+def test_endpoint_admission_requires_a_live_engine(tmp_path, monkeypatch, healthy):
+    obj = instance(tmp_path)
+    obj.vms[0]['base_port'] = 21000
+    obj.config['worker'].update(served_model='gemma', model='nvidia/gemma', context=250000, max_num_seqs=256)
+    (tmp_path/'vm_status.json').write_text(json.dumps(dict(vms=[dict(name='rtx-0', bootstrap=dict(healthy_gpus=[0]))])))
+    calls = []
+    def open_url(url, timeout):
+        calls.append(url)
+        if url.endswith('/health'):
+            if not healthy:
+                raise OSError('engine died')
+            return io.BytesIO(b'')
+        return io.BytesIO(json.dumps(dict(data=[dict(id='gemma', root='nvidia/gemma', max_model_len=250000)])).encode())
+    monkeypatch.setattr(fleet.urllib.request, 'build_opener', lambda *args: SimpleNamespace(open=open_url))
+    assert len(obj.endpoints()) == int(healthy)
+    assert calls[0].endswith('/health')
+    assert len(calls) == (2 if healthy else 1)
+
+
+def test_shutdown_still_stops_cloud_when_checkpoint_filesystem_fails(tmp_path, monkeypatch):
+    obj = instance(tmp_path)
+    active = [True]
+    monkeypatch.setattr(obj, 'states', lambda: {
+        (v['project'], v['name']): dict(status='RUNNING' if active[0] else 'TERMINATED') for v in obj.vms})
+    def broken(*args):
+        raise OSError('checkpoint filesystem unavailable')
+    monkeypatch.setattr(fleet, 'save', broken)
+    monkeypatch.setattr(obj, 'publish', broken)
+    calls = []
+    monkeypatch.setattr(obj, 'cloud', lambda command, vm: calls.append(vm['name']) or SimpleNamespace(returncode=0, stderr=''))
+    monkeypatch.setattr(fleet.time, 'sleep', lambda seconds: active.__setitem__(0, False))
+    obj.shutdown('checkpoint_write_failed')
+    assert sorted(calls) == sorted(v['name'] for v in obj.vms)
