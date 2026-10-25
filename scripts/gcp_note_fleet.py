@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import resource
 from pathlib import Path
 import signal
 import subprocess
@@ -15,6 +16,32 @@ import time
 import urllib.request
 
 REMOTE = '/opt/mmai-gemma-note-fleet'
+
+
+def ensure_ssh_descriptor_capacity():
+    """Each VM tunnel carries connections for eight independent GPU servers."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    required = 65536
+    if hard != resource.RLIM_INFINITY and hard < required:
+        raise RuntimeError('The fleet controller needs an open-file hard limit of at least 65536')
+    if soft != resource.RLIM_INFINITY and soft < required:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (required, hard))
+
+
+def remote_ssh_limit_setup():
+    # Apply to live sshd processes without disconnecting model requests, and
+    # retain the higher limit for the next Spot boot. Ubuntu uses ssh.service.
+    return ('from pathlib import Path\nimport resource\n'
+        'for name in ("ssh", "sshd"):\n'
+        ' p=Path("/etc/systemd/system")/(name+".service.d");p.mkdir(exist_ok=True)\n'
+        ' (p/"mmai-note-fleet.conf").write_text("[Service]\\nLimitNOFILE=65536\\n")\n'
+        'for p in Path("/proc").iterdir():\n'
+        ' if not p.name.isdigit():continue\n'
+        ' try:\n'
+        '  if (p/"comm").read_text().strip().startswith("sshd"):\n'
+        '   soft,hard=resource.prlimit(int(p.name),resource.RLIMIT_NOFILE)\n'
+        '   resource.prlimit(int(p.name),resource.RLIMIT_NOFILE,(max(soft,65536),max(hard,65536)))\n'
+        ' except (FileNotFoundError,ProcessLookupError):pass\n')
 
 
 def now():
@@ -65,7 +92,7 @@ def startup_script(config, worker_source):
         f'[Service]\nExecStartPre=/usr/bin/sleep {config["lease_seconds"]}\nTimeoutStartSec=0\n'
         'ExecStart=/usr/bin/python3 ' + REMOTE + '/worker.py --guard\nRestart=always\nRestartSec=5\n'
         '[Install]\nWantedBy=multi-user.target\n')
-    installer = ('from pathlib import Path\nimport json,time,subprocess\n'
+    installer = (remote_ssh_limit_setup() + 'import json,time,subprocess\n'
         f'r=Path({REMOTE!r});r.mkdir(exist_ok=True)\n'
         f'(r/"worker.py").write_text({worker_source!r})\n'
         f'(r/"config.json").write_text({json.dumps(worker)!r})\n'
@@ -332,6 +359,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     args = parser.parse_args()
+    ensure_ssh_descriptor_capacity()
     config = json.loads(args.config.read_text())
     with (args.config.parent / 'supervisor.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

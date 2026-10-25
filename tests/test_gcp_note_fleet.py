@@ -139,3 +139,21 @@ def test_shutdown_still_stops_cloud_when_checkpoint_filesystem_fails(tmp_path, m
     monkeypatch.setattr(fleet.time, 'sleep', lambda seconds: active.__setitem__(0, False))
     obj.shutdown('checkpoint_write_failed')
     assert sorted(calls) == sorted(v['name'] for v in obj.vms)
+
+
+def test_tunnels_reserve_fds_for_eight_servers(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet.resource, 'getrlimit', lambda limit: (4096, 1048576))
+    calls = []
+    monkeypatch.setattr(fleet.resource, 'setrlimit', lambda limit, value: calls.append(value))
+    fleet.ensure_ssh_descriptor_capacity()
+    assert calls == [(65536, 1048576)]
+    script = instance(tmp_path).startup
+    installer = base64.b64decode(script.split('printf %s ', 1)[1].split(' |', 1)[0]).decode()
+    assert 'LimitNOFILE=65536' in installer
+    assert 'resource.prlimit' in installer
+
+
+def test_tunnels_reject_insufficient_hard_fd_limit(monkeypatch):
+    monkeypatch.setattr(fleet.resource, 'getrlimit', lambda limit: (1024, 4096))
+    with pytest.raises(RuntimeError, match='hard limit'):
+        fleet.ensure_ssh_descriptor_capacity()

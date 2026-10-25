@@ -988,6 +988,8 @@ model/image revisions, and the active generation tokenizer-template hash.
 `scripts/gcp_note_worker.py` installs the VM-local workers and checks a reasoning
 completion before admitting each GPU. API ports bind to loopback and reach the
 generator through SSH tunnels. Existing registry entries are preserved.
+The controller and VM SSH services reserve 65,536 file descriptors so that
+eight busy GPU endpoints do not exhaust a tunnel's connection capacity.
 
 The fleet supervisor retries unavailable/preempted Spot instances, reconnects
 changed IP addresses, and removes unhealthy workers from new dispatch. Docker
