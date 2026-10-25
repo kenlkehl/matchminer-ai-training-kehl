@@ -69,6 +69,15 @@ reduce concurrency. Ordinary ceiling edits do not reset the active target.
 The shared client opens a fresh HTTP connection for each request to avoid idle
 keep-alive resets during long inference and checkpoint operations. Checkpoint
 reads run outside the event loop so resumed labeling can keep requests moving.
+Labeling renders and tokenizes independent prompts in bounded background batches
+(four workers, at most 32 prompts per batch). Full prompt text, exact untruncated
+token counts, question separation, and reasoning checkpoints are preserved.
+Checkpoint reads/writes use a dedicated bounded thread pool, leaving asyncio's
+network/DNS pool available. Server model discovery is shared across simultaneous
+requests to the same endpoint. Ready requests dispatch in small bursts with an
+explicit yield for other endpoints. These optimizations are the default in both
+standalone and orchestrated labeling. Status includes preprocessing throughput,
+queue depths, and event-loop delay; metrics failures include their exception type.
 These defaults also apply directly to `trialspace_training.py label` and
 `python -m colbert_experiments label`, without a VM supervisor or orchestration:
 use `--pending-requests 0`, `--max-auto-pending-requests`,

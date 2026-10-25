@@ -347,7 +347,7 @@ def test_teacher_makes_five_separate_calls_and_resumes_only_failed_question(tmp_
     create_fixture(tmp_path / 'corpus')
     pair = read_jsonl(tmp_path / 'corpus/train_pairs.jsonl')[0]
     write_jsonl(tmp_path / 'one_pair.jsonl', [pair])
-    prompts, fail_once = [], [True]
+    prompts, fail_once, catalogs = [], [True], []
 
     class Tokenizer:
         chat_template = 'fake test template'
@@ -358,6 +358,8 @@ def test_teacher_makes_five_separate_calls_and_resumes_only_failed_question(tmp_
 
     class Models:
         async def list(self):
+            catalogs.append(True)
+            await asyncio.sleep(.01)
             return SimpleNamespace(data=[SimpleNamespace(id='test', model_dump=lambda: dict(id='test', max_model_len=4096))])
 
     client = SimpleNamespace(base_url='http://unused.test/v1', models=Models())
@@ -397,10 +399,12 @@ def test_teacher_makes_five_separate_calls_and_resumes_only_failed_question(tmp_
     with pytest.raises(RuntimeError, match='1 unresolved'):
         asyncio.run(labeling.label(args))
     assert len(prompts) == 5
+    assert len(catalogs) == 1
     assert all(prompt.count('Question:') == 1 for prompt in prompts)
     assert len(read_jsonl(args.output / 'labels.jsonl')) == 4
     results = asyncio.run(labeling.label(args))
     assert len(prompts) == 6 and len(results) == 5
+    assert len(catalogs) == 2
     assert {r['task'] for r in results} == set(TASKS)
     assert all(r['messages'] and r['rendered_prompt'] and 'reasoning' in r for r in results)
     assert len(list((args.output / 'responses').glob('*/*.json'))) == 5

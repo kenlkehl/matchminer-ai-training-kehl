@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import fcntl
 import json
 from pathlib import Path
+import time
 import uuid
 
 from remote_vllm_pool import (CompletionSampling, OutputValidationError, RequestSession,
@@ -14,6 +15,7 @@ from vllm_reasoning_utils import (load_tokenizer, resolve_chat_template_kwargs,
 from .contracts import TASKS, contract_hash, judge_messages, parse_judgment, prompt_sources
 from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl
 from .label_concurrency import DEFAULT_AUTO_WORKERS_MAX, run_workers, worker_target
+from .label_preprocessing import BackgroundWork, PromptPreparer
 
 
 def validate_served_teacher(models, *, requested, tokenizer):
@@ -89,16 +91,21 @@ async def _label(args, output):
     base = make_completion_work_fn(replace(sampling, model=served_name),
                                    resolve_parser_name(args.teacher_tokenizer, 'auto'), tokenizer)
     server_models = {}
+    model_locks = {}
 
     async def work(client, payload):
         endpoint = str(client.base_url)
         if endpoint not in server_models:
-            catalog = await client.models.list()
-            served = validate_served_teacher([m.model_dump() for m in catalog.data],
-                                             requested=served_name, tokenizer=args.teacher_tokenizer)
-            if served.get('max_model_len', args.teacher_context) < args.teacher_context:
-                raise ValueError('Teacher server context is smaller than the configured budget')
-            server_models[endpoint] = served
+            # Hundreds of first requests can reach a newly admitted endpoint at
+            # once. Validate its catalog once, retrying if that lookup fails.
+            async with model_locks.setdefault(endpoint, asyncio.Lock()):
+                if endpoint not in server_models:
+                    catalog = await client.models.list()
+                    served = validate_served_teacher([m.model_dump() for m in catalog.data],
+                                                     requested=served_name, tokenizer=args.teacher_tokenizer)
+                    if served.get('max_model_len', args.teacher_context) < args.teacher_context:
+                        raise ValueError('Teacher server context is smaller than the configured budget')
+                    server_models[endpoint] = served
         if timing['first_request_at'] is None:
             timing['first_request_at'] = datetime.now(timezone.utc).isoformat()
         timing['attempts_started'] += 1
@@ -110,8 +117,8 @@ async def _label(args, output):
                 raise ValueError('Incomplete teacher output: ' + metadata['finish_reason'])
             result = parse_judgment(answer)
         except (ValueError, TypeError, IndexError) as error:
-            write_json(output / 'invalid_responses' / (str(uuid.uuid4()) + '.json'),
-                       dict(key=payload['key'], error=str(error), **trace))
+            await storage.run(write_json, output / 'invalid_responses' / (str(uuid.uuid4()) + '.json'),
+                              dict(key=payload['key'], error=str(error), **trace))
             raise OutputValidationError(str(error)) from error
         return dict(**result, **trace, generated_at=datetime.now(timezone.utc).isoformat())
 
@@ -129,20 +136,37 @@ async def _label(args, output):
     iterator = iter(groups() if gated else questions(pairs, patients, cohorts, sources=sources))
     completed, failures, scores = {}, {}, {}
     score_counts = {str(i): 0 for i in range(6)}
-    def progress(state='labeling'):
-        # One consistent snapshot, throttled below. Per-response status writes
-        # otherwise serialize the entire async pool on a network filesystem.
-        write_json(output / 'status.json', dict(state=state, **timing,
+    loop_lag = dict(latest_seconds=0.0, max_seconds=0.0)
+    client_stats = {}
+    def snapshot(state='labeling'):
+        # Copy mutable counters on the event loop, then serialize/write outside
+        # it. Never send patient text into operational telemetry.
+        return dict(state=state, **timing,
             updated_at=datetime.now(timezone.utc).isoformat(), total_pairs=len(pairs),
-            completed=len(completed), failures=failures,
-            **(dict(scored_pairs=len(scores), score_distribution=score_counts) if gated else {})))
+            completed=len(completed), failures=dict(failures), client=dict(client_stats),
+            event_loop_lag=dict(loop_lag),
+            **(dict(scored_pairs=len(scores), score_distribution=dict(score_counts)) if gated else {}))
+
+    async def monitor_loop():
+        while True:
+            started = time.monotonic()
+            await asyncio.sleep(1)
+            lag = max(0.0, time.monotonic() - started - 1)
+            loop_lag['latest_seconds'] = lag
+            loop_lag['max_seconds'] = max(loop_lag['max_seconds'], lag)
 
     async def report_progress():
         while True:
-            progress()
+            client_stats.update(preprocessing=dict(preparer.stats),
+                                preprocessing_queue=preparer.queue.qsize(),
+                                request_queue=session.queue.qsize() if hasattr(session, 'queue') else None)
+            await storage.run(write_json, output / 'status.json', snapshot())
             await asyncio.sleep(10)
 
-    async with RequestSession(registry, work, max_attempts=args.max_attempts) as session:
+    async with (BackgroundWork() as storage,
+                PromptPreparer(tokenizer, resolve_chat_template_kwargs(args.teacher_tokenizer),
+                               context=args.teacher_context, max_tokens=args.max_tokens) as preparer,
+                RequestSession(registry, work, max_attempts=args.max_attempts) as session):
         def load_checkpoint(item):
             # Network-filesystem reads must not block every active HTTP request
             # or the scheduler while a production run resumes saved answers.
@@ -163,15 +187,12 @@ async def _label(args, output):
             return path, None
 
         async def ask(item):
-            path, row = await asyncio.to_thread(load_checkpoint, item)
+            path, row = await storage.run(load_checkpoint, item)
             if row is not None:
                 completed[item['key']] = path
                 return row
-            prompt = tokenizer.apply_chat_template(item['messages'], tokenize=False,
-                add_generation_prompt=True, **resolve_chat_template_kwargs(args.teacher_tokenizer))
-            tokens = len(tokenizer.encode(prompt, add_special_tokens=False))
-            if tokens + args.max_tokens + 256 > args.teacher_context:
-                raise ValueError('Full teacher input and output exceed context; truncation is disabled')
+            prepared = await preparer.prepare(item['messages'])
+            prompt = prepared['prompt']
             result = await session.submit(dict(prompt=prompt, key=item['key'], max_tokens=args.max_tokens,
                 enable_thinking=True, include_completion_metadata=True, include_raw_text=True))
             if not isinstance(result, dict):
@@ -180,11 +201,11 @@ async def _label(args, output):
             # Keep the exact question and complete clinical input alongside the
             # reasoning, rather than requiring corpus reconstruction to distill it.
             row = dict(item)
-            row.update(result, prompt_sha256=digest(item['messages']), contract=signature['contract'],
+            row.update(result, prompt_sha256=prepared['prompt_sha256'], contract=signature['contract'],
                        teacher_model=args.teacher_model, rendered_prompt=prompt, sampling=asdict(sampling))
             # Await durable response storage before accepting the answer, while
             # other request chains continue. Reasoning archives remain complete.
-            await asyncio.to_thread(write_json, path, row)
+            await storage.run(write_json, path, row)
             completed[item['key']] = path
             return row
 
@@ -204,19 +225,21 @@ async def _label(args, output):
                           pair_worker_mode='fixed' if args.pending_requests else 'automatic')
 
         reporter = asyncio.create_task(report_progress())
+        loop_monitor = asyncio.create_task(monitor_loop())
         try:
             await run_workers(iterator, process, lambda: registry.request_capacity(),
                               workers=args.pending_requests, maximum=auto_maximum, on_resize=resized)
         finally:
             reporter.cancel()
-            await asyncio.gather(reporter, return_exceptions=True)
-            progress('incomplete')
+            loop_monitor.cancel()
+            await asyncio.gather(reporter, loop_monitor, return_exceptions=True)
+            await storage.run(write_json, output / 'status.json', snapshot('incomplete'))
     write_jsonl(output / 'labels.jsonl', (json.loads(completed[k].read_text()) for k in sorted(completed)))
     if gated:
         from .regression import score_balance
         write_jsonl(output / 'scores.jsonl', [scores[k] for k in sorted(scores)])
         write_json(output / 'score_balance.json', score_balance(list(scores.values())))
-    progress('incomplete' if failures else 'complete')
+    write_json(output / 'status.json', snapshot('incomplete' if failures else 'complete'))
     if failures:
         raise RuntimeError(f'{len(failures)} unresolved teacher labels; resume this command to retry')
     return ([json.loads(completed[k].read_text()) for k in sorted(completed)]

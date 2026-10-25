@@ -45,6 +45,11 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from adaptive_controller import Controller, now, parse_metrics, apply_tuning
 
 
+def _read_json_file(path):
+    with open(path) as stream:
+        return json.load(stream)
+
+
 class OutputValidationError(ValueError):
     """A completed model response failed validation, not server capacity.
 
@@ -353,8 +358,7 @@ class DynamicServerRegistry:
 
     async def _read_servers_file(self) -> Optional[List[dict]]:
         try:
-            with open(self._servers_file, "r") as fh:
-                data = json.load(fh)
+            data = await asyncio.to_thread(_read_json_file, self._servers_file)
             return list(data.get("servers", []))
         except FileNotFoundError:
             return None
@@ -383,8 +387,7 @@ class DynamicServerRegistry:
     async def _reconcile_once(self) -> None:
         if self._concurrency_file:
             try:
-                with open(self._concurrency_file) as stream:
-                    control = json.load(stream)
+                control = await asyncio.to_thread(_read_json_file, self._concurrency_file)
                 maximum = control["max_concurrent_per_server"]
                 if type(maximum) is not int or not 1 <= maximum <= self._max_concurrent:
                     raise ValueError("live concurrency must be an integer within the CLI ceiling")
@@ -496,7 +499,8 @@ class DynamicServerRegistry:
                 result['metrics'] = metrics
             except Exception as exc:
                 controller.reset_observations()
-                result['metrics_error'] = str(exc)
+                result['metrics_error'] = str(exc) or type(exc).__name__
+                result['metrics_error_type'] = type(exc).__name__
             result.update(entry.semaphore.stats(), configured_ceiling=self._scheduler_ceilings[entry.url],
                           scheduler_ceiling=controller.upper, successful_requests=entry.ok_count,
                           request_errors=entry.err_count, validation_errors=entry.output_validation_err_count,
@@ -736,6 +740,7 @@ async def _server_loop(
     stop_event: asyncio.Event,
 ) -> None:
     in_flight: set[asyncio.Task] = set()
+    dispatched = 0
     try:
         while not stop_event.is_set() and not entry.retired:
             try:
@@ -745,7 +750,10 @@ async def _server_loop(
             # Have a slot; pull an item with a short timeout so we can re-check
             # entry.retired / stop_event regularly.
             try:
-                item = await asyncio.wait_for(work_queue.get(), timeout=0.5)
+                try:
+                    item = work_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    item = await asyncio.wait_for(work_queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 # No work right now — give back the slot and loop.
                 await entry.semaphore.release(success=True)
@@ -770,6 +778,11 @@ async def _server_loop(
             )
             in_flight.add(task)
             task.add_done_callback(in_flight.discard)
+            dispatched += 1
+            if dispatched % 16 == 0:
+                # Ready work needs no extra task/timer per queue.get, but a
+                # busy endpoint must still yield to other endpoints and I/O.
+                await asyncio.sleep(0)
     finally:
         if in_flight:
             await asyncio.gather(*in_flight, return_exceptions=True)
