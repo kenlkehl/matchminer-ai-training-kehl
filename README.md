@@ -52,6 +52,9 @@ writes in background threads, preserving reasoning without blocking other reques
 chains. `status.json` refreshes every ten seconds with completed questions,
 scored pairs, total candidate pairs, score distribution, and the first request
 time; use scored-pair throughput for ETA because specificity calls are gated.
+Adaptive labeling also saves `scheduler_metrics.json` by default, containing
+per-endpoint concurrency limits, active requests, and vLLM scheduler metrics.
+Use it to exclude startup, pool changes, and concurrency ramps from pace estimates.
 Other teacher stages retain the independent
 `--teacher-concurrency` setting (0 means automatic capacity-based scheduling).
 

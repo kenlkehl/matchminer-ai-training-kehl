@@ -152,9 +152,10 @@ def test_gated_labeler_resumes_failed_specificity_without_reasking_gate(tmp_path
     args = SimpleNamespace(corpus=tmp_path / 'corpus', candidates=tmp_path / 'pairs.jsonl',
         output=tmp_path / 'teacher', teacher_model='test', teacher_tokenizer='test', cache_dir=None,
         request_timeout=5, max_tokens=100, teacher_context=4096, max_attempts=1, pending_requests=2,
-        gated_regression=True)
+        gated_regression=True, scheduler_adaptive_concurrency=True)
     with pytest.raises(RuntimeError, match='1 unresolved'):
         asyncio.run(labeling.label(args))
+    assert args.scheduler_metrics_file == str(args.output / 'scheduler_metrics.json')
     assert len(calls) == 6
     partial = read_jsonl(args.output / 'scores.jsonl')
     assert len(partial) == 1 and partial[0]['score'] == 0
