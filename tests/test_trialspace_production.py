@@ -37,6 +37,11 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
             if parsed.command == 'train':
                 assert parsed.prediction_link == 'identity' and parsed.steps == 8
                 assert parsed.output_model.parent == args.models_dir
+            else:
+                assert parsed.device_token_cache
+                assert parsed.device_cache_gb == 8
+                assert parsed.pair_batch_size == 512
+                assert parsed.score_query_batches == 4
     assert not any(script in str([s.command for s in plan]) for script in ('finetune_embedder.py', 'llm_check_trials.py', 'make_top_matches.py'))
     stages = {s.name: s for s in plan}
     for iteration in (1, 2):
@@ -177,6 +182,33 @@ def test_resident_mining_preserves_candidates_scores_and_runtime_tuning_resume(t
             assert len(model.calls) == calls
     for artifact in ('rankings.jsonl', 'candidates.jsonl'):
         assert read_jsonl(outputs[0] / artifact) == read_jsonl(outputs[1] / artifact)
+
+
+def test_batched_checkpoints_resume_legacy_and_change_rank_batch_partition(tmp_path):
+    from colbert_experiments.query_checkpoints import QueryCheckpoints
+    from colbert_experiments.data import write_json
+    old = tmp_path / 'queries/aa/aa1.json'
+    write_json(old, [dict(score=1)])
+    store = QueryCheckpoints(tmp_path)
+    store.write_batch({'bb2': [dict(score=2)], 'cc3': [dict(score=3)]})
+    # A partial temporary file is invisible on restart.
+    (tmp_path / 'query_batches/partial.json.tmp').write_text('{')
+    resumed = QueryCheckpoints(tmp_path)
+    assert resumed.keys == {'aa1', 'bb2', 'cc3'}
+    resumed.write_batch({'dd4': [dict(score=4)]})
+    assert store.ordered_hits(['dd4', 'aa1', 'cc3', 'bb2']) == [dict(score=i) for i in (4, 1, 3, 2)]
+    with pytest.raises(ValueError, match='only new queries'):
+        resumed.write_batch({'cc3': []})
+
+
+def test_training_uses_runtime_encoder_scorer_and_query_contract():
+    from matchminer_ai.embedding.colbert import ColBERT
+    from matchminer_ai.embedding.packed_scoring import score_pairs as runtime_score_pairs
+    from matchminer_ai.embedding.colbert_contract import regression_query
+    from colbert_experiments import model, regression
+    assert model.ColBERT is ColBERT
+    assert score_pairs is runtime_score_pairs
+    assert regression.regression_query is regression_query
 
 
 def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_path, monkeypatch):

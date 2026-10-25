@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import random
+import time
 
 import numpy as np
 import pandas as pd
@@ -230,6 +231,8 @@ def _mine(args, model, *, rank, world, local):
     write_json(output / f'runtime_rank_{rank}.json', dict(world_size=world, device=device,
         pair_batch_size=args.pair_batch_size, score_query_batches=args.score_query_batches,
         device_token_cache=args.device_token_cache, device_cache_gb=args.device_cache_gb))
+    from colbert_experiments.query_checkpoints import QueryCheckpoints
+    checkpoints = QueryCheckpoints(output)
     query_paths, query_number = [], 0
     resident = None
     for direction in DIRECTIONS:
@@ -254,7 +257,7 @@ def _mine(args, model, *, rank, world, local):
                 key = digest([direction, split, row['id']])
                 path = output / 'queries' / key[:2] / f'{key}.json'
                 query_paths.append(path)
-                if query_number % world == rank and not path.exists():
+                if query_number % world == rank and key not in checkpoints.keys:
                     jobs.append((row, path))
                 query_number += 1
             if not jobs:
@@ -263,6 +266,7 @@ def _mine(args, model, *, rank, world, local):
             matrix = lexical.fit_transform(t['text'] for t in targets)
             work_batch_size = args.query_batch_size * (args.score_query_batches if resident else 1)
             for offset in range(0, len(jobs), work_batch_size):
+                started = time.perf_counter()
                 batch = jobs[offset:offset + work_batch_size]
                 query_vectors = []
                 # Preserve the established encoder batch shape/precision while
@@ -270,12 +274,14 @@ def _mine(args, model, *, rank, world, local):
                 for start in range(0, len(batch), args.query_batch_size):
                     query_vectors.extend(model.encode_batch([regression_query(direction, row['text'])
                         for row, _ in batch[start:start + args.query_batch_size]], is_query=True))
+                encoded_at = time.perf_counter()
                 lexical_batch = (lexical.transform([row['text'] for row, _ in batch]) @ matrix.T).toarray()
                 proposals_batch, random_states = [], []
                 for (row, _), lexical_scores in zip(batch, lexical_batch, strict=True):
                     rng = random.Random(f'{args.seed}:{direction}:{row["id"]}')
                     proposals_batch.append(proposal_indices(lexical_scores, args.candidate_limit, rng, args.proposal_strategy))
                     random_states.append(rng)
+                proposed_at = time.perf_counter()
                 scores_batch = []
                 if resident:
                     ids = resident[1]
@@ -295,6 +301,8 @@ def _mine(args, model, *, rank, world, local):
                             vectors = [store.get(kind, targets[i]['id']) for i in chosen]
                             values.extend(score_documents(vector.to(model.device), vectors).cpu().tolist())
                         scores_batch.append(values)
+                scored_at = time.perf_counter()
+                checkpoint_rows = {}
                 for (row, path), lexical_scores, proposals, values, rng in zip(
                         batch, lexical_batch, proposals_batch, scores_batch, random_states, strict=True):
                     hits = []
@@ -308,12 +316,16 @@ def _mine(args, model, *, rank, world, local):
                         add(index, 'tfidf_baseline', place, float(lexical_scores[index]))
                     for index in rng.sample(range(len(targets)), min(args.random_k, len(targets))):
                         add(index, 'random_exploration')
-                    write_json(path, hits)
-                print(f'[mine rank={rank}] {direction}/{split}: {min(offset + len(batch), len(jobs))}/{len(jobs)}', flush=True)
+                    checkpoint_rows[path.stem] = hits
+                checkpoints.write_batch(checkpoint_rows)
+                finished = time.perf_counter()
+                print(f'[mine rank={rank}] {direction}/{split}: {min(offset + len(batch), len(jobs))}/{len(jobs)} '
+                      f'encode={encoded_at-started:.3f}s proposals={proposed_at-encoded_at:.3f}s '
+                      f'score={scored_at-proposed_at:.3f}s checkpoint={finished-scored_at:.3f}s', flush=True)
     if world > 1:
         dist.barrier()
     if rank == 0:
-        hits = [hit for path in query_paths for hit in json.loads(path.read_text())]
+        hits = checkpoints.ordered_hits([path.stem for path in query_paths])
         for pair in extra:
             if pair['split'] in args.splits:
                 hits.append(dict(patient_id=pair['patient_id'], cohort_id=pair['cohort_id'],
@@ -347,7 +359,7 @@ def parser():
         help='Encoder batches grouped for lexical proposal generation and pair scoring')
     sub.choices['mine'].add_argument('--top-k-patient-to-cohort', type=int,
         help='ColBERT cohort picks per patient; overrides --top-k for this direction')
-    sub.choices['mine'].add_argument('--top-k-cohort-to-patient', type=int,
+    sub.choices['mine'].add_argument('--top-k-cohort-to-patient', type=int, default=40,
         help='ColBERT patient picks per cohort; overrides --top-k for this direction')
     sub.choices['label'].set_defaults(gated_regression=True, return_records=False)
     sub.choices['train'].set_defaults(objective='gated_regression', eval_every=100, eval_groups_per_stratum=32, steps=None)

@@ -7,6 +7,7 @@ import random
 import numpy as np
 import torch
 from torch.nn import functional as F
+from matchminer_ai.embedding.colbert_contract import INSTRUCTION, regression_query
 
 from .contracts import TASKS, DIRECTIONS, contract_hash, judge_messages, parse_judgment, prompt_sources
 from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl
@@ -14,21 +15,12 @@ from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl
 VERSION = 'cohort-colbert-gated-score-v1'
 GATE = 'potentially_eligible'
 SPECIFICITY = tuple(task for task in TASKS if task != GATE)
-INSTRUCTION = ('Find potentially eligible patient–cohort matches, prioritizing matching cancer type, '
-               'disease burden, prior treatment, and required biomarkers.')
 
 
 def score_contract(question_contract=None):
     return digest(dict(version=VERSION, questions=question_contract or contract_hash(), gate=GATE,
                        specificity=SPECIFICITY, score='number_of_yes_answers', normalization=5,
                        query_instruction=INSTRUCTION))
-
-
-def regression_query(direction, text):
-    if direction not in DIRECTIONS:
-        raise ValueError('Unknown retrieval direction')
-    subject = 'Patient history' if direction == 'patient_to_cohort' else 'Cohort eligibility criteria'
-    return f'{INSTRUCTION}\n\n{subject}:\n{text}'
 
 
 def aggregate_pair(pair, judgments, *, question_contract=None):

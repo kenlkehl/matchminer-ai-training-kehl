@@ -63,6 +63,22 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert summary_distillation.command[summary_distillation.command.index('--notes') + 1] == str(args.synthetic_notes)
 
 
+@pytest.mark.parametrize('wrapper', ['train_all.sh', 'train_all_gcp.sh'])
+def test_shell_training_defaults_use_fast_shared_colbert(tmp_path, wrapper):
+    result = subprocess.run(['bash', str(pipeline.ROOT / wrapper), '--dry-run', '--gpus', '0,1,2,3'],
+        env={**os.environ, 'PYTHON': sys.executable}, text=True, capture_output=True, check=True)
+    plan = json.loads(result.stdout)
+    mines = [row['command'] for row in plan if row['name'].startswith('mine-')]
+    assert len(mines) == 3
+    for command in mines:
+        assert '--nproc_per_node=4' in command
+        assert command[command.index('--pair-batch-size') + 1] == '512'
+        assert command[command.index('--score-query-batches') + 1] == '4'
+        assert command[command.index('--device-cache-gb') + 1] == '8'
+        assert command[command.index('--top-k-cohort-to-patient') + 1] == '40'
+    assert mines[0][mines[0].index('--model') + 1] == 'lightonai/GTE-ModernColBERT-v1'
+
+
 def test_training_only_retains_original_default_identity(tmp_path):
     args = arguments(tmp_path)
     command = pipeline.training_command(args)

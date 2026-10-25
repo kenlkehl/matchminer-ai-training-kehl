@@ -25,7 +25,7 @@ from oncoreasoning_training.teacher import DEFAULT_TEACHER
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "2a139b0b2f406afeaa967b2e142d59b688af75cc"
+INFERENCE_COMMIT = "385a5a818242b4d1a238377077767c9b35c7a4b8"
 
 
 @dataclass
@@ -66,7 +66,7 @@ def parser():
     p.add_argument('--trialspace-candidate-limit', type=int, default=256)
     p.add_argument('--trialspace-top-k', type=int, default=20)
     p.add_argument('--trialspace-top-k-patient-to-cohort', type=int)
-    p.add_argument('--trialspace-top-k-cohort-to-patient', type=int)
+    p.add_argument('--trialspace-top-k-cohort-to-patient', type=int, default=40)
     p.add_argument('--trialspace-lexical-k', type=int, default=5)
     p.add_argument('--trialspace-random-k', type=int, default=5)
     p.add_argument('--trialspace-encode-batch-size', type=int, default=16)
@@ -410,7 +410,8 @@ def main():
                     ROOT / 'oncoreasoning_training/prepare_boilerplate.py',
                     ROOT / 'oncoreasoning_training/teacher.py',
                     args.inference_repo / 'src/matchminer_ai/llm/traces.py',
-                    args.inference_repo / 'src/matchminer_ai/llm/endpoint_pool.py']
+                    args.inference_repo / 'src/matchminer_ai/llm/endpoint_pool.py',
+                    *sorted((args.inference_repo / 'src/matchminer_ai/embedding').glob('*.py'))]
     identity['production_sources'] = [source_record(path) for path in source_paths]
     if manifest_path.exists():
         from oncoreasoning_training.pipeline_upgrade import compatible_identity

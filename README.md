@@ -9,8 +9,9 @@ OncoReasoning summarization and clinical-QA adapters.
 `train_all.sh`, `train_all_gcp.sh`, and `temp_train_gcp.sh` invoke
 `run_pipeline.py`; its training stage invokes `train_from_summaries.py`.
 `trialspace_training.py` is the production preparation/mining/labeling/training
-entrypoint. It shares the tested ColBERT implementation and question contracts
-with [`colbert_experiments`](colbert_experiments/README.md); production fixes the
+entrypoint. The native ColBERT encoder, retrieval instruction, and packed MaxSim
+scorer are owned by the inference dependency and imported by both production
+and [`colbert_experiments`](colbert_experiments/README.md). Production fixes the
 objective to gated regression.
 
 Use a local-disk virtual environment, outside the network-mounted checkout, and
@@ -131,11 +132,18 @@ mining command omits the `trialspace-` prefix and also accepts
 `--no-device-token-cache`. A zero cache budget selects the old bounded path.
 These execution controls are recorded in per-rank runtime files separately from
 the model/corpus/candidate identity, so tuning them can resume existing atomic
-embeddings and per-query checkpoints. Encoder batch sizes and text/scoring
+embeddings and query checkpoints. Queries are checkpointed in atomic batches
+under `query_batches/` to avoid thousands of small network-filesystem writes;
+older `queries/` files remain readable. A crash redoes only unpublished batches.
+Rank count and scoring batch changes preserve all published query results.
+These defaults apply through `train_all.sh` and `train_all_gcp.sh`, as well as
+direct `trialspace_training.py` execution; no background supervisor is needed.
+Encoder batch sizes and text/scoring
 contracts remain part of the strict mining identity.
 
 The default candidate pool is 256 lexical/random proposals per query. Exact
-MaxSim selects 20 within that pool; five TF-IDF and five random proposals from
+MaxSim selects 20 cohorts per patient and 40 patients per cohort within that pool;
+five TF-IDF and five random proposals from
 the whole split are also included. Known source-trial relationships and optional
 `--trialspace-extra-pairs` add independent/challenge candidates without assuming
 positive labels. This is bounded candidate mining, not exhaustive corpus search.
