@@ -221,6 +221,28 @@ def test_vectorized_candidate_order_preserves_negative_scores_and_index_ties():
         assert top_indices(scores, count) == expected[:count]
 
 
+def test_candidate_export_freezes_prompt_contract_once_for_both_directions(tmp_path, monkeypatch):
+    corpus = tmp_path / 'corpus'
+    create_fixture(corpus)
+    pairs = read_jsonl(corpus / 'train_pairs.jsonl')[:3]
+    for pair in pairs:
+        pair['sources'] = [dict(direction='both', source='fixture')]
+    candidates = tmp_path / 'candidates.jsonl'
+    write_jsonl(candidates, pairs)
+    calls = []
+    def contract():
+        calls.append(1)
+        return 'frozen-test-contract'
+    monkeypatch.setattr(production, 'score_contract', contract)
+    outputs = [tmp_path / 'patient.parquet', tmp_path / 'cohort.parquet']
+    production.export_candidates(corpus, candidates, *outputs)
+    assert len(calls) == 1
+    for path in outputs:
+        table = pd.read_parquet(path)
+        assert len(table) == len(pairs)
+        assert table.trialspace_contract.eq('frozen-test-contract').all()
+
+
 def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_path, monkeypatch):
     from colbert_experiments import training
     corpus = tmp_path / 'corpus'

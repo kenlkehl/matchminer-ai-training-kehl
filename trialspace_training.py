@@ -148,6 +148,9 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
     patients, cohorts = load_corpus(corpus)
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
     tables = {direction: [] for direction in DIRECTIONS}
+    # Freeze the rubric once for this export. Re-reading six prompt files for
+    # every pair causes millions of network-filesystem operations at scale.
+    contract = score_contract()
     for pair in read_jsonl(candidates):
         p, c = pmap[pair['patient_id']], cmap[pair['cohort_id']]
         if p['split'] != c['split'] or pair['split'] != p['split'] or p['split'] == 'test':
@@ -161,7 +164,7 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
                 nct_id=c['trial_id'], trial_id=c['trial_id'], cohort_trial_id=c['id'], space_trial_id=c['id'],
                 this_space=c['text'], cohort_eligibility_criteria=c['text'], trial_boilerplate_text='',
                 split=p['split'], candidate_id=digest([p['id'], c['id']]),
-                retrieval_sources=json.dumps(sources), trialspace_contract=score_contract()))
+                retrieval_sources=json.dumps(sources), trialspace_contract=contract))
     for direction, path in zip(DIRECTIONS, (cohort_output, patient_output), strict=True):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
