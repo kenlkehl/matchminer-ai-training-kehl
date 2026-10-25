@@ -26,7 +26,7 @@ from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "1f17ef0ee29d039befb1f13f4780674dc634dd2f"
+INFERENCE_COMMIT = "e3a2bba8137bed90a0dcda5c8e1243f6745c3e98"
 
 
 @dataclass
@@ -437,6 +437,8 @@ def main():
                     ROOT / 'oncoreasoning_training/prepare_boilerplate.py',
                     ROOT / 'oncoreasoning_training/teacher.py',
                     args.inference_repo / 'src/matchminer_ai/llm/traces.py',
+                    args.inference_repo / 'src/matchminer_ai/llm/async_processing.py',
+                    args.inference_repo / 'src/matchminer_ai/llm/remote_inference.py',
                     args.inference_repo / 'src/matchminer_ai/llm/endpoint_pool.py',
                     *sorted((args.inference_repo / 'src/matchminer_ai/embedding').glob('*.py'))]
     identity['production_sources'] = [source_record(path) for path in source_paths]

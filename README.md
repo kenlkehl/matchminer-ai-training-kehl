@@ -72,6 +72,9 @@ reads run outside the event loop so resumed labeling can keep requests moving.
 Labeling renders and tokenizes independent prompts in bounded background batches
 (four workers, at most 32 prompts per batch). Full prompt text, exact untruncated
 token counts, question separation, and reasoning checkpoints are preserved.
+The implementation is imported from the inference dependency's
+`matchminer_ai.llm.async_processing`; the training module is a compatibility
+adapter, so direct labeling and the primary orchestrators share that code.
 Checkpoint reads/writes use a dedicated bounded thread pool, leaving asyncio's
 network/DNS pool available. Server model discovery is shared across simultaneous
 requests to the same endpoint. Ready requests dispatch in small bursts with an
