@@ -979,6 +979,32 @@ as `--generation-scheduler-adaptive-concurrency` (and its `--no-` form) and
 `--generation-initial-concurrency-per-server`. Throughput comparisons require uninterrupted, sufficiently loaded
 windows; idle workers, missing metrics, and server restarts discard those
 comparisons. Cache pressure and request preemptions still trigger backoff.
+
+For the explicitly requested eight-VM RTX Spot fleet, `scripts/gcp_note_fleet.py`
+attaches 64 per-GPU Gemma workers to an already-running note job. Its frozen JSON
+configuration records project/zone/name, SSH identity and forwarding ports,
+the generator PID plus process start identity, the live server registry, pinned
+model/image revisions, and the active generation tokenizer-template hash.
+`scripts/gcp_note_worker.py` installs the VM-local workers and checks a reasoning
+completion before admitting each GPU. API ports bind to loopback and reach the
+generator through SSH tunnels. Existing registry entries are preserved.
+
+The fleet supervisor retries unavailable/preempted Spot instances, reconnects
+changed IP addresses, and removes unhealthy workers from new dispatch. Docker
+restarts crashed workers. A stopped or failed generator, completion of note
+inference, or an operator `STOP` file triggers removal of this fleet's endpoints
+and repeated stop requests until all eight VMs are terminated. Each VM also has
+an expiring 15-minute controller lease and powers itself off if renewal stops.
+After a reboot, a 15-minute grace period lets startup and SSH renew an expired
+lease before the watchdog enforces it again.
+Local output assembly can finish after cloud workers shut down. Deployment logs,
+original metadata backups, health state, and shutdown receipts stay alongside
+the fleet configuration. Run this only for a user-authorized fleet:
+
+```bash
+python scripts/gcp_note_fleet.py --config /absolute/path/to/fleet/config.json
+```
+
 Each expansion receives only its assigned prose seed and the clinical/formatting
 instructions, then generates all tagged events, including demographics and
 diagnoses. Trial criteria, general exclusions, and matching/near-miss objectives
