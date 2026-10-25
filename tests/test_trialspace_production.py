@@ -211,6 +211,16 @@ def test_training_uses_runtime_encoder_scorer_and_query_contract():
     assert regression.regression_query is regression_query
 
 
+def test_vectorized_candidate_order_preserves_negative_scores_and_index_ties():
+    import numpy as np
+    from colbert_experiments.retrieval import top_indices
+    scores = np.random.default_rng(42).normal(size=54910)
+    scores[::3] = 0
+    expected = sorted(range(len(scores)), key=lambda i: (-float(scores[i]), i))
+    for count in (0, 5, 128, len(scores)):
+        assert top_indices(scores, count) == expected[:count]
+
+
 def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_path, monkeypatch):
     from colbert_experiments import training
     corpus = tmp_path / 'corpus'

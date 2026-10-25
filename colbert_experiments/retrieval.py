@@ -14,7 +14,10 @@ from .model import maxsim
 
 
 def top_indices(scores, count):
-    return sorted(range(len(scores)), key=lambda i: (-float(scores[i]), i))[:count]
+    # Stable sorting retains the original index-order tie rule. The lexical
+    # corpus can contain tens of thousands of entries per query; keep this loop
+    # in NumPy rather than repeatedly constructing Python float/tuple keys.
+    return np.argsort(-np.asarray(scores, dtype=np.float64), kind='stable')[:count].tolist()
 
 
 def proposal_indices(scores, limit, rng, strategy='random'):

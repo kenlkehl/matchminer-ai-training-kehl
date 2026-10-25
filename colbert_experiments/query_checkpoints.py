@@ -32,7 +32,7 @@ class QueryCheckpoints:
         if not rows or self.keys.intersection(rows):
             raise ValueError('Query checkpoint batch must contain only new queries')
         write_json(self.root / 'query_batches' / f'{digest(sorted(rows))}.json',
-                   dict(version=1, queries=rows))
+                   dict(version=1, queries=rows), compact=True)
         self.keys.update(rows)
 
     def ordered_hits(self, keys):

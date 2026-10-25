@@ -10,11 +10,12 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def write_json(path, value):
+def write_json(path, value, *, compact=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + '.tmp')
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + '\n')
+    options = dict(separators=(',', ':')) if compact else dict(indent=2)
+    temporary.write_text(json.dumps(value, ensure_ascii=False, **options) + '\n')
     temporary.replace(path)
 
 
