@@ -127,6 +127,16 @@ cancers. Even identical core fields can represent distinct primaries, so those
 flags require review of extent and treatment history. The command does not edit
 the source, regenerate patients, invalidate labels or restart training.
 
+The production summarizer itself validates each generated chunk with the same
+checker and retries invalid output from the original notes and last valid prior.
+All attempts retain prompts, raw completions and separate reasoning in the summary
+shard directory. On resume it also checks saved chunks and completed round shards;
+invalid chunks and their patient's later chunks are archived under
+`quality_rejected/` and regenerated, while unrelated chunk checkpoints remain
+reusable. Exhausted retries stop the stage before a bad summary can become the
+prior for another chunk. Review-only matches of core cancer fields do not force
+regeneration, preserving legitimate multiple primary histories.
+
 Production pools **all synthetic patients and cohorts** for both retrieval
 directions, labeling, and optimization. Original splits become `source_split`
 provenance; the effective corpus split is `train`. There are no synthetic patient

@@ -689,6 +689,7 @@ async def single_inference_request(
     repetition_penalty: float = 1.0,
     max_retries: int = 6,
     base_timeout: float = 600.0,
+    trace_dir: str | None = None,
 ) -> Tuple[int, str, str]:
     """
     Send a single inference request with retry logic.
@@ -717,6 +718,23 @@ async def single_inference_request(
             )
             raw_text = response.choices[0].text
             reasoning, summary = postprocess_output(raw_text, parser_name, tokenizer)
+            from matchminer_ai.patients.summary_quality import check_patient_summary, summary_retry_codes
+            finish = response.choices[0].finish_reason
+            if trace_dir:
+                from pathlib import Path
+                from uuid import uuid4
+                from summary_pool import save
+                await asyncio.to_thread(save, Path(trace_dir) / f'{row_idx}_{uuid4().hex}.json',
+                    dict(chunk_index=row_idx, prompt=prompt, raw_text=raw_text,
+                         reasoning=reasoning, answer=summary, finish_reason=finish,
+                         model=model, endpoint=str(client.base_url), attempt=attempt + 1,
+                         summary_quality=check_patient_summary(summary),
+                         sampling=dict(temperature=temperature, top_k=top_k, top_p=top_p,
+                             presence_penalty=presence_penalty, min_p=min_p,
+                             repetition_penalty=repetition_penalty)))
+            codes = summary_retry_codes(summary, finish)
+            if codes:
+                raise ValueError('Patient summary requires regeneration: ' + ', '.join(codes))
             return (row_idx, reasoning, summary)
 
         except asyncio.TimeoutError:
@@ -757,6 +775,7 @@ async def run_inference_batch(
     max_retries: int = 6,
     base_timeout: float = 600.0,
     port: int = 8000,
+    trace_dir: str | None = None,
 ) -> List[Tuple[int, str, str]]:
     """
     Send batch of requests concurrently, return (row_idx, reasoning, summary).
@@ -816,6 +835,7 @@ async def run_inference_batch(
                     repetition_penalty=repetition_penalty,
                     max_retries=max_retries,
                     base_timeout=base_timeout,
+                    trace_dir=trace_dir,
                 )
 
         # Create tasks for this batch only
@@ -928,6 +948,7 @@ async def process_all_rounds(
                         max_retries=args.max_retries,
                         base_timeout=args.request_timeout,
                         port=port,
+                        trace_dir=os.path.join(args.shard_dir, 'attempts', 'local'),
                     )
                 )
 
@@ -935,6 +956,12 @@ async def process_all_rounds(
         results = []
         for batch_result in all_batch_results:
             results.extend(batch_result)
+
+        # A failed output must never become the prior for a later notes chunk.
+        from matchminer_ai.patients.summary_quality import summary_retry_codes
+        invalid = [idx for idx, _, summary in results if summary_retry_codes(summary)]
+        if invalid:
+            raise RuntimeError(f'Patient summaries failed validation after retries: chunk indices {invalid}')
 
         # Update state
         round_results_with_prior: List[Tuple[int, str, str, str]] = []
@@ -1152,6 +1179,9 @@ def main():
 
     # Load existing shards for resume
     completed_rounds, all_results = load_existing_shards(args.shard_dir)
+    from summary_pool import rewind_invalid_summaries
+    completed_rounds, all_results = rewind_invalid_summaries(
+        rounds, completed_rounds, all_results, args.shard_dir)
     if completed_rounds > 0:
         print(f"Resuming from round {completed_rounds} (loaded {len(all_results)} existing results)")
 

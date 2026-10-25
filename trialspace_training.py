@@ -123,14 +123,16 @@ class TokenStore:
         self.cache.move_to_end(path)
         return self.cache[path][identifier]
 
-    def resident(self, kind, device, *, budget_gb=8):
+    def resident(self, kind, device, *, budget_gb=8, reserve_gb=8):
         """Read each shard once when this direction's corpus fits the budget."""
+        if budget_gb < 0 or reserve_gb < 0:
+            raise ValueError('Token cache budget and reserve must be nonnegative')
         paths = [path for path, _ in self.batches if path.name.startswith(kind + '_')]
         estimated_bytes = sum(path.stat().st_size for path in paths)
         budget = int(budget_gb * 1024 ** 3)
         if str(device).startswith('cuda'):
             free, _ = torch.cuda.mem_get_info(device)
-            budget = min(budget, max(0, free - 8 * 1024 ** 3))
+            budget = min(budget, max(0, free - int(reserve_gb * 1024 ** 3)))
         if not paths or estimated_bytes > budget:
             return None
         vectors = {}
@@ -260,7 +262,8 @@ def _mine(args, model, *, rank, world, local):
         kind = 'cohorts' if direction == 'patient_to_cohort' else 'patients'
         resident = None  # Release the previous direction before staging this one.
         if args.device_token_cache:
-            resident = store.resident(kind, device, budget_gb=args.device_cache_gb)
+            resident = store.resident(kind, device, budget_gb=args.device_cache_gb,
+                                     reserve_gb=getattr(args, 'device_cache_reserve_gb', 8))
             if resident is None:
                 print(f'[mine rank={rank}] {kind}: resident budget unavailable; using bounded CPU cache', flush=True)
         for split in args.splits:
@@ -376,6 +379,8 @@ def parser():
     sub.choices['mine'].add_argument('--device-token-cache', action=argparse.BooleanOptionalAction, default=True)
     sub.choices['mine'].add_argument('--device-cache-gb', type=float, default=8,
         help='Per-worker resident token budget; larger corpora use the bounded CPU cache')
+    sub.choices['mine'].add_argument('--device-cache-reserve-gb', type=float, default=8,
+        help='GPU memory reserved outside the resident token cache; reduce only for bounded repair jobs')
     sub.choices['mine'].add_argument('--pair-batch-size', type=int, default=512,
         help='Query/document pairs scored together across multiple queries')
     sub.choices['mine'].add_argument('--score-query-batches', type=int, default=4,

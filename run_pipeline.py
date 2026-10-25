@@ -205,6 +205,7 @@ def build_plan(args):
               [args.synthetic_notes], [raw_summaries, d / 'patient_serial_summaries.parquet'],
               [*source('6_summarize_patients.py', 'summary_pool.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py'),
                inference_sources / 'patients/postprocess.py', inference_sources / 'patients/prompt_builder.py',
+               inference_sources / 'patients/summary_quality.py',
                inference_sources / 'prompts/patient.serial.user.primer.txt',
                inference_sources / 'prompts/patient.serial.user.question.txt']),
         Stage('prepare-training', [py, str(ROOT / 'prepare_synthetic_training.py'), 'summaries',

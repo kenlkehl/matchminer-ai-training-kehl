@@ -7,11 +7,53 @@ import hashlib
 import json
 from pathlib import Path
 import resource
+import shutil
 import uuid
 
 from remote_vllm_pool import (CompletionSampling, OutputValidationError, RequestSession,
                               build_registry_from_args, make_completion_work_fn)
 from matchminer_ai.patients.postprocess import normalize_patient_summary
+from matchminer_ai.patients.summary_quality import check_patient_summary, summary_retry_codes
+
+
+def rewind_invalid_summaries(rounds, completed_rounds, all_results, shard_dir):
+    """Archive bad chunks and descendants; replay from the last valid serial state.
+
+    Unaffected chunk checkpoints remain reusable. Round-level files are archived
+    from the earliest invalid round, because a completed round otherwise bypasses
+    request validation entirely on resume.
+    """
+    earliest = None
+    bad_patients = {}
+    for ri, rows in enumerate(rounds[:completed_rounds]):
+        for pid, idx, *_ in rows:
+            if idx in all_results and summary_retry_codes(all_results[idx][1]):
+                bad_patients[pid] = min(ri, bad_patients.get(pid, ri))
+                earliest = ri if earliest is None else min(earliest, ri)
+    if earliest is None:
+        return completed_rounds, all_results
+    root = Path(shard_dir)
+    archive = root / 'quality_rejected' / uuid.uuid4().hex
+    save(archive/'repair.json', dict(earliest_round=earliest, patients=bad_patients,
+         state='archiving', reason='Summary quality checks require regeneration from original notes'))
+    # Preserve the invalid round as the recovery marker until every descendant
+    # checkpoint is gone. An interrupted archive can then safely resume.
+    for ri, rows in enumerate(rounds):
+        for pid, idx, *_ in rows:
+            if pid in bad_patients and ri >= bad_patients[pid]:
+                source = root / 'chunks' / f'{idx // 256:05d}' / f'{idx:09d}.json'
+                if source.exists():
+                    destination = archive / source.relative_to(root)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(source, destination)
+    for ri in reversed(range(earliest, len(rounds))):
+        source = root / f'round_{ri:04d}.parquet'
+        if source.exists():
+            shutil.move(source, archive / source.name)
+    keep = {idx for rows in rounds[:earliest] for _, idx, *_ in rows}
+    save(archive/'repair.json', dict(earliest_round=earliest, patients=bad_patients, state='archived',
+         reason='Summary quality checks require regeneration from original notes'))
+    return earliest, {idx: value for idx, value in all_results.items() if idx in keep}
 
 
 def save(path, value):
@@ -39,10 +81,12 @@ def traced_work(base, root, sampling):
         trace = dict(chunk_index=payload['chunk_index'], endpoint=str(client.base_url),
                      prompt=payload['prompt'], reasoning=reasoning, answer=answer,
                      sampling=asdict(sampling), generated_at=datetime.now(timezone.utc).isoformat(), **metadata)
+        trace['summary_quality'] = check_patient_summary(answer)
         path = root / 'attempts' / f'{payload["chunk_index"] // 256:05d}' / f'{payload["chunk_index"]}_{uuid.uuid4()}.json'
         await asyncio.to_thread(save, path, trace)
-        if metadata['finish_reason'] != 'stop' or not answer.strip() or answer.lstrip().startswith('ERROR:'):
-            raise OutputValidationError('Patient summary is empty, failed, or incomplete')
+        codes = summary_retry_codes(answer, metadata['finish_reason'])
+        if codes:
+            raise OutputValidationError('Patient summary requires regeneration: ' + ', '.join(codes))
         return dict(reasoning=reasoning, summary=normalize_patient_summary(answer), trace_path=str(path))
     return work
 
@@ -97,9 +141,14 @@ async def run_rounds(*, rounds, patient_chunk_order, patient_summaries, all_resu
                         result = await asyncio.to_thread(lambda: json.loads(path.read_text()))
                         if result['identity'] != identity:
                             raise ValueError('Saved summary prompt or sampling changed')
-                        if not result['summary'].strip() or result['summary'].lstrip().startswith('ERROR:'):
-                            raise ValueError('Saved patient summary is invalid')
+                        if summary_retry_codes(result['summary']):
+                            rejected = root/'quality_rejected'/uuid.uuid4().hex/path.name
+                            rejected.parent.mkdir(parents=True, exist_ok=True)
+                            path.replace(rejected)
+                            result = None
                     else:
+                        result = None
+                    if result is None:
                         result = await session.submit(dict(chunk_index=idx, prompt=prompt, max_tokens=max_tokens,
                             include_completion_metadata=True, include_raw_text=True))
                         if not isinstance(result, dict):
