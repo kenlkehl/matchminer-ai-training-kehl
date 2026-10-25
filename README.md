@@ -68,9 +68,21 @@ sets. Multi-cohort text concatenates cohort-specific and common eligibility.
 Single-cohort text uses only the original eligibility criteria, without the title
 or summary. Patient cancer history and the prior boilerplate field become one
 summary with an **Other relevant history:** bridge. Original patient, NCT, cohort,
-and split IDs are preserved. Sibling cohorts and known synthetic patient/source
-trial relationships cannot cross splits; conflicts fail explicitly. Test rows
-remain in the corpus but are excluded from mining, labeling and optimization.
+and source split IDs are preserved. Source assignments for sibling cohorts and
+known synthetic patient/source-trial relationships are validated before pooling.
+Production pools **all synthetic patients and cohorts** for both retrieval
+directions, labeling, and optimization. Original splits become `source_split`
+provenance; the effective corpus split is `train`. There are no synthetic patient
+or cohort holdouts. Candidate exports retain `patient_source_split` and
+`cohort_source_split`, including pairs across original source partitions.
+
+This is the default for direct `trialspace_training.py` commands and both
+`train_all*.sh` paths. Production fitting requires labeled query coverage for
+every selected patient and cohort. The downstream OncoReasoning adapters also
+fit all three source partitions. For a deliberate holdout experiment, use
+`--synthetic-training-splits train` in the orchestrator, or prepare a fresh corpus
+with `--no-merge-source-splits` and explicitly select training/mining splits.
+Changing this policy requires new retrieval and labeling outputs.
 
 The training-only defaults are `DATA_DIR/patient_summaries_with_spaces.parquet`,
 `DATA_DIR/trial_cohort_lineitems.csv`, and `DATA_DIR/all_synthetic_notes.parquet`.
@@ -113,8 +125,8 @@ across query groups to keep 8K texts within memory. This is a large optimizer
 batch, not 1,024 full texts held in one forward pass. Configure it with
 `--trialspace-accumulation` and `--trialspace-documents-per-query`. Every update
 logs its actual pair count, 0–5 histogram and score range. Batch policy and sizes
-are checkpointed and cannot silently change on resume. Validation probes remain
-unchanged by training's score-balanced sampling.
+are checkpointed and cannot silently change on resume. Fixed diagnostic probes
+remain unchanged by training's score-balanced sampling.
 
 ## Mining, fitting and artifacts
 
@@ -166,18 +178,19 @@ contracts remain part of the strict mining identity.
 The default candidate pool is 256 lexical/random proposals per query. Exact
 MaxSim selects 20 cohorts per patient and 40 patients per cohort within that pool;
 five TF-IDF and five random proposals from
-the whole split are also included. Known source-trial relationships and optional
+the full pooled corpus are also included. Known source-trial relationships and optional
 `--trialspace-extra-pairs` add independent/challenge candidates without assuming
 positive labels. This is bounded candidate mining, not exhaustive corpus search.
 `--trialspace-candidate-limit`, `--trialspace-top-k`, `--trialspace-lexical-k`,
 `--trialspace-random-k`, and batching controls expose those choices. Both retrieval
 directions are scored independently; directional MaxSim is never transposed.
 
-Every 100 optimizer updates, fixed train/validation groups measure normalized
+Every 100 optimizer updates, fixed training groups measure normalized
 MSE, MAE/RMSE in 0–5 units, unequal-label ordering accuracy, and tie-aware NDCG.
-Zero and train-only constant-mean baselines expose apparent gains caused solely
+Zero and training constant-mean baselines expose apparent gains caused solely
 by score calibration or zero-heavy labels. These are fixed candidate-pool
-diagnostics, not full-corpus recall estimates.
+training diagnostics, not held-out validation or full-corpus recall estimates.
+An explicitly excluded validation partition enables separate held-out probes.
 
 New defaults are `../data/no_phi/colbert_pipeline_v1` and
 `../models/colbert_pipeline_v1`. Final models are `trialspace_round1` and

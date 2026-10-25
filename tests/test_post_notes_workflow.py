@@ -90,10 +90,22 @@ def test_four_label_teachers_do_not_expand_registered_shutdown_scope(tmp_path, m
     runner = workflow.Workflow(dict(release_teachers=old,
         local_teachers=[dict(gpu=gpu) for gpu in range(4)]), tmp_path)
     stopped, checked = [], []
-    monkeypatch.setattr(workflow, 'stop_teacher', lambda target, receipt: stopped.append(target['gpu']))
+    monkeypatch.setattr(workflow, 'stop_teacher', lambda target, receipt, **kwargs: stopped.append(target['gpu']))
     monkeypatch.setattr(workflow, 'busy_gpus', lambda selected: checked.append(selected) or [])
     runner.release_gpus()
-    assert stopped == [2, 3] and checked == [['2', '3']]
+    assert stopped == [2, 3] and checked == [['2'], ['3']]
+
+
+def test_release_all_gpus_requires_explicit_allowlist_and_preserves_cooccupants(tmp_path, monkeypatch):
+    target = dict(gpu=0, process=dict(pid=123, start_ticks=44),
+                  allowed_cooccupants=[dict(pid=999, start_ticks=22)])
+    with pytest.raises(ValueError, match='explicitly selected'):
+        workflow.stop_teacher(target, tmp_path / 'rejected.json')
+    monkeypatch.setattr(workflow, 'teacher_identity', lambda pid: None if pid == 123 else dict(pid=999, start_ticks=22))
+    monkeypatch.setattr(workflow, 'busy_gpus', lambda selected: [dict(gpu='0', pid=999)])
+    runner = workflow.Workflow(dict(release_teachers=[target], local_teachers=[], release_gpu_allowlist=[0]), tmp_path)
+    runner.release_gpus()
+    assert json.loads((tmp_path / 'stopped_gpu_0.json').read_text())['state'] == 'already_stopped'
 
 
 def test_truncated_summary_attempt_keeps_raw_reasoning(tmp_path):

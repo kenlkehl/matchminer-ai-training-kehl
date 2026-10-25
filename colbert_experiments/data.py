@@ -64,7 +64,16 @@ def split_name(value):
     return value
 
 
-def prepare(patients_path, cohorts_path, output):
+def selected_splits(value):
+    """Canonical source partitions; selecting them for fitting does not rename them."""
+    values = [value] if isinstance(value, str) else list(value)
+    if not values:
+        raise ValueError('Select at least one source split')
+    chosen = {split_name(item) for item in values}
+    return [name for name in ('train', 'val', 'test') if name in chosen]
+
+
+def prepare(patients_path, cohorts_path, output, *, merge_source_splits=False):
     from trial_cohort_format import training_rows
     patients, cohorts = read_table(patients_path), read_table(cohorts_path)
     if 'cohort_trial_id' not in cohorts:
@@ -84,12 +93,18 @@ def prepare(patients_path, cohorts_path, output):
                        text=row['cohort_eligibility_criteria'], split=split_name(row.get('split')))
                    for row in normalized.to_dict('records')]
     validate_corpus(patient_rows, cohort_rows)
+    if merge_source_splits:
+        # Validate the source lineage first, then make one shared retrieval and
+        # fitting pool. The original assignments remain available for provenance.
+        for row in patient_rows + cohort_rows:
+            row['source_split'], row['split'] = row['split'], 'train'
     output = Path(output)
     write_jsonl(output / 'patients.jsonl', patient_rows)
     write_jsonl(output / 'cohorts.jsonl', cohort_rows)
     write_json(output / 'corpus.json', dict(patients=len(patient_rows), cohorts=len(cohort_rows),
         patient_sha256=digest(patient_rows), cohort_sha256=digest(cohort_rows),
-        source_patients=str(Path(patients_path).resolve()), source_cohorts=str(Path(cohorts_path).resolve())))
+        source_patients=str(Path(patients_path).resolve()), source_cohorts=str(Path(cohorts_path).resolve()),
+        split_policy='all_synthetic_training' if merge_source_splits else 'preserve_source_splits'))
 
 
 def validate_corpus(patients, cohorts):

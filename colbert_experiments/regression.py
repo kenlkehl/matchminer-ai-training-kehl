@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from matchminer_ai.embedding.colbert_contract import INSTRUCTION, regression_query
 
 from .contracts import TASKS, DIRECTIONS, contract_hash, judge_messages, parse_judgment, prompt_sources
-from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl
+from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl, selected_splits
 
 VERSION = 'cohort-colbert-gated-score-v1'
 GATE = 'potentially_eligible'
@@ -122,6 +122,7 @@ def score_balance(scores):
 
 
 def build_groups(patients, cohorts, scores, *, split='train'):
+    included = selected_splits(split)
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
     groups, seen = {}, {}
     question_contract = contract_hash()
@@ -149,7 +150,7 @@ def build_groups(patients, cohorts, scores, *, split='train'):
                 raise ValueError('Conflicting duplicate regression labels')
             continue
         seen[key] = row['score']
-        if p['split'] != split:
+        if p['split'] not in included:
             continue
         for direction in DIRECTIONS:
             query, document = (p, c) if direction == 'patient_to_cohort' else (c, p)

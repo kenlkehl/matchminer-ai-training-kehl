@@ -39,10 +39,11 @@ def identity_file(path, identity):
     write_json(path, identity)
 
 
-def prepare_corpus(patients, cohorts, output):
+def prepare_corpus(patients, cohorts, output, *, merge_source_splits=True):
     output = Path(output)
     identity = dict(version=VERSION, patients=str(Path(patients).resolve()), cohorts=str(Path(cohorts).resolve()),
-                    patient_sha256=file_sha256(patients), cohort_sha256=file_sha256(cohorts), contract=score_contract())
+                    patient_sha256=file_sha256(patients), cohort_sha256=file_sha256(cohorts), contract=score_contract(),
+                    merge_source_splits=merge_source_splits)
     identity_file(output / 'input_manifest.json', identity)
     complete = output / 'prepared.json'
     if complete.exists():
@@ -51,14 +52,14 @@ def prepare_corpus(patients, cohorts, output):
             if file_sha256(output / name) != expected:
                 raise ValueError('Prepared TrialSpace corpus changed')
         return saved
-    prepare(patients, cohorts, output)
+    prepare(patients, cohorts, output, merge_source_splits=merge_source_splits)
     ps, cs = load_corpus(output)
     by_trial = defaultdict(list)
     for cohort in cs:
         by_trial[cohort['trial_id']].append(cohort)
     lineage = [dict(patient_id=p['id'], cohort_id=c['id'], split=p['split'])
                for p in ps for c in by_trial.get(p.get('source_trial_id'), [])
-               if p['split'] == c['split'] and p['split'] != 'test']
+               if p['split'] == c['split']]
     write_jsonl(output / 'source_trial_pairs.jsonl', lineage)
     result = dict(version=VERSION, patients=len(ps), cohorts=len(cs), trials=len(by_trial),
                   source_trial_pairs=len(lineage), contract=score_contract(),
@@ -153,8 +154,8 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
     contract = score_contract()
     for pair in read_jsonl(candidates):
         p, c = pmap[pair['patient_id']], cmap[pair['cohort_id']]
-        if p['split'] != c['split'] or pair['split'] != p['split'] or p['split'] == 'test':
-            raise ValueError('Candidate export crosses a split or includes test data')
+        if p['split'] != c['split'] or pair['split'] != p['split']:
+            raise ValueError('Candidate export crosses an effective split')
         sources = pair['sources']
         for direction in DIRECTIONS:
             if not any(s.get('direction') in (direction, 'both') for s in sources):
@@ -164,6 +165,8 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
                 nct_id=c['trial_id'], trial_id=c['trial_id'], cohort_trial_id=c['id'], space_trial_id=c['id'],
                 this_space=c['text'], cohort_eligibility_criteria=c['text'], trial_boilerplate_text='',
                 split=p['split'], candidate_id=digest([p['id'], c['id']]),
+                patient_source_split=p.get('source_split', p['split']),
+                cohort_source_split=c.get('source_split', c['split']),
                 retrieval_sources=json.dumps(sources), trialspace_contract=contract))
     for direction, path in zip(DIRECTIONS, (cohort_output, patient_output), strict=True):
         path = Path(path)
@@ -195,8 +198,8 @@ def _mine(args, model, *, rank, world, local):
         raise ValueError('Invalid resident scoring cache/batch settings')
     directional_top_k = {direction: getattr(args, 'top_k_' + direction, None) for direction in DIRECTIONS}
     directional_top_k = {direction: args.top_k if value is None else value for direction, value in directional_top_k.items()}
-    if min(*directional_top_k.values(), args.lexical_k, args.random_k) < 0 or 'test' in args.splits:
-        raise ValueError('Production mining requires nonnegative candidate counts and excludes test')
+    if min(*directional_top_k.values(), args.lexical_k, args.random_k) < 0:
+        raise ValueError('Production mining requires nonnegative candidate counts')
     output = Path(args.output)
     patients, cohorts = load_corpus(args.corpus)
     model = model or ColBERT(args.model, revision=args.revision, cache_dir=args.cache_dir,
@@ -206,6 +209,20 @@ def _mine(args, model, *, rank, world, local):
         raise ValueError('Saved model uses a different regression prompt contract')
     source_pairs = Path(args.corpus) / 'source_trial_pairs.jsonl'
     extra = (read_jsonl(source_pairs) if source_pairs.exists() else []) + (read_jsonl(args.extra_pairs) if args.extra_pairs else [])
+    # Older prepared corpora omitted test lineage proposals. Recover selected
+    # missing source pairs from immutable corpus IDs without rewriting that corpus.
+    known = {(r['patient_id'], r['cohort_id']) for r in extra}
+    by_trial = defaultdict(list)
+    for cohort in cohorts:
+        by_trial[cohort['trial_id']].append(cohort)
+    for patient in patients:
+        if patient['split'] not in args.splits:
+            continue
+        for cohort in by_trial.get(patient.get('source_trial_id'), []):
+            key = (patient['id'], cohort['id'])
+            if patient['split'] == cohort['split'] and key not in known:
+                extra.append(dict(patient_id=key[0], cohort_id=key[1], split=patient['split']))
+                known.add(key)
     signature = dict(version=VERSION, contract=score_contract(), model=model.fingerprint(),
         encoding_device_kind='cpu' if args.device == 'cpu' else 'cuda', token_storage_dtype='float16',
         patients=digest(patients), cohorts=digest(cohorts), extra_pairs=digest(extra), directional_top_k=directional_top_k,
@@ -349,7 +366,10 @@ def parser():
     p = shared_parser()
     p.description = __doc__
     sub = next(action for action in p._actions if hasattr(action, 'choices') and isinstance(action.choices, dict))
-    sub.choices['mine'].set_defaults(objective='gated_regression', candidate_limit=256, proposal_strategy='lexical_random')
+    sub.choices['prepare'].add_argument('--merge-source-splits', action=argparse.BooleanOptionalAction, default=True,
+        help='Pool all synthetic patients/cohorts for retrieval and fitting; retain source_split provenance')
+    sub.choices['mine'].set_defaults(objective='gated_regression', candidate_limit=256,
+                                    proposal_strategy='lexical_random', splits=['train', 'val', 'test'])
     sub.choices['mine'].add_argument('--query-batch-size', type=int, default=16)
     sub.choices['mine'].add_argument('--score-batch-size', type=int, default=16)
     sub.choices['mine'].add_argument('--cache-batches', type=int, default=32)
@@ -366,7 +386,8 @@ def parser():
         help='ColBERT patient picks per cohort; overrides --top-k for this direction')
     sub.choices['label'].set_defaults(gated_regression=True, return_records=False)
     sub.choices['train'].set_defaults(objective='gated_regression', eval_every=100, eval_groups_per_stratum=32,
-                                     steps=None, accumulation=32, documents_per_query=8)
+                                     steps=None, accumulation=32, documents_per_query=8,
+                                     training_splits=['train', 'val', 'test'], require_complete_coverage=True)
     sub.choices['train'].add_argument('--epochs', type=float, default=3,
         help='Aggregate query-group sampling passes; --steps overrides this')
     sub.choices['train'].add_argument('--output-model', type=Path, help='Separate final model directory; checkpoints stay in --output')
@@ -376,7 +397,7 @@ def parser():
 def main():
     args = parser().parse_args()
     if args.command == 'prepare':
-        print(prepare_corpus(args.patients, args.cohorts, args.output))
+        print(prepare_corpus(args.patients, args.cohorts, args.output, merge_source_splits=args.merge_source_splits))
     elif args.command == 'mine':
         if args.objective != 'gated_regression':
             raise ValueError('Production TrialSpace requires gated regression')

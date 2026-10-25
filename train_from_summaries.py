@@ -58,6 +58,8 @@ def parser():
                    help="Live per-server limits for TrialSpace labeling.")
     p.add_argument("--student-model", default=DEFAULT_MODEL_NAME)
     p.add_argument("--embedding-model", default="lightonai/GTE-ModernColBERT-v1")
+    p.add_argument('--synthetic-training-splits', nargs='+', choices=['train', 'val', 'test'],
+                   default=['train', 'val', 'test'], help='Synthetic source partitions used by every student fit')
     p.add_argument('--trialspace-context', type=int, default=8192)
     p.add_argument('--trialspace-steps', type=int, help='Explicit optimizer updates per fit; otherwise derive from query count')
     p.add_argument('--trialspace-epochs', type=float, default=3, help='Aggregate query-group sampling passes per fit')
@@ -115,9 +117,13 @@ def stages(args):
     corpus = run / 'trialspace_corpus'
     result = [Stage('prepare-trialspace', [py, 'trialspace_training.py', 'prepare',
         '--patients', str(inputs['patient_summaries']), '--cohorts', str(inputs['trial_spaces']),
-        '--output', str(corpus)], [corpus / 'prepared.json'])]
+        '--output', str(corpus),
+        '--merge-source-splits' if set(args.synthetic_training_splits) == {'train', 'val', 'test'}
+        else '--no-merge-source-splits'], [corpus / 'prepared.json'])]
     common = ['--corpus', str(corpus), '--query-length', str(args.trialspace_context),
               '--document-length', str(args.trialspace_context)]
+    training_splits = args.synthetic_training_splits
+    mining_splits = ['train', 'val', 'test'] if 'test' in training_splits else ['train', 'val']
     if args.trialspace_cache_dir:
         common += ['--cache-dir', str(args.trialspace_cache_dir)]
     embedding = args.embedding_model
@@ -135,6 +141,7 @@ def stages(args):
             '--pair-batch-size', str(args.trialspace_pair_batch_size),
             '--score-query-batches', str(args.trialspace_score_query_batches),
             '--device-cache-gb', str(args.trialspace_device_cache_gb)]
+        mine += ['--splits', *mining_splits]
         if args.trialspace_extra_pairs:
             mine += ['--extra-pairs', str(args.trialspace_extra_pairs)]
         for direction in ('patient-to-cohort', 'cohort-to-patient'):
@@ -166,6 +173,7 @@ def stages(args):
             '--objective', 'gated_regression', '--prediction-link', 'identity',
             '--accumulation', str(args.trialspace_accumulation), '--learning-rate', str(args.trialspace_learning_rate),
             '--documents-per-query', str(args.trialspace_documents_per_query),
+            '--training-splits', *training_splits,
             '--eval-every', '100', '--eval-groups-per-stratum', '32']
         command += (['--steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
                     else ['--epochs', str(args.trialspace_epochs)])
@@ -191,7 +199,8 @@ def stages(args):
         "--pipeline-manifest", str(run / "pipeline_manifest.json"),
         "--candidates", *map(str, candidates), "--catalog", str(catalog),
         "--boilerplate-components", str(exclusions), "--model-name", args.student_model,
-        "--inference-repo", str(args.inference_repo)], [data / "prepared.json"]))
+        "--inference-repo", str(args.inference_repo),
+        '--splits', *['validation' if split == 'val' else split for split in mining_splits]], [data / "prepared.json"]))
     result.append(Stage("distill-oncoreasoning", program + ["generate", "--output-dir", str(data),
         "--server-urls-file", str(servers), "--teacher-model", teacher_model,
         "--teacher-tokenizer", args.teacher_model,
@@ -203,6 +212,7 @@ def stages(args):
     result.append(Stage("train-oncoreasoning", launch + ["oncoreasoning_training/fine_tune_llm.py",
         "--data-dir", str(data), "--output-dir", str(student),
         "--gradient-accumulation-steps", str(max(1, 64 // gpu_count)),
+        '--training-splits', *['validation' if split == 'val' else split for split in training_splits],
         "--fsdp", "--resume-from-checkpoint", "auto"],
         [student / "oncoreasoning_contract.json"]))
     return result

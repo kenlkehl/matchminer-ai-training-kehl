@@ -75,6 +75,8 @@ def parser():
     p.add_argument("--model-name", help="Defaults to the prepared manifest's model; changing it requires re-preparation")
     p.add_argument("--task", choices=("both", *c.TASKS), default="both",
                    help="Both trains two independent adapters, each from the same frozen base")
+    p.add_argument('--training-splits', nargs='+', choices=['train', 'validation', 'test'],
+                   default=['train', 'validation', 'test'], help='Source partitions included in each adapter fit')
     p.add_argument("--output-dir", type=Path, default=c.REPO_ROOT.parent / "models" / "oncoreasoning_gemma4_e4b_answer_first_v2")
     p.add_argument("--resume-from-checkpoint", help="Checkpoint path, or auto to restart this identical run after interruption")
     p.add_argument("--num-train-epochs", type=float, default=1)
@@ -97,14 +99,18 @@ def parser():
     return p
 
 
-def select_task_dataset(dataset, task, *, max_eval_examples=256, seed=42):
+def select_task_dataset(dataset, task, *, max_eval_examples=256, seed=42, training_splits=('train',)):
     """Filter by category before removing metadata, without decoding token columns."""
-    from datasets import DatasetDict
+    from datasets import DatasetDict, concatenate_datasets
     if task not in c.TASKS:
         raise ValueError("Select exactly one adapter task")
     selected, counts = {}, {}
+    included = set(training_splits)
+    if not included or not included.issubset({'train', 'validation', 'test'}):
+        raise ValueError('Select valid source partitions for adapter training')
+    training_parts = []
     for split, rows in dataset.items():
-        if split not in ("train", "validation"):
+        if split not in included and split != 'validation':
             continue
         if "category" not in rows.column_names:
             raise ValueError("Prepared dataset needs category labels to separate adapters")
@@ -113,11 +119,16 @@ def select_task_dataset(dataset, task, *, max_eval_examples=256, seed=42):
         counts[split] = len(rows)
         if not len(rows):
             continue
+        if split in included:
+            training_parts.append(rows.select_columns(['input_ids', 'attention_mask', 'labels']))
+            continue
         if split == "validation" and len(rows) > max_eval_examples:
             rows = rows.shuffle(seed=seed).select(range(max_eval_examples))
         selected[split] = rows.select_columns(["input_ids", "attention_mask", "labels"])
-    if "train" not in selected:
+    if not training_parts:
         raise ValueError(f"No training examples for {task}")
+    selected['train'] = (training_parts[0] if len(training_parts) == 1
+                         else concatenate_datasets(training_parts).shuffle(seed=seed))
     return DatasetDict(selected), counts
 
 
@@ -148,13 +159,14 @@ def train_adapter(args):
     if c.tokenizer_fingerprint(base_tokenizer) != manifest["tokenizer_fingerprint"]:
         raise ValueError("Base model tokenizer changed since data preparation")
     dataset, counts = select_task_dataset(load_from_disk(str(args.data_dir / "tokenized_dataset")),
-        args.task, max_eval_examples=args.max_eval_examples, seed=args.seed)
+        args.task, max_eval_examples=args.max_eval_examples, seed=args.seed, training_splits=args.training_splits)
     settings = {key: getattr(args, key) for key in (
         "task", "num_train_epochs", "learning_rate", "batch_size", "gradient_accumulation_steps",
         "warmup_steps", "warmup_ratio", "weight_decay", "max_grad_norm", "save_steps",
-        "max_eval_examples", "seed", "attention", "lora_rank", "lora_alpha", "lora_dropout", "fsdp")}
+        "max_eval_examples", "seed", "attention", "lora_rank", "lora_alpha", "lora_dropout", "fsdp", "training_splits")}
     run = {"training_manifest": manifest, "model_name": model_name, "settings": settings,
-           "task_counts": counts, "eval_examples": len(dataset.get("validation", [])),
+           "task_counts": counts, "training_examples": len(dataset['train']),
+           "eval_examples": len(dataset.get("validation", [])),
            "world_size": int(os.environ.get("WORLD_SIZE", "1"))}
     run_path = args.output_dir / "oncoreasoning_training_run.json"
     restarting = args.resume_from_checkpoint == "auto"

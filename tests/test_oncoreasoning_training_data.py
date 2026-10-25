@@ -205,10 +205,13 @@ def test_prepare_generate_build_and_safe_resume(tmp_path, tokenizer, monkeypatch
     monkeypatch.setattr(trials, "load_good_option_catalog", lambda *a, **kw: Catalog())
     monkeypatch.setattr(good_options, "pack_good_option_evidence", evidence_packer)
     notes, pairs = tmp_path / "notes.parquet", tmp_path / "pairs.parquet"
-    pd.DataFrame([{"pseudo_mrn": "p1", "date": "2020-01-01", "synthetic_note": " ".join(f"Fabricated clinical event number {i}." for i in range(10))},
-                  {"pseudo_mrn": "p2", "date": "2020-01-01", "synthetic_note": "Another fabricated clinical note."}]).to_parquet(notes)
-    pd.DataFrame([{"pseudo_mrn": "p1", "nct_id": "NCT00000000", "this_space": "Trial space", "patient_summary": "Patient one", "split": "train"},
-                  {"pseudo_mrn": "p2", "nct_id": "NCT00000000", "this_space": "Trial space", "patient_summary": "Patient two", "split": "validation"}]).to_parquet(pairs)
+    pd.DataFrame([{"pseudo_mrn": "p1", "date": "2020-01-01", "synthetic_note": " ".join(f"Fabricated clinical event number {i}." for i in range(10)), "split": "train"},
+                  {"pseudo_mrn": "p2", "date": "2020-01-01", "synthetic_note": "Another fabricated clinical note.", "split": "val"},
+                  {"pseudo_mrn": "p3", "date": "2020-01-01", "synthetic_note": "Third fabricated clinical note.", "split": "test"}]).to_parquet(notes)
+    # Production retrieval pools all records; source partitions remain provenance.
+    pd.DataFrame([{"pseudo_mrn": pid, "nct_id": "NCT00000000", "this_space": "Trial space", "patient_summary": "Fabricated patient " + pid,
+                   "split": "train", "patient_source_split": split}
+                  for pid, split in [('p1', 'train'), ('p2', 'val'), ('p3', 'test')]]).to_parquet(pairs)
     directory = tmp_path / "run"
     prep = pipeline.parser().parse_args(["prepare", "--notes", str(notes), "--candidates", str(pairs),
         "--output-dir", str(directory), "--confirm-inputs-are-non-phi", "--chunk-min-tokens", "100",
@@ -216,6 +219,7 @@ def test_prepare_generate_build_and_safe_resume(tmp_path, tokenizer, monkeypatch
     pipeline.prepare(prep, tokenizer=tokenizer)
     tasks = list(pipeline.jsonl(directory / "requests.jsonl"))
     assert {t["split"] for t in tasks if t["patient_id"] == "p2"} == {"validation"}
+    assert {t["split"] for t in tasks if t["patient_id"] == "p3"} == {"test"}
     gen = pipeline.parser().parse_args(["generate", "--output-dir", str(directory), "--server-url", "http://teacher.invalid/v1", "--teacher-model", "fabricated-teacher"])
     calls = []
     def teacher(messages):
@@ -243,7 +247,8 @@ def test_prepare_generate_build_and_safe_resume(tmp_path, tokenizer, monkeypatch
     build = pipeline.parser().parse_args(["build", "--output-dir", str(directory), "--max-seq-length", "20000"])
     pipeline.build(build, tokenizer=tokenizer)
     ds = load_from_disk(str(directory / "tokenized_dataset"))
-    assert len(ds["train"]) + len(ds["validation"]) == len(tasks)
+    assert set(ds) == {'train', 'validation', 'test'}
+    assert sum(map(len, ds.values())) == len(tasks)
     for split in ds:
         for row in ds[split]:
             assert "private" not in tokenizer.decode(row["input_ids"])
@@ -339,7 +344,7 @@ def test_training_entrypoint_saves_and_resumes_text_artifact(tmp_path, monkeypat
     for item in rows[:2]:
         item["input_ids"] = item["input_ids"][:-2] + [12, 1]
         item["labels"] = item["labels"][:-2] + [12, 1]
-    DatasetDict({split: Dataset.from_list(rows) for split in ("train", "validation")}).save_to_disk(str(data / "tokenized_dataset"))
+    DatasetDict({split: Dataset.from_list(rows) for split in ("train", "validation", "test")}).save_to_disk(str(data / "tokenized_dataset"))
     pipeline.atomic_json(data / "training_manifest.json", {"student_model": str(base), "format_version": c.FORMAT_VERSION,
         "tokenizer_fingerprint": c.tokenizer_fingerprint(tokenizer), "max_seq_length": 128})
     def cpu_args(**kwargs):
@@ -363,10 +368,13 @@ def test_training_entrypoint_saves_and_resumes_text_artifact(tmp_path, monkeypat
         assert pipeline.read_json(summary / "oncoreasoning_contract.json")["tasks"] == ["summarization"]
     contract = pipeline.read_json(adapter / "oncoreasoning_contract.json")
     assert contract["tasks"] == ["clinical_qa"]
-    assert contract["task_counts"] == {"train": 2, "validation": 2}
-    assert contract["metrics"]["eval_loss"] > 0
+    assert contract["task_counts"] == {"train": 2, "validation": 2, "test": 2}
+    assert 'eval_loss' not in contract['metrics']
+    run = pipeline.read_json(adapter / 'oncoreasoning_training_run.json')
+    assert run['training_examples'] == 6 and run['eval_examples'] == 0
+    assert run['settings']['training_splits'] == ['train', 'validation', 'test']
     # Both skips its finished adapters; a single task can restore a real checkpoint.
-    monkeypatch.setattr("sys.argv", argv + ["--resume-from-checkpoint", "auto" if task == "both" else str(adapter / "checkpoint-2")])
+    monkeypatch.setattr("sys.argv", argv + ["--resume-from-checkpoint", "auto" if task == "both" else str(adapter / "checkpoint-6")])
     training.main()
     assert (adapter / "adapter_model.safetensors").read_bytes() == before
     model, _ = training.load_student(base, dtype=torch.float32)
@@ -401,6 +409,11 @@ def test_adapter_dataset_filter_keeps_tasks_and_splits_separate():
     assert qa_counts == {"train": 2, "validation": 2}
     assert len(qa["validation"]) == 1 and "test" not in qa
     assert qa["validation"]["input_ids"] == select_task_dataset(data, "clinical_qa", max_eval_examples=1)[0]["validation"]["input_ids"]
+    all_qa, all_counts = select_task_dataset(data, 'clinical_qa', max_eval_examples=1,
+                                            training_splits=['train', 'validation', 'test'])
+    assert set(all_qa) == {'train'} and len(all_qa['train']) == 6
+    assert all_counts == {'train': 2, 'validation': 2, 'test': 2}
+    assert sorted(row[0] for row in all_qa['train']['input_ids']) == [1, 1, 1, 2, 2, 2]
     with pytest.raises(ValueError, match="category"):
         select_task_dataset(data.remove_columns("category"), "clinical_qa")
     with pytest.raises(ValueError, match="No training"):

@@ -245,7 +245,7 @@ def prepare(args, tokenizer=None):
     for path in args.candidates if "clinical_qa" in args.tasks else []:
         for row in pd.read_parquet(path).to_dict(orient="records"):
             patient = patient_identifier(row, "pseudo_mrn", "patient_id")
-            split = split_name(row.get("split"))
+            split = split_name(row.get('patient_source_split', row.get("split")))
             register(patient, split)
             pairs.append({"patient_id": patient,
                           "patient_summary": required_text(row, "patient_summary", "cancer_history_summary"),
@@ -482,8 +482,8 @@ def build(args, tokenizer=None):
             cache_dir=cache)
         splits = DatasetDict({split: dataset.filter(lambda row: row["split"] == split).shuffle(seed=args.seed)
                               for split in sorted(set(dataset["split"]))})
-        if "train" not in splits:
-            raise ValueError("No training examples")
+        if not len(dataset):
+            raise ValueError("No prepared examples")
         counts = {split: dict(Counter(data["category"])) for split, data in splits.items()}
         pending_dataset = Path(cache) / "completed_dataset"
         splits.save_to_disk(str(pending_dataset))
@@ -515,7 +515,8 @@ def parser():
     prepare_parser.add_argument("--catalog", type=Path, default=c.DEFAULT_DATA_DIR / "good_option_catalog_v3")
     prepare_parser.add_argument("--boilerplate-components", type=Path, help="Validated patient-free exclusion extraction directory")
     prepare_parser.add_argument("--tasks", choices=c.TASKS, nargs="+", default=list(c.TASKS))
-    prepare_parser.add_argument("--splits", choices=("train", "validation"), nargs="+", default=["train", "validation"])
+    prepare_parser.add_argument("--splits", choices=("train", "validation", "test"), nargs="+",
+                                default=["train", "validation", "test"])
     prepare_parser.add_argument("--patient-id-column", default="pseudo_mrn")
     prepare_parser.add_argument("--date-column", default="date")
     prepare_parser.add_argument("--note-column", default="synthetic_note")

@@ -13,12 +13,13 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from .contracts import DIRECTIONS, TASKS, contract_hash, query_text
-from .data import digest, load_corpus, read_jsonl, write_json
+from .data import digest, load_corpus, read_jsonl, write_json, selected_splits
 from .model import ColBERT, grouped_loss
 from .learning import make_probes, evaluate_probes
 
 
 def build_groups(patients, cohorts, labels, *, split='train'):
+    included = selected_splits(split)
     patients, cohorts = {r['id']: r for r in patients}, {r['id']: r for r in cohorts}
     groups, seen = {}, {}
     expected_contract = contract_hash()
@@ -30,7 +31,7 @@ def build_groups(patients, cohorts, labels, *, split='train'):
             raise ValueError('Invalid binary task label')
         if p['split'] != c['split'] or label['split'] != p['split']:
             raise ValueError('Label crosses corpus splits')
-        if p['split'] != split:
+        if p['split'] not in included:
             continue
         key = (p['id'], c['id'], task)
         if key in seen:
@@ -86,10 +87,25 @@ def _train(args, world, rank, local_rank):
         group_builder, probe_builder, evaluator = continuous.build_groups, continuous.make_probes, continuous.evaluate_probes
         if args.documents_per_query < 1:
             raise ValueError('documents-per-query must be positive')
-    groups, group_report = group_builder(patients, cohorts, labels)
+    training_splits = selected_splits(getattr(args, 'training_splits', ['train']))
+    groups, group_report = group_builder(patients, cohorts, labels, split=training_splits)
     val_groups, val_report = group_builder(patients, cohorts, labels, split='val')
+    validation_is_held_out = 'val' not in training_splits
+    val_report['held_out'] = validation_is_held_out
+    if not validation_is_held_out:
+        val_groups = []
+    group_report['training_splits'] = training_splits
     if not groups:
         raise ValueError('No usable labeled training queries')
+    if getattr(args, 'require_complete_coverage', False):
+        missing = {}
+        for direction, records in [('patient_to_cohort', patients), ('cohort_to_patient', cohorts)]:
+            expected = {r['id'] for r in records if r['split'] in training_splits}
+            present = {g['query_id'] for g in groups if g['direction'] == direction}
+            missing[direction] = len(expected - present)
+        if any(missing.values()):
+            raise ValueError('Missing teacher labels for selected training splits: '
+                             f'{missing["patient_to_cohort"]} patients, {missing["cohort_to_patient"]} cohorts')
     batch_sampler = None
     if regression:
         from .batching import RegressionBatchSampler
@@ -101,7 +117,7 @@ def _train(args, world, rank, local_rank):
         args.steps = max(1, math.ceil(len(groups) * args.epochs / (world * args.accumulation)))
     probes = {split: probe_builder(rows, per_stratum=args.eval_groups_per_stratum,
                                 documents_per_class=args.documents_per_query if regression else 2, seed=args.seed)
-              for split, rows in [('train', groups), ('val', val_groups)]} if args.eval_every else {}
+              for split, rows in [('train', groups), ('val', val_groups)] if rows} if args.eval_every else {}
     buckets = defaultdict(list)
     for group in groups:
         buckets[(group['direction'], group['task'])].append(group)
@@ -115,7 +131,9 @@ def _train(args, world, rank, local_rank):
         base=model.fingerprint(), world_size=world, steps=args.steps, accumulation=args.accumulation,
         documents_per_class=args.documents_per_class, learning_rate=args.learning_rate,
         temperature=args.temperature, seed=args.seed, score='mean_maxsim', loss='explicit_pairwise_logistic',
-        eval_every=args.eval_every, probes_sha256=digest(probes))
+        eval_every=args.eval_every, probes_sha256=digest(probes), training_splits=training_splits,
+        validation_is_held_out=validation_is_held_out,
+        require_complete_coverage=getattr(args, 'require_complete_coverage', False))
     if regression:
         identity.update(contract=continuous.score_contract(), loss='mse_normalized_gated_score',
                         documents_per_query=args.documents_per_query, prediction_link=args.prediction_link,

@@ -68,6 +68,10 @@ def parser():
     model_args(train)
     train.add_argument('--corpus', required=True)
     train.add_argument('--labels', nargs='+', required=True)
+    train.add_argument('--training-splits', nargs='+', choices=['train', 'val', 'test'], default=['train'],
+                       help='Original source splits included in optimizer updates')
+    train.add_argument('--require-complete-coverage', action=argparse.BooleanOptionalAction, default=False,
+                       help='Require teacher labels covering every selected patient and cohort')
     train.add_argument('--output', required=True)
     train.add_argument('--device', choices=['cuda', 'cpu'], default='cuda', help='CPU is for explicit small smoke tests')
     train.add_argument('--objective', choices=['binary', 'gated_regression'], default='binary')

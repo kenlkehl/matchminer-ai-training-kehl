@@ -149,7 +149,11 @@ documents. Pairwise logistic loss compares only known positives and negatives in
 that group, including multiple positives. Other queries never become implicit
 negatives. Groups without both classes are counted and skipped. Sampling balances
 available task/direction groups; `group_report.json` makes missing strata visible.
-Only train-split labels update weights. BF16, gradient checkpointing, accumulation,
+The standalone experiment defaults to train-split labels; `--training-splits`
+can include additional partitions. Production `trialspace_training.py` instead
+pools every synthetic patient/cohort before mining, labels both directions, and
+trains on all records. Original splits are provenance only in that path, and its
+metrics are in-sample diagnostics. BF16, gradient checkpointing, accumulation,
 and DistributedDataParallel support long inputs and the two selected GPUs.
 With `--eval-every N`, the trainer measures fixed, explicitly labeled train and
 validation ranking groups before training and every N updates. The same queries,

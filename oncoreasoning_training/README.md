@@ -158,12 +158,15 @@ question is generated once across multiple trial spaces.
 
 Explicit patient split assignments are shared across both task categories.
 Missing assignments inherit the patient's known split or default to train;
-conflicting assignments fail. Test patients are excluded. The integrated miner
-preserves the original patient/trial co-splits. Older external mining tables
-with a constant train field must first have their original splits restored.
-Preparation records both categories in `training_manifest.json`. Training then
-filters each adapter's train and validation splits strictly to its task before
-removing metadata. There is no cross-task mixture ratio or oversampling. Use
+conflicting assignments fail. All three source partitions are included by default.
+The integrated miner pools all patients/cohorts and exports the original patient
+assignment as `patient_source_split`; preparation uses that provenance to agree
+with the raw notes. Older external mining tables with a constant train field
+must first have their original patient assignments restored.
+Preparation records both categories in `training_manifest.json`. Training filters
+each adapter's examples strictly to its task, then merges train, validation, and
+test into its training set. There is no cross-task mixture ratio or oversampling.
+Use `--training-splits train` to deliberately retain validation as a holdout. Use
 `prepare --tasks summarization` or `--tasks clinical_qa` to prepare one category,
 and `fine_tune_llm.py --task summarization` or `--task clinical_qa` to train it.
 Use `--max-patients` / `--max-pairs` for small preparation checks.
@@ -203,13 +206,15 @@ vocabulary logits. Full-parameter fine-tuning is disabled. LoRA defaults:
 | Epochs | One per adapter |
 | Batch | One example per GPU, eight accumulation steps: 64 examples on eight GPUs |
 | Checkpoint/evaluation interval | Every 100 optimizer steps |
-| Validation selection | Fixed seeded subset of at most 256 examples per task |
+| Training partitions | All synthetic train, validation, and test examples |
+| Optional held-out validation | With `--training-splits train`, fixed seeded subset of at most 256 examples per task |
 
 These are conservative starting settings, not a guarantee of output quality.
-The final artifact uses the checkpoint with the lowest measured task-specific
-validation loss when evaluation checkpoints exist, and saves final validation
-metrics. Non-finite loss stops training. Full validation data remain available
-for downstream evaluation. The [PEFT LoRA documentation](https://huggingface.co/docs/peft/en/package_reference/lora)
+By default the final artifact uses the final training checkpoint; there is no
+held-out synthetic validation. When validation is explicitly excluded from
+training, the artifact uses the checkpoint with the lowest measured task-specific
+validation loss when evaluation checkpoints exist, and saves validation metrics.
+Non-finite loss stops training. The [PEFT LoRA documentation](https://huggingface.co/docs/peft/en/package_reference/lora)
 describes all-linear targeting and the default initialization, which leaves the
 base model's initial outputs unchanged. The base is never merged or updated.
 On the current Gemma 4 E4B text configuration, rank 64 targets **155,516,928

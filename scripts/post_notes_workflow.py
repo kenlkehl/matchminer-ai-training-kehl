@@ -27,11 +27,11 @@ def generation_ready(status, alive):
     return False
 
 
-def stop_teacher(target, receipt):
+def stop_teacher(target, receipt, *, allowed_gpus=('2', '3')):
     """A PID/start-time/command match is mandatory before signaling a server."""
     expected = target['process']
-    if str(target['gpu']) not in ('2', '3'):
-        raise ValueError('This workflow may release only Camus GPUs 2 and 3')
+    if str(target['gpu']) not in set(map(str, allowed_gpus)):
+        raise ValueError('This workflow may release only explicitly selected Camus GPUs')
     current = teacher_identity(expected['pid'])
     if current is None:
         save(receipt, dict(state='already_stopped', target=target))
@@ -169,9 +169,10 @@ class Workflow:
         self.update('releasing_gpus')
         targets = self.config.get('release_teachers', self.config['local_teachers'])
         for target in targets:
-            stop_teacher(target, self.root / f'stopped_gpu_{target["gpu"]}.json')
+            stop_teacher(target, self.root / f'stopped_gpu_{target["gpu"]}.json',
+                         allowed_gpus=self.config.get('release_gpu_allowlist', ['2', '3']))
         deadline = time.monotonic() + 180
-        while busy := busy_gpus([str(target['gpu']) for target in targets]):
+        while busy := [row for target in targets for row in teacher_blockers(target)]:
             self.interrupted()
             if time.monotonic() >= deadline:
                 raise RuntimeError('Registered release GPUs are still occupied: ' + str(busy))

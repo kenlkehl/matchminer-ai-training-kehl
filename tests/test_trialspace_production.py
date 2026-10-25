@@ -27,6 +27,8 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
         if 'trialspace_training.py' not in stage.command:
             continue
         parsed = production.parser().parse_args(stage.command[stage.command.index('trialspace_training.py') + 1:])
+        if parsed.command == 'prepare':
+            assert parsed.merge_source_splits
         if parsed.command == 'label':
             assert parsed.gated_regression and not parsed.return_records
             assert parsed.scheduler_adaptive_concurrency
@@ -38,7 +40,9 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
                 assert parsed.prediction_link == 'identity' and parsed.steps == 8
                 assert parsed.output_model.parent == args.models_dir
                 assert parsed.accumulation == 32 and parsed.documents_per_query == 8
+                assert parsed.training_splits == ['train', 'val', 'test'] and parsed.require_complete_coverage
             else:
+                assert parsed.splits == ['train', 'val', 'test']
                 assert parsed.device_token_cache
                 assert parsed.device_cache_gb == 8
                 assert parsed.pair_batch_size == 512
@@ -52,6 +56,25 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
         previous = args.embedding_model if iteration == 1 else str(args.models_dir / 'trialspace_round1')
         assert fit[fit.index('--model') + 1] == previous
     assert stages['mine-3'].command[stages['mine-3'].command.index('--model') + 1] == str(args.models_dir / 'trialspace_round2')
+    downstream_prepare = stages['prepare-oncoreasoning'].command
+    downstream_fit = stages['train-oncoreasoning'].command
+    assert downstream_prepare[downstream_prepare.index('--splits') + 1:] == ['train', 'validation', 'test']
+    index = downstream_fit.index('--training-splits')
+    assert downstream_fit[index + 1:index + 4] == ['train', 'validation', 'test']
+
+
+def test_explicit_holdout_experiment_preserves_original_partitions(tmp_path):
+    args = runner.parser().parse_args(['--data-dir', str(tmp_path), '--synthetic-training-splits', 'train'])
+    stages = {stage.name: stage for stage in runner.stages(args)}
+    assert '--no-merge-source-splits' in stages['prepare-trialspace'].command
+    for stage in stages.values():
+        if 'trialspace_training.py' not in stage.command:
+            continue
+        parsed = production.parser().parse_args(stage.command[stage.command.index('trialspace_training.py') + 1:])
+        if parsed.command == 'train':
+            assert parsed.training_splits == ['train']
+        elif parsed.command == 'mine':
+            assert parsed.splits == ['train', 'val']
 
 
 def test_prepare_reconstructs_full_criteria_history_and_lineage(tmp_path):
@@ -277,18 +300,21 @@ def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_p
     training.train(production.parser().parse_args(command))
     status = json.loads((tmp_path / 'fit/status.json').read_text())
     assert status['state'] == 'complete' and status['model'] == str(tmp_path / 'model')
-    assert status['steps'] == 6  # 7 patient + 4 cohort query groups; ceil(11 / 2).
+    assert status['steps'] == 11  # Both source partitions: 14 patient + 8 cohort groups.
     assert torch.load(tmp_path / 'model/model.pt', weights_only=True)['weight'] < .9
     saved = json.loads((tmp_path / 'model/regression_scoring.json').read_text())
     assert saved['prediction_link'] == 'identity' and saved['output_scale'] == 5
     training.train(production.parser().parse_args(command))
     metrics = json.loads((tmp_path / 'fit/metrics.json').read_text())
-    assert len(metrics['history']) == 6
+    assert len(metrics['history']) == 11
+    assert all('val' not in entry for entry in metrics['evaluations'])
     assert all(sum(entry['batch_score_counts'].values()) == entry['batch_pairs']
                and entry['batch_query_groups'] == 2 for entry in metrics['history'])
     manifest = json.loads((tmp_path / 'fit/training_manifest.json').read_text())
     assert manifest['batch_sampling']['policy'] == 'direction_score_stratified_v1'
     assert manifest['max_pairs_per_update'] == 16
+    assert manifest['training_splits'] == ['train', 'val', 'test']
+    assert not manifest['validation_is_held_out']
     with pytest.raises(ValueError, match='identity changed'):
         training.train(production.parser().parse_args(command + ['--documents-per-query', '4']))
 
@@ -305,3 +331,51 @@ def test_directional_mining_returns_twenty_cohorts_and_forty_patients(tmp_path):
     assert rankings[rankings.direction.eq('patient_to_cohort')].groupby('patient_id').cohort_id.nunique().eq(20).all()
     assert rankings[rankings.direction.eq('cohort_to_patient')].groupby('cohort_id').patient_id.nunique().eq(40).all()
     assert len(rankings) == 45 * 20 + 25 * 40
+
+
+def test_all_synthetic_pool_retrieves_across_original_splits_and_requires_complete_labels(tmp_path):
+    from colbert_experiments import training
+    from colbert_experiments.contracts import contract_hash
+    from colbert_experiments.labeling import questions
+    patients, cohorts = [], []
+    for i, split in enumerate(('train', 'val', 'test')):
+        trial = f'NCT{i+1:08d}'
+        patients.append(dict(pseudo_mrn=f'p{i}', patient_summary=f'Complete synthetic history {i}.',
+                             split=split, nct_id=trial))
+        cohorts.append(dict(trial_id=trial, cohort_trial_id=f'c{i}', cohort_number=0, cohort_count=1,
+                            cancer_treatment_trial='yes', multiple_cohorts='no',
+                            eligibility_criteria=f'Full synthetic eligibility {i}.',
+                            cohort_eligibility_criteria=f'Full synthetic eligibility {i}.', split=split))
+    patient_path, cohort_path, corpus = tmp_path / 'patients.parquet', tmp_path / 'cohorts.csv', tmp_path / 'corpus'
+    pd.DataFrame(patients).to_parquet(patient_path)
+    pd.DataFrame(cohorts).to_csv(cohort_path, index=False)
+    production.prepare_corpus(patient_path, cohort_path, corpus)
+    ps, cs = load_corpus(corpus)
+    assert {r['split'] for r in ps + cs} == {'train'}
+    assert {r['source_split'] for r in ps} == {'train', 'val', 'test'}
+    assert len(read_jsonl(corpus / 'source_trial_pairs.jsonl')) == 3
+    out = tmp_path / 'mining'
+    args = production.parser().parse_args(['mine', '--corpus', str(corpus), '--output', str(out),
+        '--device', 'cpu', '--candidate-limit', '3', '--top-k-patient-to-cohort', '3',
+        '--top-k-cohort-to-patient', '3', '--lexical-k', '0', '--random-k', '0'])
+    production.mine(args, ToyModel(tmp_path / 'toy'))
+    pairs = read_jsonl(out / 'candidates.jsonl')
+    assert {(r['patient_id'], r['cohort_id']) for r in pairs} == {(f'p{i}', f'c{j}') for i in range(3) for j in range(3)}
+    assert len(list(questions(pairs, ps, cs))) == 45
+    for direction in ('patient_to_cohort', 'cohort_to_patient'):
+        rows = pd.read_parquet(out / f'{direction}.parquet')
+        cross = rows[rows.patient_id.eq('p0') & rows.cohort_trial_id.eq('c2')].iloc[0]
+        assert cross['split'] == 'train' and cross.patient_source_split == 'train' and cross.cohort_source_split == 'test'
+    scores = []
+    for pair in pairs:
+        if pair['patient_id'] == 'p2':
+            continue
+        row = dict(**pair, task='potentially_eligible', answer='no', evidence_status='supported',
+                   reason='Fabricated negative.', contract=contract_hash())
+        row['key'] = label_key(row)
+        scores.append(aggregate_pair(pair, [row]))
+    write_jsonl(tmp_path / 'partial_scores.jsonl', scores)
+    fit = production.parser().parse_args(['train', '--device', 'cpu', '--corpus', str(corpus),
+        '--labels', str(tmp_path / 'partial_scores.jsonl'), '--output', str(tmp_path / 'fit'), '--steps', '1'])
+    with pytest.raises(ValueError, match='1 patients, 0 cohorts'):
+        training.train(fit)
