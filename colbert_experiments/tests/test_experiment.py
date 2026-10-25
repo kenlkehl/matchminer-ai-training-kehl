@@ -158,9 +158,15 @@ def test_v22_sampling_preserves_cohorts_and_excludes_conflicting_lineage(tmp_pat
 
 def test_patient_keeps_other_history_and_no_core_only_fallback():
     text = combined_patient_history(dict(patient_summary='Cancer summary.', patient_boilerplate_text='Dialysis.'))
-    assert text == 'Cancer history:\nCancer summary.\n\nOther relevant history:\nDialysis.'
+    assert text == 'Cancer summary.\n\nOther relevant history:\nDialysis.'
     with pytest.raises(ValueError, match='Missing patient'):
         combined_patient_history(dict(patient_boilerplate_text='Dialysis.'))
+
+
+def test_unified_patient_summary_is_used_once_without_a_separate_history_column():
+    value = 'Age: 60\nCancer type: Lung\n\nOther relevant history:\nDialysis.'
+    assert combined_patient_history(dict(patient_summary=value)) == value
+    assert combined_patient_history(dict(patient_summary=value, patient_boilerplate_text='Dialysis.')) == value
 
 
 def test_prepare_rebuilds_complete_criteria(tmp_path):

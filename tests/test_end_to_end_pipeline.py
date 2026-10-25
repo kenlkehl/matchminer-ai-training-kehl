@@ -133,6 +133,8 @@ def test_preparation_preserves_ids_content_intervals_and_trial_cosplits(tmp_path
     result = tmp_path / 'patient_summaries_with_spaces.parquet'
     prepare.prepare_summaries(summaries, patients, result)
     merged = pd.read_parquet(result)
+    assert 'patient_boilerplate_text' not in merged
+    assert merged.patient_summary.eq('Synthetic summary\n\nOther relevant history:\nNo active infection').all()
     assert merged.this_space.eq(SPACE).all()
     assert set(merged.pseudo_mrn) == set(frame.pseudo_mrn.astype(str))
     from make_top_matches import load_retrieval_tables

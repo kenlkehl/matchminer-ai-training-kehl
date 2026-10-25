@@ -74,6 +74,22 @@ def terminal_reason(status, alive):
     return None
 
 
+def workflow_terminal_reason(generation, generator_alive, workflow, workflow_alive):
+    """An explicitly attached workflow can retain this fleet through summaries."""
+    if workflow.get('phase') == 'failed':
+        return 'downstream_workflow_failed'
+    if not workflow_alive:
+        return 'downstream_controller_exited'
+    if workflow.get('phase') in ('stopping_cloud', 'releasing_gpus', 'preparing_corpus',
+                                  'mining', 'starting_labelers', 'labeling', 'completed'):
+        return 'patient_summarization_finished'
+    if generation.get('stage') == 'failed':
+        return 'note_generation_failed'
+    if generation.get('stage') != 'completed' and not generator_alive:
+        return 'note_generator_exited'
+    return None
+
+
 def merge_servers(registry, fleet_id, servers):
     return {**registry, 'ready': True,
             'servers': [s for s in registry['servers'] if s.get('fleet_id') != fleet_id] + servers}
@@ -323,7 +339,14 @@ class Fleet:
                 while True:
                     status = json.loads(Path(self.config['generation_status']).read_text())
                     alive = process_identity(self.config['generator_pid']) == self.config['generator_start_ticks']
-                    reason = terminal_reason(status, alive)
+                    workflow_config = self.config.get('workflow')
+                    workflow = None
+                    if workflow_config:
+                        workflow = json.loads(Path(workflow_config['status']).read_text())
+                        workflow_alive = process_identity(workflow_config['pid']) == workflow_config['start_ticks']
+                        reason = workflow_terminal_reason(status, alive, workflow, workflow_alive)
+                    else:
+                        reason = terminal_reason(status, alive)
                     if self.stop or (self.root / 'STOP').exists():
                         reason = reason or 'operator_stop'
                     if reason:
@@ -342,10 +365,12 @@ class Fleet:
                     self.publish(endpoints)
                     save(self.root / 'status.json', dict(at=now(), state='running', supervisor_pid=os.getpid(),
                         generator_pid=self.config['generator_pid'], generation_stage=status['stage'],
+                        workflow_phase=workflow.get('phase') if workflow else None,
                         completed_notes=(status.get('stage_completed') if status['stage'] in ('notes', 'assembling', 'completed') else None),
                         expected_notes=status.get('expected_notes'),
                         healthy_gpu_servers=len(endpoints), expected_gpu_servers=64,
-                        automatic_vm_shutdown=True, shutdown_on=['generator_failure', 'note_inference_complete', 'controller_lease_expiry']))
+                        automatic_vm_shutdown=True, shutdown_on=(['generator_or_workflow_failure', 'patient_summarization_complete', 'controller_lease_expiry']
+                            if workflow_config else ['generator_failure', 'note_inference_complete', 'controller_lease_expiry'])))
                     time.sleep(10)
         except BaseException as error:
             reason = 'supervisor_error'

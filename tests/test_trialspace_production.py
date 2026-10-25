@@ -178,3 +178,17 @@ def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_p
     training.train(production.parser().parse_args(command))
     metrics = json.loads((tmp_path / 'fit/metrics.json').read_text())
     assert len(metrics['history']) == 6
+
+
+def test_directional_mining_returns_twenty_cohorts_and_forty_patients(tmp_path):
+    corpus, out = tmp_path / 'corpus', tmp_path / 'mining'
+    write_jsonl(corpus / 'patients.jsonl', [dict(id=f'p{i}', text=f'Synthetic cancer history number {i}.', split='train') for i in range(45)])
+    write_jsonl(corpus / 'cohorts.jsonl', [dict(id=f'c{i}', trial_id=f't{i}', text=f'Synthetic cancer eligibility number {i}.', split='train') for i in range(25)])
+    args = production.parser().parse_args(['mine', '--corpus', str(corpus), '--output', str(out),
+        '--device', 'cpu', '--candidate-limit', '50', '--top-k-patient-to-cohort', '20',
+        '--top-k-cohort-to-patient', '40', '--lexical-k', '0', '--random-k', '0'])
+    production.mine(args, ToyModel(tmp_path / 'toy'))
+    rankings = pd.DataFrame(read_jsonl(out / 'rankings.jsonl'))
+    assert rankings[rankings.direction.eq('patient_to_cohort')].groupby('patient_id').cohort_id.nunique().eq(20).all()
+    assert rankings[rankings.direction.eq('cohort_to_patient')].groupby('cohort_id').patient_id.nunique().eq(40).all()
+    assert len(rankings) == 45 * 20 + 25 * 40

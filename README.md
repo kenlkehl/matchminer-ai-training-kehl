@@ -1007,6 +1007,42 @@ the fleet configuration. Run this only for a user-authorized fleet:
 python scripts/gcp_note_fleet.py --config /absolute/path/to/fleet/config.json
 ```
 
+For a handoff that retains the fleet for patient summarization, attach the
+explicit `workflow` record (status path, PID, and process start ticks) to the
+fleet config and launch `scripts/post_notes_workflow.py --config <workflow.json>`.
+This controller waits for complete notes, runs note preparation and serial
+summarization through `run_pipeline.py`, waits for verified termination of all
+fleet VMs, then releases only the registered Camus GPU 2/3 serving processes.
+It runs corpus preparation and distributed mining, restores the two serving
+commands, and labels the mined pairs. It stops after labeling; it does not fit
+a model. Commands, output paths, local process identities, restart environments,
+and the separate live labeling registry are recorded in its config. GPU 0/1
+remain available for their existing work. The fleet watches both the generator
+and workflow; either process failing triggers shutdown, with VM leases as a
+fallback. Keep both supervisors running until the cloud shutdown receipt exists.
+
+Remote patient summarization uses the shared adaptive scheduler. It checkpoints
+every completed patient chunk, preserves the rendered prompt, raw response and
+reasoning for every returned attempt, and rejects empty, failed or token-limited
+answers before they can become a later chunk's prior summary. An interrupted
+round resumes its saved chunks using prompt/sampling identity checks. The
+upstream generation concurrency controls also apply to summarization.
+
+Patient-level output has one `patient_summary` text column, containing all
+cancer-history sections followed by `Other relevant history:` and, on the next
+line, the former boilerplate evidence. Step 6 renders the inference package's
+patient prompt directly. The training adapter can also combine historical split
+inputs, removes their `patient_boilerplate_text` column, and never duplicates an
+already combined history. ColBERT uses the complete unified text. Serial chunk
+artifacts retain raw answers and reasoning separately for distillation.
+
+Mining accepts separate `--top-k-patient-to-cohort` and
+`--top-k-cohort-to-patient` counts (the training orchestrator prefixes these with
+`--trialspace-`). For example, 20 and 40 select that many ColBERT results in the
+respective directions, with additional lexical/random/source-trial candidates
+retained separately. These rankings are over the configured proposal pool;
+the completion manifest records that scope.
+
 Each expansion receives only its assigned prose seed and the clinical/formatting
 instructions, then generates all tagged events, including demographics and
 diagnoses. Trial criteria, general exclusions, and matching/near-miss objectives

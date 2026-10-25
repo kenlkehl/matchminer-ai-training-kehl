@@ -164,7 +164,9 @@ def _mine(args, model, *, rank, world, local):
         raise ValueError('Batch and cache sizes must be positive')
     if args.candidate_limit is not None and args.candidate_limit < 1:
         raise ValueError('Candidate limit must be positive')
-    if min(args.top_k, args.lexical_k, args.random_k) < 0 or 'test' in args.splits:
+    directional_top_k = {direction: getattr(args, 'top_k_' + direction, None) for direction in DIRECTIONS}
+    directional_top_k = {direction: args.top_k if value is None else value for direction, value in directional_top_k.items()}
+    if min(*directional_top_k.values(), args.lexical_k, args.random_k) < 0 or 'test' in args.splits:
         raise ValueError('Production mining requires nonnegative candidate counts and excludes test')
     output = Path(args.output)
     patients, cohorts = load_corpus(args.corpus)
@@ -177,7 +179,7 @@ def _mine(args, model, *, rank, world, local):
     extra = (read_jsonl(source_pairs) if source_pairs.exists() else []) + (read_jsonl(args.extra_pairs) if args.extra_pairs else [])
     signature = dict(version=VERSION, contract=score_contract(), model=model.fingerprint(),
         encoding_device_kind='cpu' if args.device == 'cpu' else 'cuda', token_storage_dtype='float16',
-        patients=digest(patients), cohorts=digest(cohorts), extra_pairs=digest(extra),
+        patients=digest(patients), cohorts=digest(cohorts), extra_pairs=digest(extra), directional_top_k=directional_top_k,
         **{k: getattr(args, k) for k in ('top_k', 'lexical_k', 'random_k', 'candidate_limit',
             'proposal_strategy', 'cohort_query_limit', 'splits', 'seed', 'document_batch_size',
             'query_batch_size', 'score_batch_size')})
@@ -242,7 +244,7 @@ def _mine(args, model, *, rank, world, local):
                         pid, cid = (row['id'], targets[index]['id']) if direction == 'patient_to_cohort' else (targets[index]['id'], row['id'])
                         hits.append(dict(patient_id=pid, cohort_id=cid, direction=direction, source=source,
                                          task='gated_score' if source == 'colbert' else None, rank=rank_value, score=value))
-                    for place, index in enumerate(top_indices(values, args.top_k), 1):
+                    for place, index in enumerate(top_indices(values, directional_top_k[direction]), 1):
                         add(proposals[index], 'colbert', place, values[index])
                     for place, index in enumerate(top_indices(lexical_scores, args.lexical_k), 1):
                         add(index, 'tfidf_baseline', place, float(lexical_scores[index]))
@@ -278,6 +280,10 @@ def parser():
     sub.choices['mine'].add_argument('--query-batch-size', type=int, default=16)
     sub.choices['mine'].add_argument('--score-batch-size', type=int, default=16)
     sub.choices['mine'].add_argument('--cache-batches', type=int, default=32)
+    sub.choices['mine'].add_argument('--top-k-patient-to-cohort', type=int,
+        help='ColBERT cohort picks per patient; overrides --top-k for this direction')
+    sub.choices['mine'].add_argument('--top-k-cohort-to-patient', type=int,
+        help='ColBERT patient picks per cohort; overrides --top-k for this direction')
     sub.choices['label'].set_defaults(gated_regression=True, return_records=False)
     sub.choices['train'].set_defaults(objective='gated_regression', eval_every=100, eval_groups_per_stratum=32, steps=None)
     sub.choices['train'].add_argument('--epochs', type=float, default=3,

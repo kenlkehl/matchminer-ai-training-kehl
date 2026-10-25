@@ -65,6 +65,8 @@ def parser():
     p.add_argument('--trialspace-learning-rate', type=float, default=1e-5)
     p.add_argument('--trialspace-candidate-limit', type=int, default=256)
     p.add_argument('--trialspace-top-k', type=int, default=20)
+    p.add_argument('--trialspace-top-k-patient-to-cohort', type=int)
+    p.add_argument('--trialspace-top-k-cohort-to-patient', type=int)
     p.add_argument('--trialspace-lexical-k', type=int, default=5)
     p.add_argument('--trialspace-random-k', type=int, default=5)
     p.add_argument('--trialspace-encode-batch-size', type=int, default=16)
@@ -126,6 +128,10 @@ def stages(args):
             '--score-batch-size', str(args.trialspace_score_batch_size)]
         if args.trialspace_extra_pairs:
             mine += ['--extra-pairs', str(args.trialspace_extra_pairs)]
+        for direction in ('patient-to-cohort', 'cohort-to-patient'):
+            value = getattr(args, 'trialspace_top_k_' + direction.replace('-', '_'), None)
+            if value is not None:
+                mine += ['--top-k-' + direction, str(value)]
         result.append(Stage(f'mine-{iteration}', mine, [mining / 'complete.json', mining / 'candidates.jsonl', *candidates]))
         if iteration == 3:
             break

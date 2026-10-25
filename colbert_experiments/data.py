@@ -37,13 +37,14 @@ def text(value):
 
 
 def combined_patient_history(row):
+    from matchminer_ai.patients.postprocess import normalize_patient_summary
     if text(row.get('combined_patient_summary')):
-        return row['combined_patient_summary']
-    cancer = text(row.get('cancer_history_summary')) or text(row.get('patient_summary'))
+        return normalize_patient_summary(row['combined_patient_summary'])
+    cancer = text(row.get('patient_summary')) or text(row.get('cancer_history_summary'))
     other = text(row.get('other_relevant_history')) or text(row.get('general_exclusion_criteria_evidence')) or text(row.get('patient_boilerplate_text'))
     if not cancer:
         raise ValueError('Missing patient summary')
-    return 'Cancer history:\n' + cancer + ('\n\nOther relevant history:\n' + other if other else '')
+    return normalize_patient_summary(cancer, other)
 
 
 def read_table(path):
@@ -130,7 +131,9 @@ def sample_v22(patients_path, cohorts_path, output, *, train_count=256, val_coun
         load_corpus(output)
         return saved
     columns = ['pseudo_mrn', 'patient_summary', 'patient_boilerplate_text', 'nct_id', 'split']
-    patients = pd.read_parquet(patients_path, columns=columns)
+    import pyarrow.parquet as pq
+    available = pq.read_schema(patients_path).names
+    patients = pd.read_parquet(patients_path, columns=[c for c in columns if c in available])
     cohorts = read_table(cohorts_path)
     trial_splits = cohorts[['trial_id', 'split']].drop_duplicates().set_index('trial_id')['split']
     if not trial_splits.index.is_unique:
