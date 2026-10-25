@@ -115,9 +115,24 @@ interruptions within the same fit, with strict source/model/label identities.
 Both query and document limits are **8,192 tokens**, including markers. Full text
 is never silently truncated. The model uses its published projection, Q/D markers,
 and document punctuation mask. All encoding and mining score calculations are
-batched. Distributed miners share atomic token-cache shards on disk; each worker
-holds a bounded LRU cache instead of loading the entire corpus into memory.
-Per-query checkpoints allow mining to resume without repeating completed work.
+batched. Distributed miners share atomic token-cache shards on disk. By default,
+each worker loads the current direction's document vectors once into a packed
+GPU cache when they fit an 8-GiB budget, retaining an additional memory reserve
+for model inference and scoring. Larger corpora fall back to the bounded CPU
+LRU cache. Ragged vectors are stored without corpus-wide padding. Scoring groups
+four encoder batches, generates lexical proposals in a batch, then evaluates up
+to 512 query/document pairs together, bucketed by token length. Both padding
+masks and the original mean-MaxSim rule are retained; normal floating-point
+roundoff can differ between kernel batch shapes.
+
+`--trialspace-device-cache-gb`, `--trialspace-score-query-batches`, and
+`--trialspace-pair-batch-size` expose these performance controls. The direct
+mining command omits the `trialspace-` prefix and also accepts
+`--no-device-token-cache`. A zero cache budget selects the old bounded path.
+These execution controls are recorded in per-rank runtime files separately from
+the model/corpus/candidate identity, so tuning them can resume existing atomic
+embeddings and per-query checkpoints. Encoder batch sizes and text/scoring
+contracts remain part of the strict mining identity.
 
 The default candidate pool is 256 lexical/random proposals per query. Exact
 MaxSim selects 20 within that pool; five TF-IDF and five random proposals from

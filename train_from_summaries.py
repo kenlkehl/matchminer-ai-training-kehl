@@ -71,6 +71,9 @@ def parser():
     p.add_argument('--trialspace-random-k', type=int, default=5)
     p.add_argument('--trialspace-encode-batch-size', type=int, default=16)
     p.add_argument('--trialspace-score-batch-size', type=int, default=16)
+    p.add_argument('--trialspace-pair-batch-size', type=int, default=512)
+    p.add_argument('--trialspace-score-query-batches', type=int, default=4)
+    p.add_argument('--trialspace-device-cache-gb', type=float, default=8)
     p.add_argument('--trialspace-label-workers', type=int, default=1024)
     p.add_argument('--trialspace-extra-pairs', type=Path, help='Additional independent/challenge candidate JSONL')
     p.add_argument('--trialspace-cache-dir', type=Path, help='Local Hugging Face model cache')
@@ -125,7 +128,10 @@ def stages(args):
             '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
             '--document-batch-size', str(args.trialspace_encode_batch_size),
             '--query-batch-size', str(args.trialspace_encode_batch_size),
-            '--score-batch-size', str(args.trialspace_score_batch_size)]
+            '--score-batch-size', str(args.trialspace_score_batch_size),
+            '--pair-batch-size', str(args.trialspace_pair_batch_size),
+            '--score-query-batches', str(args.trialspace_score_query_batches),
+            '--device-cache-gb', str(args.trialspace_device_cache_gb)]
         if args.trialspace_extra_pairs:
             mine += ['--extra-pairs', str(args.trialspace_extra_pairs)]
         for direction in ('patient-to-cohort', 'cohort-to-patient'):

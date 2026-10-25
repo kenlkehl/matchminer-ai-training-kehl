@@ -5,6 +5,7 @@ The experiment and production entrypoints share the tested native ColBERT,
 question contracts, adaptive teacher, and regression trainer. This entrypoint
 fixes the production objective and adds resumable, distributed disk-backed mining.
 """
+import argparse
 import asyncio
 from collections import OrderedDict, defaultdict
 import json
@@ -22,6 +23,7 @@ from colbert_experiments.__main__ import parser as shared_parser
 from colbert_experiments.contracts import DIRECTIONS
 from colbert_experiments.data import digest, load_corpus, prepare, read_jsonl, write_json, write_jsonl
 from colbert_experiments.model import ColBERT
+from colbert_experiments.packed_scoring import PackedTokens, score_pairs
 from colbert_experiments.regression import regression_query, score_contract
 from colbert_experiments.retrieval import merge_candidates, proposal_indices, top_indices
 from trial_cohort_format import file_sha256
@@ -119,6 +121,27 @@ class TokenStore:
         self.cache.move_to_end(path)
         return self.cache[path][identifier]
 
+    def resident(self, kind, device, *, budget_gb=8):
+        """Read each shard once when this direction's corpus fits the budget."""
+        paths = [path for path, _ in self.batches if path.name.startswith(kind + '_')]
+        estimated_bytes = sum(path.stat().st_size for path in paths)
+        budget = int(budget_gb * 1024 ** 3)
+        if str(device).startswith('cuda'):
+            free, _ = torch.cuda.mem_get_info(device)
+            budget = min(budget, max(0, free - 8 * 1024 ** 3))
+        if not paths or estimated_bytes > budget:
+            return None
+        vectors = {}
+        for path in paths:
+            vectors.update(torch.load(path, map_location='cpu', weights_only=True))
+        # Discard the CPU LRU after the one-time transfer. The packed corpus is
+        # replaced between directions, so patient and cohort caches do not add.
+        packed = PackedTokens(list(vectors.values()), device)
+        ids = {identifier: i for i, identifier in enumerate(vectors)}
+        self.cache.clear()
+        print(f'[resident] {kind}: {len(ids)} documents, {packed.values.numel() * packed.values.element_size() / 1024**3:.2f} GiB on {device}', flush=True)
+        return packed, ids
+
 
 def export_candidates(corpus, candidates, cohort_output, patient_output):
     patients, cohorts = load_corpus(corpus)
@@ -164,6 +187,8 @@ def _mine(args, model, *, rank, world, local):
         raise ValueError('Batch and cache sizes must be positive')
     if args.candidate_limit is not None and args.candidate_limit < 1:
         raise ValueError('Candidate limit must be positive')
+    if min(args.pair_batch_size, args.score_query_batches) < 1 or args.device_cache_gb < 0:
+        raise ValueError('Invalid resident scoring cache/batch settings')
     directional_top_k = {direction: getattr(args, 'top_k_' + direction, None) for direction in DIRECTIONS}
     directional_top_k = {direction: args.top_k if value is None else value for direction, value in directional_top_k.items()}
     if min(*directional_top_k.values(), args.lexical_k, args.random_k) < 0 or 'test' in args.splits:
@@ -202,10 +227,19 @@ def _mine(args, model, *, rank, world, local):
     store.encode(model, rank=rank, world=world)
     if world > 1:
         dist.barrier()
+    write_json(output / f'runtime_rank_{rank}.json', dict(world_size=world, device=device,
+        pair_batch_size=args.pair_batch_size, score_query_batches=args.score_query_batches,
+        device_token_cache=args.device_token_cache, device_cache_gb=args.device_cache_gb))
     query_paths, query_number = [], 0
+    resident = None
     for direction in DIRECTIONS:
         queries, documents = (patients, cohorts) if direction == 'patient_to_cohort' else (cohorts, patients)
         kind = 'cohorts' if direction == 'patient_to_cohort' else 'patients'
+        resident = None  # Release the previous direction before staging this one.
+        if args.device_token_cache:
+            resident = store.resident(kind, device, budget_gb=args.device_cache_gb)
+            if resident is None:
+                print(f'[mine rank={rank}] {kind}: resident budget unavailable; using bounded CPU cache', flush=True)
         for split in args.splits:
             targets = [r for r in documents if r['split'] == split]
             selected = [r for r in queries if r['split'] == split]
@@ -227,18 +261,42 @@ def _mine(args, model, *, rank, world, local):
                 continue
             lexical = TfidfVectorizer(ngram_range=(1, 2), lowercase=True)
             matrix = lexical.fit_transform(t['text'] for t in targets)
-            for offset in range(0, len(jobs), args.query_batch_size):
-                batch = jobs[offset:offset + args.query_batch_size]
-                query_vectors = model.encode_batch([regression_query(direction, row['text']) for row, _ in batch], is_query=True)
-                for (row, path), vector in zip(batch, query_vectors, strict=True):
+            work_batch_size = args.query_batch_size * (args.score_query_batches if resident else 1)
+            for offset in range(0, len(jobs), work_batch_size):
+                batch = jobs[offset:offset + work_batch_size]
+                query_vectors = []
+                # Preserve the established encoder batch shape/precision while
+                # combining several batches for lexical work and pair scoring.
+                for start in range(0, len(batch), args.query_batch_size):
+                    query_vectors.extend(model.encode_batch([regression_query(direction, row['text'])
+                        for row, _ in batch[start:start + args.query_batch_size]], is_query=True))
+                lexical_batch = (lexical.transform([row['text'] for row, _ in batch]) @ matrix.T).toarray()
+                proposals_batch, random_states = [], []
+                for (row, _), lexical_scores in zip(batch, lexical_batch, strict=True):
                     rng = random.Random(f'{args.seed}:{direction}:{row["id"]}')
-                    lexical_scores = (lexical.transform([row['text']]) @ matrix.T).toarray()[0]
-                    proposals = proposal_indices(lexical_scores, args.candidate_limit, rng, args.proposal_strategy)
-                    values = []
-                    for begin in range(0, len(proposals), args.score_batch_size):
-                        chosen = proposals[begin:begin + args.score_batch_size]
-                        vectors = [store.get(kind, targets[i]['id']) for i in chosen]
-                        values.extend(score_documents(vector.to(model.device), vectors).cpu().tolist())
+                    proposals_batch.append(proposal_indices(lexical_scores, args.candidate_limit, rng, args.proposal_strategy))
+                    random_states.append(rng)
+                scores_batch = []
+                if resident:
+                    ids = resident[1]
+                    query_ids = [qi for qi, proposals in enumerate(proposals_batch) for _ in proposals]
+                    document_ids = [ids[targets[i]['id']] for proposals in proposals_batch for i in proposals]
+                    values = score_pairs(PackedTokens(query_vectors, device), resident[0], query_ids, document_ids,
+                                         pair_batch_size=args.pair_batch_size)
+                    begin = 0
+                    for proposals in proposals_batch:
+                        scores_batch.append(values[begin:begin + len(proposals)])
+                        begin += len(proposals)
+                else:
+                    for vector, proposals in zip(query_vectors, proposals_batch, strict=True):
+                        values = []
+                        for begin in range(0, len(proposals), args.score_batch_size):
+                            chosen = proposals[begin:begin + args.score_batch_size]
+                            vectors = [store.get(kind, targets[i]['id']) for i in chosen]
+                            values.extend(score_documents(vector.to(model.device), vectors).cpu().tolist())
+                        scores_batch.append(values)
+                for (row, path), lexical_scores, proposals, values, rng in zip(
+                        batch, lexical_batch, proposals_batch, scores_batch, random_states, strict=True):
                     hits = []
                     def add(index, source, rank_value=None, value=None):
                         pid, cid = (row['id'], targets[index]['id']) if direction == 'patient_to_cohort' else (targets[index]['id'], row['id'])
@@ -280,6 +338,13 @@ def parser():
     sub.choices['mine'].add_argument('--query-batch-size', type=int, default=16)
     sub.choices['mine'].add_argument('--score-batch-size', type=int, default=16)
     sub.choices['mine'].add_argument('--cache-batches', type=int, default=32)
+    sub.choices['mine'].add_argument('--device-token-cache', action=argparse.BooleanOptionalAction, default=True)
+    sub.choices['mine'].add_argument('--device-cache-gb', type=float, default=8,
+        help='Per-worker resident token budget; larger corpora use the bounded CPU cache')
+    sub.choices['mine'].add_argument('--pair-batch-size', type=int, default=512,
+        help='Query/document pairs scored together across multiple queries')
+    sub.choices['mine'].add_argument('--score-query-batches', type=int, default=4,
+        help='Encoder batches grouped for lexical proposal generation and pair scoring')
     sub.choices['mine'].add_argument('--top-k-patient-to-cohort', type=int,
         help='ColBERT cohort picks per patient; overrides --top-k for this direction')
     sub.choices['mine'].add_argument('--top-k-cohort-to-patient', type=int,

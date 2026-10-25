@@ -10,6 +10,7 @@ from colbert_experiments.data import load_corpus, read_jsonl, write_jsonl
 from colbert_experiments.fixtures import create_fixture
 from colbert_experiments.labeling import label_key
 from colbert_experiments.model import maxsim
+from colbert_experiments.packed_scoring import PackedTokens, score_pairs
 from colbert_experiments.regression import aggregate_pair, INSTRUCTION
 import train_from_summaries as runner
 import trialspace_training as production
@@ -86,6 +87,21 @@ def test_batched_maxsim_matches_exact_and_masks_padding():
     assert actual[0] < .01  # Padded zeros must not replace negative similarities.
 
 
+def test_packed_pair_batching_matches_reference_with_padding_and_duplicates():
+    generator = torch.Generator().manual_seed(123)
+    queries = [torch.randn(n, 8, generator=generator) for n in (1, 7, 12)]
+    docs = [torch.randn(n, 8, generator=generator) for n in (1, 4, 11, 19)]
+    qids, dids = [2, 0, 1, 2, 1, 0], [1, 3, 0, 2, 3, 3]
+    expected = torch.stack([maxsim(queries[q], docs[d], query_block=3, document_block=5) for q, d in zip(qids, dids)])
+    actual = score_pairs(PackedTokens(queries, 'cpu'), PackedTokens(docs, 'cpu'), qids, dids,
+                         pair_batch_size=4, query_block=3, document_block=5)
+    torch.testing.assert_close(torch.tensor(actual), expected)
+    negative = score_pairs(PackedTokens([torch.ones(7, 8), torch.ones(1, 8)], 'cpu'),
+        PackedTokens([-torch.ones(1, 8), -2 * torch.ones(9, 8)], 'cpu'), [0, 1], [0, 1],
+        query_block=3, document_block=4)
+    assert negative == [-8., -16.]
+
+
 class ToyModel(torch.nn.Module):
     def __init__(self, folder):
         super().__init__()
@@ -136,6 +152,31 @@ def test_mining_batches_caches_resumes_and_exports_complete_cohorts(tmp_path):
     (out / 'candidates.jsonl').write_text('changed')
     with pytest.raises(ValueError, match='artifacts changed'):
         production.mine(args, model)
+
+
+def test_resident_mining_preserves_candidates_scores_and_runtime_tuning_resume(tmp_path):
+    corpus = tmp_path / 'corpus'
+    create_fixture(corpus)
+    outputs = []
+    for name, option in [('resident', []), ('fallback', ['--device-cache-gb', '0'])]:
+        out = tmp_path / name
+        args = production.parser().parse_args(['mine', '--corpus', str(corpus), '--output', str(out),
+            '--device', 'cpu', '--candidate-limit', '3', '--top-k', '2', '--lexical-k', '1', '--random-k', '1',
+            '--document-batch-size', '4', '--query-batch-size', '2', '--score-batch-size', '2',
+            '--pair-batch-size', '5', '--score-query-batches', '3', *option])
+        model = ToyModel(tmp_path / 'toy')
+        production.mine(args, model)
+        outputs.append(out)
+        if name == 'resident':
+            # Runtime cache/pair scheduling may change without invalidating
+            # established embedding/candidate/scoring identities.
+            (out / 'complete.json').unlink()
+            calls = len(model.calls)
+            args.pair_batch_size, args.score_query_batches = 3, 2
+            production.mine(args, model)
+            assert len(model.calls) == calls
+    for artifact in ('rankings.jsonl', 'candidates.jsonl'):
+        assert read_jsonl(outputs[0] / artifact) == read_jsonl(outputs[1] / artifact)
 
 
 def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_path, monkeypatch):
