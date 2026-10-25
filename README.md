@@ -60,6 +60,9 @@ The live concurrency control file can set a new active target for one endpoint:
 {"cap": 256, "upper": 768}}}`. Each revision applies once, within the configured
 per-server ceiling; subsequent queue/cache pressure and request errors can still
 reduce concurrency. Ordinary ceiling edits do not reset the active target.
+The shared client opens a fresh HTTP connection for each request to avoid idle
+keep-alive resets during long inference and checkpoint operations. Checkpoint
+reads run outside the event loop so resumed labeling can keep requests moving.
 Other teacher stages retain the independent
 `--teacher-concurrency` setting (0 means automatic capacity-based scheduling).
 

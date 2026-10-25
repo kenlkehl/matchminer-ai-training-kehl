@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, List, Optional, Sequence, Tuple
 
 import httpx
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from adaptive_controller import Controller, now, parse_metrics, apply_tuning
 
@@ -363,11 +363,21 @@ class DynamicServerRegistry:
             return None
 
     def _make_client(self, url: str) -> AsyncOpenAI:
+        # Long generation requests and local checkpoint/tokenization work can
+        # leave idle connections beyond a vLLM proxy's keep-alive timeout. A
+        # fresh connection avoids reset races being mistaken for GPU overload;
+        # active requests still share the same bounded asynchronous pool.
+        client = DefaultAsyncHttpxClient(
+            limits=httpx.Limits(max_connections=max(1000, self._max_concurrent),
+                               max_keepalive_connections=0),
+            timeout=self._request_timeout + 60,
+        )
         return AsyncOpenAI(
             base_url=url,
             api_key=self._api_key,
             timeout=self._request_timeout + 60,
             max_retries=0,  # we own retry policy
+            http_client=client,
         )
 
     async def _reconcile_once(self) -> None:

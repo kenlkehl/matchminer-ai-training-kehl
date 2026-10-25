@@ -140,7 +140,9 @@ async def _label(args, output):
             await asyncio.sleep(10)
 
     async with RequestSession(registry, work, max_attempts=args.max_attempts) as session:
-        async def ask(item):
+        def load_checkpoint(item):
+            # Network-filesystem reads must not block every active HTTP request
+            # or the scheduler while a production run resumes saved answers.
             path = checkpoint_dir / item['key'][:2] / (item['key'] + '.json')
             legacy = checkpoint_dir / (item['key'] + '.json')
             if legacy.exists():
@@ -154,6 +156,12 @@ async def _label(args, output):
                     row['messages'] = item['messages']
                     row['sampling'] = asdict(sampling)
                     write_json(path, row)
+                return path, row
+            return path, None
+
+        async def ask(item):
+            path, row = await asyncio.to_thread(load_checkpoint, item)
+            if row is not None:
                 completed[item['key']] = path
                 return row
             prompt = tokenizer.apply_chat_template(item['messages'], tokenize=False,

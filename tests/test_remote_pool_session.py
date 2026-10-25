@@ -4,10 +4,53 @@ import pytest
 
 from remote_vllm_pool import (
     AdaptiveSemaphore,
+    DynamicServerRegistry,
     OutputValidationError,
     RequestSession,
     ServerEntry,
 )
+
+
+def test_clients_do_not_reuse_idle_server_connections():
+    """A vLLM endpoint's short keep-alive lifetime cannot poison later work."""
+    async def scenario():
+        connections = []
+        handlers = set()
+
+        async def handle(reader, writer):
+            task = asyncio.current_task()
+            handlers.add(task)
+            connections.append(writer)
+            try:
+                while True:
+                    await reader.readuntil(b'\r\n\r\n')
+                    body = b'{"object":"list","data":[]}'
+                    writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'
+                                 + f'Content-Length: {len(body)}\r\n\r\n'.encode() + body)
+                    await writer.drain()
+            except asyncio.IncompleteReadError:
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                handlers.discard(task)
+
+        server = await asyncio.start_server(handle, '127.0.0.1', 0)
+        port = server.sockets[0].getsockname()[1]
+        registry = DynamicServerRegistry(max_concurrent_per_server=768, request_timeout=60,
+                                         static_urls=[f'http://127.0.0.1:{port}/v1'])
+        client = registry._make_client(registry._static_urls[0])
+        try:
+            assert (await client.models.list()).data == []
+            assert (await client.models.list()).data == []
+            assert len(connections) == 2
+        finally:
+            await client.close()
+            server.close()
+            await server.wait_closed()
+            await asyncio.gather(*list(handlers))
+
+    asyncio.run(scenario())
 
 
 class Registry:
