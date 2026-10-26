@@ -80,6 +80,8 @@ def parser():
     train.add_argument('--device', choices=['cuda', 'cpu'], default='cuda', help='CPU is for explicit small smoke tests')
     train.add_argument('--objective', choices=['binary', 'gated_regression'], default='binary')
     train.add_argument('--documents-per-query', type=int, default=4)
+    train.add_argument('--gradient-checkpointing', action=argparse.BooleanOptionalAction, default=True,
+                       help='Recompute encoder activations to reduce VRAM; disable when memory permits')
     train.add_argument('--prediction-link', choices=['identity', 'sigmoid'], default='identity')
     train.add_argument('--steps', type=int, default=1000)
     train.add_argument('--accumulation', type=int, default=8)

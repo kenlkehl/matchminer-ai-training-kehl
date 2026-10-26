@@ -152,7 +152,8 @@ def _train(args, world, rank, local_rank, pause):
     output.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
     model = ColBERT(args.model, revision=args.revision, query_length=args.query_length,
-                   document_length=args.document_length, cache_dir=args.cache_dir, checkpointing=True).to(device)
+                   document_length=args.document_length, cache_dir=args.cache_dir,
+                   checkpointing=getattr(args, 'gradient_checkpointing', True)).to(device)
     identity = dict(contract=contract_hash(), patients=digest(patients), cohorts=digest(cohorts), labels=digest(labels),
         base=model.fingerprint(), world_size=world, steps=args.steps, accumulation=args.accumulation,
         documents_per_class=args.documents_per_class, learning_rate=args.learning_rate,
@@ -176,6 +177,10 @@ def _train(args, world, rank, local_rank, pause):
         identity.update(lr_scheduler=schedule, warmup_ratio=warmup)
     if device.type == 'cpu':
         identity['execution_device'] = 'cpu'
+    if not getattr(args, 'gradient_checkpointing', True):
+        identity['gradient_checkpointing'] = False
+    if hasattr(model, 'execution_settings'):
+        identity['encoder_execution'] = model.execution_settings()
     manifest = output / 'training_manifest.json'
     if manifest.exists() and json.loads(manifest.read_text()) != identity:
         raise ValueError('Training identity changed; use a new round directory')
@@ -253,6 +258,7 @@ def _train(args, world, rank, local_rank, pause):
         evaluate(step)
 
     for current in range(step, args.steps):
+        step_started = time.monotonic()
         optimizer.zero_grad(set_to_none=True)
         loss_sum = torch.zeros((), device=device)
         batch_score_counts = [0] * 6
@@ -324,8 +330,11 @@ def _train(args, world, rank, local_rank, pause):
                 batch_unique_directional_pairs=len({(g['direction'], g['query_id'], g['documents'][i]['id'])
                     for g, indices in global_batch for i in indices}))
         if rank == 0:
-            entry = dict(step=current + 1, loss=float(loss_sum), gradient_norm=float(norm),
+            entry = dict(step=current + 1, steps=args.steps, loss=float(loss_sum), gradient_norm=float(norm),
                          learning_rate=learning_rate, elapsed_seconds=round(time.monotonic() - start, 2),
+                         step_seconds=round(time.monotonic() - step_started, 3),
+                         **(dict(gpu_peak_allocated_gb=round(torch.cuda.max_memory_allocated(device) / 2**30, 2))
+                            if device.type == 'cuda' else {}),
                          **ranking_metrics, **batch_metrics)
             history.append(entry)
             write_json(output / 'status.json', dict(state='training', **entry))

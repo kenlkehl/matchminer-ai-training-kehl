@@ -7,6 +7,7 @@ replays each microbatch with the same random seed to apply the score gradients.
 from collections import defaultdict
 from contextlib import nullcontext
 import math
+import time
 
 import torch
 import torch.distributed as dist
@@ -94,6 +95,7 @@ def cached_ranking_backward(model, wrapped, batch, *, device, rank, world,
         queries.extend([group['query_id']] * len(indices))
         offsets.append(len(labels))
     cached = torch.zeros(len(labels), device=device, dtype=torch.float32)
+    cache_started = time.monotonic()
     microbatches = math.ceil(len(batch) / world)
     for micro in range(microbatches):
         if micro % pause_poll_microbatches == 0 and should_pause():
@@ -114,12 +116,16 @@ def cached_ranking_backward(model, wrapped, batch, *, device, rank, world,
     # index operations for each query. Only the scalar-score gradients return
     # to the encoder GPU; the full-batch objective is unchanged.
     loss_scores = cached.detach().cpu().requires_grad_()
+    cache_seconds = time.monotonic() - cache_started
+    loss_started = time.monotonic()
     if not torch.isfinite(loss_scores).all():
         raise ValueError('Nonfinite cached MaxSim score')
     loss, components = ranking_loss(loss_scores, labels, directions, queries,
         objective=objective, scale=scale, contrastive_weight=contrastive_weight)
     score_grad, = torch.autograd.grad(loss, loss_scores)
     score_grad = score_grad.to(device)
+    loss_seconds = time.monotonic() - loss_started
+    replay_started = time.monotonic()
     replay_error = torch.zeros((), device=device)
     for micro in range(microbatches):
         if micro % pause_poll_microbatches == 0 and should_pause():
@@ -149,4 +155,6 @@ def cached_ranking_backward(model, wrapped, batch, *, device, rank, world,
     if not torch.isfinite(replay_error) or replay_error > 1e-5:
         raise ValueError(f'Cached and replayed scores differ: {float(replay_error):.6g}')
     return dict(loss=loss.detach(), **{k: v.detach() if isinstance(v, torch.Tensor) else v
-                                     for k, v in components.items()}, replay_max_error=float(replay_error))
+                                     for k, v in components.items()}, replay_max_error=float(replay_error),
+                cache_pass_seconds=cache_seconds, ranking_loss_seconds=loss_seconds,
+                replay_backward_seconds=time.monotonic() - replay_started)

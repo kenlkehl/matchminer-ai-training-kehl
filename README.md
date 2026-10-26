@@ -247,7 +247,8 @@ It mixes scores within queries and distributes direction/score strata throughout
 each epoch without replacement. Actual score coverage depends on the labels
 available in that batch; absent scores are never invented.
 
-Each full query and its candidates are encoded together. A first pass caches
+Each full query and its candidates are encoded in batches grouped by text length
+to reduce padding. Differentiable MaxSim also batches candidate documents. A first pass caches
 scalar scores across GPUs; a second replays seeded microbatches and applies the
 gradient of the **full effective batch** ranking loss. Ordinary accumulation
 alone would not compare scores across microbatches. This adds one forward pass
@@ -260,6 +261,12 @@ between polls. Configure the effective batch with
 logs its actual pair count, 0–5 histogram and score range. Batch policy and sizes
 are checkpointed and cannot silently change on resume. Logs also include counts
 of ordinal comparisons and queries with known positive/negative contrasts.
+Direct training supports `--no-gradient-checkpointing` to trade more GPU memory
+for less encoder recomputation; the one-off
+[`train_full_gb300.py`](colbert_experiments/train_full_gb300.py) launcher uses
+this faster setting and one complete epoch by default. Its fresh default output
+preserves the earlier three-epoch run. Per-update logs include the total update
+count, step time, ranking-cache/loss/backward times, and peak GPU allocation.
 
 ColBERT checkpoints contain model, optimizer, and LR-scheduler state. By default, at most
 two checkpoint payloads are retained, including a new save in progress; the

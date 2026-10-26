@@ -14,7 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 SOURCE = ROOT.parent / 'data/no_phi/synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025'
-OUTPUT = ROOT.parent / 'data/no_phi/colbert_production_gb300_20261026'
+OUTPUT = ROOT.parent / 'data/no_phi/colbert_production_gb300_one_epoch_20261026'
 EXPECTED_PAIRS = 2435540
 
 
@@ -29,7 +29,9 @@ def parser():
     p.add_argument('--cache-dir', type=Path, help='Local Hugging Face cache; otherwise use the environment default')
     p.add_argument('--documents-per-query', type=int, default=16)
     p.add_argument('--accumulation', type=int, default=64)
-    p.add_argument('--epochs', type=float, default=3)
+    p.add_argument('--epochs', type=float, default=1)
+    p.add_argument('--gradient-checkpointing', action=argparse.BooleanOptionalAction, default=False,
+                   help='Recompute encoder activations to save VRAM at the cost of speed')
     p.add_argument('--learning-rate', type=float, default=2e-5)
     p.add_argument('--eval-every', type=int, default=100)
     p.add_argument('--dry-run', action='store_true', help='Print the command without waiting, using GPUs or writing outputs')
@@ -51,6 +53,7 @@ def command(args):
         '--ranking-scale', '20', '--contrastive-weight', '1',
         '--eval-every', str(args.eval_every), '--eval-groups-per-stratum', '32',
         '--save-steps', '25', '--save-total-limit', '2', '--pause-file', str(output / 'PAUSE')]
+    result += ['--gradient-checkpointing' if args.gradient_checkpointing else '--no-gradient-checkpointing']
     if args.cache_dir:
         result += ['--cache-dir', str(args.cache_dir.resolve())]
     return result

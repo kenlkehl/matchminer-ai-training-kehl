@@ -26,7 +26,7 @@ from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "3f3d743c1d5138f62388b7ce3ee8809b2fb6bfce"
+INFERENCE_COMMIT = "dcd62307a25ffeab4998b898a26d38b80833e8b1"
 
 TRIALSPACE_OPERATIONAL_OPTIONS = {
     'trialspace_save_steps', 'trialspace_save_total_limit', 'trialspace_stop_at', 'trialspace_pause_file',

@@ -29,16 +29,26 @@ This one-off launcher waits for validated production training scores, then uses
 `trialspace_training.py train` on all 2,435,540 repaired patient/cohort pairs,
 including all original source splits, in both directions. It starts from the
 base ModernColBERT model and uses the production CoSENT plus known-negative
-contrast objective for three complete epochs, with a linear learning-rate
+contrast objective for one complete epoch (5,162 optimizer updates), with a linear learning-rate
 schedule, learning rate `2e-5` and 1% warmup. The default microbatch has one query
 and up to 16 documents; 64 accumulated groups give up to 1,024 directional pairs
 per optimizer update. Ranking comparisons span the effective batch. Full inputs
 retain the 8,192-token limits and truncation checks.
 
-Output defaults to `../data/no_phi/colbert_production_gb300_20261026`, with
+The encoder groups texts of similar lengths to reduce padding, and differentiable
+MaxSim scores documents in batches. The GB300 launcher disables activation
+checkpointing by default to avoid encoder recomputation during backward; add
+`--gradient-checkpointing` if memory is insufficient. This trades VRAM for speed
+without shortening inputs or reducing pair coverage. Logs include total updates,
+per-step time, cache/loss/backward timings, and peak allocated GPU memory.
+
+Output defaults to `../data/no_phi/colbert_production_gb300_one_epoch_20261026`, with
 checkpoints in `fit/` and the final model in `model/`. Checkpoints save every 25
 updates, keeping at most two. Repeat the command to resume; create `OUTPUT/PAUSE`
 to pause cleanly and remove it before resuming. This run has no Camus time cutoff.
+The new directory starts the one-epoch schedule from scratch and preserves the
+older three-epoch run. Changing epochs or execution settings requires a fresh
+output directory.
 The launcher refuses to train on Camus and makes no LLM calls. It checks the
 complete-score publication receipt and SHA-256 content of the training files,
 then reads finalized numeric scores through the production trainer without
@@ -51,7 +61,7 @@ Verification streams the four data files sequentially; it does not enumerate
 the millions of saved reasoning checkpoints.
 Use `--cache-dir` for a local model cache, `--source-run`/`--output` to adjust mount
 locations, and `--dry-run` to print the command without starting anything.
-The GB300 batch configuration has not been benchmarked; microbatch and
+End-to-end throughput must be measured on the GB300; microbatch and
 accumulation settings can be overridden before the first fit.
 
 ## One-off smoke test on two A6000 GPUs while production labels continue
@@ -359,7 +369,7 @@ needed. The checkpoint supports 8K positions, but its retrieval training used mu
 shorter texts: mechanical long-context support does not establish clinical recall.
 Every encoder path uses batches: length-sorted document batches (16 by default),
 all question queries for a source entity together, and each training query with
-its explicitly positive/negative documents in one mixed-role batch. Padding is
+its explicitly labeled documents in mixed-role batches grouped by length. Padding is
 masked; query/document markers and document-only punctuation masking remain
 separate. Batched training retains gradients through all token embeddings.
 
