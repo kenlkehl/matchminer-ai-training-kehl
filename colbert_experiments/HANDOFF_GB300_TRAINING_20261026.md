@@ -6,6 +6,24 @@ model release. Paths below assume the same shared mount.
 
 ## Named-cohort format regeneration (latest request)
 
+Subsequent authorization: run full retrieval, then labeling on this GB300's
+existing port 8000 only. The workflow stops after labeling; cloud workers and
+model training remain paused. The live run is
+`data/no_phi/colbert_namedcohorts_gb300_20261026/`; consult `gb300_status.json`,
+`labeling_launch.json`, and `LABELING_OPERATIONS.txt` there for current state.
+Its endpoint registry supports adding servers later. No old-cohort labels are
+reused and no synthetic patients are regenerated or subsampled.
+
+Initial preparation exposed pandas treating the literal criteria text `None`
+as missing. `trial_cohort_format.read_clinical_csv` now preserves pandas' usual
+NA-like words and treats only empty cells as missing. Extraction, sampling,
+generation/preparation, standalone retrieval, and the production corpus builder
+share this reader. Standalone retrieval also retains `cohort_name` for schema
+validation. The production source manifest includes this shared adapter.
+228 affected tests passed, including a direct production `prepare` CLI and
+CSV round trips through each consumer. The promoted input files were unchanged.
+The failed preparation receipt is retained as `labeling_launch.prepare_failed.json`.
+
 The user authorized support for separate `cohort_name` and
 `cohort_specific_eligibility_criteria` fields, commits of both repositories, and
 re-extraction of the same 5,000 trials on the GB300's existing port 8000. The new
@@ -34,8 +52,9 @@ The launcher now
 uses fresh `colbert_namedcohorts_gb300_20261026/` source artifacts and
 `colbert_production_gb300_namedcohorts_20261026/` model output, so the previous
 partial retrieval/labels cannot be mistaken for the new cohort generation.
-Labeling, retrieval, model training, and all cloud VMs remain paused. This request
-authorizes cohort extraction only. Run receipts contain completion, exact counts,
+At extraction completion, labeling, retrieval, model training, and all cloud VMs
+were paused; the subsequent authorization above supersedes that state for local
+retrieval and labeling. Run receipts contain completion, exact counts,
 source hashes, and launch details; check them rather than the historical counts below.
 
 ## Current state after cohort refresh (2026-10-26)

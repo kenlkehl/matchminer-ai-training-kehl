@@ -48,6 +48,20 @@ def arguments(tmp_path):
         '--output-json', str(tmp_path / 'combined.json')])
 
 
+def test_extraction_csv_preserves_literal_none_as_original_eligibility(tmp_path, backend):
+    from trial_cohort_format import read_clinical_csv
+    answers, calls = backend
+    answers['Trial 1'] = json.dumps(dict(cancer_treatment_trial='yes', multiple_cohorts='no'))
+    args = arguments(tmp_path)
+    row = source()
+    row['eligibility_criteria'] = 'None'
+    pd.DataFrame([row]).to_csv(args.input, index=False)
+    extract.run(args, extract.make_config(args))
+    assert len(calls) == 1
+    assert read_clinical_csv(args.output_cohorts).cohort_eligibility_criteria.tolist() == ['None']
+    assert read_clinical_csv(args.output_trials).eligibility_criteria.tolist() == ['None']
+
+
 def test_selection_includes_phase4_and_boundary_preserves_metadata_and_splits():
     rows = [source(i) for i in range(1, 9)]
     rows[1]['phases'] = '["PHASE4"]'

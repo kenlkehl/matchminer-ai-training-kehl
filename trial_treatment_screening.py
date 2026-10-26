@@ -82,9 +82,10 @@ def screening_record(reasoning, final, finish_reason):
 def load_screening_results(trials, input_path, work_dir):
     """Reuse a complete audit against identical selected inputs, with independent extraction settings."""
     import pandas as pd
+    from trial_cohort_format import read_clinical_csv
 
     source = Path(input_path)
-    audit = pd.read_csv(source)
+    audit = read_clinical_csv(source)
     required = set(trials.columns) | {
         "is_cancer_treatment_trial", "treatment_screen_output",
         "treatment_screen_finish_reason", "treatment_screen_status", "treatment_screen_model",

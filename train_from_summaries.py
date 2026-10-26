@@ -484,6 +484,7 @@ def main():
     from colbert_experiments.regression import score_contract
     identity['trialspace_contract'] = score_contract()
     source_paths = [ROOT / 'train_from_summaries.py', ROOT / 'trialspace_training.py',
+                    ROOT / 'trial_cohort_format.py',
                     ROOT / 'remote_vllm_pool.py', ROOT / 'adaptive_controller.py',
                     ROOT / 'train_good_option_checker.py',
                     *sorted((ROOT / 'colbert_experiments').glob('*.py')),

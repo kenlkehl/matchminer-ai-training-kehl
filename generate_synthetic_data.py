@@ -26,7 +26,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from trial_cohort_format import training_rows, patient_generation_criteria
+from trial_cohort_format import training_rows, patient_generation_criteria, read_clinical_csv
 
 from remote_vllm_pool import (
     CompletionSampling, OutputValidationError, RequestSession,
@@ -826,7 +826,7 @@ class Generator:
 
     async def run(self):
         identity = self.manifest()
-        spaces = training_rows(pd.read_csv(self.args.input_csv))
+        spaces = training_rows(read_clinical_csv(self.args.input_csv))
         if spaces.space_index.tolist() != list(range(len(spaces))):
             raise ValueError('Expected contiguous 0c space_index values')
         spaces['trial_boilerplate_text'] = spaces.trial_boilerplate_text.fillna('')

@@ -15,6 +15,17 @@ COHORT_REQUIRED = {'trial_id', 'cohort_trial_id', 'cohort_number', 'cohort_count
                    'cohort_eligibility_criteria', 'cancer_treatment_trial', 'multiple_cohorts'}
 
 
+def read_clinical_csv(path, **kwargs):
+    """Preserve literal clinical text; only empty CSV cells represent missing data.
+
+    Pandas' default NA vocabulary includes valid text such as "None", "NA" and
+    "N/A". Keep those values intact, while retaining nulls for absent single-
+    cohort components and normal numeric inference for counts and indices.
+    Chunked reads and column selection use the same policy.
+    """
+    return pd.read_csv(path, keep_default_na=False, na_values=[''], **kwargs)
+
+
 def is_cohort_table(frame):
     return 'cohort_eligibility_criteria' in frame.columns
 

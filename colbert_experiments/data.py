@@ -4,6 +4,7 @@ import hashlib
 import json
 
 import pandas as pd
+from trial_cohort_format import read_clinical_csv
 
 
 def digest(value):
@@ -55,7 +56,7 @@ def read_table(path):
         return pd.read_parquet(path)
     if path.suffix == '.jsonl':
         return pd.DataFrame(read_jsonl(path))
-    return pd.read_csv(path)
+    return read_clinical_csv(path)
 
 
 def split_name(value):

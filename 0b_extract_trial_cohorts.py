@@ -20,7 +20,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from trial_cohort_format import REPRESENTATION, validate_cohort_rows
+from trial_cohort_format import REPRESENTATION, validate_cohort_rows, read_clinical_csv
 
 ROOT = Path(__file__).resolve().parent
 PHASES = {'EARLY_PHASE1', 'PHASE1', 'PHASE2', 'PHASE3', 'PHASE4'}
@@ -184,7 +184,7 @@ def run(args, config):
     from matchminer_ai.config import config_snapshot
     from matchminer_ai.trials.cohort_schema import COHORT_SCHEMA_VERSION, load_cohort_prompt
     import matchminer_ai
-    frame = select_trials(pd.read_csv(args.input), start_year=args.start_year, seed=args.seed)
+    frame = select_trials(read_clinical_csv(args.input), start_year=args.start_year, seed=args.seed)
     package = Path(matchminer_ai.__file__).parent
     identity = dict(input_sha256=sha_file(args.input), start_year=args.start_year, seed=args.seed,
         schema=COHORT_SCHEMA_VERSION, prompt_sha256=hashlib.sha256(load_cohort_prompt().encode()).hexdigest(),

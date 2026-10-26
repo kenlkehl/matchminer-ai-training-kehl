@@ -21,6 +21,11 @@ The inference revision is pinned by `INFERENCE_COMMIT` in
 and prompt contract, so an uncommitted code or prompt change cannot silently
 resume incompatible work.
 
+CSV inputs for extraction, cohort sampling, synthetic generation/preparation,
+and retrieval share `trial_cohort_format.read_clinical_csv`. Literal clinical
+text such as `None`, `NA`, and `N/A` is preserved; only empty cells are missing.
+This applies to direct script invocations as well as orchestrated production runs.
+
 ```bash
 ~/thisenv/bin/python train_from_summaries.py --dry-run
 PYTHON=~/thisenv/bin/python bash train_all_gcp.sh

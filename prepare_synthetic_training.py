@@ -19,7 +19,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from trial_cohort_format import training_rows
+from trial_cohort_format import training_rows, read_clinical_csv
 
 
 def split_name(value):
@@ -30,7 +30,7 @@ def split_name(value):
 
 
 def load_spaces(path):
-    frame = training_rows(pd.read_csv(path))
+    frame = training_rows(read_clinical_csv(path))
     required = ['space_index', 'nct_id', 'this_space', 'split', 'trial_boilerplate_text']
     if any(c not in frame for c in required) or frame.empty:
         raise ValueError('Sampled spaces need IDs, text, boilerplate, and source trial splits')

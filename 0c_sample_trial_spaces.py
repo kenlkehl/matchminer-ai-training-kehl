@@ -10,7 +10,8 @@ from pathlib import Path
 import pandas as pd
 from trial_space_format import has_required_space_fields
 from trial_cohort_format import (COHORT_REQUIRED, representation_for, validate_cohort_rows,
-                                 complete_cohort_criteria, load_production_cohorts, file_sha256)
+                                 complete_cohort_criteria, load_production_cohorts, file_sha256,
+                                 read_clinical_csv)
 
 def clean_trial_spaces(line_item_space_dataframe):
     return line_item_space_dataframe.this_space.apply(has_required_space_fields)
@@ -51,9 +52,9 @@ def sample_trial_spaces(input_csv, output_csv, dfci_csv, *, n_trials=5000, seed=
                 frame = source.iloc[start:start + chunksize]
                 yield (frame[fields] if fields else frame).copy()
     else:
-        columns = pd.read_csv(input_csv, nrows=0).columns
+        columns = read_clinical_csv(input_csv, nrows=0).columns
         def chunks(fields=None):
-            yield from pd.read_csv(input_csv, usecols=fields, chunksize=chunksize)
+            yield from read_clinical_csv(input_csv, usecols=fields, chunksize=chunksize)
     # Scan only the small columns first; the full extraction CSV can contain
     # repeated multi-megabyte reasoning traces. Sampling is by trial, not space.
     counts, invalid, non_cancer = {}, set(), set()
