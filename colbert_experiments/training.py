@@ -19,6 +19,7 @@ from .learning import make_probes, evaluate_probes
 from .checkpointing import PauseRequest, save_checkpoint
 from .complete_pass_batches import CompletePassBatchSampler
 from .ordinal_ranking import cached_ranking_backward
+from .retained_ranking import retained_ranking_backward
 
 
 def build_groups(patients, cohorts, labels, *, split='train'):
@@ -90,6 +91,14 @@ def _train(args, world, rank, local_rank, pause):
     regression = getattr(args, 'objective', 'binary') == 'gated_regression'
     loss_name = getattr(args, 'loss', 'mse')
     ranking = regression and loss_name != 'mse'
+    ranking_backward = getattr(args, 'ranking_backward', 'replay')
+    retained = ranking_backward == 'retained'
+    if retained and (not ranking or getattr(args, 'gradient_checkpointing', True)):
+        raise ValueError('Retained ranking requires a ranking loss and --no-gradient-checkpointing for one forward')
+    activation_storage = getattr(args, 'activation_storage', 'auto')
+    activation_budget = getattr(args, 'activation_gpu_budget_gb', 0)
+    if not math.isfinite(activation_budget) or activation_budget < 0:
+        raise ValueError('Activation GPU budget must be finite and nonnegative')
     groups_per_forward = getattr(args, 'query_groups_per_forward', 1)
     encoder_token_budget = getattr(args, 'encoder_token_budget', 32768)
     token_cache_tokens = getattr(args, 'token_cache_tokens', 8000000)
@@ -178,8 +187,12 @@ def _train(args, world, rank, local_rank, pause):
         if ranking:
             identity.pop('normalization')
             identity.update(loss=loss_name, ranking_scale=scale, contrastive_weight=contrastive_weight,
-                effective_batch_comparisons='two-pass scalar-score gradient cache with seeded forward replay',
+                effective_batch_comparisons=('single forward with retained activations' if retained else
+                                            'two-pass scalar-score gradient cache with seeded forward replay'),
                 loss_weighting='mean CoSENT over directions with unequal labels; mean contrast over queries with known positives and zeros')
+            if retained:
+                identity.update(ranking_backward='retained', activation_storage=activation_storage,
+                                activation_gpu_budget_gb=activation_budget)
     if schedule != 'constant':
         identity.update(lr_scheduler=schedule, warmup_ratio=warmup)
     if device.type == 'cpu':
@@ -220,7 +233,10 @@ def _train(args, world, rank, local_rank, pause):
             write_json(output / 'fixed_probes.json', probes)
             if regression and not ranking:
                 write_json(output / 'baseline_metrics.json', continuous.constant_baselines(groups, probes))
-    wrapped = DistributedDataParallel(model, device_ids=[local_rank] if device.type == 'cuda' else None) if world > 1 else model
+    # ColBERT buffers are derived deterministic position caches. Re-broadcasting
+    # them between retained forwards can invalidate tensors saved for backward.
+    wrapped = DistributedDataParallel(model, device_ids=[local_rank] if device.type == 'cuda' else None,
+                                      broadcast_buffers=not retained) if world > 1 else model
     wrapped.train()
     start = time.monotonic()
 
@@ -279,11 +295,14 @@ def _train(args, world, rank, local_rank, pause):
                 documents_per_query=args.documents_per_query, seed=args.seed, step=current)
             update_batch = global_batch[rank::world]
         if ranking:
-            result = cached_ranking_backward(model, wrapped, global_batch, device=device, rank=rank, world=world,
+            backward = retained_ranking_backward if retained else cached_ranking_backward
+            storage_options = dict(activation_storage=activation_storage,
+                                   activation_gpu_budget_gb=activation_budget) if retained else {}
+            result = backward(model, wrapped, global_batch, device=device, rank=rank, world=world,
                 seed_for_micro=lambda micro: args.seed + (current * args.accumulation + micro) * world + rank,
                 objective=loss_name, scale=scale, contrastive_weight=contrastive_weight,
                 groups_per_forward=groups_per_forward, encoder_token_budget=encoder_token_budget,
-                should_pause=lambda: pause_if_requested(current))
+                should_pause=lambda: pause_if_requested(current), **storage_options)
             if result is None:
                 return 'paused'
             loss_sum = result.pop('loss')

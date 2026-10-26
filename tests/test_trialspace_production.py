@@ -122,13 +122,16 @@ def test_pipeline_passes_grouped_encoder_and_token_cache_controls():
     import run_pipeline
     for parser in (runner.parser, run_pipeline.parser):
         args = parser().parse_args(['--trialspace-query-groups-per-forward', '4',
-            '--trialspace-encoder-token-budget', '65536', '--trialspace-token-cache-tokens', '123456'])
+            '--trialspace-encoder-token-budget', '65536', '--trialspace-token-cache-tokens', '123456',
+            '--trialspace-ranking-backward', 'retained', '--trialspace-activation-storage', 'gpu'])
         for stage in runner.stages(args):
             if stage.name.startswith('train-trialspace-'):
                 tail = stage.command[stage.command.index('trialspace_training.py') + 1:]
                 child = production.parser().parse_args(tail)
                 assert child.query_groups_per_forward == 4 and child.encoder_token_budget == 65536
                 assert child.token_cache_tokens == 123456
+                assert child.ranking_backward == 'retained' and child.activation_storage == 'gpu'
+                assert child.gradient_checkpointing is False
 
 
 def test_deadline_and_checkpoint_changes_do_not_invalidate_pipeline_resume():
@@ -387,7 +390,8 @@ def test_regression_cpu_fit_resumes_and_saves_separate_production_artifact(tmp_p
 
 
 @pytest.mark.parametrize('loss', ['legacy_ranking', 'cosent'])
-def test_production_ranking_defaults_cover_all_pairs_evaluate_and_resume(tmp_path, monkeypatch, loss):
+@pytest.mark.parametrize('backward_mode', ['replay', 'retained'])
+def test_production_ranking_defaults_cover_all_pairs_evaluate_and_resume(tmp_path, monkeypatch, loss, backward_mode):
     from colbert_experiments import training
     corpus = tmp_path/'corpus'
     create_fixture(corpus)
@@ -421,6 +425,8 @@ def test_production_ranking_defaults_cover_all_pairs_evaluate_and_resume(tmp_pat
         '--accumulation', '5', '--eval-every', '2', '--save-steps', '2']
     if loss != 'legacy_ranking':
         command += ['--loss', loss]
+    if backward_mode == 'retained':
+        command += ['--ranking-backward', 'retained', '--no-gradient-checkpointing']
     args = production.parser().parse_args(command)
     assert args.loss == loss and args.learning_rate == 2e-5 and args.lr_scheduler == 'linear'
     training.train(args)
@@ -431,7 +437,12 @@ def test_production_ranking_defaults_cover_all_pairs_evaluate_and_resume(tmp_pat
     assert sum(r['batch_pairs'] for r in metrics['history']) == 2 * len(scores)
     assert all(r['batch_unique_directional_pairs'] == r['batch_pairs'] for r in metrics['history'])
     assert any(r['gradient_norm'] > 0 for r in metrics['history'])
-    assert all(r['replay_max_error'] == 0 for r in metrics['history'])
+    if backward_mode == 'replay':
+        assert all(r['replay_max_error'] == 0 for r in metrics['history'])
+    else:
+        assert manifest['effective_batch_comparisons'] == 'single forward with retained activations'
+        assert all(r['encoder_forward_passes'] == r['model_backward_calls'] == 1 for r in metrics['history'])
+        assert all('replay_backward_seconds' not in r for r in metrics['history'])
     assert any(r['encoder_batches_per_pass'] < r['batch_query_groups'] for r in metrics['history'])
     for evaluation in metrics['evaluations']:
         assert 'val' not in evaluation  # Production includes every original split.
@@ -457,7 +468,7 @@ def test_production_ranking_defaults_cover_all_pairs_evaluate_and_resume(tmp_pat
     training.train(production.parser().parse_args(command))
     resumed = torch.load(tmp_path/'fit/model/model.pt', weights_only=True)
     torch.testing.assert_close(resumed['weight'], state['model']['weight'])
-    with pytest.raises(ValueError, match='identity changed'):
+    with pytest.raises(ValueError, match='identity changed|Retained ranking requires'):
         training.train(production.parser().parse_args(command + ['--loss', 'mse']))
 
 

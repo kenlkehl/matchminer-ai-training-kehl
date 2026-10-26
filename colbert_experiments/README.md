@@ -30,29 +30,46 @@ This one-off launcher waits for validated production training scores, then uses
 including all original source splits, in both directions. It starts from the
 base ModernColBERT model and uses the production CoSENT plus known-negative
 contrast objective for one complete epoch (5,162 optimizer updates), with a linear learning-rate
-schedule, learning rate `2e-5` and 1% warmup. The default microbatch has one query
-and up to 16 documents; 64 accumulated groups give up to 1,024 directional pairs
+schedule, learning rate `2e-5` and 1% warmup. Each query group has one query
+and up to 16 documents; 64 groups give up to 1,024 directional pairs
 per optimizer update. Ranking comparisons span the effective batch. Full inputs
 retain the 8,192-token limits and truncation checks.
 
-The encoder combines up to **four query groups** per forward (up to 68 texts),
-grouping similar lengths to reduce padding, within a **65,536 padded-token**
+The encoder combines up to **eight query groups** per forward (up to 136 texts),
+grouping similar lengths to reduce padding, within a **131,072 padded-token**
 packing budget. Longer groups are packed separately without truncation. All 64
 query groups still contribute to each update and the full-batch ranking loss.
-This cuts encoder calls per pass from 64 to as few as 16. Adjust
+This cuts ColBERT forward calls per pass from 64 to as few as eight. Adjust
 `--query-groups-per-forward` and `--encoder-token-budget` for available VRAM.
 An eight-million-token CPU LRU cache (`--token-cache-tokens`) avoids repeated
-tokenization; both passes reuse the same prepared inputs. It retains no model
+tokenization. This token cache retains no model
 outputs or gradients. Token masks are compacted with CPU-derived integer indices
 to avoid per-text CUDA boolean-indexing synchronization. Differentiable MaxSim
-scores documents in batches. The GB300 launcher disables activation
-checkpointing by default to avoid encoder recomputation during backward; add
-`--gradient-checkpointing` if memory is insufficient. This trades VRAM for speed
-without shortening inputs or reducing pair coverage. Logs include total updates,
-per-step time, preparation/cache/loss/backward timings, encoder batches per pass,
-token-cache occupancy/hits, and peak allocated GPU memory.
+scores documents in batches.
 
-Output defaults to `../data/no_phi/colbert_production_gb300_batched_20261026`, with
+The GB300 launcher defaults to **`--ranking-backward retained`**: one forward per
+microbatch, retaining every graph until the full effective-batch loss is known,
+then one model backward invocation across those graphs. There is no forward
+replay. Activation checkpointing must remain disabled in this mode. Loss
+comparisons, pair coverage, effective batch and LR schedule are unchanged.
+`--activation-storage auto` retains saved tensors on GPU until the soft allocation
+limit, then retains overflow in pinned CPU RAM; it never switches to recomputation.
+The automatic limit leaves half of initially available VRAM for temporary work
+and backward (including memory reusable in PyTorch's allocator). Set
+`--activation-gpu-budget-gb` to an explicit soft limit, `--activation-storage gpu`
+to retain everything on GPU, or `--activation-storage cpu` to offload saved
+activations. Whole-batch retention can require substantial host RAM, and transfer
+time can offset the saved forward work. These are soft storage controls, not
+guarantees that every input will fit. Model weights stay on GPU.
+On Linux, CPU offloading stops before consuming the last 8 GiB of available host
+RAM, rather than exhausting the machine or silently changing the training mode.
+Logs separate `forward_seconds`, `ranking_loss_seconds` and `backward_seconds`,
+and report one forward pass, one model backward call, offloaded activation GiB,
+the GPU soft limit, preparation time, encoder batches, token-cache stats and peak
+GPU memory. The earlier `--ranking-backward replay` mode remains explicitly
+available for memory-constrained runs; no fallback changes modes silently.
+
+Output defaults to `../data/no_phi/colbert_production_gb300_retained_20261026`, with
 checkpoints in `fit/` and the final model in `model/`. Checkpoints save every 25
 updates, keeping at most two. Repeat the command to resume; create `OUTPUT/PAUSE`
 to pause cleanly and remove it before resuming. This run has no Camus time cutoff.
@@ -80,6 +97,9 @@ PATH/fit/fixed_probes.json --device cuda:0`. It compares one versus four query
 groups using the same small synthetic probe subset and reports GPU memory and
 cached-score replay errors. A local H100 check with 64 pairs measured 6.82 versus
 3.05 seconds (13.0 versus 29.3 GiB allocated); this is not a GB300 production ETA.
+Use `--group-counts 4 8 --backward-modes replay retained
+--encoder-token-budget 131072` to compare larger batches and retained graphs.
+The benchmark does not update model weights.
 
 ## One-off smoke test on two A6000 GPUs while production labels continue
 

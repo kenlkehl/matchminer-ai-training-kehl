@@ -95,6 +95,9 @@ def parser():
     p.add_argument('--trialspace-query-groups-per-forward', type=int, default=2)
     p.add_argument('--trialspace-encoder-token-budget', type=int, default=32768)
     p.add_argument('--trialspace-token-cache-tokens', type=int, default=8000000)
+    p.add_argument('--trialspace-ranking-backward', choices=['replay', 'retained'], default='replay')
+    p.add_argument('--trialspace-activation-storage', choices=['auto', 'gpu', 'cpu'], default='auto')
+    p.add_argument('--trialspace-activation-gpu-budget-gb', type=float, default=0)
     p.add_argument('--trialspace-learning-rate', type=float, default=2e-5)
     p.add_argument('--trialspace-loss', choices=['mse', 'cosent', 'legacy_ranking'], default='legacy_ranking')
     p.add_argument('--trialspace-ranking-scale', type=float, default=20.)
@@ -225,12 +228,17 @@ def stages(args):
             '--query-groups-per-forward', str(args.trialspace_query_groups_per_forward),
             '--encoder-token-budget', str(args.trialspace_encoder_token_budget),
             '--token-cache-tokens', str(args.trialspace_token_cache_tokens),
+            '--ranking-backward', args.trialspace_ranking_backward,
+            '--activation-storage', args.trialspace_activation_storage,
+            '--activation-gpu-budget-gb', str(args.trialspace_activation_gpu_budget_gb),
             '--save-steps', str(args.trialspace_save_steps),
             '--save-total-limit', str(args.trialspace_save_total_limit),
             '--training-splits', *training_splits,
             '--eval-every', '100', '--eval-groups-per-stratum', '32']
         command += (['--steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
                     else ['--epochs', str(args.trialspace_epochs)])
+        if args.trialspace_ranking_backward == 'retained':
+            command += ['--no-gradient-checkpointing']
         if args.trialspace_stop_at:
             command += ['--stop-at', args.trialspace_stop_at]
         if args.trialspace_pause_file:

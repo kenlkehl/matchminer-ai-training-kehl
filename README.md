@@ -281,6 +281,22 @@ They also report encoder batches per pass, preparation time and token-cache
 occupancy/hits. Single-GPU pause polling stays on CPU. GPU token compaction uses
 CPU-prepared integer indices rather than per-text CUDA boolean indexing.
 
+The GB300 launcher uses eight groups per forward, a 131,072 padded-token budget,
+and **retained activations** by default. Direct training selects this with
+`--ranking-backward retained --no-gradient-checkpointing`; the integrated runner
+accepts `--trialspace-ranking-backward retained` and disables checkpoint
+recomputation for that mode. It performs one forward per microbatch and one
+model backward invocation over all retained graphs, using the same full-batch
+ranking loss. General production defaults retain the memory-saving replay mode.
+`--activation-storage auto` keeps saved activations on GPU within a soft limit
+and spills overflow to pinned CPU RAM without recomputation. `gpu` and `cpu`
+select explicit storage; `--activation-gpu-budget-gb` overrides the auto soft
+limit (zero leaves half of available VRAM for temporary work and backward).
+Integrated flags have the `--trialspace-` prefix. Whole-batch activation storage
+may use substantial RAM; logs report transferred activation GiB and separate
+forward/backward times so transfer overhead is visible. Changing modes requires
+a fresh fit directory; the GB300 default uses `colbert_production_gb300_retained_20261026`.
+
 ColBERT checkpoints contain model, optimizer, and LR-scheduler state. By default, at most
 two checkpoint payloads are retained, including a new save in progress; the
 previous committed checkpoint survives an interrupted write. Direct training

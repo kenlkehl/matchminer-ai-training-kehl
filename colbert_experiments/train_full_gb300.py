@@ -14,7 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 SOURCE = ROOT.parent / 'data/no_phi/synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025'
-OUTPUT = ROOT.parent / 'data/no_phi/colbert_production_gb300_batched_20261026'
+OUTPUT = ROOT.parent / 'data/no_phi/colbert_production_gb300_retained_20261026'
 EXPECTED_PAIRS = 2435540
 
 
@@ -29,9 +29,13 @@ def parser():
     p.add_argument('--cache-dir', type=Path, help='Local Hugging Face cache; otherwise use the environment default')
     p.add_argument('--documents-per-query', type=int, default=16)
     p.add_argument('--accumulation', type=int, default=64)
-    p.add_argument('--query-groups-per-forward', type=int, default=4)
-    p.add_argument('--encoder-token-budget', type=int, default=65536)
+    p.add_argument('--query-groups-per-forward', type=int, default=8)
+    p.add_argument('--encoder-token-budget', type=int, default=131072)
     p.add_argument('--token-cache-tokens', type=int, default=8000000)
+    p.add_argument('--ranking-backward', choices=['replay', 'retained'], default='retained')
+    p.add_argument('--activation-storage', choices=['auto', 'gpu', 'cpu'], default='auto')
+    p.add_argument('--activation-gpu-budget-gb', type=float, default=0,
+                   help='Auto retention soft GPU limit in GiB; zero reserves half initially free VRAM')
     p.add_argument('--epochs', type=float, default=1)
     p.add_argument('--gradient-checkpointing', action=argparse.BooleanOptionalAction, default=False,
                    help='Recompute encoder activations to save VRAM at the cost of speed')
@@ -55,6 +59,8 @@ def command(args):
         '--query-groups-per-forward', str(args.query_groups_per_forward),
         '--encoder-token-budget', str(args.encoder_token_budget),
         '--token-cache-tokens', str(args.token_cache_tokens),
+        '--ranking-backward', args.ranking_backward, '--activation-storage', args.activation_storage,
+        '--activation-gpu-budget-gb', str(args.activation_gpu_budget_gb),
         '--lr-scheduler', 'linear', '--warmup-ratio', '.01',
         '--ranking-scale', '20', '--contrastive-weight', '1',
         '--eval-every', str(args.eval_every), '--eval-groups-per-stratum', '32',
@@ -121,6 +127,8 @@ def main():
         raise ValueError('Select one GPU and positive microbatch/accumulation sizes')
     if min(args.query_groups_per_forward, args.encoder_token_budget) < 1 or args.token_cache_tokens < 0:
         raise ValueError('Use positive encoder batch limits and nonnegative token cache capacity')
+    if args.ranking_backward == 'retained' and args.gradient_checkpointing:
+        raise ValueError('Retained mode uses one forward; leave gradient checkpointing disabled')
     gpu = selected_gpu(args.gpu, os.environ.get('CUDA_VISIBLE_DEVICES'), visible_index=args.visible_gpu)
     launch = command(args)
     print('CUDA_VISIBLE_DEVICES=' + shlex.quote(gpu) + ' ' + shlex.join(launch), flush=True)
@@ -131,6 +139,7 @@ def main():
     print(f'Up to {args.query_groups_per_forward} query groups per encoder forward; '
           f'{args.encoder_token_budget:,} padded-token packing budget; CPU token cache enabled '
           f'for up to {args.token_cache_tokens:,} tokens.', flush=True)
+    print(f'Ranking backward: {args.ranking_backward}; activation storage: {args.activation_storage}.', flush=True)
     if args.dry_run:
         return
     if socket.gethostname().split('.')[0].lower().startswith('camus'):
