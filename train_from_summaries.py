@@ -26,7 +26,7 @@ from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "e3a2bba8137bed90a0dcda5c8e1243f6745c3e98"
+INFERENCE_COMMIT = "3f3d743c1d5138f62388b7ce3ee8809b2fb6bfce"
 
 TRIALSPACE_OPERATIONAL_OPTIONS = {
     'trialspace_save_steps', 'trialspace_save_total_limit', 'trialspace_stop_at', 'trialspace_pause_file',
@@ -470,6 +470,7 @@ def main():
     from colbert_experiments.regression import score_contract
     identity['trialspace_contract'] = score_contract()
     source_paths = [ROOT / 'train_from_summaries.py', ROOT / 'trialspace_training.py',
+                    ROOT / 'remote_vllm_pool.py', ROOT / 'adaptive_controller.py',
                     ROOT / 'train_good_option_checker.py',
                     *sorted((ROOT / 'colbert_experiments').glob('*.py')),
                     *sorted((ROOT / 'colbert_experiments/prompts').glob('*.txt')),
@@ -480,6 +481,7 @@ def main():
                     args.inference_repo / 'src/matchminer_ai/llm/async_processing.py',
                     args.inference_repo / 'src/matchminer_ai/llm/remote_inference.py',
                     args.inference_repo / 'src/matchminer_ai/llm/endpoint_pool.py',
+                    args.inference_repo / 'src/matchminer_ai/llm/dispatch.py',
                     *sorted((args.inference_repo / 'src/matchminer_ai/embedding').glob('*.py'))]
     identity['production_sources'] = [source_record(path) for path in source_paths]
     if manifest_path.exists():

@@ -187,6 +187,14 @@ class AdaptiveSemaphore:
                 await self._cond.wait()
             self.in_flight += 1
 
+    async def try_acquire(self):
+        """Reserve a ready request without blocking dispatch to other servers."""
+        async with self._cond:
+            if self.in_flight >= self.limit:
+                return False
+            self.in_flight += 1
+            return True
+
     async def set_max_limit(self, maximum, *, reset=False):
         """Resize without cancelling active requests or undoing error backoff."""
         async with self._cond:
@@ -729,65 +737,6 @@ async def _dispatch_one(
         await entry.semaphore.release(success=success)
 
 
-async def _server_loop(
-    entry: ServerEntry,
-    *,
-    work_queue: asyncio.Queue,
-    work_fn: WorkFn,
-    results: ResultBuffer,
-    max_attempts: int,
-    error_placeholder: Callable[[Any, Exception], Any],
-    stop_event: asyncio.Event,
-) -> None:
-    in_flight: set[asyncio.Task] = set()
-    dispatched = 0
-    try:
-        while not stop_event.is_set() and not entry.retired:
-            try:
-                await entry.semaphore.acquire()
-            except asyncio.CancelledError:
-                break
-            # Have a slot; pull an item with a short timeout so we can re-check
-            # entry.retired / stop_event regularly.
-            try:
-                try:
-                    item = work_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    item = await asyncio.wait_for(work_queue.get(), timeout=0.5)
-            except asyncio.TimeoutError:
-                # No work right now — give back the slot and loop.
-                await entry.semaphore.release(success=True)
-                continue
-            except asyncio.CancelledError:
-                await entry.semaphore.release(success=True)
-                break
-
-            item_id, payload, attempt = item
-            if stop_event.is_set():
-                await entry.semaphore.release(success=None)
-                break
-            task = asyncio.create_task(
-                _dispatch_one(
-                    entry, item_id, payload, attempt,
-                    work_fn=work_fn,
-                    work_queue=work_queue,
-                    results=results,
-                    max_attempts=max_attempts,
-                    error_placeholder=error_placeholder,
-                )
-            )
-            in_flight.add(task)
-            task.add_done_callback(in_flight.discard)
-            dispatched += 1
-            if dispatched % 16 == 0:
-                # Ready work needs no extra task/timer per queue.get, but a
-                # busy endpoint must still yield to other endpoints and I/O.
-                await asyncio.sleep(0)
-    finally:
-        if in_flight:
-            await asyncio.gather(*in_flight, return_exceptions=True)
-
-
 async def _registry_supervisor(
     registry: DynamicServerRegistry,
     *,
@@ -798,57 +747,85 @@ async def _registry_supervisor(
     error_placeholder: Callable[[Any, Exception], Any],
     stop_event: asyncio.Event,
 ) -> None:
-    """Spawns and joins one _server_loop per active server, reacting to
-    registry changes."""
-    running: dict[str, Tuple[ServerEntry, asyncio.Task]] = {}
+    """Assign ready work to the endpoint with the most proportional headroom.
+
+    Idle endpoints hold no queue items or semaphore slots. Fast servers therefore
+    receive replacement work before slower, more occupied servers, even when the
+    producer supplies only a few requests at a time.
+    """
+    from matchminer_ai.llm.dispatch import least_loaded_endpoint
+
+    running = set()
+    wake = asyncio.Event()
+    last_used, announced = {}, set()
+    sequence, dispatched = 0, 0
+    pending = None
+
+    async def watch_registry():
+        while not stop_event.is_set():
+            await registry.wait_for_change(timeout=2.0)
+            wake.set()
+
+    def finished(task):
+        running.discard(task)
+        wake.set()
+
+    watcher = asyncio.create_task(watch_registry())
     try:
         while not stop_event.is_set():
-            active = await registry.active_entries()
-            active_urls = {e.url for e in active}
-
-            # Start new loops
+            if pending is None:
+                try:
+                    pending = work_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    try:
+                        pending = await asyncio.wait_for(work_queue.get(), timeout=.5)
+                    except asyncio.TimeoutError:
+                        continue
+            wake.clear()
+            active = [entry for entry in await registry.active_entries() if not entry.retired]
             for entry in active:
-                if entry.url not in running:
-                    task = asyncio.create_task(
-                        _server_loop(
-                            entry,
-                            work_queue=work_queue,
-                            work_fn=work_fn,
-                            results=results,
-                            max_attempts=max_attempts,
-                            error_placeholder=error_placeholder,
-                            stop_event=stop_event,
-                        )
-                    )
-                    running[entry.url] = (entry, task)
-                    print(f"[remote_vllm_pool] + server {entry.url}"
-                          f" ({entry.instance})")
-
-            # Reap finished or retired loops
-            for url in list(running.keys()):
-                e, t = running[url]
-                if t.done():
-                    running.pop(url, None)
-                    print(f"[remote_vllm_pool] - server {url} (loop ended)")
-                elif e.retired and url not in active_urls:
-                    # Already marked retired; the loop will exit on its own.
+                if entry.url not in announced:
+                    print(f"[remote_vllm_pool] + server {entry.url} ({entry.instance})")
+                    announced.add(entry.url)
+            selected = least_loaded_endpoint(
+                (entry.url, entry.semaphore.in_flight, entry.semaphore.limit, last_used.get(entry.url, -1))
+                for entry in active)
+            if selected is None:
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=.5)
+                except asyncio.TimeoutError:
                     pass
-
-            # Wait for either a registry change or stop
-            try:
-                await asyncio.wait_for(
-                    registry.wait_for_change(timeout=2.0),
-                    timeout=2.5,
-                )
-            except asyncio.TimeoutError:
-                pass
-            if stop_event.is_set():
-                break
+                continue
+            entry = next(entry for entry in active if entry.url == selected)
+            if not await entry.semaphore.try_acquire():
+                continue  # A metrics update changed admission while choosing.
+            if entry.retired or stop_event.is_set():
+                await entry.semaphore.release(success=None)
+                continue
+            item_id, payload, attempt = pending
+            pending = None
+            last_used[entry.url] = sequence
+            sequence += 1
+            task = asyncio.create_task(_dispatch_one(
+                entry, item_id, payload, attempt, work_fn=work_fn,
+                work_queue=work_queue, results=results, max_attempts=max_attempts,
+                error_placeholder=error_placeholder))
+            running.add(task)
+            task.add_done_callback(finished)
+            dispatched += 1
+            if dispatched % 16 == 0:
+                await asyncio.sleep(0)
+    except BaseException:
+        for task in list(running):
+            task.cancel()
+        raise
     finally:
-        # Stop signal already set or supervisor exiting; wait for loops.
+        if pending is not None:
+            work_queue.put_nowait(pending)
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
         if running:
-            await asyncio.gather(*[t for _, t in running.values()],
-                                  return_exceptions=True)
+            await asyncio.gather(*list(running), return_exceptions=True)
 
 
 async def _status_logger(

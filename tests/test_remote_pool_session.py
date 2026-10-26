@@ -71,6 +71,60 @@ class Registry:
         self.stopped = True
 
 
+def test_sparse_requests_fill_fast_endpoint_headroom_instead_of_round_robin():
+    async def scenario():
+        registry = Registry()
+        fast = ServerEntry('fast', 'fast', AdaptiveSemaphore(8))
+        slow = ServerEntry('slow', 'slow', AdaptiveSemaphore(2))
+        await slow.semaphore.acquire()  # A separate long-running request.
+        async def entries():
+            return [slow, fast]
+        registry.active_entries = entries
+        calls = []
+        async def work(client, payload):
+            calls.append(client)
+            await asyncio.sleep(.001)
+            return payload
+        async with RequestSession(registry, work) as session:
+            # Allow idle consumers to form: the old dispatcher then alternated
+            # these sparse arrivals even though the slow server was occupied.
+            await asyncio.sleep(.02)
+            for i in range(12):
+                assert await session.submit(i) == i
+                await asyncio.sleep(.002)
+        assert calls == ['fast'] * 12
+        assert fast.semaphore.in_flight == 0
+        await slow.semaphore.release(success=None)
+    asyncio.run(scenario())
+
+
+def test_retired_endpoint_drains_while_replacement_receives_new_work():
+    async def scenario():
+        registry = Registry()
+        old = ServerEntry('old', 'old', AdaptiveSemaphore(1))
+        new = ServerEntry('new', 'new', AdaptiveSemaphore(2))
+        current = [old]
+        async def entries():
+            return current[:]
+        registry.active_entries = entries
+        started, release = asyncio.Event(), asyncio.Event()
+        async def work(client, payload):
+            if client == 'old':
+                started.set()
+                await release.wait()
+            return client
+        async with RequestSession(registry, work) as session:
+            first = asyncio.create_task(session.submit('first'))
+            await started.wait()
+            old.retired = True
+            current[:] = [new]
+            assert await asyncio.wait_for(session.submit('second'), 2) == 'new'
+            release.set()
+            assert await first == 'old'
+        assert old.semaphore.in_flight == new.semaphore.in_flight == 0
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("limit", [1, 2, 5])
 def test_session_shares_capacity_retries_json_neutrally_and_accepts_new_work(limit):
     async def scenario():

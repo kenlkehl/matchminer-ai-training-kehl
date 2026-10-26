@@ -2,7 +2,7 @@
 # Run as the VM's training user, on its persistent local disk.
 set -euo pipefail
 TRAINING_COMMIT=${1:?Pass the pushed training commit SHA}
-INFERENCE_COMMIT=6e38839e46a61d2583dc6c72dd6c672a19cd6a94
+INFERENCE_COMMIT=3f3d743c1d5138f62388b7ce3ee8809b2fb6bfce
 WORKSPACE="$HOME/mmai"
 sudo apt-get update
 sudo apt-get install -y git curl rsync build-essential python3-dev ninja-build

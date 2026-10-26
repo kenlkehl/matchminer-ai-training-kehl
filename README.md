@@ -99,8 +99,14 @@ The implementation is imported from the inference dependency's
 adapter, so direct labeling and the primary orchestrators share that code.
 Checkpoint reads/writes use a dedicated bounded thread pool, leaving asyncio's
 network/DNS pool available. Server model discovery is shared across simultaneous
-requests to the same endpoint. Ready requests dispatch in small bursts with an
-explicit yield for other endpoints. These optimizations are the default in both
+requests to the same endpoint. Ready requests select the server with the lowest
+active-request fraction of its adaptive limit, using the inference package's
+shared selector. Idle endpoints do not each reserve a queue consumer; sparse
+arrivals can refill a fast GPU while slower GPUs remain occupied. Dispatch yields
+after small bursts and preserves live endpoint changes, retries and admission
+limits. Checkpoint reads, durable response writes, and progress reports use
+separate bounded I/O pools, so a read backlog cannot hold completed answers or
+status updates behind thousands of other reads. These optimizations are the default in both
 standalone and orchestrated labeling. Status includes preprocessing throughput,
 queue depths, and event-loop delay; metrics failures include their exception type.
 These defaults also apply directly to `trialspace_training.py label` and

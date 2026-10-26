@@ -164,10 +164,12 @@ async def _label(args, output):
             client_stats.update(preprocessing=dict(preparer.stats),
                                 preprocessing_queue=preparer.queue.qsize(),
                                 request_queue=session.queue.qsize() if hasattr(session, 'queue') else None)
-            await storage.run(write_json, output / 'status.json', snapshot())
+            await telemetry.run(write_json, output / 'status.json', snapshot())
             await asyncio.sleep(10)
 
     async with (AsyncExitStack() as stack, BackgroundWork() as storage,
+                BackgroundWork(name='label-checkpoint-read') as checkpoint_reads,
+                BackgroundWork(1, 1, 'label-progress') as telemetry,
                 PromptPreparer(tokenizer, resolve_chat_template_kwargs(args.teacher_tokenizer),
                                context=args.teacher_context, max_tokens=args.max_tokens) as preparer,
                 RequestSession(registry, work, max_attempts=args.max_attempts) as session):
@@ -209,7 +211,7 @@ async def _label(args, output):
             return path, None
 
         async def ask(item):
-            path, row = await storage.run(load_checkpoint, item)
+            path, row = await checkpoint_reads.run(load_checkpoint, item)
             if row is not None:
                 completed[item['key']] = path
                 return row
@@ -258,7 +260,7 @@ async def _label(args, output):
             reporter.cancel()
             loop_monitor.cancel()
             await asyncio.gather(reporter, loop_monitor, return_exceptions=True)
-            await storage.run(write_json, output / 'status.json', snapshot('incomplete'))
+            await telemetry.run(write_json, output / 'status.json', snapshot('incomplete'))
     def exported_labels():
         for pair_key in sorted(restored_pairs):
             for key in scores[pair_key]['question_keys'].values():
