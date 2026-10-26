@@ -190,3 +190,28 @@ def test_tunnels_reject_insufficient_hard_fd_limit(monkeypatch):
     monkeypatch.setattr(fleet.resource, 'getrlimit', lambda limit: (1024, 4096))
     with pytest.raises(RuntimeError, match='hard limit'):
         fleet.ensure_ssh_descriptor_capacity()
+
+
+def test_new_controller_loads_host_keys_only_from_authenticated_gcp(tmp_path, monkeypatch):
+    obj = instance(tmp_path)
+    vm = dict(name='rtx-one', project='profile-notes', zone='us-central1-c',
+              alias='trusted-vm', known=str(tmp_path / 'known'))
+    calls = []
+    def cloud(command, selected):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=json.dumps([
+            dict(namespace='hostkeys', key='ssh-ed25519', value='public-key-data')]))
+    monkeypatch.setattr(obj, 'cloud', cloud)
+    obj.ensure_host_keys(vm)
+    assert (tmp_path / 'known').read_text() == 'trusted-vm ssh-ed25519 public-key-data\n'
+    obj.ensure_host_keys(vm)
+    assert len(calls) == 1
+
+
+def test_missing_gcp_host_keys_do_not_disable_ssh_verification(tmp_path, monkeypatch):
+    obj = instance(tmp_path)
+    vm = dict(name='rtx-one', known=str(tmp_path / 'known'), alias='trusted-vm')
+    monkeypatch.setattr(obj, 'cloud', lambda *a: SimpleNamespace(returncode=1, stderr='not published yet'))
+    with pytest.raises(RuntimeError, match='not available yet'):
+        obj.ensure_host_keys(vm)
+    assert not (tmp_path / 'known').exists()

@@ -18,6 +18,7 @@ from .contracts import TASKS, contract_hash, judge_messages, parse_judgment, pro
 from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl
 from .label_concurrency import DEFAULT_AUTO_WORKERS_MAX, run_workers, worker_target
 from .label_preprocessing import BackgroundWork, PromptPreparer
+from .label_checkpoints import ResponseStore
 
 
 def validate_served_teacher(models, *, requested, tokenizer):
@@ -130,6 +131,13 @@ async def _label(args, output):
         args.scheduler_metrics_file = str(output / 'concurrency_status.json')
     registry = build_registry_from_args(args)
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
+    if (output / 'reuse_sources.json').exists():
+        if not gated:
+            raise ValueError('Candidate-subset reuse requires gated labels')
+        from .label_reuse import import_completed_sources
+        write_json(output / 'status.json', dict(state='waiting_for_source_labels', **timing))
+        imported = await asyncio.to_thread(import_completed_sources, output, signature, pmap, cmap, pairs)
+        print(f'[labels] imported {imported} completed candidate-subset pairs with their reasoning traces', flush=True)
     restored_pairs = set()
     scheduled_pairs = pairs
     def groups():
@@ -197,21 +205,19 @@ async def _label(args, output):
         def load_checkpoint(item):
             # Network-filesystem reads must not block every active HTTP request
             # or the scheduler while a production run resumes saved answers.
-            path = checkpoint_dir / item['key'][:2] / (item['key'] + '.json')
-            legacy = checkpoint_dir / (item['key'] + '.json')
-            if legacy.exists():
-                path = legacy
-            if path.exists():
-                row = json.loads(path.read_text())
+            path, row = response_store.read(item['key'])
+            if row is not None:
                 if row['key'] != item['key'] or row['prompt_sha256'] != digest(item['messages']):
                     raise ValueError('Checkpoint key or clinical text mismatch')
                 parse_judgment(json.dumps({k: row[k] for k in ('answer', 'evidence_status', 'reason')}))
                 if 'messages' not in row:
                     row['messages'] = item['messages']
                     row['sampling'] = asdict(sampling)
-                    write_json(path, row)
+                    response_store.write(path, row)
                 return path, row
             return path, None
+
+        response_store = await storage.run(ResponseStore, checkpoint_dir)
 
         async def ask(item):
             path, row = await checkpoint_reads.run(load_checkpoint, item)
@@ -232,7 +238,7 @@ async def _label(args, output):
                        teacher_model=args.teacher_model, rendered_prompt=prompt, sampling=asdict(sampling))
             # Await durable response storage before accepting the answer, while
             # other request chains continue. Reasoning archives remain complete.
-            await storage.run(write_json, path, row)
+            await storage.run(response_store.write, path, row)
             completed[item['key']] = path
             return row
 

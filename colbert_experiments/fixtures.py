@@ -8,6 +8,7 @@ from .data import write_json, write_jsonl
 def create_fixture(output):
     output = Path(output)
     patients, cohorts, labels, candidates = [], [], [], []
+    contract = contract_hash()
     for split, cancer_a, cancer_b, gene_a, gene_b, therapy_a, therapy_b in [
         ('train', 'lung adenocarcinoma', 'colorectal adenocarcinoma', 'EGFR L858R', 'KRAS G12D', 'docetaxel', 'oxaliplatin'),
         ('val', 'cutaneous melanoma', 'gastrointestinal stromal tumor', 'BRAF V600E', 'KIT exon 11 mutation', 'dabrafenib', 'imatinib'),
@@ -66,7 +67,7 @@ def create_fixture(output):
                     labels.append(dict(**pair, task=task, answer='yes' if answer else 'no',
                         evidence_status='insufficient_information' if unknown else 'supported' if answer else 'contradicted',
                         reason='Hand-specified fabricated challenge expectation; see fixture definition.',
-                        contract=contract_hash(), label_source='fabricated_reference'))
+                        contract=contract, label_source='fabricated_reference'))
     write_jsonl(output / 'patients.jsonl', patients)
     write_jsonl(output / 'cohorts.jsonl', cohorts)
     write_jsonl(output / 'reference_labels.jsonl', labels)

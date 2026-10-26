@@ -8,7 +8,7 @@ directions**. The production entrypoint `../trialspace_training.py` and
 its original binary-task default for controlled comparisons. Use synthetic/non-PHI
 inputs unless the selected endpoint is authorized for the data.
 
-## Full production labels on one GB300 (2026-10-26)
+## Refreshed cohorts: retrieval and training on one GB300 (2026-10-26)
 
 Run on the GB300 host from the mounted training checkout, using its training
 Python environment and an available GPU:
@@ -25,11 +25,53 @@ With neither option nor a visibility mask, the default is physical GPU 0.
 The printed `CUDA_VISIBLE_DEVICES=...` line describes the training subprocess;
 the launcher does not retain GPU settings between invocations.
 
-This one-off launcher waits for validated production training scores, then uses
-`trialspace_training.py train` on all 2,435,540 repaired patient/cohort pairs,
-including all original source splits, in both directions. It starts from the
-base ModernColBERT model and uses the production CoSENT plus known-negative
-contrast objective for one complete epoch (5,162 optimizer updates), with a linear learning-rate
+The launcher now runs the production `prepare → mine → label → train` stages.
+It reads the promoted `../data/no_phi/sample_trial_cohort_lineitems.csv`:
+**6,762 cohorts from 4,981 accepted trials**, re-extracted from the same 5,000-trial
+sample with inference commit `1e57f66`. The other 19 screening decisions remain in
+`../data/no_phi/sample_trials_with_cohorts.csv`. The prior root sample, sampling
+receipt, and NCT list are archived under
+`../data/no_phi/archives/cohort_sample_before_reextract_20261026T152425Z/`.
+`sample_trial_cohort_lineitems.promotion.json` records the promoted and archived
+file hashes. The immutable extraction snapshot remains in
+`cohort_reextract_sample5000_gemma4_31b_20261026/`.
+
+All **68,480 existing synthetic patients** come from the repaired
+`synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025/prepared/patient_summaries_with_spaces.parquet`.
+There is no patient generation or summarization stage. Original source-trial IDs
+and source splits are retained; patients from newly rejected trials remain valid
+retrieval queries. Source-trial proposals use NCT IDs, not changed cohort indices.
+
+Fresh corpus, retrieval, and labels live in
+`../data/no_phi/colbert_reextract_gb300_20261026/`. Retrieval uses the base model,
+256 lexical/random proposals, top 20 cohorts per patient and top 40 patients per
+cohort, plus five lexical and five random candidates and source-trial proposals.
+Both directions pool all original source splits. Labeling uses the existing
+`http://127.0.0.1:8000/v1` server (`gemma4-31b`,
+`nvidia/Gemma-4-31B-IT-NVFP4`) with an adaptive request ceiling of 320.
+The launcher does not start, stop, or restart vLLM. Select an available GPU for
+mining/training separately from the server's GPU.
+For a changing pool, pass `--teacher-servers-file PATH` and
+`--teacher-concurrency-file PATH`; both files reload during labeling. Fixed
+`--teacher-url` entries are an alternative to the registry. Use `--stop-after
+label` when authorizing labeling without starting model training. Mining batch,
+pair batch, device cache, and allocator limits can be configured separately when
+sharing the GB300 with the existing vLLM process.
+
+Independent source-trial labeling can run while retrieval finishes. An explicit
+`labels/reuse_sources.json` of the form
+`{"sources": [{"labels": "/path/source/labels", "candidates": "/path/source/candidates.jsonl"}]}`
+waits for that source labeler's lock, verifies the same clinical inputs and teacher
+contract, and imports completed scores only if their pairs belong to final
+retrieval. Reasoning traces are retained alongside imported scores; the remaining
+pairs are labeled normally. This does not permit reuse across changed cohorts.
+
+Old retrieval, labels, and training checkpoints remain in their original dated
+directories. The refreshed run generates its own labels and verifies complete
+coverage against its actual retrieval count; the old 2,435,540-pair expectation
+no longer applies. Training starts from the base ModernColBERT model and uses
+the production CoSENT plus known-negative contrast objective for one complete
+epoch, with a linear learning-rate
 schedule, learning rate `2e-5` and 1% warmup. Each query group has one query
 and up to 16 documents; 64 groups give up to 1,024 directional pairs
 per optimizer update. Ranking comparisons span the effective batch. Full inputs
@@ -76,14 +118,15 @@ exhausted host memory during forward. Keep direct mode for bounded investigation
 Linux host-memory guards now exclude GPU-only NUMA nodes and account for pinned
 allocation rounding; they never reduce the effective batch or switch modes.
 
-Output defaults to `../data/no_phi/colbert_production_gb300_replay_20261026`, with
+Output defaults to `../data/no_phi/colbert_production_gb300_reextract_20261026`, with
 checkpoints in `fit/` and the final model in `model/`. Checkpoints save every 25
 updates, keeping at most two. Repeat the command to resume; create `OUTPUT/PAUSE`
 to pause cleanly and remove it before resuming. This run has no Camus time cutoff.
 The new directory starts the one-epoch schedule from scratch and preserves the
 earlier runs. Changing epochs or execution settings requires a fresh
 output directory.
-The launcher refuses to train on Camus and makes no LLM calls. It checks the
+The launcher refuses to run on Camus. Its labeling stage makes fresh LLM calls;
+after completion, subsequent launches reuse verified scores. It checks the
 complete-score publication receipt and SHA-256 content of the training files,
 then reads finalized numeric scores through the production trainer without
 inspecting individual reasoning checkpoints. The large distillation archive can
@@ -93,8 +136,16 @@ scores, corpus files, candidate files, or teacher identity still prevent trainin
 Timestamp differences across host mounts do not invalidate identical content.
 Verification streams the four data files sequentially; it does not enumerate
 the millions of saved reasoning checkpoints.
-Use `--cache-dir` for a local model cache, `--source-run`/`--output` to adjust mount
-locations, and `--dry-run` to print the command without starting anything.
+Use `--cache-dir` for a local model cache, `--source-run`/`--output` to select
+fresh artifact directories, and `--dry-run` to print the plan without starting
+anything. `--cohorts` and `--patients` override inputs; their hashes are checked
+on resume. Changing cohort text requires fresh artifact and training directories.
+`--stop-after prepare` builds only the CPU corpus; `--stop-after mine` stops after
+retrieval; `--stop-after label` prepares verified scores without starting training.
+`--teacher-url`, `--teacher-model`, `--teacher-tokenizer`, and `--label-concurrency`
+configure the existing teacher. Repeating the same command resumes completed
+stages with their content/identity checks. No old label directory is copied into
+this run. In-sample AUROC evaluation remains every 100 updates.
 End-to-end throughput must be measured on the GB300; microbatch and
 accumulation settings can be overridden before the first fit.
 

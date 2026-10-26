@@ -192,6 +192,24 @@ class Fleet:
             '-o', 'HostKeyAlias=' + vm['alias'], '-o', 'ConnectTimeout=10',
             '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3']
 
+    def ensure_host_keys(self, vm):
+        """Bootstrap trust through authenticated GCP guest attributes, never TOFU."""
+        known = Path(vm['known'])
+        if known.exists() and known.stat().st_size:
+            return
+        result = self.cloud(['instances', 'get-guest-attributes', vm['name'],
+                             '--query-path=hostkeys/', '--format=json'], vm)
+        if result.returncode:
+            raise RuntimeError('Trusted VM host keys not available yet: ' + result.stderr[-500:])
+        keys = [row for row in json.loads(result.stdout)
+                if row.get('namespace') == 'hostkeys'
+                and row.get('key') in ('ssh-ed25519', 'ecdsa-sha2-nistp256', 'ssh-rsa')
+                and row.get('value') and not any(c.isspace() for c in row['value'])]
+        if not keys:
+            raise ValueError('GCP did not provide valid SSH host keys')
+        known.parent.mkdir(parents=True, exist_ok=True)
+        known.write_text(''.join(f"{vm['alias']} {row['key']} {row['value']}\n" for row in keys))
+
     def remote(self, vm, ip, code, shell='sudo -n python3 -', timeout=45):
         result = self.run([*self.ssh(vm), 'kenneth_kehl@' + ip, shell], input=code, timeout=timeout)
         if result.returncode:
@@ -252,6 +270,7 @@ class Fleet:
                 return result
             ip = state['networkInterfaces'][0]['accessConfigs'][0]['natIP']
             result['ip'] = ip
+            self.ensure_host_keys(vm)
             code = ('from pathlib import Path\nimport json,time,subprocess\n'
                 f'r=Path({REMOTE!r});p=r/"config.json"\n'
                 f'valid=p.exists() and json.loads(p.read_text()).get("config_hash")=={self.config["worker"]["config_hash"]!r}\n'

@@ -285,7 +285,14 @@ The GB300 launcher uses eight groups per forward, a 131,072 padded-token budget,
 and **replay** by default, with 64 query chunks in the effective ranking batch.
 The [GB300 measurements](colbert_experiments/GB300_MEMORY_RESULTS_20261026.md)
 show why retaining the full batch is not the current production recommendation.
-The fresh default output is `colbert_production_gb300_replay_20261026`.
+The launcher now prepares the promoted `data/no_phi/sample_trial_cohort_lineitems.csv`
+with the existing repaired synthetic patient summaries, reruns retrieval and
+teacher labeling on local port 8000, then trains on the new validated pairs.
+It preserves old artifacts and uses `colbert_reextract_gb300_20261026` for the
+new corpus/mining/labels and `colbert_production_gb300_reextract_20261026` for
+training. No synthetic patient generation is included. See the
+[GB300 workflow](colbert_experiments/README.md) for inputs and stage controls;
+`--stop-after label` finishes new labels without starting training.
 
 Retained graphs remain an explicit experiment: use `--ranking-backward retained
 --no-gradient-checkpointing`, or `--trialspace-ranking-backward retained` in the

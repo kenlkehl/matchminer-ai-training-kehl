@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""One-off single-GB300 training on all completed production labels, no new LLM calls."""
+"""Single-GB300 retrieval, fresh teacher labels, and training on promoted cohorts."""
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -8,20 +9,41 @@ import shlex
 import socket
 import subprocess
 import sys
-import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-SOURCE = ROOT.parent / 'data/no_phi/synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025'
-OUTPUT = ROOT.parent / 'data/no_phi/colbert_production_gb300_replay_20261026'
-EXPECTED_PAIRS = 2435540
+DATA = ROOT.parent / 'data/no_phi'
+PATIENTS = DATA / 'synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025/prepared/patient_summaries_with_spaces.parquet'
+COHORTS = DATA / 'sample_trial_cohort_lineitems.csv'
+SOURCE = DATA / 'colbert_reextract_gb300_20261026'
+OUTPUT = DATA / 'colbert_production_gb300_reextract_20261026'
 
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source-run', type=Path, default=SOURCE)
     p.add_argument('--output', type=Path, default=OUTPUT)
+    p.add_argument('--cohorts', type=Path, default=COHORTS)
+    p.add_argument('--patients', type=Path, default=PATIENTS,
+                   help='Existing repaired synthetic summaries; no patient generation or summarization')
+    teacher = p.add_mutually_exclusive_group()
+    teacher.add_argument('--teacher-url', default='http://127.0.0.1:8000/v1')
+    teacher.add_argument('--teacher-servers-file', type=Path,
+                         help='Live endpoint registry; healthy servers may join and leave during labeling')
+    p.add_argument('--teacher-concurrency-file', type=Path,
+                   help='Live global/per-endpoint adaptive concurrency ceilings')
+    p.add_argument('--teacher-model', default='gemma4-31b')
+    p.add_argument('--teacher-tokenizer', default='nvidia/Gemma-4-31B-IT-NVFP4')
+    p.add_argument('--label-concurrency', type=int, default=320)
+    p.add_argument('--mining-batch-size', type=int, default=16)
+    p.add_argument('--mining-pair-batch-size', type=int, default=512)
+    p.add_argument('--mining-device-cache-gb', type=float, default=8)
+    p.add_argument('--mining-device-cache-reserve-gb', type=float, default=8)
+    p.add_argument('--mining-device-memory-limit-gb', type=float, default=0,
+                   help='Optional PyTorch allocator limit when retrieval shares a GPU with vLLM')
+    p.add_argument('--stop-after', choices=['prepare', 'mine', 'label', 'train'], default='train',
+                   help='Run the resumable stages through this point; default includes training')
     device = p.add_mutually_exclusive_group()
     device.add_argument('--gpu', help='Physical CUDA GPU index or UUID; explicitly overrides CUDA_VISIBLE_DEVICES')
     device.add_argument('--visible-gpu', type=int,
@@ -43,6 +65,43 @@ def parser():
     p.add_argument('--eval-every', type=int, default=100)
     p.add_argument('--dry-run', action='store_true', help='Print the command without waiting, using GPUs or writing outputs')
     return p
+
+
+def preparation_commands(args):
+    """Use production stages with one shared, generation-specific corpus."""
+    source = args.source_run.resolve()
+    program = [sys.executable, str(ROOT / 'trialspace_training.py')]
+    corpus = str(source / 'corpus_all')
+    prepare = program + ['prepare', '--patients', str(args.patients.resolve()),
+        '--cohorts', str(args.cohorts.resolve()), '--output', corpus, '--merge-source-splits']
+    mine = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nproc_per_node=1',
+        *program[1:], 'mine', '--corpus', corpus, '--output', str(source / 'mining_all'),
+        '--model', 'lightonai/GTE-ModernColBERT-v1', '--query-length', '8192', '--document-length', '8192',
+        '--candidate-limit', '256', '--proposal-strategy', 'lexical_random',
+        '--top-k-patient-to-cohort', '20', '--top-k-cohort-to-patient', '40',
+        '--lexical-k', '5', '--random-k', '5', '--document-batch-size', str(args.mining_batch_size),
+        '--query-batch-size', str(args.mining_batch_size), '--score-batch-size', str(args.mining_batch_size),
+        '--cache-batches', '256', '--pair-batch-size', str(args.mining_pair_batch_size),
+        '--score-query-batches', '4', '--device-cache-gb', str(args.mining_device_cache_gb),
+        '--device-cache-reserve-gb', str(args.mining_device_cache_reserve_gb),
+        '--device-memory-limit-gb', str(args.mining_device_memory_limit_gb),
+        '--splits', 'train', 'val', 'test']
+    label = program + ['label', '--corpus', corpus,
+        '--candidates', str(source / 'mining_all/candidates.jsonl'), '--output', str(source / 'labels'),
+        '--teacher-model', args.teacher_model, '--teacher-tokenizer', args.teacher_tokenizer,
+        '--teacher-context', '250000',
+        '--max_concurrent_per_server', str(args.label_concurrency),
+        '--initial-concurrent-per-server', str(min(96, args.label_concurrency)),
+        '--pending-requests', '0', '--max_attempts', '16', '--request_timeout', '7200',
+        '--gated-regression', '--scheduler-adaptive-concurrency']
+    label += (['--server_urls_file', str(args.teacher_servers_file.resolve())] if args.teacher_servers_file
+              else ['--server_urls', args.teacher_url])
+    if args.teacher_concurrency_file:
+        label += ['--concurrency-control-file', str(args.teacher_concurrency_file.resolve())]
+    if args.cache_dir:
+        for stage in (mine, label):
+            stage += ['--cache-dir', str(args.cache_dir.resolve())]
+    return [('prepare', prepare), ('mine', mine), ('label', label)]
 
 
 def command(args):
@@ -95,30 +154,81 @@ def selected_gpu(gpu, visible, *, visible_index=None):
 def ready(source):
     """Verify compact training files by content; never scan reasoning checkpoints."""
     from colbert_experiments.score_publication import ready_scores
+    completion = source / 'mining_all/complete.json'
+    if not completion.exists():
+        return False, dict(state='retrieval_not_complete')
+    expected_pairs = json.loads(completion.read_text())['pairs']
+    if not isinstance(expected_pairs, int) or expected_pairs < 1:
+        raise ValueError('Completed retrieval must contain a positive candidate count')
     publication = ready_scores(source / 'labels', corpus=source / 'corpus_all',
-                               candidates=source / 'mining_all/candidates.jsonl', expected_pairs=EXPECTED_PAIRS)
+                               candidates=source / 'mining_all/candidates.jsonl', expected_pairs=expected_pairs)
     if publication is not None:
         return True, dict(state='training_scores_ready', scored_pairs=publication['pairs'])
-    workflow = json.loads((source / 'status.json').read_text())
-    labels = json.loads((source / 'labels/status.json').read_text())
-    if labels.get('failures'):
-        raise RuntimeError('Source labeling failed with unresolved question labels')
-    if workflow.get('phase') == 'failed' or labels.get('state') == 'failed':
-        raise RuntimeError('Source workflow failed before publishing verified training scores: '
-                           + str(workflow.get('error', labels.get('error', 'unknown error')))
-                           + f". Saved pairs: {labels.get('scored_pairs')}/{labels.get('total_pairs')}. "
-                           'Resume CPU-only label finalization; this is not evidence that saved labels are missing.')
-    if labels.get('total_pairs') != EXPECTED_PAIRS:
-        raise ValueError('This one-off launcher expects the repaired 2,435,540-pair production run')
-    if workflow.get('phase') != 'completed' or labels.get('state') != 'complete':
-        return False, labels
-    if labels.get('scored_pairs') != EXPECTED_PAIRS:
-        raise ValueError('Source has incomplete score coverage')
-    required = ['completed/labeling.json', 'labels/scores.jsonl',
-                'labels/labels.jsonl', 'corpus_all/patients.jsonl', 'corpus_all/cohorts.jsonl']
-    if not all((source / item).is_file() for item in required):
-        raise FileNotFoundError('Completed production label/corpus files are missing')
-    return True, labels
+    return False, dict(state='training_scores_not_published', total_pairs=expected_pairs)
+
+
+def label_settings(args):
+    """Only semantic label settings belong in the resume identity."""
+    return dict(teacher_model=args.teacher_model, teacher_tokenizer=args.teacher_tokenizer,
+                teacher_context=250000, max_attempts=16, request_timeout=7200)
+
+
+def run_process(command, *, environment, status_path, phase):
+    """Expose the actual child identity to the fleet's inference-complete guard."""
+    from colbert_experiments.data import write_json
+    with subprocess.Popen(command, cwd=ROOT, env=environment) as child:
+        write_json(status_path, dict(phase=phase, pid=os.getpid(), child_pid=child.pid, command=command))
+        try:
+            return child.wait()
+        except BaseException:
+            child.terminate()
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            raise
+
+
+def run_stages(args, environment):
+    from colbert_experiments.data import write_json
+    source = args.source_run.resolve()
+    source.mkdir(parents=True, exist_ok=True)
+    with (source / 'gb300_workflow.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        settings_path = source / 'gb300_label_settings.json'
+        settings = label_settings(args)
+        if settings_path.exists() and json.loads(settings_path.read_text()) != settings:
+            raise ValueError('Teacher settings changed; use a new --source-run and --output')
+        write_json(settings_path, settings)
+        status_path = source / 'gb300_status.json'
+        for name, stage in preparation_commands(args):
+            # Prepare and mine validate their own source/settings manifests even
+            # on resume. Only a complete content-verified score publication skips
+            # label replay (which would reopen the large reasoning archive).
+            done, status = ready(source) if name == 'label' else (False, {})
+            phase = {'prepare': 'preparing_corpus', 'mine': 'mining', 'label': 'labeling'}[name]
+            write_json(status_path, dict(phase=phase, pid=os.getpid(), command=stage))
+            if not done:
+                returncode = run_process(stage, environment=environment, status_path=status_path, phase=phase)
+                if returncode:
+                    write_json(status_path, dict(phase='failed', stage=name, returncode=returncode))
+                    raise SystemExit(returncode)
+            if name == 'label':
+                done, status = ready(source)
+                if not done:
+                    raise RuntimeError('Labeling did not publish complete training scores: ' + json.dumps(status))
+                print(f"Verified {status['scored_pairs']:,} freshly retrieved training pairs.", flush=True)
+            if args.stop_after == name:
+                write_json(status_path, dict(phase='completed' if name == 'label' else 'stopped', completed_stage=name))
+                return 0
+        args.output.mkdir(parents=True, exist_ok=True)
+        write_json(status_path, dict(phase='training', pid=os.getpid(), command=command(args)))
+        print('Complete production training scores are ready. Starting training; resume by repeating this command.', flush=True)
+        returncode = run_process(command(args), environment=environment, status_path=status_path, phase='training')
+        write_json(status_path, dict(phase={0: 'completed', 75: 'paused'}.get(returncode, 'failed'),
+                                    stage='train', returncode=returncode))
+        return returncode
 
 
 def main():
@@ -129,30 +239,34 @@ def main():
         raise ValueError('Use positive encoder batch limits and nonnegative token cache capacity')
     if args.ranking_backward == 'retained' and args.gradient_checkpointing:
         raise ValueError('Retained mode uses one forward; leave gradient checkpointing disabled')
+    if not 1 <= args.label_concurrency <= 1024:
+        raise ValueError('--label-concurrency must be between 1 and 1024')
+    if min(args.mining_batch_size, args.mining_pair_batch_size) < 1 or args.mining_device_cache_gb < 0:
+        raise ValueError('Use positive mining batches and a nonnegative device cache budget')
     gpu = selected_gpu(args.gpu, os.environ.get('CUDA_VISIBLE_DEVICES'), visible_index=args.visible_gpu)
     launch = command(args)
-    print('CUDA_VISIBLE_DEVICES=' + shlex.quote(gpu) + ' ' + shlex.join(launch), flush=True)
+    if args.stop_after == 'train':
+        print('CUDA_VISIBLE_DEVICES=' + shlex.quote(gpu) + ' ' + shlex.join(launch), flush=True)
+    else:
+        print(f'CUDA_VISIBLE_DEVICES={shlex.quote(gpu)}; plan stops after {args.stop_after}.', flush=True)
     selection = 'explicit --gpu' if args.gpu is not None else 'visible GPU selection'
     print(f'Training subprocess will see physical CUDA device {gpu} as cuda:0 ({selection}).', flush=True)
-    print(f'Both directions; all {EXPECTED_PAIRS:,} pairs; {args.epochs:g} complete epochs; '
+    print(f'Both directions; all freshly retrieved/labeled pairs; {args.epochs:g} complete epochs; '
           f'up to {args.documents_per_query * args.accumulation:,} directional pairs per update.', flush=True)
     print(f'Up to {args.query_groups_per_forward} query groups per encoder forward; '
           f'{args.encoder_token_budget:,} padded-token packing budget; CPU token cache enabled '
           f'for up to {args.token_cache_tokens:,} tokens.', flush=True)
     print(f'Ranking backward: {args.ranking_backward}; activation storage: {args.activation_storage}.', flush=True)
+    print(f'Promoted cohorts: {args.cohorts.resolve()}', flush=True)
+    print(f'Existing patient summaries: {args.patients.resolve()}', flush=True)
+    for name, stage in preparation_commands(args):
+        print(f'{name}: ' + shlex.join(stage), flush=True)
+        if name == args.stop_after:
+            break
     if args.dry_run:
         return
     if socket.gethostname().split('.')[0].lower().startswith('camus'):
         raise RuntimeError('This run was moved off Camus. Run this launcher on the GB300 host.')
-    source = args.source_run.resolve()
-    print('Verifying training-file content hashes with sequential reads; no reasoning checkpoints are scanned.', flush=True)
-    while True:
-        done, status = ready(source)
-        if done:
-            break
-        print('Waiting for validated production training scores: ' + json.dumps({key: status.get(key) for key in
-              ('state', 'scored_pairs', 'exported_questions', 'total_questions')}), flush=True)
-        time.sleep(30)
     environment = {**os.environ, 'CUDA_VISIBLE_DEVICES': gpu, 'PYTHONUNBUFFERED': '1',
                    'TOKENIZERS_PARALLELISM': 'false', 'OMP_NUM_THREADS': '4',
                    'MKL_NUM_THREADS': '4', 'OPENBLAS_NUM_THREADS': '4'}
@@ -163,10 +277,7 @@ def main():
     if environment.get('PYTHONPATH'):
         paths.append(environment['PYTHONPATH'])
     environment['PYTHONPATH'] = os.pathsep.join(paths)
-    args.output.mkdir(parents=True, exist_ok=True)
-    print('Complete production training scores are ready. Starting training; resume by repeating this command.', flush=True)
-    result = subprocess.run(launch, cwd=ROOT, env=environment)
-    raise SystemExit(result.returncode)
+    raise SystemExit(run_stages(args, environment))
 
 
 if __name__ == '__main__':

@@ -4,7 +4,95 @@ Prepared 2026-10-26 from Camus for a Codex session running directly on
 `sn4622130540`. This is an implementation/debugging handoff, not a published
 model release. Paths below assume the same shared mount.
 
-## What the user wants next
+## Current state after cohort refresh (2026-10-26)
+
+**Latest: user paused the run at 16:22 UTC for further cohort-prompt and output-format changes.**
+The labeling client, retrieval workflow, and host-key helper are stopped. All
+eight cloud VMs were confirmed TERMINATED at 16:24 UTC; the supervisor exited and
+the fleet STOP marker is set. Preserve
+partial answers and reasoning, and do not restart without user authorization.
+The active-run details below describe the state immediately before this pause.
+
+This section supersedes the older optimization handoff below. GB300 benchmarking
+selected replay as the default; see `GB300_MEMORY_RESULTS_20261026.md`.
+The pre-refresh code was committed as training `b0bccdc` and inference `1e57f66`.
+
+The same 5,000 trials were re-screened/extracted using the updated cohort prompt
+on local port 8000. All decisions validated: 4,981 accepted trials, 19 rejected,
+6,762 cohort rows (previously 6,848). The refreshed exports are promoted to the
+main `data/no_phi` directory. Previous root sample files are preserved under
+`archives/cohort_sample_before_reextract_20261026T152425Z/`; the root
+`sample_trial_cohort_lineitems.promotion.json` records hashes and exact paths.
+Synthetic generation snapshots and patient data are unchanged.
+
+`train_full_gb300.py` now orchestrates `prepare → mine → label → train`, defaulting
+to the promoted `sample_trial_cohort_lineitems.csv` and all 68,480 existing repaired
+patient summaries from the old `post_notes_colbert_20261025/prepared/` directory.
+New source artifacts go to `data/no_phi/colbert_reextract_gb300_20261026/` and model
+training to `data/no_phi/colbert_production_gb300_reextract_20261026/`. Old labels,
+retrieval artifacts, and paused checkpoints stay in their dated directories.
+The new run must retrieve and label against the new cohort definitions; the old
+2,435,540 pair count and 5,162-update estimate are historical.
+
+The new CPU corpus has been prepared and checked: its `patients.jsonl` is
+byte-identical to the repaired prior corpus, with SHA-256
+`53c4c541dda0746a94744b8cb7689589cd7426dd322e313f90d3e76005b5f7c5`.
+`colbert_reextract_gb300_20261026/configuration_validation.json` records promotion,
+archive, and corpus checks, and `launch_plan.txt` contains the dry-run command plan.
+Retrieval and labeling are now active under the user's subsequent authorization.
+The invocation stops after labeling; model training has not started. The launch
+receipt, live progress, and complete operating instructions are in that run's
+`labeling_launch.json`, `gb300_status.json`, and `LABELING_OPERATIONS.txt`.
+
+Full retrieval shares the GB300 with its existing vLLM process, using batches of
+8, 128-pair scoring, a 4 GiB token cache, and a 7 GiB PyTorch allocator ceiling.
+While retrieval runs, `source_trial_labeling/` labels the 135,580 source-trial
+pairs guaranteed to appear in the final union. No patients are subsampled. The
+final `labels/reuse_sources.json` imports completed pairs only after the source
+labeler releases its lock, verifies identical corpus/prompt/teacher contracts and
+candidate membership, and preserves each reasoning response. Old-cohort labels
+are never imported.
+
+The live pool uses the existing local port 8000, Camus ports 8002/8003 through
+model-name proxies on 18102/18103, and 172.24.216.113:8001. The run-owned cloud
+supervisor manages only the eight requested RTX Spot VMs in `profile-notes` and
+`kehllab-caia-v2`, up to eight NVIDIA Gemma 4 31B NVFP4 servers per VM. Healthy
+servers join automatically; unavailable or preempted VMs retry every 300 seconds.
+At 16:12 UTC, 56 cloud GPU endpoints were admitted; `rtxpro-3` was repeatedly
+preempted and remained under retry. Treat this as a timestamped snapshot.
+
+`label_servers.json` and `label_concurrency.json` are live controls. Runtime
+ceilings are GB300 768, Camus 128 each, other existing host 256, cloud 256 each,
+within CLI ceiling 1024. Adaptive targets start at 96. Fleet shutdown follows
+completion of final label inference, main workflow failure/exit, or lease expiry;
+source-subset completion alone does not stop the fleet.
+
+The cohort prompt audit compared the actual stored extraction request with the
+inference file as it stood at the initial audit: SHA-256
+`013c4376609cf7e8b05aaeeb425e2d2955e05cbaa8bb659af6afda01c69db965`.
+The revised examples were sent and the old “First population:” example was absent.
+Cohort-name headings remain in raw model responses (e.g. NCT04215978's “Phase 1a
+(dose escalation):”), rather than being restored by CSV processing. The prompt
+still asks the string to identify its population and does not prohibit headings.
+No prompt edits or new extraction were performed by the agent as part of this audit.
+At 16:20 UTC a subsequent user edit appeared, with SHA-256
+`6f16c11aa8661bcd905eaadeb7f1eabe31b87fea82626d2a9c104d01fa4965ed`.
+It requests dictionaries containing `cohort_name` and
+`cohort_specific_eligibility_criteria`; that newer edit was not used in this run.
+Its output-format section and example still specify strings, a format conflict
+reported to the user. Preserve these ongoing user edits.
+
+The teacher defaults to `http://127.0.0.1:8000/v1`, served model `gemma4-31b`,
+root `nvidia/Gemma-4-31B-IT-NVFP4`, with adaptive concurrency capped at 320.
+The launcher does not manage server processes. The GPU flag selects the single
+device used for retrieval and training. The previous verified training device was
+`GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9`; check availability before launch.
+Use `--dry-run` to inspect the plan or `--stop-after prepare|mine|label` to stop
+before later stages. Repeating a command resumes with source and content checks.
+Training keeps replay, 64 groups × 16 documents, group cap 8, token budget 131,072,
+checkpoints every 25 updates (two retained), and AUROC every 100 updates.
+
+## Historical optimization handoff
 
 Make the complete, one-epoch TrialSpace training run substantially faster on the
 GB300 without discarding training examples or weakening its effective-batch

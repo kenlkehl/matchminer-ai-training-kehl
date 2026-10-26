@@ -60,11 +60,12 @@ def test_finalization_rejects_changed_clinical_inputs(tmp_path):
     assert not (output / 'scores_ready.json').exists()
 
 
-@pytest.mark.parametrize('changed', ['scores', 'patients', 'teacher'])
+@pytest.mark.parametrize('changed', ['scores', 'patients', 'cohorts', 'teacher'])
 def test_publication_rejects_files_changed_after_validation(tmp_path, changed):
     corpus, candidates, output = source(tmp_path)
     finalize(corpus, candidates, output, scores_only=True)
     path = {'scores': output / 'scores.jsonl', 'patients': corpus / 'patients.jsonl',
+            'cohorts': corpus / 'cohorts.jsonl',
             'teacher': output / 'labeling_manifest.json'}[changed]
     if changed == 'teacher':
         signature = json.loads(path.read_text())
@@ -76,14 +77,23 @@ def test_publication_rejects_files_changed_after_validation(tmp_path, changed):
         ready_scores(output, corpus=corpus, candidates=candidates, expected_pairs=2)
 
 
-def test_gb300_can_use_validated_scores_after_export_workflow_failure(tmp_path, monkeypatch):
+def test_gb300_can_use_validated_scores_after_export_workflow_failure(tmp_path):
     from colbert_experiments import train_full_gb300 as launcher
     corpus, candidates, output = source(tmp_path)
     finalize(corpus, candidates, output, scores_only=True)
-    monkeypatch.setattr(launcher, 'EXPECTED_PAIRS', 2)
+    write_json(tmp_path / 'mining_all/complete.json', dict(pairs=2))
     ready, status = launcher.ready(tmp_path)
     assert ready and status['scored_pairs'] == 2
     assert not (output / 'labels.jsonl').exists()
+
+
+def test_gb300_requires_scores_for_the_new_retrieval_count(tmp_path):
+    from colbert_experiments import train_full_gb300 as launcher
+    corpus, candidates, output = source(tmp_path)
+    finalize(corpus, candidates, output, scores_only=True)
+    write_json(tmp_path / 'mining_all/complete.json', dict(pairs=3))
+    with pytest.raises(ValueError, match='expected complete candidate set'):
+        launcher.ready(tmp_path)
 
 
 def test_other_mount_timestamp_precision_does_not_reject_identical_content(tmp_path, monkeypatch):

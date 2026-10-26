@@ -224,6 +224,17 @@ def _mine(args, model, *, rank, world, local):
     if min(*directional_top_k.values(), args.lexical_k, args.random_k) < 0:
         raise ValueError('Production mining requires nonnegative candidate counts')
     output = Path(args.output)
+    memory_limit = getattr(args, 'device_memory_limit_gb', 0)
+    if memory_limit < 0:
+        raise ValueError('Device memory limit must be nonnegative')
+    if memory_limit:
+        if args.device == 'cpu':
+            raise ValueError('Device memory limit requires CUDA retrieval')
+        total = torch.cuda.get_device_properties(local).total_memory
+        fraction = memory_limit * 1024 ** 3 / total
+        if fraction > 1:
+            raise ValueError('Device memory limit exceeds GPU capacity')
+        torch.cuda.set_per_process_memory_fraction(fraction, local)
     patients, cohorts = load_corpus(args.corpus)
     model = model or ColBERT(args.model, revision=args.revision, cache_dir=args.cache_dir,
                             query_length=args.query_length, document_length=args.document_length)
@@ -398,6 +409,8 @@ def parser():
         help='Per-worker resident token budget; larger corpora use the bounded CPU cache')
     sub.choices['mine'].add_argument('--device-cache-reserve-gb', type=float, default=8,
         help='GPU memory reserved outside the resident token cache; reduce only for bounded repair jobs')
+    sub.choices['mine'].add_argument('--device-memory-limit-gb', type=float, default=0,
+        help='Optional PyTorch allocator ceiling in GiB for shared-GPU retrieval; zero leaves the default')
     sub.choices['mine'].add_argument('--pair-batch-size', type=int, default=512,
         help='Query/document pairs scored together across multiple queries')
     sub.choices['mine'].add_argument('--score-query-batches', type=int, default=4,
