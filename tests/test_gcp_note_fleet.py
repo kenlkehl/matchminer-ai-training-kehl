@@ -2,7 +2,6 @@ import hashlib
 import base64
 import json
 import io
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -44,6 +43,18 @@ def test_label_fleet_keeps_teachers_during_retrieval_and_labeling(phase):
 def test_label_fleet_stops_when_attached_workflow_finishes_or_fails(phase, alive, reason):
     assert fleet.workflow_terminal_reason(dict(stage='completed'), False, dict(phase=phase), alive,
                                           mode='labeling') == reason
+
+
+def test_label_fleet_stops_before_cpu_only_reasoning_export_finishes():
+    workflow = dict(phase='labeling', child_pid=42)
+    labels = dict(pid=42, state='exporting_labels', inference_complete=True,
+                  total_pairs=10, scored_pairs=10, failures={})
+    assert fleet.workflow_terminal_reason({}, False, workflow, True, mode='labeling',
+        label_status=labels) == 'label_inference_finished'
+    for change in [dict(pid=41), dict(inference_complete=False), dict(scored_pairs=9),
+                   dict(failures={'key': 'error'}), dict(state='labeling')]:
+        assert fleet.workflow_terminal_reason({}, False, workflow, True, mode='labeling',
+            label_status={**labels, **change}) is None
 
 
 def test_label_fleet_requires_attached_workflow(tmp_path):

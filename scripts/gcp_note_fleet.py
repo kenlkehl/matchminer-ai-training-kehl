@@ -74,7 +74,8 @@ def terminal_reason(status, alive):
     return None
 
 
-def workflow_terminal_reason(generation, generator_alive, workflow, workflow_alive, *, mode='summarization'):
+def workflow_terminal_reason(generation, generator_alive, workflow, workflow_alive, *, mode='summarization',
+                             label_status=None):
     """Watch the explicitly selected inference stage, including its preparation."""
     if mode not in ('summarization', 'labeling'):
         raise ValueError('Unknown fleet workflow mode')
@@ -82,6 +83,14 @@ def workflow_terminal_reason(generation, generator_alive, workflow, workflow_ali
         return 'downstream_workflow_failed'
     if mode == 'labeling' and workflow.get('phase') == 'completed':
         return 'labeling_finished'
+    if (mode == 'labeling' and label_status and label_status.get('inference_complete') is True
+            and workflow.get('phase') == 'labeling' and workflow.get('child_pid') is not None
+            and label_status.get('pid') == workflow['child_pid']
+            and label_status.get('state') in ('exporting_labels', 'complete')
+            and not label_status.get('failures')
+            and label_status.get('scored_pairs') == label_status.get('total_pairs')
+            and label_status.get('total_pairs', 0) > 0):
+        return 'label_inference_finished'
     if not workflow_alive:
         return 'downstream_controller_exited'
     if mode == 'labeling':
@@ -355,8 +364,12 @@ class Fleet:
                     if workflow_config:
                         workflow = json.loads(Path(workflow_config['status']).read_text())
                         workflow_alive = process_identity(workflow_config['pid']) == workflow_config['start_ticks']
+                        label_path = Path(workflow_config.get('label_status',
+                            Path(workflow_config['status']).parent / 'labels/status.json'))
+                        label_status = (json.loads(label_path.read_text())
+                            if self.config.get('workflow_mode') == 'labeling' and label_path.exists() else None)
                         reason = workflow_terminal_reason(status, alive, workflow, workflow_alive,
-                            mode=self.config.get('workflow_mode', 'summarization'))
+                            mode=self.config.get('workflow_mode', 'summarization'), label_status=label_status)
                     else:
                         reason = terminal_reason(status, alive)
                     if self.stop or (self.root / 'STOP').exists():

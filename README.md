@@ -78,6 +78,12 @@ Partial pairs reuse their saved questions. Batched journal writes are flushed to
 disk before completion is reported, and only a torn final append is recoverable;
 conflicting records or changed identities fail validation. Full reasoning remains
 in `responses/` and the final flattened distillation export.
+After inference drains and all checkpoints are durable, status explicitly reports
+`inference_complete` and `exporting_labels`. The attached cloud supervisor stops
+the VMs at that boundary, without waiting for CPU-only output consolidation.
+The final export uses bounded parallel checkpoint reads and atomic publication,
+preserves every response field, and reports exported-question progress. Training
+still waits for the complete, validated output files.
 
 Older runs require a one-time conversion with the labeler stopped:
 

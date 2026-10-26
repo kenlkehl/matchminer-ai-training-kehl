@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import fcntl
 import json
+import os
 from pathlib import Path
 import time
 import uuid
@@ -65,7 +66,7 @@ async def label(args):
 async def _label(args, output):
     auto_maximum = getattr(args, 'max_auto_pending_requests', DEFAULT_AUTO_WORKERS_MAX)
     worker_target(args.pending_requests, 0, auto_maximum)  # Validate before loading the corpus.
-    timing = dict(started_at=datetime.now(timezone.utc).isoformat(), first_request_at=None,
+    timing = dict(pid=os.getpid(), started_at=datetime.now(timezone.utc).isoformat(), first_request_at=None,
                   attempts_started=0)
     patients, cohorts = load_corpus(args.corpus)
     pairs = read_jsonl(args.candidates)
@@ -261,18 +262,21 @@ async def _label(args, output):
             loop_monitor.cancel()
             await asyncio.gather(reporter, loop_monitor, return_exceptions=True)
             await telemetry.run(write_json, output / 'status.json', snapshot('incomplete'))
-    def exported_labels():
+    def export_keys():
         for pair_key in sorted(restored_pairs):
             for key in scores[pair_key]['question_keys'].values():
-                path = checkpoint_dir / key[:2] / (key + '.json')
-                if not path.exists():
-                    path = checkpoint_dir / (key + '.json')
-                yield json.loads(path.read_text())
+                yield key
         for key in sorted(completed):
-            yield json.loads(completed[key].read_text())
+            yield key
     # This is a final flattened distillation export, after LLM work finishes.
     # It is not used to reconstruct progress or dispatch requests on resume.
-    write_jsonl(output / 'labels.jsonl', exported_labels())
+    from .label_export import export_labels
+    timing['inference_complete'] = not failures
+    timing['inference_finished_at'] = datetime.now(timezone.utc).isoformat()
+    def export_progress(values):
+        write_json(output / 'status.json', dict(snapshot('exporting_labels'), **values))
+    export_labels(checkpoint_dir, output / 'labels.jsonl', export_keys(),
+                  total=restored_questions + len(completed), progress=export_progress)
     if gated:
         from .regression import score_balance
         write_jsonl(output / 'scores.jsonl', [scores[k] for k in sorted(scores)])
@@ -280,5 +284,5 @@ async def _label(args, output):
     write_json(output / 'status.json', snapshot('incomplete' if failures else 'complete'))
     if failures:
         raise RuntimeError(f'{len(failures)} unresolved teacher labels; resume this command to retry')
-    return (list(exported_labels())
+    return (read_jsonl(output / 'labels.jsonl')
             if getattr(args, 'return_records', True) else None)
