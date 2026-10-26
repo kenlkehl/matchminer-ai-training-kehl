@@ -11,7 +11,8 @@ seeds, event lists, and synthetic notes, using the six existing endpoints and a
 live pool for future additions. Production `run_pipeline.py` is running only the
 `generate-synthetic` stage in
 `data/no_phi/synthetic_namedcohorts_5000_gemma4_31b_20261026/`.
-The coordinator launch PID is 3024971 and generation child PID is 3025052;
+After checkpoint recovery at 23:07 UTC, the coordinator launch PID is 3148418
+and generation child PID is 3148482;
 verify their recorded start identities in `launch.json` and
 `generator_process.json` before signaling them. The run stops after raw synthetic
 notes; summarization, retrieval, labeling, and model training remain paused.
@@ -26,19 +27,90 @@ histories; notes start after all histories validate. No archived patient
 checkpoints are reused. Source archives and provenance capture training
 `609ecd5` and inference `9b1bf81`.
 
-Pool: GB300 port 8000, `172.24.216.113:8001`, and Camus ports 8000–8003. The four
-Camus endpoints use new run-owned alias proxies on loopback ports 18100–18103;
+Pool: GB300 port 8000, `172.24.216.113:8001–8003`, and Camus ports 8002–8003. The four
+Camus alias proxies use loopback ports 18100–18103, but 18100/18101 were removed
+from the registry at 23:06 UTC after both upstream ports refused connections;
 their configs and launch identities are under `pool/`. Initial adaptive targets
 are 256 for GB300, 64 for 172.24.216.113, and 32 per Camus endpoint; configured
 ceilings are 768, 256, and 128 respectively. `servers.json` and `concurrency.json`
 reload live, with `servers.fleet.lock` for coordinated edits. The pending queue
-is 8,192; per-server limits control actual requests. No cloud fleet is attached.
+is 8,192; per-server limits control actual requests.
+
+At 22:13 UTC the user authorized attaching all eight RTX Pro 6000 x8 Spot VMs
+in `profile-notes` and `kehllab-caia-v2` through both event and synthetic-note
+generation. The current controller/configuration is
+`gcp_generation_fleet_20261026/` inside this generation run, managed by user
+service `mmai-synthetic-gcp-fleet-20261026.service`. It uses the existing tested
+`scripts/gcp_note_fleet.py` and `scripts/gcp_note_worker.py`, with frozen copies
+and source hashes in that fleet directory. Each GPU serves
+`nvidia/Gemma-4-31B-IT-NVFP4` as `gemma4-31b`, with the pinned model revision,
+container digest, and tokenizer template verified against the active run.
+Cloud endpoints use SSH-forwarded loopback ports 22400–22477 (eight ports per
+ten-port VM block), initial concurrency 64 and configured ceiling 256 per GPU.
+Only healthy endpoints join the shared registry. VM starts retry every 300
+seconds; preempted workers recover through startup metadata and container
+restart policies. A VM-local 900-second controller lease guards against orphans.
+The controller watches this run's generation PID/start identity and status;
+it stops all eight VMs after note inference completes (`assembling`), or if
+generation fails/exits. No downstream summarization/labeling workflow is attached.
+Consult fleet `status.json` and `vm_status.json` for current capacity rather than
+assuming all 64 GPUs started. Fleet regressions passed (29 tests) before launch.
+
+The user also scheduled Camus ports 8000 and 8001 to stop accepting new prompts
+at 18:50 Pacific on October 26 (October 27 01:50 UTC). User timer
+`mmai-retire-camus-8000-8001-20261026.timer` removes their aliases from the live
+registry, with up to 15 seconds for reload; in-flight requests finish normally.
+Its script and receipt are in `scheduled_actions/`. Both endpoints were already
+removed for connection failures at 23:06 UTC; the scheduled retirement remains
+idempotent. Fleet registry merges preserve that removal and all unrelated endpoints.
+
+At 23:06 UTC event generation saved 66,796/66,800 histories with all 13,360 seed
+batches complete, then exited because four histories exhausted transport retries
+on the offline Camus endpoints. No validated history was discarded. Recovery
+receipts and the old failure/status files are under `recovery/20261026T230655Z/`.
+The identical pipeline command resumed against the six healthy existing endpoints.
+The fleet safety shutdown completed, then the same fleet service was relaunched
+at 23:07 UTC with its configuration bound to the new generator PID/start identity;
+Spot retry and automatic shutdown at note-inference completion remain enabled.
+At 23:15 UTC all four retries succeeded: 66,800 histories saved, all 13,360 seed
+batches complete, zero unresolved items. The worker is exporting events before
+preparing notes. Retired Camus entries were also removed from concurrency tuning
+overrides so remaining-server tuning validates after resume.
 
 Use `status.json` for saved seed/history/note counts, `concurrency_status.json`
 for endpoint activity, and `pipeline/logs/generate-synthetic.log` for the worker
-log. Exact resume command: `command.json`. Full instructions:
+log. Exact resume command: `command.json`; set `PYTHONPATH` to the sibling
+`matchminer-ai-inference-kehl/src` plus this repository before launching the pipeline.
+Full instructions:
 `GENERATION_OPERATIONS.txt`. On pause, interrupt the generation child first and
 allow checkpoint flushing and coordinator exit before stopping alias proxies.
+
+### Next-run note preparation optimization (current run left untouched)
+
+The event export finished at 23:35 UTC; note preparation finished at 23:37 UTC
+and the current process is generating 1,137,527 notes. At the user's request,
+working-tree changes optimize preparation only for subsequent launches. No
+process, endpoint, fleet configuration, or active checkpoint was changed by this
+optimization. The active generator retains its already-loaded original code.
+
+`create_masked_dataset` now joins each patient history once and splices the
+event marker at recorded offsets, preserving the old first-equal-event rule.
+`Generator.prepare_notes` uses a bounded spawn process pool (up to eight CPUs
+by default), assigns deterministic row-ID ranges before dispatch, reuses completed
+chunks, and reports preparation progress. Override with
+`--generation-note-preparation-workers N` in the pipeline or
+`--note-preparation-workers N` in the generator; `1` selects serial preparation.
+
+An isolated local benchmark copied one completed synthetic event chunk and
+repeated it across 1,024 cohort indices (175,184 note inputs). The original path
+took 3.83 s, optimized serial 3.46 s, and four workers 2.05 s, including process
+startup and parquet writes. Every event/note dataframe matched exactly. These
+measurements use local `/tmp`, not the shared filesystem used by the live run.
+Benchmark code, results, and pre-edit source snapshots are under
+`/tmp/mmai-note-preparation-20261026/`. The live run's frozen source archives also
+remain under its `source/` directory. If that run needs restarting, use its
+original source snapshot: the edited working tree intentionally fails its
+existing source-hash checks; do not weaken or rewrite that manifest.
 
 ## Previous pause and archive (2026-10-26 19:08 UTC)
 

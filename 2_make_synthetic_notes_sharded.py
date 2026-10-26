@@ -89,29 +89,31 @@ def process_clinical_notes_from_df(input_frame: pd.DataFrame) -> pd.DataFrame:
 def create_masked_dataset(patient_df: pd.DataFrame) -> pd.DataFrame:
     event_types_to_keep = ['clinical_note', 'imaging_report', 'pathology_report', 'ngs_report']
     filtered_df = patient_df[patient_df['event_type'].isin(event_types_to_keep)].copy()
-    full_histories = patient_df.groupby('patient_id')['event_text'].apply(list).to_dict()
+    # Join each history once, retaining offsets into the exact original text.
+    # Splicing avoids a pandas Series and another full event-list scan per note.
+    # Keep the historical first-equal-event rule even for duplicate event text.
+    histories = {}
+    for patient_id, events in patient_df.groupby('patient_id', sort=False)['event_text']:
+        texts = events.tolist()
+        offsets, position = {}, 0
+        for text in texts:
+            offsets.setdefault(text, position)
+            position += len(text) + 1
+        histories[patient_id] = ('\n'.join(texts), offsets)
 
-    def generate_masked_string(row: pd.Series) -> str:
-        patient_id = row['patient_id']
-        current_event_text = row['event_text']
-        current_event_type = row['event_type']
-        patient_history_list = full_histories.get(patient_id, [])
-        masked_history_list = []
-        is_masked = False
-        for event_text in patient_history_list:
-            if event_text == current_event_text and not is_masked:
-                masked_event = (
-                    "<BEGIN EVENT CORRESPONDING TO SYNTHETIC NOTE> " +
-                    f"<{current_event_type}>{event_text}" +
-                    " <END EVENT CORRESPONDING TO SYNTHETIC NOTE>"
-                )
-                masked_history_list.append(masked_event)
-                is_masked = True
-            else:
-                masked_history_list.append(event_text)
-        return "\n".join(masked_history_list)
-
-    filtered_df['masked_text'] = filtered_df.apply(generate_masked_string, axis=1)
+    masked = []
+    for patient_id, event_text, event_type in zip(
+            filtered_df.patient_id, filtered_df.event_text, filtered_df.event_type):
+        history, offsets = histories.get(patient_id, ('', {}))
+        if event_text not in offsets:
+            masked.append(history)
+            continue
+        start = offsets[event_text]
+        masked.append(history[:start] + '<BEGIN EVENT CORRESPONDING TO SYNTHETIC NOTE> '
+                      + f'<{event_type}>{event_text}'
+                      + ' <END EVENT CORRESPONDING TO SYNTHETIC NOTE>'
+                      + history[start + len(event_text):])
+    filtered_df['masked_text'] = pd.array(masked, dtype='str')
     return filtered_df
 
 

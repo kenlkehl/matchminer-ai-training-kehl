@@ -65,6 +65,8 @@ def parser():
     p.add_argument('--generation-max-attempts', type=int, default=16)
     p.add_argument('--generation-seed-max-tokens', type=int, default=16000)
     p.add_argument('--generation-event-max-tokens', type=int, default=20000)
+    p.add_argument('--generation-note-preparation-workers', type=int, default=0,
+                   help='CPU processes for note inputs: 0 uses up to 8 available CPUs; 1 is serial')
     p.add_argument('--api-key-env', default='OPENAI_API_KEY')
     p.add_argument('--wait-for-generation', action='store_true',
                    help='Observe the existing generation job until complete; never launch or interrupt it')
@@ -180,6 +182,7 @@ def build_plan(args):
               '--output-dir', str(g), '--seed', str(args.data_seed), '--max-model-len', str(args.generation_context),
               '--seed-max-tokens', str(args.generation_seed_max_tokens),
               '--event-max-tokens', str(args.generation_event_max_tokens),
+              '--note-preparation-workers', str(args.generation_note_preparation_workers),
               '--scheduler-adaptive-concurrency' if args.generation_scheduler_adaptive_concurrency else '--no-scheduler-adaptive-concurrency',
               '--initial-concurrent-per-server', str(args.generation_initial_concurrency_per_server),
               '--pending-requests', str(args.generation_pending_requests), *model, *cache, *remote],

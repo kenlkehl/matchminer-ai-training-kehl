@@ -1417,8 +1417,23 @@ Outputs include `trial_spaces_with_positive_prompts.csv`,
 `trial_spaces_with_negative_prompts.csv`, `all_synthetic_events.parquet`, and
 `all_synthetic_notes.parquet`. The combined event parquet is saved before note
 generation starts. During events, `status.json` reports saved seed batches and
-individual patient histories separately. Preparation
-and note assembly are bounded and streamed; all checkpoints and final files
+individual patient histories separately. Note-input preparation uses up to eight
+available CPUs by default, with at most one submitted chunk per worker. Set
+`--note-preparation-workers N` on `generate_synthetic_data.py`, or
+`--generation-note-preparation-workers N` on `run_pipeline.py` / the `train_all*.sh`
+wrappers (`0` selects the default; `1` runs serially). Workers parse histories,
+construct masked note inputs, and write independent atomic parquet chunks.
+Each patient's history is joined once rather than rebuilt through pandas row
+callbacks for every note. Note text, ordering, and the first-equal-event behavior
+for duplicate event text are preserved.
+
+Row IDs are assigned in input order before dispatch, so completion order and
+worker count cannot change note identities. Complete chunks are reused on resume;
+partially written pairs are rebuilt. During `preparing_notes`, `status.json`
+reports `note_preparation_completed_chunks`, `note_preparation_expected_chunks`,
+`prepared_note_inputs`, and `note_preparation_workers`. Child processes use the
+spawn start method and one Arrow thread each, without inheriting tokenizer or
+LLM-client state. Preparation and note assembly are bounded and streamed; all checkpoints and final files
 remain on the client machine. The command does not start or stop vLLM services,
 shut down VMs, summarize patients, or launch model training. A separately running
 pool supervisor must maintain remote tunnels, endpoint health, and VM recovery.

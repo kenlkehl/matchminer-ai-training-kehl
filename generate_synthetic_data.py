@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict
 from datetime import datetime, timezone
 import fcntl
@@ -16,6 +17,8 @@ from functools import lru_cache
 import hashlib
 import importlib.util
 import json
+import multiprocessing
+import os
 from pathlib import Path
 import random
 import re
@@ -378,6 +381,39 @@ def compose_parquet(paths, destination, expected_rows=None):
         raise ValueError(f'Assembly has {count} rows, expected {expected_rows}')
     temporary.replace(destination)
     return count
+
+
+def note_preparation_workers(requested=0):
+    """Bound CPU/RAM use by default; zero selects up to eight available CPUs."""
+    if requested < 0:
+        raise ValueError('--note-preparation-workers must be nonnegative')
+    return requested or min(8, os.process_cpu_count() or 1)
+
+
+def initialize_note_preparation_worker():
+    # Each process already owns one CPU task. Avoid multiplying Arrow's thread
+    # pools by the worker count, and never inherit the parent's tokenizer/sockets.
+    pa.set_cpu_count(1)
+    pa.set_io_thread_count(1)
+
+
+@lru_cache(maxsize=1)
+def note_preparation_stage():
+    return load_stage('2_make_synthetic_notes_sharded.py')
+
+
+def prepare_note_chunk(job):
+    """Write one independent chunk with IDs assigned in input order by the parent."""
+    patients = event_rows(job['records'], job['identity'])
+    promptframe = note_preparation_stage().create_masked_dataset(patients).reset_index(drop=True)
+    chunk = job['chunk']
+    if len(promptframe) != chunk['notes']:
+        raise ValueError('Prepared note count differs from event-tag count')
+    promptframe['row_id'] = range(chunk['first_row_id'], chunk['last_row_id'] + 1)
+    promptframe['key'] = promptframe.row_id.map(lambda value: f'note:{value}')
+    save_frame(chunk['events'], patients)
+    save_frame(chunk['path'], promptframe)
+    return chunk
 
 
 class Generator:
@@ -802,26 +838,75 @@ class Generator:
     def prepare_notes(self, spaces, events, identity):
         directory = self.out / 'note_inputs'
         directory.mkdir(exist_ok=True)
-        records, row_offset = [], 0
-        for start in range(0, len(spaces), self.args.spaces_per_note_chunk):
-            selected = set(spaces.iloc[start:start + self.args.spaces_per_note_chunk].space_index)
-            index = start // self.args.spaces_per_note_chunk
-            path = directory / f'promptframe_{index:06d}.parquet'
-            event_path = directory / f'events_{index:06d}.parquet'
-            if path.exists() and event_path.exists():
-                nrows = pq.ParquetFile(path).metadata.num_rows
-            else:
-                patients = event_rows(events.loc[events.space_index.isin(selected)].to_dict('records'), identity)
-                save_frame(event_path, patients)
-                promptframe = self.notes.create_masked_dataset(patients).reset_index(drop=True)
-                promptframe['row_id'] = range(row_offset, row_offset + len(promptframe))
-                promptframe['key'] = promptframe.row_id.map(lambda value: f'note:{value}')
-                save_frame(path, promptframe)
-                nrows = len(promptframe)
-            records.append(dict(path=str(path), events=str(event_path), notes=nrows,
-                                first_row_id=row_offset, last_row_id=row_offset + nrows - 1))
-            row_offset += nrows
-        save_json(self.out / 'note_input_manifest.json', dict(chunks=records, notes=row_offset))
+        chunk_size = self.args.spaces_per_note_chunk
+        if chunk_size < 1:
+            raise ValueError('--spaces-per-note-chunk must be positive')
+        total = (len(spaces) + chunk_size - 1) // chunk_size
+        workers = min(note_preparation_workers(getattr(self.args, 'note_preparation_workers', 0)), max(1, total))
+        groups = events.groupby('space_index', sort=False).indices
+        completed = {}
+
+        def progress():
+            self.write_status(stage='preparing_notes', note_preparation_workers=workers,
+                              note_preparation_completed_chunks=len(completed),
+                              note_preparation_expected_chunks=total,
+                              prepared_note_inputs=sum(chunk['notes'] for chunk in completed.values()))
+
+        def jobs():
+            row_offset = 0
+            for index, start in enumerate(range(0, len(spaces), chunk_size)):
+                selected = spaces.iloc[start:start + chunk_size].space_index
+                # Select only the columns needed by event_rows; do not send raw
+                # model responses/reasoning to each child or scan the full frame.
+                positions = sorted(position for space in selected for position in groups[space])
+                rows = events.iloc[positions][['space_index', 'patient_class', 'nct_id', 'answer']].to_dict('records')
+                # Counting complete report tags is cheap; parsing/validation and
+                # construction happen in the worker. Prefix counts make row IDs
+                # independent of process completion order, retries, and resume.
+                nrows = sum(row['answer'].count(f'<{kind}>') for row in rows for kind in REPORT_TYPES)
+                chunk = dict(path=str(directory / f'promptframe_{index:06d}.parquet'),
+                             events=str(directory / f'events_{index:06d}.parquet'), notes=nrows,
+                             first_row_id=row_offset, last_row_id=row_offset + nrows - 1)
+                row_offset += nrows
+                if Path(chunk['path']).exists() and Path(chunk['events']).exists():
+                    if pq.ParquetFile(chunk['path']).metadata.num_rows != nrows:
+                        raise ValueError(f'Saved note input count changed: {chunk["path"]}')
+                    completed[index] = chunk
+                    progress()
+                    continue
+                yield index, dict(records=rows, identity=identity, chunk=chunk)
+
+        def collect(pending, futures):
+            for future in futures:
+                completed[pending.pop(future)] = future.result()
+                progress()
+
+        progress()
+        if workers == 1:
+            for index, job in jobs():
+                completed[index] = prepare_note_chunk(job)
+                progress()
+        else:
+            with ProcessPoolExecutor(max_workers=workers,
+                                     mp_context=multiprocessing.get_context('spawn'),
+                                     initializer=initialize_note_preparation_worker) as pool:
+                pending = {}
+                try:
+                    for index, job in jobs():
+                        if len(pending) >= workers:
+                            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                            collect(pending, finished)
+                        pending[pool.submit(prepare_note_chunk, job)] = index
+                    while pending:
+                        finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                        collect(pending, finished)
+                finally:
+                    # On failure, finish active atomic writes and cancel queued
+                    # chunks before releasing the generation lock.
+                    for future in pending:
+                        future.cancel()
+        records = [completed[index] for index in range(total)]
+        save_json(self.out / 'note_input_manifest.json', dict(chunks=records, notes=sum(c['notes'] for c in records)))
         return records
 
     async def run(self):
@@ -883,12 +968,16 @@ def parse_args():
     parser.add_argument('--max-model-len', type=int, default=250000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--spaces-per-note-chunk', type=int, default=64)
+    parser.add_argument('--note-preparation-workers', type=int, default=0,
+                        help='CPU processes preparing note inputs: 0 uses up to 8 available CPUs; 1 is serial')
     parser.add_argument('--pending-requests', type=int, default=1536)
     parser.add_argument('--stop-after-events', action='store_true', help='Save seeds and patient histories without starting notes')
     add_remote_cli_args(parser)
     parser.set_defaults(results_per_shard=128, max_attempts=16, request_timeout=1800,
                         scheduler_adaptive_concurrency=True)
     args = parser.parse_args()
+    if args.note_preparation_workers < 0 or args.spaces_per_note_chunk < 1:
+        parser.error('--note-preparation-workers must be nonnegative and --spaces-per-note-chunk must be positive')
     if args.scheduler_adaptive_concurrency and not args.scheduler_metrics_file:
         args.scheduler_metrics_file = str(Path(args.output_dir) / 'concurrency_status.json')
     return args

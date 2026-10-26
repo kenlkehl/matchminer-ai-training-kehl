@@ -63,6 +63,13 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert summary_distillation.command[summary_distillation.command.index('--notes') + 1] == str(args.synthetic_notes)
 
 
+def test_pipeline_passes_note_preparation_workers(tmp_path):
+    args = arguments(tmp_path, '--start-at', 'generate-synthetic', '--stop-after', 'generate-synthetic',
+                     '--generation-note-preparation-workers', '3')
+    command = pipeline.build_plan(args)[0].command
+    assert command[command.index('--note-preparation-workers') + 1] == '3'
+
+
 @pytest.mark.parametrize('wrapper', ['train_all.sh', 'train_all_gcp.sh'])
 def test_shell_training_defaults_use_fast_shared_colbert(tmp_path, wrapper):
     result = subprocess.run(['bash', str(pipeline.ROOT / wrapper), '--dry-run', '--gpus', '0,1,2,3'],
