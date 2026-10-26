@@ -181,8 +181,22 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix('.tmp')
-        pd.DataFrame(tables[direction]).to_parquet(temporary, index=False)
+        # Full clinical strings repeat across millions of pairs. The default
+        # 1 MiB dictionary spills almost immediately and duplicates that text.
+        pd.DataFrame(tables[direction]).to_parquet(temporary, index=False,
+            compression='zstd', use_dictionary=True, dictionary_pagesize_limit=256 * 1024**2)
         temporary.replace(path)
+
+
+def finalize_candidate_exports(corpus, output, *, pair_count, query_count):
+    """Publish full-text tables and their checksums after query JSON is durable."""
+    output = Path(output)
+    export_candidates(corpus, output / 'candidates.jsonl', output / 'patient_to_cohort.parquet',
+                      output / 'cohort_to_patient.parquet')
+    write_json(output / 'complete.json', dict(pairs=pair_count, queries=query_count,
+        candidate_scope='exact MaxSim over recorded lexical/random proposal pools',
+        outputs={name: file_sha256(output / name) for name in
+                 ('candidates.jsonl', 'rankings.jsonl', 'patient_to_cohort.parquet', 'cohort_to_patient.parquet')}))
 
 
 def mine(args, model=None):
@@ -363,11 +377,7 @@ def _mine(args, model, *, rank, world, local):
         pairs = merge_candidates(patients, cohorts, hits)
         write_jsonl(output / 'candidates.jsonl', pairs)
         write_jsonl(output / 'rankings.jsonl', [h for h in hits if h['source'] == 'colbert'])
-        export_candidates(args.corpus, output / 'candidates.jsonl', output / 'patient_to_cohort.parquet', output / 'cohort_to_patient.parquet')
-        write_json(completion, dict(pairs=len(pairs), queries=len(query_paths),
-            candidate_scope='exact MaxSim over recorded lexical/random proposal pools',
-            outputs={name: file_sha256(output / name) for name in
-                     ('candidates.jsonl', 'rankings.jsonl', 'patient_to_cohort.parquet', 'cohort_to_patient.parquet')}))
+        finalize_candidate_exports(args.corpus, output, pair_count=len(pairs), query_count=len(query_paths))
     if world > 1:
         dist.barrier()
 
