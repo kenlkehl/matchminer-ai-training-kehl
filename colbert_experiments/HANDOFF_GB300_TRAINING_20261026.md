@@ -4,7 +4,38 @@ Prepared 2026-10-26 from Camus for a Codex session running directly on
 `sn4622130540`. This is an implementation/debugging handoff, not a published
 model release. Paths below assume the same shared mount.
 
-## Named-cohort format regeneration (latest request)
+## Paused and archived (latest request, 2026-10-26 19:08 UTC)
+
+The user paused labeling to reconsider synthetic patients generated under an
+earlier cohort prompt, and requested archiving the experiment except its latest
+5,000-trial cohort extraction. The labeler exited gracefully at 19:06 UTC;
+its workflow and four Camus alias proxies are stopped. All six teacher endpoints
+reported zero running and queued requests afterward. The existing vLLM servers
+remain available; no new generation, labeling, retrieval, or model training is
+authorized by this pause.
+
+Archive: `data/no_phi/archives/trialspace_reset_20261026T190832Z/`.
+Its `manifest.json` maps all 32 original paths to their archived locations,
+including old cohort extractions, synthetic patients/notes/summaries, ColBERT
+retrieval and labels, model outputs, and audits. Each move was a same-filesystem
+rename preserving the file/directory identity. Historical manifests inside the
+archive retain their original paths as provenance; no redirect symlinks exist.
+The completed-score journal contains 13,058 valid records after graceful drain;
+the last progress snapshot reported 19,249 completed questions. Partial answers
+and reasoning remain archived.
+Raw references and unrelated catalogs/experiments remain outside this archive.
+
+Still active and unchanged: `data/no_phi/cohort_reextract_named_sample5000_gemma4_31b_20261026/`
+and its seven promoted root sample files/receipts. The sample remains 5,000
+trials, 4,981 accepted and 19 rejected, with 6,680 cohort rows. Root export hashes
+and the extraction snapshot's exported files were verified against promotion
+receipts. `data/no_phi/trialspace_archive_latest.json` records the current state.
+
+The default `train_full_gb300.py` patient input is now archived. Do not restore
+or silently reuse it; future work needs an explicit choice of patient data and
+fresh run/output paths. The following sections describe historical work.
+
+## Named-cohort format regeneration (history)
 
 Subsequent authorization: run full retrieval, then labeling on this GB300's
 existing port 8000 only. The workflow stops after labeling; cloud workers and
