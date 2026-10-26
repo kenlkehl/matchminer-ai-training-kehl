@@ -4,7 +4,43 @@ Prepared 2026-10-26 from Camus for a Codex session running directly on
 `sn4622130540`. This is an implementation/debugging handoff, not a published
 model release. Paths below assume the same shared mount.
 
-## Paused and archived (latest request, 2026-10-26 19:08 UTC)
+## Fresh synthetic generation (latest request, 2026-10-26 19:25 UTC)
+
+The user subsequently authorized fresh cohort-seeded patient generation through
+seeds, event lists, and synthetic notes, using the six existing endpoints and a
+live pool for future additions. Production `run_pipeline.py` is running only the
+`generate-synthetic` stage in
+`data/no_phi/synthetic_namedcohorts_5000_gemma4_31b_20261026/`.
+The coordinator launch PID is 3024971 and generation child PID is 3025052;
+verify their recorded start identities in `launch.json` and
+`generator_process.json` before signaling them. The run stops after raw synthetic
+notes; summarization, retrieval, labeling, and model training remain paused.
+
+The run has a verified, independent copy of the latest seven cohort exports and
+receipts, retaining source hash `b19a836fe402b509cef9713f53c27b9c63ac5bc9877e5d3a01e9cb7978a0778e`.
+All 6,680 cohort criteria match the promoted extraction exactly, including the
+separate name/criteria representation and original single-cohort eligibility.
+Five matching and five near-miss patients per cohort give 66,800 patients from
+13,360 seed batches. Each saved seed batch precedes its individual patient
+histories; notes start after all histories validate. No archived patient
+checkpoints are reused. Source archives and provenance capture training
+`609ecd5` and inference `9b1bf81`.
+
+Pool: GB300 port 8000, `172.24.216.113:8001`, and Camus ports 8000–8003. The four
+Camus endpoints use new run-owned alias proxies on loopback ports 18100–18103;
+their configs and launch identities are under `pool/`. Initial adaptive targets
+are 256 for GB300, 64 for 172.24.216.113, and 32 per Camus endpoint; configured
+ceilings are 768, 256, and 128 respectively. `servers.json` and `concurrency.json`
+reload live, with `servers.fleet.lock` for coordinated edits. The pending queue
+is 8,192; per-server limits control actual requests. No cloud fleet is attached.
+
+Use `status.json` for saved seed/history/note counts, `concurrency_status.json`
+for endpoint activity, and `pipeline/logs/generate-synthetic.log` for the worker
+log. Exact resume command: `command.json`. Full instructions:
+`GENERATION_OPERATIONS.txt`. On pause, interrupt the generation child first and
+allow checkpoint flushing and coordinator exit before stopping alias proxies.
+
+## Previous pause and archive (2026-10-26 19:08 UTC)
 
 The user paused labeling to reconsider synthetic patients generated under an
 earlier cohort prompt, and requested archiving the experiment except its latest
