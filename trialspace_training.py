@@ -131,6 +131,10 @@ class TokenStore:
         estimated_bytes = sum(path.stat().st_size for path in paths)
         budget = int(budget_gb * 1024 ** 3)
         if str(device).startswith('cuda'):
+            # The previous retrieval direction's tensors have been released,
+            # but their allocator cache can still obscure available GPU memory.
+            with torch.cuda.device(device):
+                torch.cuda.empty_cache()
             free, _ = torch.cuda.mem_get_info(device)
             budget = min(budget, max(0, free - int(reserve_gb * 1024 ** 3)))
         if not paths or estimated_bytes > budget:
