@@ -15,7 +15,22 @@ live response. Both public inference embeddings and training use criteria text,
 with names retained only as metadata. Source splits and patient data are unchanged.
 
 New extraction snapshot: `data/no_phi/cohort_reextract_named_sample5000_gemma4_31b_20261026/`.
-Root sample exports will be replaced after complete validation. The launcher now
+Completed and promoted at 17:01 UTC: all 5,000 original trials validated, with
+4,981 accepted, 19 rejected, and 6,680 rows (2,706 named multi-cohort rows plus
+3,974 single-cohort rows). No failed trials remain. Full sample coverage, source
+splits, original single-cohort eligibility, separate name/criteria fields, output
+hashes, and unchanged synthetic artifacts passed validation. No exact-name or
+generic cohort/arm/part headings were flagged in the final criteria fields.
+
+Extraction ran from frozen training `87906be` and inference `9b1bf81` archives.
+The actual request trace confirms literal single-brace JSON examples; doubled
+braces exist only in the Python format template. NCT07738367 received one extra
+same-prompt extraction to replace a repeated descriptive name before a colon.
+Both original and replacement responses are preserved under `format_retries/`,
+and the replacement keeps the driver-gene and treatment-history requirements.
+Root sample exports and receipts were replaced after validation; the earlier
+immutable extraction and patient-generation snapshots remain for provenance.
+The launcher now
 uses fresh `colbert_namedcohorts_gb300_20261026/` source artifacts and
 `colbert_production_gb300_namedcohorts_20261026/` model output, so the previous
 partial retrieval/labels cannot be mistaken for the new cohort generation.

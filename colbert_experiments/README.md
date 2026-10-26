@@ -27,16 +27,17 @@ the launcher does not retain GPU settings between invocations.
 
 The launcher now runs the production `prepare → mine → label → train` stages.
 It reads the promoted `../data/no_phi/sample_trial_cohort_lineitems.csv`:
-the same 5,000-trial sample is being regenerated with named-cohort JSON schema
-v3, using inference commit `9b1bf81`. Each multi-cohort row retains `cohort_name`
+**6,680 cohorts from 4,981 accepted trials**, regenerated from the exact same
+5,000-trial sample with named-cohort JSON schema v3 and inference commit `9b1bf81`.
+The remaining 19 screening rejections stay in the trial audit. Each multi-cohort row retains `cohort_name`
 separately from `cohort_specific_eligibility_criteria`; the combined eligibility
 text used by retrieval contains criteria only. Single-population trials still
-use original eligibility verbatim. The exact new counts and hashes are recorded
-in the promoted sampling/validation receipts after extraction completes.
+use original eligibility verbatim. The exact counts and hashes are recorded
+in the promoted sampling/validation receipts.
 The immutable named extraction snapshot is
 `cohort_reextract_named_sample5000_gemma4_31b_20261026/`. Earlier generation inputs,
 reasoning, and paused labels remain in their dated directories. Superseded root
-sample exports are replaced only after the new outputs validate.
+sample exports were replaced after every trial and output validated.
 
 All **68,480 existing synthetic patients** come from the repaired
 `synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025/prepared/patient_summaries_with_spaces.parquet`.
