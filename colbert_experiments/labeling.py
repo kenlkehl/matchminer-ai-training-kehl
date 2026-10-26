@@ -128,14 +128,13 @@ async def _label(args, output):
     registry = build_registry_from_args(args)
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
     restored_pairs = set()
+    scheduled_pairs = pairs
     def groups():
         seen = set()
-        for pair in pairs:
+        for pair in scheduled_pairs:
             key = (pair['patient_id'], pair['cohort_id'])
             if key not in seen:
                 seen.add(key)
-                if digest(list(key)) in restored_pairs:
-                    continue
                 yield list(questions([pair], pmap, cmap, sources=sources))
     iterator = iter(groups() if gated else questions(pairs, patients, cohorts, sources=sources))
     completed, failures, scores = {}, {}, {}
@@ -174,10 +173,12 @@ async def _label(args, output):
                 RequestSession(registry, work, max_attempts=args.max_attempts) as session):
         journal = None
         if gated:
-            from .score_journal import ScoreJournal
+            from .score_journal import ScoreJournal, pending_candidates
             journal = ScoreJournal(output, signature)
             write_json(output / 'status.json', snapshot('loading_completed_scores'))
             scores = await storage.run(journal.load, pmap, cmap)
+            if scores:
+                scheduled_pairs = await storage.run(pending_candidates, pairs, scores)
             restored_pairs.update(scores)
             for score in scores.values():
                 score_counts[str(score['score'])] += 1

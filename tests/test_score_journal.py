@@ -7,7 +7,7 @@ from colbert_experiments.contracts import contract_hash
 from colbert_experiments.data import digest, write_json
 from colbert_experiments.export_completed_scores import score_from_answers
 from colbert_experiments.regression import score_contract
-from colbert_experiments.score_journal import ScoreJournal, import_archive
+from colbert_experiments.score_journal import ScoreJournal, import_archive, pending_candidates
 
 
 def fixture():
@@ -18,6 +18,15 @@ def fixture():
     score = score_from_answers('p', 'c', 'train', ['yes'] * 5,
                                signature['contract'], signature['aggregation_contract'])
     return signature, patients, cohorts, score
+
+
+def test_pending_work_filters_completed_and_rejects_orphan_scores():
+    _, _, _, score = fixture()
+    pending = dict(patient_id='p', cohort_id='new', split='train')
+    saved = {digest(['p', 'c']): score}
+    assert pending_candidates([score, pending], saved) == [pending]
+    with pytest.raises(ValueError, match='absent from the candidate set'):
+        pending_candidates([pending], saved)
 
 
 def test_compact_resume_never_needs_response_files_and_rejects_changed_identity(tmp_path):

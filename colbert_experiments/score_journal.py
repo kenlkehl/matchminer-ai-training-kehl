@@ -16,6 +16,20 @@ from .export_completed_scores import validate_score
 from .label_preprocessing import BackgroundWork
 
 
+def pending_candidates(pairs, scores):
+    """Filter in a background worker before request dispatch; reject orphan scores."""
+    unmatched, pending = set(scores), []
+    for pair in pairs:
+        key = digest([pair['patient_id'], pair['cohort_id']])
+        if key in scores:
+            unmatched.discard(key)
+        else:
+            pending.append(pair)
+    if unmatched:
+        raise ValueError('Completed-score journal contains pairs absent from the candidate set')
+    return pending
+
+
 class ScoreJournal:
     def __init__(self, output, signature, *, allow_import=False):
         self.output = Path(output)
