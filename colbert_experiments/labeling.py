@@ -176,6 +176,7 @@ async def _label(args, output):
             from .score_journal import ScoreJournal, pending_candidates
             journal = ScoreJournal(output, signature)
             write_json(output / 'status.json', snapshot('loading_completed_scores'))
+            resume_started = time.monotonic()
             scores = await storage.run(journal.load, pmap, cmap)
             if scores:
                 scheduled_pairs = await storage.run(pending_candidates, pairs, scores)
@@ -183,7 +184,8 @@ async def _label(args, output):
             for score in scores.values():
                 score_counts[str(score['score'])] += 1
                 restored_questions += len(score['question_keys'])
-            timing.update(restored_pairs=len(restored_pairs), restored_questions=restored_questions)
+            timing.update(restored_pairs=len(restored_pairs), restored_questions=restored_questions,
+                          resume_index_seconds=time.monotonic() - resume_started)
             await stack.enter_async_context(journal)
             print(f'[labels] restored {len(restored_pairs)} completed pairs from compact journal; '
                   'individual reasoning traces were not replayed', flush=True)
