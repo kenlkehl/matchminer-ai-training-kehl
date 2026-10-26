@@ -8,6 +8,41 @@ directions**. The production entrypoint `../trialspace_training.py` and
 its original binary-task default for controlled comparisons. Use synthetic/non-PHI
 inputs unless the selected endpoint is authorized for the data.
 
+## Full production labels on one GB300 (2026-10-26)
+
+Run on the GB300 host from the mounted training checkout, using its training
+Python environment and an available GPU:
+
+```bash
+python colbert_experiments/train_full_gb300.py --gpu 0
+```
+
+This one-off launcher waits for validated production training scores, then uses
+`trialspace_training.py train` on all 2,435,540 repaired patient/cohort pairs,
+including all original source splits, in both directions. It starts from the
+base ModernColBERT model and uses the production CoSENT plus known-negative
+contrast objective for three complete epochs, with a linear learning-rate
+schedule, learning rate `2e-5` and 1% warmup. The default microbatch has one query
+and up to 16 documents; 64 accumulated groups give up to 1,024 directional pairs
+per optimizer update. Ranking comparisons span the effective batch. Full inputs
+retain the 8,192-token limits and truncation checks.
+
+Output defaults to `../data/no_phi/colbert_production_gb300_20261026`, with
+checkpoints in `fit/` and the final model in `model/`. Checkpoints save every 25
+updates, keeping at most two. Repeat the command to resume; create `OUTPUT/PAUSE`
+to pause cleanly and remove it before resuming. This run has no Camus time cutoff.
+The launcher refuses to train on Camus and makes no LLM calls. It checks the
+complete-score publication receipt and input/output file identities while waiting,
+then reads finalized numeric scores through the production trainer without
+inspecting individual reasoning checkpoints. The large distillation archive can
+finish separately: a later export/supervisor failure does not invalidate a
+complete, independently verified training-score publication. Missing or changed
+scores, corpus files, candidate files, or teacher identity still prevent training.
+Use `--cache-dir` for a local model cache, `--source-run`/`--output` to adjust mount
+locations, and `--dry-run` to print the command without starting anything.
+The GB300 batch configuration has not been benchmarked; microbatch and
+accumulation settings can be overridden before the first fit.
+
 ## One-off smoke test on two A6000 GPUs while production labels continue
 
 Run this on the machine with the two A6000s, from this training checkout, using

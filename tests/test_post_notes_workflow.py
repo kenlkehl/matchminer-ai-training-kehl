@@ -1,6 +1,5 @@
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -92,6 +91,20 @@ def test_label_resume_requires_completed_upstream_receipts(tmp_path):
     runner = workflow.Workflow(dict(local_teachers=[]), tmp_path)
     with pytest.raises(ValueError, match='before all upstream stages complete'):
         runner.resume_labeling()
+
+
+@pytest.mark.parametrize('state', ['publishing_scores', 'training_scores_ready', 'exporting_labels', 'complete'])
+def test_cpu_finalization_does_not_restart_teachers(tmp_path, monkeypatch, state):
+    runner = workflow.Workflow(dict(local_teachers=[dict(gpu=0)]), tmp_path)
+    runner.child = SimpleNamespace(pid=123)
+    runner.adopted_teachers = {'0': dict(pid=456)}
+    (tmp_path / 'labels').mkdir()
+    path = tmp_path / 'labels/status.json'
+    path.write_text(json.dumps(dict(pid=123, state=state, inference_complete=True, failures={})))
+    monkeypatch.setattr(workflow, 'teacher_identity', lambda pid: None)
+    monkeypatch.setattr(runner, 'launch_teacher', lambda target: pytest.fail('CPU export must not restart an LLM'))
+    runner.restart_dead_teachers()
+    assert runner.adopted_teachers == {'0': dict(pid=456)}
 
 
 def test_teacher_pid_reuse_is_never_signaled(tmp_path, monkeypatch):

@@ -52,7 +52,8 @@ def test_handoff_requires_complete_labels_and_successful_receipt(tmp_path):
         labels_ready(dict(phase='failed'), labels, receipt, 4)
 
 
-def test_handoff_stops_cloud_then_local_teachers_before_starting_fit(tmp_path, monkeypatch):
+@pytest.mark.parametrize('disabled', [False, True])
+def test_handoff_stops_cloud_then_local_teachers_before_starting_fit(tmp_path, monkeypatch, disabled):
     handoff = Handoff.__new__(Handoff)
     handoff.root = tmp_path
     handoff.workflow_root = tmp_path / 'workflow'
@@ -66,14 +67,28 @@ def test_handoff_stops_cloud_then_local_teachers_before_starting_fit(tmp_path, m
     save(handoff.config['label_status'], dict(state='complete', scored_pairs=2, total_pairs=2, failures={}))
     save(handoff.config['fit_status'], dict(state='complete'))
     calls = []
+    if disabled:
+        (tmp_path / 'DISABLE_TRAINING').touch()
     monkeypatch.setattr(handoff, 'cloud_stop', lambda wait: calls.append(('cloud', wait)))
     monkeypatch.setattr(handoff, 'stop_local', lambda: calls.append(('local', True)))
     monkeypatch.setattr(handoff, 'check_gpu_availability', lambda: calls.append(('gpu_check', True)))
     monkeypatch.setattr(handoff, 'launch_training', lambda: calls.append(('train', True)) or True)
     monkeypatch.setattr(handoff, 'service', lambda: dict(ActiveState='inactive', ExecMainStatus='0'))
     handoff.run()
-    assert calls == [('cloud', True), ('local', True), ('gpu_check', True), ('train', True)]
-    assert json.loads((tmp_path / 'status.json').read_text())['phase'] == 'complete'
+    expected = [('cloud', True), ('local', True)]
+    if not disabled:
+        expected += [('gpu_check', True), ('train', True)]
+    assert calls == expected
+    assert json.loads((tmp_path / 'status.json').read_text())['phase'] == (
+        'complete_without_training' if disabled else 'complete')
+
+
+def test_launch_rechecks_disable_marker_inside_launch_lock(tmp_path):
+    handoff = Handoff.__new__(Handoff)
+    handoff.root = tmp_path
+    (tmp_path / 'DISABLE_TRAINING').touch()
+    assert handoff.launch_training() is False
+    assert json.loads((tmp_path / 'status.json').read_text())['phase'] == 'complete_without_training'
 
 
 def test_reused_pid_is_never_signaled(monkeypatch):

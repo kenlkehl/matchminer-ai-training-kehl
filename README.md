@@ -82,8 +82,27 @@ After inference drains and all checkpoints are durable, status explicitly report
 `inference_complete` and `exporting_labels`. The attached cloud supervisor stops
 the VMs at that boundary, without waiting for CPU-only output consolidation.
 The final export uses bounded parallel checkpoint reads and atomic publication,
-preserves every response field, and reports exported-question progress. Training
-still waits for the complete, validated output files.
+preserves every response field, and reports exported-question progress. Once
+every candidate has a validated score, `scores.jsonl` and `scores_ready.json`
+are published before the large reasoning archive. The receipt binds the exact
+teacher, repaired corpus and candidate files, complete pair count, and score-file
+identity. Independent training can use that verified artifact while the reasoning
+export continues. The local teacher supervisor stops restarting servers after
+inference finishes, so a server exiting cannot abort CPU-only finalization.
+
+If inference completed but output consolidation was interrupted, recover without
+starting teachers or using GPUs:
+
+```bash
+python -m colbert_experiments.finalize_labels \
+  --corpus RUN/corpus_all --candidates RUN/mining_all/candidates.jsonl \
+  --output RUN/labels --workers 16
+```
+
+This validates the compact journal against the complete candidate set and the
+original corpus/teacher contract before publishing training scores. It then
+exports all saved reasoning. `--scores-only` stops after score publication;
+neither mode generates or fills in missing labels.
 
 Older runs require a one-time conversion with the labeler stopped:
 

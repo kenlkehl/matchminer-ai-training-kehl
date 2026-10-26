@@ -86,7 +86,7 @@ def workflow_terminal_reason(generation, generator_alive, workflow, workflow_ali
     if (mode == 'labeling' and label_status and label_status.get('inference_complete') is True
             and workflow.get('phase') == 'labeling' and workflow.get('child_pid') is not None
             and label_status.get('pid') == workflow['child_pid']
-            and label_status.get('state') in ('exporting_labels', 'complete')
+            and label_status.get('state') in ('publishing_scores', 'training_scores_ready', 'exporting_labels', 'complete')
             and not label_status.get('failures')
             and label_status.get('scored_pairs') == label_status.get('total_pairs')
             and label_status.get('total_pairs', 0) > 0):

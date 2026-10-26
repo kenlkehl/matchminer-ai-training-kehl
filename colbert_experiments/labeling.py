@@ -68,6 +68,8 @@ async def _label(args, output):
     worker_target(args.pending_requests, 0, auto_maximum)  # Validate before loading the corpus.
     timing = dict(pid=os.getpid(), started_at=datetime.now(timezone.utc).isoformat(), first_request_at=None,
                   attempts_started=0)
+    from .score_publication import input_fingerprints, publish_scores
+    source_inputs = input_fingerprints(args.corpus, args.candidates)
     patients, cohorts = load_corpus(args.corpus)
     pairs = read_jsonl(args.candidates)
     sources = prompt_sources()
@@ -273,11 +275,17 @@ async def _label(args, output):
     from .label_export import export_labels
     timing['inference_complete'] = not failures
     timing['inference_finished_at'] = datetime.now(timezone.utc).isoformat()
+    if gated and not failures:
+        if source_inputs != input_fingerprints(args.corpus, args.candidates):
+            raise ValueError('Corpus or candidates changed during labeling')
+        write_json(output / 'status.json', snapshot('publishing_scores'))
+        publish_scores(output, signature, scores, pairs, inputs=source_inputs)
+        timing['training_scores_ready'] = True
     def export_progress(values):
         write_json(output / 'status.json', dict(snapshot('exporting_labels'), **values))
     export_labels(checkpoint_dir, output / 'labels.jsonl', export_keys(),
                   total=restored_questions + len(completed), progress=export_progress)
-    if gated:
+    if gated and failures:
         from .regression import score_balance
         write_jsonl(output / 'scores.jsonl', [scores[k] for k in sorted(scores)])
         write_json(output / 'score_balance.json', score_balance(list(scores.values())))

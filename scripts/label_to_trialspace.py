@@ -222,6 +222,9 @@ class Handoff:
         # Serialize launch with the independent deadline guard to prevent a late
         # launch after that guard has already released the GPUs.
         with self.lock('launch'):
+            if (self.root / 'DISABLE_TRAINING').exists():
+                self.update('complete_without_training', reason='Training launch disabled by operator')
+                return False
             if time.time() >= self.pause_at or (self.root / 'DEADLINE').exists():
                 self.update('paused_before_training', reason='Deadline reached before fit could start')
                 return False
@@ -246,7 +249,7 @@ class Handoff:
     def run(self):
         with self.lock('handoff'):
             try:
-                if read(self.root / 'status.json', {}).get('phase') in ('complete', 'paused', 'failed'):
+                if read(self.root / 'status.json', {}).get('phase') in ('complete', 'complete_without_training', 'paused', 'failed'):
                     return
                 while not (self.root / 'training_launch.json').exists():
                     if time.time() >= self.pause_at or (self.root / 'DEADLINE').exists():
@@ -260,6 +263,9 @@ class Handoff:
                         self.cloud_stop(wait=True)
                         self.update('stopping_local_teachers')
                         self.stop_local()
+                        if (self.root / 'DISABLE_TRAINING').exists():
+                            self.update('complete_without_training', reason='Training moved to a separate host')
+                            return
                         self.check_gpu_availability()
                         if not self.launch_training():
                             return
@@ -268,7 +274,8 @@ class Handoff:
                     if process_identity(expected['pid']) != expected:
                         raise RuntimeError('Label workflow exited without complete labeling outputs')
                     self.update('waiting_labels', scored_pairs=labels.get('scored_pairs'),
-                                total_pairs=self.config['expected_pairs'])
+                                total_pairs=self.config['expected_pairs'],
+                                training_enabled=not (self.root / 'DISABLE_TRAINING').exists())
                     time.sleep(15)
                 while True:
                     unit = self.service()

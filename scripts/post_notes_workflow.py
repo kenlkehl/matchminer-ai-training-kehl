@@ -192,6 +192,15 @@ class Workflow:
         save(self.root / f'label_teacher_gpu_{gpu}.json', dict(pid=process.pid, at=now(), gpu=gpu, command=target['command']))
 
     def restart_dead_teachers(self):
+        # A completed LLM phase needs only CPU/disk finalization. Server exits
+        # after that point must never restart teachers or abort the exporter.
+        path = self.root / 'labels/status.json'
+        if path.exists() and self.child is not None:
+            status = json.loads(path.read_text())
+            if (status.get('pid') == self.child.pid and status.get('inference_complete') is True
+                    and status.get('state') in ('publishing_scores', 'training_scores_ready', 'exporting_labels', 'complete')
+                    and not status.get('failures')):
+                return
         for target in self.config['local_teachers']:
             gpu = str(target['gpu'])
             expected = self.adopted_teachers.get(gpu)
