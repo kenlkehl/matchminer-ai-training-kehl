@@ -411,6 +411,7 @@ def parser():
                                      learning_rate=2e-5, lr_scheduler='linear', warmup_ratio=.01,
                                      eval_every=100, eval_groups_per_stratum=32,
                                      steps=None, accumulation=32, documents_per_query=8,
+                                     query_groups_per_forward=2,
                                      training_splits=['train', 'val', 'test'], require_complete_coverage=True)
     sub.choices['train'].add_argument('--epochs', type=float, default=3,
         help='Complete directional-pair epochs for ranking; query sampling passes for MSE; --steps overrides')

@@ -32,6 +32,15 @@ def test_rotation_and_failed_write_preserve_committed_resume(tmp_path, monkeypat
     assert not list(tmp_path.glob('*.tmp'))
 
 
+def test_single_rank_pause_check_does_not_synchronize_cuda(tmp_path, monkeypatch):
+    from colbert_experiments.checkpointing import PauseRequest
+    monkeypatch.setattr(torch, 'tensor', lambda *a, **kw: pytest.fail('No device scalar needed for one rank'))
+    request = PauseRequest(pause_file=tmp_path / 'PAUSE')
+    assert not request.requested(torch.device('cuda'), 1)
+    (tmp_path / 'PAUSE').touch()
+    assert request.requested(torch.device('cuda'), 1)
+
+
 def test_deadline_is_unambiguous():
     assert deadline_timestamp('2026-10-26T08:55:00-04:00') == 1793019300
     with pytest.raises(ValueError, match='timezone'):
@@ -135,10 +144,14 @@ class Student(torch.nn.Module):
     @property
     def device(self): return self.weight.device
     def fingerprint(self): return dict(toy='trainable')
-    def forward(self, query, documents):
+    def prepare_groups(self, queries, documents): return list(zip(queries, documents))
+    def prepared_batch_tokens(self, groups): return sum(len(q) + sum(map(len, ds)) for q, ds in groups)
+    def forward(self, query=None, documents=None, *, prepared_groups=None):
         self.calls += 1
         if mode == 'pause' and os.environ['RANK'] == '0' and self.calls == 3:
             (root / 'PAUSE').touch()
+        if prepared_groups is not None:
+            documents = [d for _, ds in prepared_groups for d in ds]
         return self.weight * torch.tensor([len(d) / 1000 for d in documents])
     def save(self, path):
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -148,14 +161,16 @@ directory = root / ('reference' if mode == 'reference' else 'resumed')
 args = production.parser().parse_args(['train', '--device', 'cpu', '--corpus', str(root/'corpus'),
     '--labels', str(root/'scores.jsonl'), '--output', str(directory/'fit'),
     '--output-model', str(directory/'model'), '--steps', '4', '--accumulation', '2',
-    '--eval-every', '0', '--save-steps', '1', '--pause-file', str(root/'PAUSE'), '--loss', sys.argv[3]])
+    '--eval-every', '0', '--save-steps', '1', '--pause-file', str(root/'PAUSE'), '--loss', sys.argv[3],
+    '--query-groups-per-forward', sys.argv[4]])
 result = training.train(args)
 (directory / ('rank-' + os.environ['RANK'] + '.json')).write_text(json.dumps(result))
 '''
 
 
-@pytest.mark.parametrize('loss, paused_step', [('mse', 1), ('legacy_ranking', 0)])
-def test_four_rank_mid_accumulation_pause_resumes_identically(tmp_path, loss, paused_step):
+@pytest.mark.parametrize('loss, groups_per_forward, paused_step', [('mse', 1, 1), ('legacy_ranking', 1, 0),
+                                                               ('legacy_ranking', 2, 1)])
+def test_four_rank_mid_accumulation_pause_resumes_identically(tmp_path, loss, groups_per_forward, paused_step):
     create_fixture(tmp_path / 'corpus')
     grouped = {}
     for row in read_jsonl(tmp_path / 'corpus/reference_labels.jsonl'):
@@ -168,7 +183,7 @@ def test_four_rank_mid_accumulation_pause_resumes_identically(tmp_path, loss, pa
            'PYTHONPATH': str(Path(__file__).resolve().parents[1]) + os.pathsep + os.environ.get('PYTHONPATH', '')}
     def run(mode):
         result = subprocess.run([sys.executable, '-m', 'torch.distributed.run', '--standalone',
-            '--nproc_per_node=4', str(worker), str(tmp_path), mode, loss], env=env,
+            '--nproc_per_node=4', str(worker), str(tmp_path), mode, loss, str(groups_per_forward)], env=env,
             text=True, capture_output=True, timeout=180)
         assert result.returncode == 0, result.stdout + result.stderr
     run('pause')

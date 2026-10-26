@@ -40,6 +40,8 @@ class PauseRequest:
     def requested(self, device, world):
         requested = (self.signaled or (self.path is not None and self.path.exists())
                      or (self.deadline is not None and time.time() >= self.deadline))
+        if world == 1:
+            return bool(requested)
         # Every rank calls at the same microbatch boundary, including no_sync
         # microbatches. A signal delivered to just one rank pauses all ranks.
         flag = torch.tensor(int(requested), device=device)

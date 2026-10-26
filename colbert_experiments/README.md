@@ -35,19 +35,29 @@ and up to 16 documents; 64 accumulated groups give up to 1,024 directional pairs
 per optimizer update. Ranking comparisons span the effective batch. Full inputs
 retain the 8,192-token limits and truncation checks.
 
-The encoder groups texts of similar lengths to reduce padding, and differentiable
-MaxSim scores documents in batches. The GB300 launcher disables activation
+The encoder combines up to **four query groups** per forward (up to 68 texts),
+grouping similar lengths to reduce padding, within a **65,536 padded-token**
+packing budget. Longer groups are packed separately without truncation. All 64
+query groups still contribute to each update and the full-batch ranking loss.
+This cuts encoder calls per pass from 64 to as few as 16. Adjust
+`--query-groups-per-forward` and `--encoder-token-budget` for available VRAM.
+An eight-million-token CPU LRU cache (`--token-cache-tokens`) avoids repeated
+tokenization; both passes reuse the same prepared inputs. It retains no model
+outputs or gradients. Token masks are compacted with CPU-derived integer indices
+to avoid per-text CUDA boolean-indexing synchronization. Differentiable MaxSim
+scores documents in batches. The GB300 launcher disables activation
 checkpointing by default to avoid encoder recomputation during backward; add
 `--gradient-checkpointing` if memory is insufficient. This trades VRAM for speed
 without shortening inputs or reducing pair coverage. Logs include total updates,
-per-step time, cache/loss/backward timings, and peak allocated GPU memory.
+per-step time, preparation/cache/loss/backward timings, encoder batches per pass,
+token-cache occupancy/hits, and peak allocated GPU memory.
 
-Output defaults to `../data/no_phi/colbert_production_gb300_one_epoch_20261026`, with
+Output defaults to `../data/no_phi/colbert_production_gb300_batched_20261026`, with
 checkpoints in `fit/` and the final model in `model/`. Checkpoints save every 25
 updates, keeping at most two. Repeat the command to resume; create `OUTPUT/PAUSE`
 to pause cleanly and remove it before resuming. This run has no Camus time cutoff.
 The new directory starts the one-epoch schedule from scratch and preserves the
-older three-epoch run. Changing epochs or execution settings requires a fresh
+earlier runs. Changing epochs or execution settings requires a fresh
 output directory.
 The launcher refuses to train on Camus and makes no LLM calls. It checks the
 complete-score publication receipt and SHA-256 content of the training files,
@@ -63,6 +73,13 @@ Use `--cache-dir` for a local model cache, `--source-run`/`--output` to adjust m
 locations, and `--dry-run` to print the command without starting anything.
 End-to-end throughput must be measured on the GB300; microbatch and
 accumulation settings can be overridden before the first fit.
+
+For a bounded forward/backward timing comparison without optimizer steps or
+saving model weights, run `benchmark_grouped_training.py --probes
+PATH/fit/fixed_probes.json --device cuda:0`. It compares one versus four query
+groups using the same small synthetic probe subset and reports GPU memory and
+cached-score replay errors. A local H100 check with 64 pairs measured 6.82 versus
+3.05 seconds (13.0 versus 29.3 GiB allocated); this is not a GB300 production ETA.
 
 ## One-off smoke test on two A6000 GPUs while production labels continue
 

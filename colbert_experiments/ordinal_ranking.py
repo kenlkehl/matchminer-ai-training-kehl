@@ -12,6 +12,8 @@ import time
 import torch
 import torch.distributed as dist
 
+from .ranking_microbatches import prepare_encoder_batches
+
 
 PAUSE_POLL_MICROBATCHES = 8
 
@@ -75,7 +77,8 @@ def ranking_loss(scores, labels, directions, query_ids, *, objective='legacy_ran
 def cached_ranking_backward(model, wrapped, batch, *, device, rank, world,
                             seed_for_micro, objective='legacy_ranking', scale=20.,
                             contrastive_weight=1., should_pause=lambda: False,
-                            pause_poll_microbatches=PAUSE_POLL_MICROBATCHES):
+                            pause_poll_microbatches=PAUSE_POLL_MICROBATCHES,
+                            groups_per_forward=1, encoder_token_budget=32768):
     """Exact full-batch loss gradient, subject to deterministic forward replay.
 
     All ranks receive the same batch. The cache pass uses the unwrapped encoder
@@ -94,19 +97,26 @@ def cached_ranking_backward(model, wrapped, batch, *, device, rank, world,
         directions.extend([group['direction']] * len(indices))
         queries.extend([group['query_id']] * len(indices))
         offsets.append(len(labels))
+    preparation_started = time.monotonic()
+    packets, fallback = prepare_encoder_batches(model, batch, offsets, rank=rank, world=world,
+        device=device, groups_per_forward=groups_per_forward, token_budget=encoder_token_budget)
+    microbatches = len(packets)
+    if world > 1:
+        count = torch.tensor(microbatches, device=device)
+        dist.all_reduce(count, op=dist.ReduceOp.MAX)
+        microbatches = int(count)
+    preparation_seconds = time.monotonic() - preparation_started
     cached = torch.zeros(len(labels), device=device, dtype=torch.float32)
     cache_started = time.monotonic()
-    microbatches = math.ceil(len(batch) / world)
     for micro in range(microbatches):
         if micro % pause_poll_microbatches == 0 and should_pause():
             return None
-        index = micro * world + rank
-        if index < len(batch):
-            group, indices = batch[index]
-            torch.manual_seed(seed_for_micro(micro))
+        if micro < len(packets):
+            packet = packets[micro]
+            torch.manual_seed(seed_for_micro(packet.seed_micro))
             with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16, enabled=device.type == 'cuda'):
-                scores = model(group['query'], [group['documents'][i]['text'] for i in indices])
-            cached[offsets[index]:offsets[index + 1]] = scores.float()
+                scores = model(**packet.kwargs)
+            cached[packet.positions] = scores.float()
     if should_pause():
         return None
     if world > 1:
@@ -130,18 +140,16 @@ def cached_ranking_backward(model, wrapped, batch, *, device, rank, world,
     for micro in range(microbatches):
         if micro % pause_poll_microbatches == 0 and should_pause():
             return None
-        index = micro * world + rank
-        real = index < len(batch)
-        group, indices = batch[index] if real else batch[0]
-        torch.manual_seed(seed_for_micro(micro))
+        real = micro < len(packets)
+        packet = packets[micro] if real else None
+        torch.manual_seed(seed_for_micro(packet.seed_micro if real else micro))
         sync = wrapped.no_sync() if world > 1 and micro + 1 < microbatches else nullcontext()
         with sync, torch.autocast('cuda', dtype=torch.bfloat16, enabled=device.type == 'cuda'):
-            prediction = wrapped(group['query'], [group['documents'][i]['text'] for i in indices]).float()
+            prediction = wrapped(**(packet.kwargs if real else fallback)).float()
             if real:
-                section = slice(offsets[index], offsets[index + 1])
-                replay_error = torch.maximum(replay_error, (prediction.detach() - cached.detach()[section]).abs().max())
+                replay_error = torch.maximum(replay_error, (prediction.detach() - cached[packet.positions]).abs().max())
                 # DDP averages parameter gradients, so undo its division.
-                surrogate = (prediction * score_grad[section]).sum() * world
+                surrogate = (prediction * score_grad[packet.positions]).sum() * world
             else:
                 surrogate = prediction.sum() * 0
             surrogate.backward()
@@ -157,4 +165,5 @@ def cached_ranking_backward(model, wrapped, batch, *, device, rank, world,
     return dict(loss=loss.detach(), **{k: v.detach() if isinstance(v, torch.Tensor) else v
                                      for k, v in components.items()}, replay_max_error=float(replay_error),
                 cache_pass_seconds=cache_seconds, ranking_loss_seconds=loss_seconds,
-                replay_backward_seconds=time.monotonic() - replay_started)
+                replay_backward_seconds=time.monotonic() - replay_started,
+                batch_preparation_seconds=preparation_seconds, encoder_batches_per_pass=len(packets))

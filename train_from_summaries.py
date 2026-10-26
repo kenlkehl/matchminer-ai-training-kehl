@@ -26,7 +26,7 @@ from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "dcd62307a25ffeab4998b898a26d38b80833e8b1"
+INFERENCE_COMMIT = "3a12dad764b4ba9f8111f2802612bad764f7adc6"
 
 TRIALSPACE_OPERATIONAL_OPTIONS = {
     'trialspace_save_steps', 'trialspace_save_total_limit', 'trialspace_stop_at', 'trialspace_pause_file',
@@ -92,6 +92,9 @@ def parser():
                    help='Query groups per GPU per optimizer update, sampled across available scores')
     p.add_argument('--trialspace-documents-per-query', type=int, default=8,
                    help='Full-text labeled candidates encoded together for each training query')
+    p.add_argument('--trialspace-query-groups-per-forward', type=int, default=2)
+    p.add_argument('--trialspace-encoder-token-budget', type=int, default=32768)
+    p.add_argument('--trialspace-token-cache-tokens', type=int, default=8000000)
     p.add_argument('--trialspace-learning-rate', type=float, default=2e-5)
     p.add_argument('--trialspace-loss', choices=['mse', 'cosent', 'legacy_ranking'], default='legacy_ranking')
     p.add_argument('--trialspace-ranking-scale', type=float, default=20.)
@@ -219,6 +222,9 @@ def stages(args):
             '--lr-scheduler', args.trialspace_lr_scheduler, '--warmup-ratio', str(args.trialspace_warmup_ratio),
             '--accumulation', str(args.trialspace_accumulation), '--learning-rate', str(args.trialspace_learning_rate),
             '--documents-per-query', str(args.trialspace_documents_per_query),
+            '--query-groups-per-forward', str(args.trialspace_query_groups_per_forward),
+            '--encoder-token-budget', str(args.trialspace_encoder_token_budget),
+            '--token-cache-tokens', str(args.trialspace_token_cache_tokens),
             '--save-steps', str(args.trialspace_save_steps),
             '--save-total-limit', str(args.trialspace_save_total_limit),
             '--training-splits', *training_splits,

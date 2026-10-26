@@ -85,6 +85,12 @@ def parser():
     train.add_argument('--prediction-link', choices=['identity', 'sigmoid'], default='identity')
     train.add_argument('--steps', type=int, default=1000)
     train.add_argument('--accumulation', type=int, default=8)
+    train.add_argument('--query-groups-per-forward', type=int, default=1,
+                       help='Ranking query groups encoded together without changing the effective batch')
+    train.add_argument('--encoder-token-budget', type=int, default=32768,
+                       help='Padded-token budget for combining groups; an oversized single group stays complete')
+    train.add_argument('--token-cache-tokens', type=int, default=8000000,
+                       help='Per-process CPU LRU cache capacity in input tokens; zero disables retention')
     train.add_argument('--documents-per-class', type=int, default=2)
     train.add_argument('--learning-rate', type=float, default=1e-5)
     train.add_argument('--loss', choices=['mse', 'cosent', 'legacy_ranking'], default='mse',

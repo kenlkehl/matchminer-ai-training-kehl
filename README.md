@@ -248,7 +248,17 @@ each epoch without replacement. Actual score coverage depends on the labels
 available in that batch; absent scores are never invented.
 
 Each full query and its candidates are encoded in batches grouped by text length
-to reduce padding. Differentiable MaxSim also batches candidate documents. A first pass caches
+to reduce padding. Production ranking combines up to **two query groups per
+encoder forward**, within a 32,768 padded-token budget. This changes the actual
+GPU microbatch, leaving the effective batch and complete pair coverage unchanged.
+Use `--trialspace-query-groups-per-forward`, `--trialspace-encoder-token-budget`,
+and `--trialspace-token-cache-tokens` in the integrated runner (omit `trialspace-`
+for direct training). The per-process CPU LRU cache defaults to eight million
+input tokens; it stores token IDs and masks, never learned embeddings. Tokens
+prepared for an update are reused in both passes even if the cache evicts them.
+One group exceeding the packing budget is processed complete on its own; the
+budget limits combining groups, not the model's supported input length.
+Differentiable MaxSim also batches candidate documents. A first pass caches
 scalar scores across GPUs; a second replays seeded microbatches and applies the
 gradient of the **full effective batch** ranking loss. Ordinary accumulation
 alone would not compare scores across microbatches. This adds one forward pass
@@ -267,6 +277,9 @@ for less encoder recomputation; the one-off
 this faster setting and one complete epoch by default. Its fresh default output
 preserves the earlier three-epoch run. Per-update logs include the total update
 count, step time, ranking-cache/loss/backward times, and peak GPU allocation.
+They also report encoder batches per pass, preparation time and token-cache
+occupancy/hits. Single-GPU pause polling stays on CPU. GPU token compaction uses
+CPU-prepared integer indices rather than per-text CUDA boolean indexing.
 
 ColBERT checkpoints contain model, optimizer, and LR-scheduler state. By default, at most
 two checkpoint payloads are retained, including a new save in progress; the

@@ -46,6 +46,8 @@ def test_production_plan_uses_only_gated_colbert_and_parses_real_commands(tmp_pa
                 assert parsed.prediction_link == 'identity' and parsed.steps == 8
                 assert parsed.output_model.parent == args.models_dir
                 assert parsed.accumulation == 32 and parsed.documents_per_query == 8
+                assert parsed.query_groups_per_forward == 2 and parsed.encoder_token_budget == 32768
+                assert parsed.token_cache_tokens == 8000000
                 assert parsed.save_total_limit == 2
                 assert parsed.training_splits == ['train', 'val', 'test'] and parsed.require_complete_coverage
             else:
@@ -114,6 +116,19 @@ def test_pipeline_passes_training_pause_and_checkpoint_controls():
                 assert child.save_steps == 25 and child.save_total_limit == 2
                 assert child.stop_at == '2026-10-26T08:50:00-04:00'
                 assert child.pause_file == Path('/tmp/PAUSE')
+
+
+def test_pipeline_passes_grouped_encoder_and_token_cache_controls():
+    import run_pipeline
+    for parser in (runner.parser, run_pipeline.parser):
+        args = parser().parse_args(['--trialspace-query-groups-per-forward', '4',
+            '--trialspace-encoder-token-budget', '65536', '--trialspace-token-cache-tokens', '123456'])
+        for stage in runner.stages(args):
+            if stage.name.startswith('train-trialspace-'):
+                tail = stage.command[stage.command.index('trialspace_training.py') + 1:]
+                child = production.parser().parse_args(tail)
+                assert child.query_groups_per_forward == 4 and child.encoder_token_budget == 65536
+                assert child.token_cache_tokens == 123456
 
 
 def test_deadline_and_checkpoint_changes_do_not_invalidate_pipeline_resume():
@@ -390,8 +405,12 @@ def test_production_ranking_defaults_cover_all_pairs_evaluate_and_resume(tmp_pat
         @property
         def device(self): return self.weight.device
         def fingerprint(self): return dict(toy='ranking')
-        def forward(self, query, documents):
-            assert query.startswith(INSTRUCTION)
+        def prepare_groups(self, queries, documents): return list(zip(queries, documents))
+        def prepared_batch_tokens(self, groups): return sum(len(q) + sum(map(len, ds)) for q, ds in groups)
+        def forward(self, query=None, documents=None, *, prepared_groups=None):
+            groups = prepared_groups if prepared_groups is not None else [(query, documents)]
+            assert all(q.startswith(INSTRUCTION) for q, _ in groups)
+            documents = [d for _, ds in groups for d in ds]
             return self.weight * torch.tensor([len(d) / 1000 for d in documents])
         def save(self, path):
             Path(path).mkdir(parents=True, exist_ok=True)
@@ -413,6 +432,7 @@ def test_production_ranking_defaults_cover_all_pairs_evaluate_and_resume(tmp_pat
     assert all(r['batch_unique_directional_pairs'] == r['batch_pairs'] for r in metrics['history'])
     assert any(r['gradient_norm'] > 0 for r in metrics['history'])
     assert all(r['replay_max_error'] == 0 for r in metrics['history'])
+    assert any(r['encoder_batches_per_pass'] < r['batch_query_groups'] for r in metrics['history'])
     for evaluation in metrics['evaluations']:
         assert 'val' not in evaluation  # Production includes every original split.
         train = evaluation['train']

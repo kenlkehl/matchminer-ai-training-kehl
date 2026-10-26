@@ -90,6 +90,11 @@ def _train(args, world, rank, local_rank, pause):
     regression = getattr(args, 'objective', 'binary') == 'gated_regression'
     loss_name = getattr(args, 'loss', 'mse')
     ranking = regression and loss_name != 'mse'
+    groups_per_forward = getattr(args, 'query_groups_per_forward', 1)
+    encoder_token_budget = getattr(args, 'encoder_token_budget', 32768)
+    token_cache_tokens = getattr(args, 'token_cache_tokens', 8000000)
+    if min(groups_per_forward, encoder_token_budget) < 1 or token_cache_tokens < 0:
+        raise ValueError('Use positive encoder batch limits and nonnegative token cache capacity')
     schedule = getattr(args, 'lr_scheduler', 'constant')
     warmup = getattr(args, 'warmup_ratio', .01)
     scale, contrastive_weight = getattr(args, 'ranking_scale', 20.), getattr(args, 'contrastive_weight', 1.)
@@ -154,6 +159,8 @@ def _train(args, world, rank, local_rank, pause):
     model = ColBERT(args.model, revision=args.revision, query_length=args.query_length,
                    document_length=args.document_length, cache_dir=args.cache_dir,
                    checkpointing=getattr(args, 'gradient_checkpointing', True)).to(device)
+    if hasattr(model, 'configure_token_cache'):
+        model.configure_token_cache(token_cache_tokens)
     identity = dict(contract=contract_hash(), patients=digest(patients), cohorts=digest(cohorts), labels=digest(labels),
         base=model.fingerprint(), world_size=world, steps=args.steps, accumulation=args.accumulation,
         documents_per_class=args.documents_per_class, learning_rate=args.learning_rate,
@@ -181,6 +188,9 @@ def _train(args, world, rank, local_rank, pause):
         identity['gradient_checkpointing'] = False
     if hasattr(model, 'execution_settings'):
         identity['encoder_execution'] = model.execution_settings()
+    if ranking and groups_per_forward > 1:
+        identity['ranking_encoder_batches'] = dict(query_groups_per_forward=groups_per_forward,
+                                                   padded_token_budget=encoder_token_budget)
     manifest = output / 'training_manifest.json'
     if manifest.exists() and json.loads(manifest.read_text()) != identity:
         raise ValueError('Training identity changed; use a new round directory')
@@ -272,6 +282,7 @@ def _train(args, world, rank, local_rank, pause):
             result = cached_ranking_backward(model, wrapped, global_batch, device=device, rank=rank, world=world,
                 seed_for_micro=lambda micro: args.seed + (current * args.accumulation + micro) * world + rank,
                 objective=loss_name, scale=scale, contrastive_weight=contrastive_weight,
+                groups_per_forward=groups_per_forward, encoder_token_budget=encoder_token_budget,
                 should_pause=lambda: pause_if_requested(current))
             if result is None:
                 return 'paused'
@@ -336,6 +347,8 @@ def _train(args, world, rank, local_rank, pause):
                          **(dict(gpu_peak_allocated_gb=round(torch.cuda.max_memory_allocated(device) / 2**30, 2))
                             if device.type == 'cuda' else {}),
                          **ranking_metrics, **batch_metrics)
+            if hasattr(model, 'token_cache_info'):
+                entry['token_cache'] = model.token_cache_info()
             history.append(entry)
             write_json(output / 'status.json', dict(state='training', **entry))
             print(json.dumps(entry), flush=True)

@@ -12,6 +12,8 @@ def test_full_launcher_uses_production_parser_and_complete_data(tmp_path):
     assert train.training_splits == ['train', 'val', 'test'] and train.require_complete_coverage
     assert train.loss == 'legacy_ranking' and train.steps is None and train.epochs == 1
     assert train.gradient_checkpointing is False
+    assert train.query_groups_per_forward == 4 and train.encoder_token_budget == 65536
+    assert train.token_cache_tokens == 8000000
     assert train.documents_per_query * train.accumulation == 1024
     assert train.save_total_limit == 2 and train.stop_at is None
     assert train.labels == [str(tmp_path / 'source/labels/scores.jsonl')]
@@ -107,4 +109,4 @@ def test_physical_and_visible_selection_are_mutually_exclusive():
 def test_memory_saving_checkpointing_can_be_enabled_for_the_new_run():
     args = launcher.parser().parse_args(['--gradient-checkpointing'])
     assert '--gradient-checkpointing' in launcher.command(args)
-    assert launcher.OUTPUT.name == 'colbert_production_gb300_one_epoch_20261026'
+    assert launcher.OUTPUT.name == 'colbert_production_gb300_batched_20261026'
