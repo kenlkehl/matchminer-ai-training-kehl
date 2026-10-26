@@ -96,7 +96,7 @@ def parser():
     p.add_argument('--trialspace-encoder-token-budget', type=int, default=32768)
     p.add_argument('--trialspace-token-cache-tokens', type=int, default=8000000)
     p.add_argument('--trialspace-ranking-backward', choices=['replay', 'retained'], default='replay')
-    p.add_argument('--trialspace-activation-storage', choices=['auto', 'gpu', 'cpu'], default='auto')
+    p.add_argument('--trialspace-activation-storage', choices=['auto', 'gpu', 'cpu', 'direct'], default='auto')
     p.add_argument('--trialspace-activation-gpu-budget-gb', type=float, default=0)
     p.add_argument('--trialspace-learning-rate', type=float, default=2e-5)
     p.add_argument('--trialspace-loss', choices=['mse', 'cosent', 'legacy_ranking'], default='legacy_ranking')

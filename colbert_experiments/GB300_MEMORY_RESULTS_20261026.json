@@ -1,0 +1,439 @@
+{
+  "date": "2026-10-26",
+  "host": "sn4622130540",
+  "base_training_commit": "dba5ec011e47c921f7d232043648a7b96f660b1f",
+  "gpu_uuid": "GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9",
+  "driver": "595.58.03",
+  "transformers": "5.17.0",
+  "cpu_numa_node": 0,
+  "gpu_numa_node": 1,
+  "coherent_gpu_memory_mode_parameter": "",
+  "cuda_attributes": {
+    "PAGEABLE_MEMORY_ACCESS": 1,
+    "CONCURRENT_MANAGED_ACCESS": 1,
+    "PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES": 1
+  },
+  "probe_path": "../data/no_phi/colbert_production_gb300_batched_20261026/fit/fixed_probes.json",
+  "probe_sha256": "a5d2d4943c5523c761b128ccea15e74178eaf1780703e73fdbab57950ffc7119",
+  "runs": {
+    "replay64": [
+      {
+        "device": "NVIDIA GB300",
+        "groups": 64,
+        "pairs": 1024,
+        "python": "3.13.15",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "visible_devices": "GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9",
+        "warmup": 1,
+        "repeats": 3,
+        "deterministic": false,
+        "encoder_token_budget": 131072,
+        "activation_storage": "auto",
+        "activation_gpu_budget_gb": 0
+      },
+      {
+        "query_groups_per_forward": 8,
+        "ranking_backward": "replay",
+        "seconds": 16.83489502221346,
+        "seconds_per_repeat": [
+          16.81232820637524,
+          16.828486413694918,
+          16.863870446570218
+        ],
+        "pairs_per_second": 60.826040117793625,
+        "peak_allocated_gb": 90.45743083953857,
+        "peak_reserved_gb": 128.974609375,
+        "encoder_batches_per_pass": 11,
+        "replay_max_error": 0.0,
+        "phase_seconds_last_repeat": {
+          "cache_pass_seconds": 5.799415136687458,
+          "ranking_loss_seconds": 0.017962715588510036,
+          "replay_backward_seconds": 11.036950850859284,
+          "batch_preparation_seconds": 0.006647721864283085
+        },
+        "phase_memory_gb_last_repeat": {},
+        "token_cache": {
+          "tokens": 690239,
+          "capacity_tokens": 8000000,
+          "entries": 922,
+          "hits": 3688,
+          "misses": 922
+        }
+      }
+    ],
+    "replay64_large": [
+      {
+        "device": "NVIDIA GB300",
+        "groups": 64,
+        "pairs": 1024,
+        "python": "3.13.15",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "visible_devices": "GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9",
+        "warmup": 1,
+        "repeats": 3,
+        "deterministic": false,
+        "encoder_token_budget": 262144,
+        "activation_storage": "auto",
+        "activation_gpu_budget_gb": 0
+      },
+      {
+        "query_groups_per_forward": 16,
+        "ranking_backward": "replay",
+        "seconds": 16.07524294095735,
+        "seconds_per_repeat": [
+          16.056835290044546,
+          16.05954589974135,
+          16.109347633086145
+        ],
+        "pairs_per_second": 63.700436986305135,
+        "peak_allocated_gb": 173.02452325820923,
+        "peak_reserved_gb": 202.455078125,
+        "encoder_batches_per_pass": 6,
+        "replay_max_error": 0.0,
+        "phase_seconds_last_repeat": {
+          "cache_pass_seconds": 5.516214270144701,
+          "ranking_loss_seconds": 0.01749526895582676,
+          "replay_backward_seconds": 10.563201299868524,
+          "batch_preparation_seconds": 0.00912142638117075
+        },
+        "phase_memory_gb_last_repeat": {},
+        "pinned_allocator_gb": {
+          "active_bytes.peak": 4.6566128730773926e-09,
+          "allocated_bytes.current": 4.6566128730773926e-09,
+          "allocated_bytes.peak": 4.6566128730773926e-09
+        },
+        "token_cache": {
+          "tokens": 690239,
+          "capacity_tokens": 8000000,
+          "entries": 922,
+          "hits": 3688,
+          "misses": 922
+        }
+      }
+    ],
+    "gpu8_grads": [
+      {
+        "device": "NVIDIA GB300",
+        "groups": 8,
+        "pairs": 128,
+        "python": "3.13.15",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "visible_devices": "GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9",
+        "warmup": 1,
+        "repeats": 2,
+        "encoder_token_budget": 65536,
+        "activation_storage": "gpu",
+        "activation_gpu_budget_gb": 0
+      },
+      {
+        "query_groups_per_forward": 4,
+        "ranking_backward": "retained",
+        "seconds": 1.6131321252323687,
+        "seconds_per_repeat": [
+          1.6176511328667402,
+          1.6086131175979972
+        ],
+        "pairs_per_second": 79.34873901389933,
+        "peak_allocated_gb": 101.10068941116333,
+        "peak_reserved_gb": 102.9296875,
+        "encoder_batches_per_pass": 4,
+        "encoder_forward_passes": 1,
+        "model_backward_calls": 1,
+        "activation_offloaded_gb": 0.0,
+        "activation_gpu_soft_limit_gb": null,
+        "phase_seconds_last_repeat": {
+          "forward_seconds": 0.8703342480584979,
+          "ranking_loss_seconds": 0.0030699949711561203,
+          "backward_seconds": 0.7254075603559613,
+          "batch_preparation_seconds": 0.0007710745558142662
+        },
+        "phase_memory_gb_last_repeat": {
+          "forward_peak_allocated_gb": 100.84158134460449,
+          "forward_end_allocated_gb": 100.8241720199585,
+          "backward_peak_allocated_gb": 101.10068941116333
+        },
+        "gradient_relative_l2_error": 0.006182395072581552,
+        "gradient_max_abs_error": 0.0023888126015663147,
+        "gradient_reference": "replay",
+        "token_cache": {
+          "tokens": 105064,
+          "capacity_tokens": 8000000,
+          "entries": 127,
+          "hits": 508,
+          "misses": 127
+        }
+      }
+    ],
+    "replay8_grads": [
+      {
+        "device": "NVIDIA GB300",
+        "groups": 8,
+        "pairs": 128,
+        "python": "3.13.15",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "visible_devices": "GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9",
+        "warmup": 1,
+        "repeats": 2,
+        "encoder_token_budget": 65536,
+        "activation_storage": "auto",
+        "activation_gpu_budget_gb": 0
+      },
+      {
+        "query_groups_per_forward": 4,
+        "ranking_backward": "replay",
+        "seconds": 2.4757853280752897,
+        "seconds_per_repeat": [
+          2.47338651958853,
+          2.4781841365620494
+        ],
+        "pairs_per_second": 51.700766842943125,
+        "peak_allocated_gb": 31.46305274963379,
+        "peak_reserved_gb": 38.099609375,
+        "encoder_batches_per_pass": 4,
+        "replay_max_error": 0.0,
+        "phase_seconds_last_repeat": {
+          "cache_pass_seconds": 0.8238354399800301,
+          "ranking_loss_seconds": 0.0029866350814700127,
+          "replay_backward_seconds": 1.648264130577445,
+          "batch_preparation_seconds": 0.0006737625226378441
+        },
+        "phase_memory_gb_last_repeat": {},
+        "gradient_relative_l2_error": 0.0062481570010886655,
+        "gradient_max_abs_error": 0.002414509654045105,
+        "gradient_reference": "replay",
+        "token_cache": {
+          "tokens": 105064,
+          "capacity_tokens": 8000000,
+          "entries": 127,
+          "hits": 508,
+          "misses": 127
+        }
+      }
+    ],
+    "direct8_deterministic_fixed": [
+      {
+        "device": "NVIDIA GB300",
+        "groups": 8,
+        "pairs": 128,
+        "python": "3.13.15",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "visible_devices": "GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9",
+        "warmup": 1,
+        "repeats": 1,
+        "deterministic": true,
+        "encoder_token_budget": 65536,
+        "activation_storage": "direct",
+        "activation_gpu_budget_gb": 1.0
+      },
+      {
+        "query_groups_per_forward": 4,
+        "ranking_backward": "retained",
+        "seconds": 9.312193540856242,
+        "seconds_per_repeat": [
+          9.312193540856242
+        ],
+        "pairs_per_second": 13.745418782203553,
+        "peak_allocated_gb": 2.1755385398864746,
+        "peak_reserved_gb": 38.29296875,
+        "encoder_batches_per_pass": 4,
+        "encoder_forward_passes": 1,
+        "model_backward_calls": 1,
+        "activation_offloaded_gb": 121.70728779304773,
+        "activation_gpu_soft_limit_gb": 1.0,
+        "phase_seconds_last_repeat": {
+          "forward_seconds": 3.8875865507870913,
+          "ranking_loss_seconds": 0.0032200366258621216,
+          "backward_seconds": 5.3687946032732725,
+          "batch_preparation_seconds": 0.0010206084698438644
+        },
+        "phase_memory_gb_last_repeat": {
+          "forward_peak_allocated_gb": 1.96744966506958,
+          "forward_end_allocated_gb": 0.9872016906738281,
+          "backward_peak_allocated_gb": 2.1755385398864746
+        },
+        "gradient_relative_l2_error": 5.339183659870325e-08,
+        "gradient_max_abs_error": 1.1920928955078125e-07,
+        "gradient_reference": "replay",
+        "token_cache": {
+          "tokens": 105064,
+          "capacity_tokens": 8000000,
+          "entries": 127,
+          "hits": 381,
+          "misses": 127
+        }
+      }
+    ],
+    "profile_cpu": [
+      {
+        "device": "NVIDIA GB300",
+        "groups": 2,
+        "pairs": 16,
+        "python": "3.13.15",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "visible_devices": "GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9",
+        "warmup": 1,
+        "repeats": 2,
+        "deterministic": true,
+        "encoder_token_budget": 32768,
+        "activation_storage": "cpu",
+        "activation_gpu_budget_gb": 1e-06
+      },
+      {
+        "query_groups_per_forward": 2,
+        "ranking_backward": "retained",
+        "seconds": 0.7912864256650209,
+        "seconds_per_repeat": [
+          0.7899002144113183,
+          0.7926726369187236
+        ],
+        "pairs_per_second": 20.2202381856268,
+        "peak_allocated_gb": 1.3842592239379883,
+        "peak_reserved_gb": 11.638671875,
+        "encoder_batches_per_pass": 1,
+        "encoder_forward_passes": 1,
+        "model_backward_calls": 1,
+        "activation_offloaded_gb": 12.717142075300217,
+        "activation_gpu_soft_limit_gb": null,
+        "phase_seconds_last_repeat": {
+          "forward_seconds": 0.4242092911154032,
+          "ranking_loss_seconds": 0.0014952365309000015,
+          "backward_seconds": 0.36135865561664104,
+          "batch_preparation_seconds": 0.00019494444131851196
+        },
+        "phase_memory_gb_last_repeat": {
+          "forward_peak_allocated_gb": 1.1029877662658691,
+          "forward_end_allocated_gb": 0.6372170448303223,
+          "backward_peak_allocated_gb": 1.3842592239379883
+        },
+        "pinned_allocator_gb": {
+          "active_bytes.peak": 20.286363010294735,
+          "allocated_bytes.current": 20.286363010294735,
+          "allocated_bytes.peak": 20.286363010294735
+        },
+        "gradient_relative_l2_error": 0.0,
+        "gradient_max_abs_error": 0.0,
+        "gradient_reference": "replay",
+        "token_cache": {
+          "tokens": 13369,
+          "capacity_tokens": 8000000,
+          "entries": 18,
+          "hits": 72,
+          "misses": 18
+        }
+      }
+    ],
+    "profile_direct": [
+      {
+        "device": "NVIDIA GB300",
+        "groups": 2,
+        "pairs": 16,
+        "python": "3.13.15",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "visible_devices": "GPU-b9b14780-9af1-c0ab-46e5-fa6faeef64d9",
+        "warmup": 1,
+        "repeats": 2,
+        "deterministic": true,
+        "encoder_token_budget": 32768,
+        "activation_storage": "direct",
+        "activation_gpu_budget_gb": 1e-06
+      },
+      {
+        "query_groups_per_forward": 2,
+        "ranking_backward": "retained",
+        "seconds": 1.3416679361835122,
+        "seconds_per_repeat": [
+          1.2719450071454048,
+          1.4113908652216196
+        ],
+        "pairs_per_second": 11.925454554361156,
+        "peak_allocated_gb": 1.386643409729004,
+        "peak_reserved_gb": 11.638671875,
+        "encoder_batches_per_pass": 1,
+        "encoder_forward_passes": 1,
+        "model_backward_calls": 1,
+        "activation_offloaded_gb": 12.717142075300217,
+        "activation_gpu_soft_limit_gb": 9.993091225624084e-07,
+        "phase_seconds_last_repeat": {
+          "forward_seconds": 0.8201702926307917,
+          "ranking_loss_seconds": 0.0024069827049970627,
+          "backward_seconds": 0.5793406683951616,
+          "batch_preparation_seconds": 0.00023452937602996826
+        },
+        "phase_memory_gb_last_repeat": {
+          "forward_peak_allocated_gb": 1.1029877662658691,
+          "forward_end_allocated_gb": 0.6372170448303223,
+          "backward_peak_allocated_gb": 1.386643409729004
+        },
+        "pinned_allocator_gb": {
+          "active_bytes.peak": 20.286363010294735,
+          "allocated_bytes.current": 20.286363010294735,
+          "allocated_bytes.peak": 20.286363010294735
+        },
+        "gradient_relative_l2_error": 0.0,
+        "gradient_max_abs_error": 0.0,
+        "gradient_reference": "replay",
+        "token_cache": {
+          "tokens": 13369,
+          "capacity_tokens": 8000000,
+          "entries": 18,
+          "hits": 72,
+          "misses": 18
+        }
+      }
+    ]
+  },
+  "profile_memcpy": {
+    "cpu": {
+      "count": {
+        "Memcpy HtoD (Pageable -> Device)": 19,
+        "Memcpy DtoH (Device -> Pinned)": 2346,
+        "Memcpy DtoD (Device -> Device)": 90,
+        "Memcpy DtoH (Device -> Pageable)": 1,
+        "Memcpy HtoD (Pinned -> Device)": 2522
+      },
+      "bytes": {
+        "Memcpy HtoD (Pageable -> Device)": 347488,
+        "Memcpy DtoH (Device -> Pinned)": 13654927336,
+        "Memcpy DtoD (Device -> Device)": 68465664,
+        "Memcpy DtoH (Device -> Pageable)": 64,
+        "Memcpy HtoD (Pinned -> Device)": 13717109848
+      }
+    },
+    "direct": {
+      "count": {
+        "Memcpy HtoD (Pageable -> Device)": 19,
+        "Memcpy DtoH (Device -> Pinned)": 2346,
+        "Memcpy DtoD (Device -> Device)": 90,
+        "Memcpy DtoH (Device -> Pageable)": 1
+      },
+      "bytes": {
+        "Memcpy HtoD (Pageable -> Device)": 347488,
+        "Memcpy DtoH (Device -> Pinned)": 13654927336,
+        "Memcpy DtoD (Device -> Device)": 68465664,
+        "Memcpy DtoH (Device -> Pageable)": 64
+      }
+    }
+  },
+  "failed_full_retention": {
+    "auto64": "64 groups, 16 documents, cap 8, token budget 131072, default GPU budget: host memory guard during forward",
+    "direct64": "Same batch and packing, direct default GPU budget: host memory guard during forward",
+    "discarded_arena_experiment": "64 groups, 16 documents, cap 4, token budget 65536, GPU budget 160 GiB: host guard during forward after arena reserved 524.5 GiB; arena implementation not retained"
+  },
+  "validation": {
+    "cpu_integration": "61 passed, 15 CUDA opt-in tests skipped",
+    "cuda": "20 passed (15 CUDA cases and five CPU cases)",
+    "native_model": "Deterministic direct/replay relative L2 5.34e-8 on 128 pairs; staged/replay and direct/replay exactly equal on 16 pairs"
+  },
+  "limitations": [
+    "Forward/backward only; no optimizer steps or production training.",
+    "Normal replay-to-replay gradient checks predate the automatic deterministic check flag.",
+    "Profiler copy counters do not measure all C2C kernel reads or establish physical residency throughout a full NUMA-mode run."
+  ]
+}

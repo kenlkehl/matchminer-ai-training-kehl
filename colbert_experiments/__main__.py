@@ -93,10 +93,10 @@ def parser():
                        help='Per-process CPU LRU cache capacity in input tokens; zero disables retention')
     train.add_argument('--ranking-backward', choices=['replay', 'retained'], default='replay',
                        help='Retained uses one forward and keeps activations; requires --no-gradient-checkpointing')
-    train.add_argument('--activation-storage', choices=['auto', 'gpu', 'cpu'], default='auto',
-                       help='Retained activations: GPU only, pinned CPU, or GPU with CPU overflow')
+    train.add_argument('--activation-storage', choices=['auto', 'gpu', 'cpu', 'direct'], default='auto',
+                       help='Retained activations: gpu, staged cpu/auto, or experimental ATS direct CPU overflow')
     train.add_argument('--activation-gpu-budget-gb', type=float, default=0,
-                       help='Auto storage soft GPU allocation limit in GiB; zero uses half initially free memory')
+                       help='Auto/direct storage soft GPU allocation limit in GiB; zero uses half initially free memory')
     train.add_argument('--documents-per-class', type=int, default=2)
     train.add_argument('--learning-rate', type=float, default=1e-5)
     train.add_argument('--loss', choices=['mse', 'cosent', 'legacy_ranking'], default='mse',

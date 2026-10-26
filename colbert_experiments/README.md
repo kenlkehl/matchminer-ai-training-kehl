@@ -14,7 +14,7 @@ Run on the GB300 host from the mounted training checkout, using its training
 Python environment and an available GPU:
 
 ```bash
-python colbert_experiments/train_full_gb300.py --gpu 0
+python colbert_experiments/train_full_gb300.py --gpu <verified-GPU-UUID>
 ```
 
 An explicit `--gpu 1` always selects physical CUDA GPU 1 and overrides inherited
@@ -47,29 +47,36 @@ outputs or gradients. Token masks are compacted with CPU-derived integer indices
 to avoid per-text CUDA boolean-indexing synchronization. Differentiable MaxSim
 scores documents in batches.
 
-The GB300 launcher defaults to **`--ranking-backward retained`**: one forward per
-microbatch, retaining every graph until the full effective-batch loss is known,
-then one model backward invocation across those graphs. There is no forward
-replay. Activation checkpointing must remain disabled in this mode. Loss
-comparisons, pair coverage, effective batch and LR schedule are unchanged.
-`--activation-storage auto` retains saved tensors on GPU until the soft allocation
-limit, then retains overflow in pinned CPU RAM; it never switches to recomputation.
-The automatic limit leaves half of initially available VRAM for temporary work
-and backward (including memory reusable in PyTorch's allocator). Set
-`--activation-gpu-budget-gb` to an explicit soft limit, `--activation-storage gpu`
-to retain everything on GPU, or `--activation-storage cpu` to offload saved
-activations. Whole-batch retention can require substantial host RAM, and transfer
-time can offset the saved forward work. These are soft storage controls, not
-guarantees that every input will fit. Model weights stay on GPU.
-On Linux, CPU offloading stops before consuming the last 8 GiB of available host
-RAM, rather than exhausting the machine or silently changing the training mode.
-Logs separate `forward_seconds`, `ranking_loss_seconds` and `backward_seconds`,
-and report one forward pass, one model backward call, offloaded activation GiB,
-the GPU soft limit, preparation time, encoder batches, token-cache stats and peak
-GPU memory. The earlier `--ranking-backward replay` mode remains explicitly
-available for memory-constrained runs; no fallback changes modes silently.
+The GB300 launcher defaults to **`--ranking-backward replay`** after the
+[full-batch GB300 investigation](GB300_MEMORY_RESULTS_20261026.md). Replay uses a
+no-gradient score pass and then recomputes each physical microbatch for backward,
+applying derivatives from the complete effective-batch ranking loss. The 64 query
+chunks, up to 1,024 directional pairs, coverage and LR schedule are unchanged.
+The 131,072-token configuration completed three warmed probe repeats averaging
+16.83 seconds, with 90.46 GiB peak allocated HBM. This is a forward/backward
+benchmark, without optimizer steps, evaluation, checkpoint I/O or an epoch ETA.
 
-Output defaults to `../data/no_phi/colbert_production_gb300_retained_20261026`, with
+`--ranking-backward retained --no-gradient-checkpointing` remains an explicit
+experiment with one forward per microbatch and one joint backward invocation.
+`--activation-storage auto` keeps saved tensors on GPU until a soft allocation
+limit, then spills to pinned RAM and copies them back for backward. `gpu` keeps
+all activations on GPU; `cpu` stages all eligible activations. The experimental
+`direct` mode uses auto's budget but returns CUDA views of pinned allocations
+instead of restoring them to HBM. It requires coherent ATS host access, preserves
+strides including aligned attention masks, and keeps host owners alive through
+synchronized backward. Unsupported devices fail explicitly; there is no silent
+fallback. Tested with PyTorch 2.13/CUDA 13.0 on this GB300.
+
+Set `--activation-gpu-budget-gb` to an explicit auto/direct soft limit in GiB;
+zero leaves half of initially available HBM for temporary work and backward.
+These are not hard memory limits. Direct reads still incur interconnect traffic,
+and NUMA-mode physical placement must be checked under load. Small direct-access
+tests passed native-model gradient checks, but the 64-chunk retained experiments
+exhausted host memory during forward. Keep direct mode for bounded investigations.
+Linux host-memory guards now exclude GPU-only NUMA nodes and account for pinned
+allocation rounding; they never reduce the effective batch or switch modes.
+
+Output defaults to `../data/no_phi/colbert_production_gb300_replay_20261026`, with
 checkpoints in `fit/` and the final model in `model/`. Checkpoints save every 25
 updates, keeping at most two. Repeat the command to resume; create `OUTPUT/PAUSE`
 to pause cleanly and remove it before resuming. This run has no Camus time cutoff.
@@ -99,7 +106,13 @@ cached-score replay errors. A local H100 check with 64 pairs measured 6.82 versu
 3.05 seconds (13.0 versus 29.3 GiB allocated); this is not a GB300 production ETA.
 Use `--group-counts 4 8 --backward-modes replay retained
 --encoder-token-budget 131072` to compare larger batches and retained graphs.
-The benchmark does not update model weights.
+The benchmark does not update model weights. It warms each configuration before
+reporting individual repeat times, phase times, allocated/reserved HBM and pinned
+allocator counters. `--check-gradients` enables deterministic kernels and checks
+against same-packing replay; use it separately from ordinary throughput timing.
+`--profile /tmp/colbert.trace.json` captures one additional run of the final
+configuration. Direct-mode experiments use `--activation-storage direct` and an
+explicit budget; a tiny positive budget forces spill for a small correctness test.
 
 ## One-off smoke test on two A6000 GPUs while production labels continue
 

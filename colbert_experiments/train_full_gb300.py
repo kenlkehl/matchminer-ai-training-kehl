@@ -14,7 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 SOURCE = ROOT.parent / 'data/no_phi/synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025'
-OUTPUT = ROOT.parent / 'data/no_phi/colbert_production_gb300_retained_20261026'
+OUTPUT = ROOT.parent / 'data/no_phi/colbert_production_gb300_replay_20261026'
 EXPECTED_PAIRS = 2435540
 
 
@@ -32,10 +32,10 @@ def parser():
     p.add_argument('--query-groups-per-forward', type=int, default=8)
     p.add_argument('--encoder-token-budget', type=int, default=131072)
     p.add_argument('--token-cache-tokens', type=int, default=8000000)
-    p.add_argument('--ranking-backward', choices=['replay', 'retained'], default='retained')
-    p.add_argument('--activation-storage', choices=['auto', 'gpu', 'cpu'], default='auto')
+    p.add_argument('--ranking-backward', choices=['replay', 'retained'], default='replay')
+    p.add_argument('--activation-storage', choices=['auto', 'gpu', 'cpu', 'direct'], default='auto')
     p.add_argument('--activation-gpu-budget-gb', type=float, default=0,
-                   help='Auto retention soft GPU limit in GiB; zero reserves half initially free VRAM')
+                   help='Auto/direct retention soft GPU limit in GiB; zero reserves half initially free VRAM')
     p.add_argument('--epochs', type=float, default=1)
     p.add_argument('--gradient-checkpointing', action=argparse.BooleanOptionalAction, default=False,
                    help='Recompute encoder activations to save VRAM at the cost of speed')

@@ -118,19 +118,20 @@ def test_pipeline_passes_training_pause_and_checkpoint_controls():
                 assert child.pause_file == Path('/tmp/PAUSE')
 
 
-def test_pipeline_passes_grouped_encoder_and_token_cache_controls():
+@pytest.mark.parametrize('storage', ['gpu', 'direct'])
+def test_pipeline_passes_grouped_encoder_and_token_cache_controls(storage):
     import run_pipeline
     for parser in (runner.parser, run_pipeline.parser):
         args = parser().parse_args(['--trialspace-query-groups-per-forward', '4',
             '--trialspace-encoder-token-budget', '65536', '--trialspace-token-cache-tokens', '123456',
-            '--trialspace-ranking-backward', 'retained', '--trialspace-activation-storage', 'gpu'])
+            '--trialspace-ranking-backward', 'retained', '--trialspace-activation-storage', storage])
         for stage in runner.stages(args):
             if stage.name.startswith('train-trialspace-'):
                 tail = stage.command[stage.command.index('trialspace_training.py') + 1:]
                 child = production.parser().parse_args(tail)
                 assert child.query_groups_per_forward == 4 and child.encoder_token_budget == 65536
                 assert child.token_cache_tokens == 123456
-                assert child.ranking_backward == 'retained' and child.activation_storage == 'gpu'
+                assert child.ranking_backward == 'retained' and child.activation_storage == storage
                 assert child.gradient_checkpointing is False
 
 

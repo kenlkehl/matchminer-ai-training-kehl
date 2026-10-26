@@ -282,20 +282,23 @@ occupancy/hits. Single-GPU pause polling stays on CPU. GPU token compaction uses
 CPU-prepared integer indices rather than per-text CUDA boolean indexing.
 
 The GB300 launcher uses eight groups per forward, a 131,072 padded-token budget,
-and **retained activations** by default. Direct training selects this with
-`--ranking-backward retained --no-gradient-checkpointing`; the integrated runner
-accepts `--trialspace-ranking-backward retained` and disables checkpoint
-recomputation for that mode. It performs one forward per microbatch and one
-model backward invocation over all retained graphs, using the same full-batch
-ranking loss. General production defaults retain the memory-saving replay mode.
-`--activation-storage auto` keeps saved activations on GPU within a soft limit
-and spills overflow to pinned CPU RAM without recomputation. `gpu` and `cpu`
-select explicit storage; `--activation-gpu-budget-gb` overrides the auto soft
-limit (zero leaves half of available VRAM for temporary work and backward).
-Integrated flags have the `--trialspace-` prefix. Whole-batch activation storage
-may use substantial RAM; logs report transferred activation GiB and separate
-forward/backward times so transfer overhead is visible. Changing modes requires
-a fresh fit directory; the GB300 default uses `colbert_production_gb300_retained_20261026`.
+and **replay** by default, with 64 query chunks in the effective ranking batch.
+The [GB300 measurements](colbert_experiments/GB300_MEMORY_RESULTS_20261026.md)
+show why retaining the full batch is not the current production recommendation.
+The fresh default output is `colbert_production_gb300_replay_20261026`.
+
+Retained graphs remain an explicit experiment: use `--ranking-backward retained
+--no-gradient-checkpointing`, or `--trialspace-ranking-backward retained` in the
+integrated runner. `--activation-storage auto` keeps saved tensors on GPU within
+a soft limit and stages overflow through pinned CPU RAM; `gpu` and `cpu` select
+explicit storage. Experimental `direct` uses the same soft limit but returns
+CUDA views of spilled pinned allocations, avoiding an explicit restoration copy.
+It requires ATS host-page-table support and fails on unsupported hardware without
+silently changing modes. It does not make a full retained batch fit automatically.
+`--activation-gpu-budget-gb` overrides the auto/direct soft limit. Integrated flags
+have the `--trialspace-` prefix. Offload preserves tensor strides and attention-mask
+alignment. Linux host-memory checks exclude memory-only GPU NUMA nodes.
+Changing execution settings requires a fresh fit directory.
 
 ColBERT checkpoints contain model, optimizer, and LR-scheduler state. By default, at most
 two checkpoint payloads are retained, including a new save in progress; the
