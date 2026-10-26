@@ -288,8 +288,8 @@ show why retaining the full batch is not the current production recommendation.
 The launcher now prepares the promoted `data/no_phi/sample_trial_cohort_lineitems.csv`
 with the existing repaired synthetic patient summaries, reruns retrieval and
 teacher labeling on local port 8000, then trains on the new validated pairs.
-It preserves old artifacts and uses `colbert_reextract_gb300_20261026` for the
-new corpus/mining/labels and `colbert_production_gb300_reextract_20261026` for
+It preserves old artifacts and uses `colbert_namedcohorts_gb300_20261026` for the
+new corpus/mining/labels and `colbert_production_gb300_namedcohorts_20261026` for
 training. No synthetic patient generation is included. See the
 [GB300 workflow](colbert_experiments/README.md) for inputs and stage controls;
 `--stop-after label` finishes new labels without starting training.
@@ -725,7 +725,10 @@ file. Use registry caps for this stage. Neither serving nor training is launched
 
 `trial_cohort_format.py` explicitly adapts cohort rows for existing training
 internals (`cohort_index` → `space_index`, complete criteria → `this_space`).
-It preserves native IDs and marks `trial_representation=trial-treatment-cohorts-v3`.
+New exports preserve native IDs and `cohort_name` separately, with
+`trial_representation=trial-treatment-cohorts-v4`. Complete criteria and the
+retrieval text omit the cohort name. Historical v3 rows remain readable under
+their original representation, without inventing names or changing patient data.
 Common criteria may include inclusions as well as exclusions and are **not** copied
 to `trial_boilerplate_text`; that column is empty because this API does not extract
 separate boilerplate. Synthetic seeds use the complete cohort criteria. Existing
@@ -918,7 +921,7 @@ one shared-criteria string.
 The legacy 0b space workflow below still selects positive trials for its explicitly
 configured space extraction. New cohort consumers should call the public
 `matchminer_ai.trials.summarize_trials` API directly. The installed inference
-package must include the `trial-treatment-cohorts-v2` contract. It includes direct
+package must include the `trial-treatment-cohorts-v3` contract. It includes direct
 anti-cancer therapy (including early-phase safety/dose studies and adjuvant or
 maintenance treatment) and excludes diagnostic-only and supportive-care studies.
 Anti-cancer treatment studies qualify even when their only outcomes are PK/PD,
@@ -930,7 +933,8 @@ Cancer patients receiving background anti-cancer therapy are not sufficient:
 the study must evaluate an anti-cancer treatment strategy. Insufficient textual
 evidence produces `{"cancer_treatment_trial": "no"}` without further fields.
 Accepted responses add `multiple_cohorts`, and add `cohorts` followed by
-`common_eligibility_criteria` only when it is `yes`. Each cohort string together
+`common_eligibility_criteria` only when it is `yes`. Each cohort is an object with `cohort_name` and
+`cohort_specific_eligibility_criteria`; the criteria string together
 with the common string contains all applicable eligibility criteria. The public
 API combines them in code for complete cohort rows.
 The shared validator accepts one complete outer Markdown fence labeled `json`

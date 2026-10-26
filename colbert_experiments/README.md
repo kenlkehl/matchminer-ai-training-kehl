@@ -27,14 +27,16 @@ the launcher does not retain GPU settings between invocations.
 
 The launcher now runs the production `prepare → mine → label → train` stages.
 It reads the promoted `../data/no_phi/sample_trial_cohort_lineitems.csv`:
-**6,762 cohorts from 4,981 accepted trials**, re-extracted from the same 5,000-trial
-sample with inference commit `1e57f66`. The other 19 screening decisions remain in
-`../data/no_phi/sample_trials_with_cohorts.csv`. The prior root sample, sampling
-receipt, and NCT list are archived under
-`../data/no_phi/archives/cohort_sample_before_reextract_20261026T152425Z/`.
-`sample_trial_cohort_lineitems.promotion.json` records the promoted and archived
-file hashes. The immutable extraction snapshot remains in
-`cohort_reextract_sample5000_gemma4_31b_20261026/`.
+the same 5,000-trial sample is being regenerated with named-cohort JSON schema
+v3, using inference commit `9b1bf81`. Each multi-cohort row retains `cohort_name`
+separately from `cohort_specific_eligibility_criteria`; the combined eligibility
+text used by retrieval contains criteria only. Single-population trials still
+use original eligibility verbatim. The exact new counts and hashes are recorded
+in the promoted sampling/validation receipts after extraction completes.
+The immutable named extraction snapshot is
+`cohort_reextract_named_sample5000_gemma4_31b_20261026/`. Earlier generation inputs,
+reasoning, and paused labels remain in their dated directories. Superseded root
+sample exports are replaced only after the new outputs validate.
 
 All **68,480 existing synthetic patients** come from the repaired
 `synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025/prepared/patient_summaries_with_spaces.parquet`.
@@ -43,7 +45,7 @@ and source splits are retained; patients from newly rejected trials remain valid
 retrieval queries. Source-trial proposals use NCT IDs, not changed cohort indices.
 
 Fresh corpus, retrieval, and labels live in
-`../data/no_phi/colbert_reextract_gb300_20261026/`. Retrieval uses the base model,
+`../data/no_phi/colbert_namedcohorts_gb300_20261026/`. Retrieval uses the base model,
 256 lexical/random proposals, top 20 cohorts per patient and top 40 patients per
 cohort, plus five lexical and five random candidates and source-trial proposals.
 Both directions pool all original source splits. Labeling uses the existing
@@ -118,7 +120,7 @@ exhausted host memory during forward. Keep direct mode for bounded investigation
 Linux host-memory guards now exclude GPU-only NUMA nodes and account for pinned
 allocation rounding; they never reduce the effective batch or switch modes.
 
-Output defaults to `../data/no_phi/colbert_production_gb300_reextract_20261026`, with
+Output defaults to `../data/no_phi/colbert_production_gb300_namedcohorts_20261026`, with
 checkpoints in `fit/` and the final model in `model/`. Checkpoints save every 25
 updates, keeping at most two. Repeat the command to resume; create `OUTPUT/PAUSE`
 to pause cleanly and remove it before resuming. This run has no Camus time cutoff.

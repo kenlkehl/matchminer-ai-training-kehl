@@ -17,7 +17,8 @@ def test_training_uses_the_same_combined_prompt():
 @pytest.mark.parametrize("decision", [
     {"cancer_treatment_trial": "no"},
     {"cancer_treatment_trial": "yes", "multiple_cohorts": "no"},
-    {"cancer_treatment_trial": "yes", "multiple_cohorts": "yes", "cohorts": ["A criteria", "B criteria"],
+    {"cancer_treatment_trial": "yes", "multiple_cohorts": "yes", "cohorts": [{"cohort_name": "A", "cohort_specific_eligibility_criteria": "A criteria"},
+     {"cohort_name": "B", "cohort_specific_eligibility_criteria": "B criteria"}],
      "common_eligibility_criteria": "Shared inclusion and exclusion criteria."},
 ])
 @pytest.mark.parametrize("fenced", [False, True])
@@ -54,7 +55,7 @@ def test_historical_v1_cohorts_are_readable_but_live_calls_require_shared_field(
     old = json.dumps({"cancer_treatment_trial": "yes", "multiple_cohorts": "yes",
                       "cohorts": ["Complete A criteria", "Complete B criteria"]})
     assert parse_screening_output(old, "stop")["is_cancer_treatment_trial"] is True
-    with pytest.raises(ValueError, match="common_eligibility_criteria"):
+    with pytest.raises(ValueError, match="cohort.*object"):
         screening_record("", old, "stop")
 
 
@@ -62,3 +63,11 @@ def test_historical_v1_cohorts_are_readable_but_live_calls_require_shared_field(
 def test_incomplete_new_response_is_not_an_exclusion(finish):
     with pytest.raises(ValueError):
         screening_record("", '{"cancer_treatment_trial":"no"}', finish)
+
+
+def test_historical_v2_strings_are_readable_but_never_live_named_objects():
+    old = json.dumps({"cancer_treatment_trial": "yes", "multiple_cohorts": "yes",
+        "cohorts": ["A criteria", "B criteria"], "common_eligibility_criteria": "Adults."})
+    assert parse_screening_output(old, "stop")["is_cancer_treatment_trial"] is True
+    with pytest.raises(ValueError, match="cohort.*object"):
+        screening_record("", old, "stop")

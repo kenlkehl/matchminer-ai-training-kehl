@@ -93,6 +93,9 @@ def prepare(patients_path, cohorts_path, output, *, merge_source_splits=False):
     cohort_rows = [dict(id=row['cohort_trial_id'], trial_id=row['nct_id'],
                        text=row['cohort_eligibility_criteria'], split=split_name(row.get('split')))
                    for row in normalized.to_dict('records')]
+    if 'cohort_name' in normalized:
+        for row, name in zip(cohort_rows, normalized.cohort_name):
+            row['cohort_name'] = name if isinstance(name, str) else None
     validate_corpus(patient_rows, cohort_rows)
     if merge_source_splits:
         # Validate the source lineage first, then make one shared retrieval and

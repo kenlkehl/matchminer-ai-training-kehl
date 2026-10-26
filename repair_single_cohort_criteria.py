@@ -14,7 +14,7 @@ import shutil
 
 import pandas as pd
 
-from trial_cohort_format import REPRESENTATION, file_sha256
+from trial_cohort_format import REPRESENTATION, LEGACY_REPRESENTATION, cohort_components, file_sha256
 
 
 def atomic_json(path, value):
@@ -70,9 +70,11 @@ def repair_locked(directory):
         shutil.copy2(target, backup)
     temp = target.with_suffix('.repair.tmp')
     counts, ids, changed = Counter(), set(), 0
+    named_rows = False
     with target.open() as src, temp.open('w') as dst:
         for line in src:
             row = json.loads(line)
+            named_rows = named_rows or 'cohort_name' in row
             tid = row['trial_id']
             if tid not in expected or row['cohort_trial_id'] in ids:
                 raise ValueError('Unknown/rejected trial or duplicate cohort')
@@ -95,19 +97,21 @@ def repair_locked(directory):
                     line = json.dumps(row, ensure_ascii=False) + '\n'
             else:
                 number = row['cohort_number']
-                specific, common = decision['cohorts'][number], decision['common_eligibility_criteria']
+                name, specific = cohort_components(decision['cohorts'][number])
+                common = decision['common_eligibility_criteria']
                 full = (f'Cohort-specific eligibility criteria:\n{specific}\n\n'
                         f'Common eligibility criteria:\n{common}') if common else specific
                 if (row['cohort_specific_eligibility_criteria'] != specific
                         or row['common_eligibility_criteria'] != common
-                        or row['cohort_eligibility_criteria'] != full):
+                        or row['cohort_eligibility_criteria'] != full
+                        or (name is not None and row.get('cohort_name') != name)):
                     raise ValueError(f'Multiple-cohort criteria mismatch for {tid}')
             dst.write(line)
     if counts != expected or len(ids) != status['cohort_rows']:
         raise ValueError('Incomplete cohort export; original file preserved')
     if file_sha256(target) != current_sha:
         raise ValueError('Export changed during repair')
-    receipt = dict(representation_version=REPRESENTATION,
+    receipt = dict(representation_version=REPRESENTATION if named_rows else LEGACY_REPRESENTATION,
         repaired_at=datetime.now(timezone.utc).isoformat(),
         extraction_run_identity=json.loads((directory / 'manifest.json').read_text())['run_identity'],
         inputs_sha256=source_sha, decisions_sha256=decisions_sha,

@@ -8,13 +8,36 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPRESENTATION = 'trial-treatment-cohorts-v3'
+REPRESENTATION = 'trial-treatment-cohorts-v4'
+LEGACY_REPRESENTATION = 'trial-treatment-cohorts-v3'
+SUPPORTED_REPRESENTATIONS = {LEGACY_REPRESENTATION, REPRESENTATION}
 COHORT_REQUIRED = {'trial_id', 'cohort_trial_id', 'cohort_number', 'cohort_count',
                    'cohort_eligibility_criteria', 'cancer_treatment_trial', 'multiple_cohorts'}
 
 
 def is_cohort_table(frame):
     return 'cohort_eligibility_criteria' in frame.columns
+
+
+def cohort_components(value):
+    """Read named objects and historical strings without inventing old names."""
+    if isinstance(value, str) and value.strip():
+        return None, value
+    fields = {'cohort_name', 'cohort_specific_eligibility_criteria'}
+    if (not isinstance(value, dict) or set(value) != fields
+            or not all(isinstance(value[k], str) and value[k].strip() for k in fields)):
+        raise ValueError('Invalid saved cohort name/criteria object')
+    return value['cohort_name'], value['cohort_specific_eligibility_criteria']
+
+
+def representation_for(frame):
+    """Preserve historical identity; do not claim old strings are named objects."""
+    if 'trial_representation' in frame and not frame.empty:
+        versions = set(frame.trial_representation)
+        if len(versions) != 1 or not versions <= SUPPORTED_REPRESENTATIONS:
+            raise ValueError('Conflicting trial representation; repair/regenerate the cohort CSV before generation')
+        return next(iter(versions))
+    return REPRESENTATION if 'cohort_name' in frame else LEGACY_REPRESENTATION
 
 
 def complete_cohort_criteria(frame):
@@ -108,10 +131,12 @@ def load_production_cohorts(directory, *, seed=42):
         decision = decisions[row.trial_id]
         if row.multiple_cohorts != decision['multiple_cohorts']:
             raise ValueError(f'Cohort decision mismatch for {row.trial_id}')
-        if row.multiple_cohorts == 'yes' and (
-                row.cohort_specific_eligibility_criteria != decision['cohorts'][row.cohort_number]
-                or row.common_eligibility_criteria != decision['common_eligibility_criteria']):
-            raise ValueError(f'Criteria disagree with saved combined JSON for {row.trial_id}')
+        if row.multiple_cohorts == 'yes':
+            name, specific = cohort_components(decision['cohorts'][row.cohort_number])
+            if (row.cohort_specific_eligibility_criteria != specific
+                    or row.common_eligibility_criteria != decision['common_eligibility_criteria']
+                    or (name is not None and getattr(row, 'cohort_name', None) != name)):
+                raise ValueError(f'Criteria or name disagree with saved combined JSON for {row.trial_id}')
     frame = cohorts.merge(source, left_on='trial_id', right_on='nct_id', validate='many_to_one')
     frame = frame.sort_values(['trial_id', 'cohort_number']).reset_index(drop=True)
     complete = complete_cohort_criteria(frame)
@@ -119,7 +144,7 @@ def load_production_cohorts(directory, *, seed=42):
         raise ValueError('Saved full criteria disagree with specific/common criteria or original eligibility_criteria; repair the export first')
     if not frame.loc[frame.multiple_cohorts.eq('no'), 'cohort_criteria_source'].eq('eligibility_criteria').all():
         raise ValueError('Single cohort provenance must identify eligibility_criteria')
-    complete['trial_representation'] = REPRESENTATION
+    complete['trial_representation'] = representation_for(complete)
     provenance = dict(source_trials=len(source), cancer_treatment_trials=len(counts),
         excluded_non_cancer_trials=sorted(rejected), extraction_directory=str(directory.resolve()),
         extraction_run_identity=json.loads((directory / 'manifest.json').read_text())['run_identity'],
@@ -148,6 +173,12 @@ def validate_cohort_rows(frame):
         raise ValueError('Only accepted cancer-treatment trials may supply cohort rows')
     if not frame.multiple_cohorts.isin(['yes', 'no']).all():
         raise ValueError('Invalid multiple_cohorts decision')
+    if representation_for(frame) == REPRESENTATION and 'cohort_name' not in frame:
+        raise ValueError('Named-cohort representation requires cohort_name')
+    if 'cohort_name' in frame:
+        names = frame.loc[frame.multiple_cohorts.eq('yes'), 'cohort_name']
+        if not names.map(lambda x: isinstance(x, str) and bool(x.strip())).all():
+            raise ValueError('Every extracted cohort must retain a nonempty cohort_name')
     if not frame.cohort_eligibility_criteria.map(lambda x: isinstance(x, str) and bool(x.strip())).all():
         raise ValueError('Cohort criteria must be nonempty text')
     if 'nct_id' in frame and not frame.nct_id.eq(frame.trial_id).all():
@@ -179,8 +210,7 @@ def training_rows(frame):
     if not is_cohort_table(frame):
         return frame.copy()
     validate_cohort_rows(frame)
-    if 'trial_representation' in frame and not frame.trial_representation.eq(REPRESENTATION).all():
-        raise ValueError('Conflicting trial representation; repair/regenerate the cohort CSV before generation')
+    representation = representation_for(frame)
     frame = complete_cohort_criteria(frame)
     aliases = {'nct_id': frame.trial_id, 'this_space': frame.cohort_eligibility_criteria}
     if 'cohort_index' in frame:
@@ -192,11 +222,11 @@ def training_rows(frame):
     if 'trial_boilerplate_text' in frame and frame.trial_boilerplate_text.fillna('').ne('').any():
         raise ValueError('Cohort output does not contain separately extracted boilerplate')
     frame['trial_boilerplate_text'] = ''
-    frame['trial_representation'] = REPRESENTATION
+    frame['trial_representation'] = representation
     return frame
 
 
 def patient_generation_criteria(item):
-    if item.get('trial_representation') == REPRESENTATION:
+    if item.get('trial_representation') in SUPPORTED_REPRESENTATIONS:
         return item['cohort_eligibility_criteria']
     return item['this_space'] + '\nNo history of:\n' + item['trial_boilerplate_text']

@@ -16,8 +16,8 @@ sys.path.insert(0, str(ROOT))
 DATA = ROOT.parent / 'data/no_phi'
 PATIENTS = DATA / 'synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025/prepared/patient_summaries_with_spaces.parquet'
 COHORTS = DATA / 'sample_trial_cohort_lineitems.csv'
-SOURCE = DATA / 'colbert_reextract_gb300_20261026'
-OUTPUT = DATA / 'colbert_production_gb300_reextract_20261026'
+SOURCE = DATA / 'colbert_namedcohorts_gb300_20261026'
+OUTPUT = DATA / 'colbert_production_gb300_namedcohorts_20261026'
 
 
 def parser():

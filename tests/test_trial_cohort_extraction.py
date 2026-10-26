@@ -72,7 +72,8 @@ def test_public_api_combined_decisions_complete_rows_and_resume(tmp_path, backen
     decisions = [dict(cancer_treatment_trial='no'),
                  dict(cancer_treatment_trial='yes', multiple_cohorts='no'),
                  dict(cancer_treatment_trial='yes', multiple_cohorts='yes',
-                      cohorts=['Cohort A: untreated lung cancer.', 'Cohort B: previously treated breast cancer.'],
+                      cohorts=[dict(cohort_name='Cohort A', cohort_specific_eligibility_criteria='Untreated lung cancer.'),
+                               dict(cohort_name='Cohort B', cohort_specific_eligibility_criteria='Previously treated breast cancer.')],
                       common_eligibility_criteria='Age >= 18; exclude active infection.')]
     answers.update({f'Trial {i}': '```json\n' + json.dumps(d) + '\n```' for i, d in enumerate(decisions, 1)})
     args = arguments(tmp_path)
@@ -88,6 +89,8 @@ def test_public_api_combined_decisions_complete_rows_and_resume(tmp_path, backen
     assert len(rows) == 3 and len(audit) == 3
     assert rows.nct_id.tolist() == ['NCT00000002', 'NCT00000003', 'NCT00000003']
     assert rows.cohort_count.tolist() == [1, 2, 2]
+    assert rows.cohort_name.iloc[1:].tolist() == ['Cohort A', 'Cohort B']
+    assert not rows.cohort_eligibility_criteria.str.contains('Cohort A|Cohort B').any()
     assert rows.cohort_eligibility_criteria.iloc[0] == 'Adults with cancer.'
     assert rows.cohort_eligibility_criteria.iloc[1:].str.contains('Age >= 18; exclude active infection.', regex=False).all()
     assert rows.last_update_post_date.eq('2026-10').all()
@@ -401,3 +404,48 @@ def test_generation_calls_five_positive_and_five_negative_seeds_separately_per_c
     histories = pd.concat([pd.read_parquet(p) for p in generation.checkpoint_paths(tmp_path / 'patient_events')])
     assert len(histories) == 30
     assert histories.groupby(['cohort_trial_id', 'patient_class']).size().eq(5).all()
+
+
+def test_named_production_export_preserves_names_through_sampling_and_colbert(tmp_path):
+    from colbert_experiments.data import prepare, read_jsonl
+    from trial_cohort_format import REPRESENTATION, LEGACY_REPRESENTATION, load_production_cohorts
+    run, dfci = production_export(tmp_path)
+    historical, _ = load_production_cohorts(run)
+    assert training_rows(historical).trial_representation.eq(LEGACY_REPRESENTATION).all()
+    decisions = json.loads((run / 'combined_outputs.json').read_text())
+    decision = decisions['NCT00000003']
+    decision['cohorts'] = [dict(cohort_name=f'Arm {i + 1}', cohort_specific_eligibility_criteria=text)
+                           for i, text in enumerate(decision['cohorts'])]
+    (run / 'combined_outputs.json').write_text(json.dumps(decisions))
+    rows = pd.read_json(run / 'cohorts.jsonl', lines=True)
+    rows['cohort_name'] = [f'Arm {number + 1}' if multi == 'yes' else None
+                          for number, multi in zip(rows.cohort_number, rows.multiple_cohorts)]
+    rows.to_json(run / 'cohorts.jsonl', orient='records', lines=True)
+    output = tmp_path / 'sample.csv'
+    sampled = sample.sample_trial_spaces(None, output, dfci, extraction_dir=run, n_trials=2)
+    assert sampled.trial_representation.eq(REPRESENTATION).all()
+    assert sampled.loc[sampled.multiple_cohorts.eq('yes'), 'cohort_name'].tolist() == ['Arm 1', 'Arm 2']
+    assert not sampled.cohort_eligibility_criteria.str.contains('Arm 1|Arm 2').any()
+    patients = tmp_path / 'patients.jsonl'
+    patients.write_text(json.dumps(dict(patient_id='synthetic', patient_summary='Cancer history.',
+                                       split=sampled.split.iloc[0])) + '\n')
+    prepare(patients, output, tmp_path / 'corpus')
+    corpus = read_jsonl(tmp_path / 'corpus/cohorts.jsonl')
+    assert [c['cohort_name'] for c in corpus if c['trial_id'] == 'NCT00000003'] == ['Arm 1', 'Arm 2']
+    assert all('Arm 1' not in c['text'] and 'Arm 2' not in c['text'] for c in corpus)
+    rows.loc[rows.multiple_cohorts.eq('yes'), 'cohort_name'] = 'Wrong name'
+    rows.to_json(run / 'cohorts.jsonl', orient='records', lines=True)
+    with pytest.raises(ValueError, match='name disagree'):
+        load_production_cohorts(run)
+
+
+def test_new_representation_requires_names_without_relabeling_historical_rows():
+    from trial_cohort_format import REPRESENTATION, LEGACY_REPRESENTATION
+    frame = pd.DataFrame(cohort_rows('NCT00000001'))
+    assert training_rows(frame).trial_representation.eq(LEGACY_REPRESENTATION).all()
+    frame['trial_representation'] = REPRESENTATION
+    with pytest.raises(ValueError, match='requires cohort_name'):
+        training_rows(frame)
+    frame['cohort_name'] = ['Arm A', None]
+    with pytest.raises(ValueError, match='nonempty cohort_name'):
+        training_rows(frame)

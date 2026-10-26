@@ -167,7 +167,7 @@ def test_physical_and_visible_selection_are_mutually_exclusive():
 def test_memory_saving_checkpointing_can_be_enabled_for_the_new_run():
     args = launcher.parser().parse_args(['--ranking-backward', 'replay', '--gradient-checkpointing'])
     assert '--gradient-checkpointing' in launcher.command(args)
-    assert launcher.OUTPUT.name == 'colbert_production_gb300_reextract_20261026'
+    assert launcher.OUTPUT.name == 'colbert_production_gb300_namedcohorts_20261026'
 
 
 def test_retained_launcher_rejects_activation_recomputation(monkeypatch):

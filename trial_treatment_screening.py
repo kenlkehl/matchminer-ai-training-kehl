@@ -30,12 +30,16 @@ def parse_screening_output(final, finish_reason=None, *, allow_legacy=True):
         ) from exc
     if isinstance(result, dict) and "cancer_treatment_trial" in result:
         try:
-            # Historical v1 audits contain repeated complete cohort criteria.
-            # Only read them explicitly; live requests must use the v2 split.
+            # Historical v1/v2 audits use strings. New requests require named
+            # objects; read-only audit compatibility never relaxes live parsing.
             schema_version = COHORT_SCHEMA_VERSION
             if (allow_legacy and result.get("multiple_cohorts") == "yes"
                     and "common_eligibility_criteria" not in result):
                 schema_version = "trial-treatment-cohorts-v1"
+            elif (allow_legacy and result.get("multiple_cohorts") == "yes"
+                  and isinstance(result.get("cohorts"), list)
+                  and all(isinstance(c, str) for c in result["cohorts"])):
+                schema_version = "trial-treatment-cohorts-v2"
             combined = parse_cohort_response(
                 final, (finish_reason or "stop") if allow_legacy else finish_reason,
                 schema_version=schema_version,

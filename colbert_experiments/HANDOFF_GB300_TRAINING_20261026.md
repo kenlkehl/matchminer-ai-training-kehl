@@ -4,6 +4,25 @@ Prepared 2026-10-26 from Camus for a Codex session running directly on
 `sn4622130540`. This is an implementation/debugging handoff, not a published
 model release. Paths below assume the same shared mount.
 
+## Named-cohort format regeneration (latest request)
+
+The user authorized support for separate `cohort_name` and
+`cohort_specific_eligibility_criteria` fields, commits of both repositories, and
+re-extraction of the same 5,000 trials on the GB300's existing port 8000. The new
+inference commit is `9b1bf81`, with response schema v3 and row representation v4.
+Historical string outputs retain their prior versions and cannot satisfy a new
+live response. Both public inference embeddings and training use criteria text,
+with names retained only as metadata. Source splits and patient data are unchanged.
+
+New extraction snapshot: `data/no_phi/cohort_reextract_named_sample5000_gemma4_31b_20261026/`.
+Root sample exports will be replaced after complete validation. The launcher now
+uses fresh `colbert_namedcohorts_gb300_20261026/` source artifacts and
+`colbert_production_gb300_namedcohorts_20261026/` model output, so the previous
+partial retrieval/labels cannot be mistaken for the new cohort generation.
+Labeling, retrieval, model training, and all cloud VMs remain paused. This request
+authorizes cohort extraction only. Run receipts contain completion, exact counts,
+source hashes, and launch details; check them rather than the historical counts below.
+
 ## Current state after cohort refresh (2026-10-26)
 
 **Latest: user paused the run at 16:22 UTC for further cohort-prompt and output-format changes.**

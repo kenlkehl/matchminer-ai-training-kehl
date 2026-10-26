@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 from trial_space_format import has_required_space_fields
-from trial_cohort_format import (COHORT_REQUIRED, REPRESENTATION, validate_cohort_rows,
+from trial_cohort_format import (COHORT_REQUIRED, representation_for, validate_cohort_rows,
                                  complete_cohort_criteria, load_production_cohorts, file_sha256)
 
 def clean_trial_spaces(line_item_space_dataframe):
@@ -63,6 +63,7 @@ def sample_trial_spaces(input_csv, output_csv, dfci_csv, *, n_trials=5000, seed=
         # when a trial straddles chunks. A malformed cohort excludes its trial.
         fields = sorted((COHORT_REQUIRED | {'nct_id', 'split', 'trial_text',
                          'title', 'brief_summary', 'eligibility_criteria',
+                         'cohort_name', 'trial_representation',
                          'cohort_specific_eligibility_criteria', 'common_eligibility_criteria'}) & set(columns))
         compact = []
         for chunk in chunks(fields):
@@ -79,7 +80,8 @@ def sample_trial_spaces(input_csv, output_csv, dfci_csv, *, n_trials=5000, seed=
             good = chunk.cohort_eligibility_criteria.map(lambda x: isinstance(x, str) and bool(x.strip()))
             invalid.update(chunk.loc[~good, 'nct_id'])
             chunk['cohort_eligibility_criteria'] = 'validated text'
-            compact.append(chunk[sorted(COHORT_REQUIRED | {'nct_id', 'split'})])
+            compact.append(chunk[sorted(COHORT_REQUIRED | {'nct_id', 'split'} |
+                ({'cohort_name', 'trial_representation'} & set(chunk)))])
         if compact:
             compact = pd.concat(compact, ignore_index=True)
             if compact.cohort_trial_id.duplicated(keep=False).any():
@@ -118,7 +120,7 @@ def sample_trial_spaces(input_csv, output_csv, dfci_csv, *, n_trials=5000, seed=
     assert output.groupby('nct_id').size().to_dict() == {trial: counts[trial] for trial in sampled}
     if native:
         output = complete_cohort_criteria(output)
-        output['trial_representation'] = REPRESENTATION
+        output['trial_representation'] = representation_for(output)
         validate_cohort_rows(output)
     else:
         assert clean_trial_spaces(output).all()
@@ -137,7 +139,7 @@ def sample_trial_spaces(input_csv, output_csv, dfci_csv, *, n_trials=5000, seed=
         manifest.update(cancer_treatment_filter='cancer_treatment_trial == yes',
                         excluded_non_cancer_trials=sorted(non_cancer))
     if native:
-        manifest.update(sampled_cohorts=len(output), all_cohorts_retained=True, trial_representation=REPRESENTATION,
+        manifest.update(sampled_cohorts=len(output), all_cohorts_retained=True, trial_representation=representation_for(output),
                         cancer_treatment_trials=len(set(counts) - non_cancer - invalid),
                         cancer_treatment_filter='cancer_treatment_trial == yes',
                         excluded_non_cancer_trials=sorted(non_cancer))
