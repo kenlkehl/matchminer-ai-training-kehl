@@ -159,12 +159,18 @@ def test_gated_labeler_resumes_failed_specificity_without_reasking_gate(tmp_path
     assert len(calls) == 6
     partial = read_jsonl(args.output / 'scores.jsonl')
     assert len(partial) == 1 and partial[0]['score'] == 0
+    original_questions = labeling.questions
+    def pending_questions(pending, *args, **kwargs):
+        assert all(pair['cohort_id'] != pairs[1]['cohort_id'] for pair in pending)
+        return original_questions(pending, *args, **kwargs)
+    monkeypatch.setattr(labeling, 'questions', pending_questions)
     asyncio.run(labeling.label(args))
     assert len(calls) == 7 and calls[-1][1] == 'biomarker'
     assert sorted(s['score'] for s in read_jsonl(args.output / 'scores.jsonl')) == [0, 5]
     progress = json.loads((args.output / 'status.json').read_text())
     assert progress['scored_pairs'] == 2 and progress['total_pairs'] == 2
     assert progress['completed'] == 6
+    assert progress['restored_pairs'] == 1 and progress['restored_questions'] == 1
     assert progress['score_distribution']['0'] == progress['score_distribution']['5'] == 1
     assert progress['updated_at'] >= progress['started_at']
     args.gated_regression = False

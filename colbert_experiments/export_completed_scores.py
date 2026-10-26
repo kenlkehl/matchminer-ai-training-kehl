@@ -24,13 +24,14 @@ if SIBLING.exists():
     sys.path.insert(0, str(SIBLING))
 
 from colbert_experiments.contracts import TASKS, contract_hash, judge_messages, parse_judgment, prompt_sources
-from colbert_experiments.data import digest, load_corpus, write_json
+from colbert_experiments.data import digest, load_corpus, read_jsonl, write_json
 from colbert_experiments.regression import GATE, SPECIFICITY, score_contract
 
 TASK_ORDER = tuple(TASKS)
 DEFAULT_RUN = ROOT.parent / 'data/no_phi/synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025'
 _CONTEXT = None
 _READERS = None
+_RESPONSES = None
 
 
 def score_from_answers(patient_id, cohort_id, split, values, question_contract, aggregate_contract):
@@ -65,12 +66,13 @@ def validate_score(row, patients, cohorts, question_contract, aggregate_contract
         raise ValueError('Compact score is incomplete or violates the gated score contract')
 
 
-def initialize_reader(corpus, question_contract, cutoff_ns, reader_threads):
-    global _CONTEXT, _READERS
+def initialize_reader(corpus, question_contract, cutoff_ns, reader_threads, responses=None):
+    global _CONTEXT, _READERS, _RESPONSES
     patients, cohorts = load_corpus(corpus)
     _CONTEXT = ({p['id']: p for p in patients}, {c['id']: c for c in cohorts},
                 question_contract, cutoff_ns, prompt_sources())
     _READERS = ThreadPoolExecutor(max_workers=reader_threads)
+    _RESPONSES = Path(responses) if responses else None
 
 
 def read_one(path):
@@ -100,6 +102,35 @@ def read_batch(paths):
     return rows, byte_count
 
 
+def read_candidate(pair):
+    """Directly address known keys; do not list huge NFS response directories."""
+    rows, byte_count = [], 0
+    for task in (GATE, *SPECIFICITY):
+        key = digest([pair['patient_id'], pair['cohort_id'], task])
+        try:
+            row, size = read_one(str(_RESPONSES / key[:2] / (key + '.json')))
+        except FileNotFoundError:
+            try:
+                row, size = read_one(str(_RESPONSES / (key + '.json')))
+            except FileNotFoundError:
+                return rows, byte_count
+        byte_count += size
+        if row is None:
+            return rows, byte_count
+        rows.append(row)
+        if task == GATE and row[3] == 'no':
+            break
+    return rows, byte_count
+
+
+def read_candidate_batch(pairs):
+    rows, byte_count = [], 0
+    for values, size in _READERS.map(read_candidate, pairs):
+        rows.extend(values)
+        byte_count += size
+    return rows, byte_count
+
+
 def response_paths(root):
     with os.scandir(root) as entries:
         for entry in entries:
@@ -118,14 +149,14 @@ def batches(paths, size=128):
         yield batch
 
 
-def export(source_run, output, *, workers=4, reader_threads=8):
+def export(source_run, output, *, workers=4, reader_threads=8, candidates=None):
     output.mkdir(parents=True, exist_ok=True)
     with (output/'export.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _export(source_run, output, workers=workers, reader_threads=reader_threads)
+        return _export(source_run, output, workers=workers, reader_threads=reader_threads, candidates=candidates)
 
 
-def _export(source_run, output, *, workers, reader_threads):
+def _export(source_run, output, *, workers, reader_threads, candidates=None):
     cutoff_ns = time.time_ns()
     patients, cohorts = load_corpus(source_run/'corpus_all')
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
@@ -138,12 +169,21 @@ def _export(source_run, output, *, workers, reader_threads):
     pairs, counts = {}, Counter()
     started = progress = time.monotonic()
     task_indices = {task: i for i, task in enumerate(TASK_ORDER)}
-    jobs = batches(response_paths(source_run/'labels/responses'))
+    if candidates:
+        candidate_rows = read_jsonl(candidates)
+        if digest(candidate_rows) != teacher.get('pairs'):
+            raise ValueError('Candidate file differs from teacher manifest')
+        jobs = batches(candidate_rows)
+        reader = read_candidate_batch
+    else:
+        jobs = batches(response_paths(source_run/'labels/responses'))
+        reader = read_batch
     with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn'),
-            initializer=initialize_reader, initargs=(source_run/'corpus_all', question_contract, cutoff_ns, reader_threads)) as pool:
+            initializer=initialize_reader, initargs=(source_run/'corpus_all', question_contract, cutoff_ns,
+                                                    reader_threads, source_run/'labels/responses')) as pool:
         # Bound submissions so a million filenames never become a million futures.
         while window := list(islice(jobs, workers * 4)):
-            for rows, byte_count in pool.map(read_batch, window):
+            for rows, byte_count in pool.map(reader, window):
                 counts['response_bytes'] += byte_count
                 counts['responses'] += len(rows)
                 for patient_id, cohort_id, task, answer in rows:
@@ -201,11 +241,12 @@ def main():
     p.add_argument('--output', type=Path, help='Default SOURCE_RUN/labels/completed_scores')
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--reader-threads', type=int, default=8, help='Concurrent NFS reads per CPU process')
+    p.add_argument('--candidates', type=Path, help='Use direct candidate-key reads instead of listing response directories')
     args = p.parse_args()
     if min(args.workers, args.reader_threads) < 1:
         raise ValueError('workers and reader-threads must be positive')
     export(args.source_run.resolve(), (args.output or args.source_run/'labels/completed_scores').resolve(),
-           workers=args.workers, reader_threads=args.reader_threads)
+           workers=args.workers, reader_threads=args.reader_threads, candidates=args.candidates)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 """Resumable five-question teacher labels using the existing adaptive vLLM pool."""
 import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import fcntl
@@ -126,15 +127,19 @@ async def _label(args, output):
         args.scheduler_metrics_file = str(output / 'concurrency_status.json')
     registry = build_registry_from_args(args)
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
+    restored_pairs = set()
     def groups():
         seen = set()
         for pair in pairs:
             key = (pair['patient_id'], pair['cohort_id'])
             if key not in seen:
                 seen.add(key)
+                if digest(list(key)) in restored_pairs:
+                    continue
                 yield list(questions([pair], pmap, cmap, sources=sources))
     iterator = iter(groups() if gated else questions(pairs, patients, cohorts, sources=sources))
     completed, failures, scores = {}, {}, {}
+    restored_questions = 0
     score_counts = {str(i): 0 for i in range(6)}
     loop_lag = dict(latest_seconds=0.0, max_seconds=0.0)
     client_stats = {}
@@ -143,7 +148,7 @@ async def _label(args, output):
         # it. Never send patient text into operational telemetry.
         return dict(state=state, **timing,
             updated_at=datetime.now(timezone.utc).isoformat(), total_pairs=len(pairs),
-            completed=len(completed), failures=dict(failures), client=dict(client_stats),
+            completed=restored_questions + len(completed), failures=dict(failures), client=dict(client_stats),
             event_loop_lag=dict(loop_lag),
             **(dict(scored_pairs=len(scores), score_distribution=dict(score_counts)) if gated else {}))
 
@@ -163,10 +168,24 @@ async def _label(args, output):
             await storage.run(write_json, output / 'status.json', snapshot())
             await asyncio.sleep(10)
 
-    async with (BackgroundWork() as storage,
+    async with (AsyncExitStack() as stack, BackgroundWork() as storage,
                 PromptPreparer(tokenizer, resolve_chat_template_kwargs(args.teacher_tokenizer),
                                context=args.teacher_context, max_tokens=args.max_tokens) as preparer,
                 RequestSession(registry, work, max_attempts=args.max_attempts) as session):
+        journal = None
+        if gated:
+            from .score_journal import ScoreJournal
+            journal = ScoreJournal(output, signature)
+            write_json(output / 'status.json', snapshot('loading_completed_scores'))
+            scores = await storage.run(journal.load, pmap, cmap)
+            restored_pairs.update(scores)
+            for score in scores.values():
+                score_counts[str(score['score'])] += 1
+                restored_questions += len(score['question_keys'])
+            timing.update(restored_pairs=len(restored_pairs), restored_questions=restored_questions)
+            await stack.enter_async_context(journal)
+            print(f'[labels] restored {len(restored_pairs)} completed pairs from compact journal; '
+                  'individual reasoning traces were not replayed', flush=True)
         def load_checkpoint(item):
             # Network-filesystem reads must not block every active HTTP request
             # or the scheduler while a production run resumes saved answers.
@@ -217,6 +236,9 @@ async def _label(args, output):
             rows = await gated_judgments(item, ask)
             if rows is not None:
                 score = aggregate_pair(item[0], rows, question_contract=signature['contract'])
+                # All question checkpoints (including reasoning) already exist.
+                # Commit the small score before counting this pair as complete.
+                await journal.commit(score)
                 scores[digest([score['patient_id'], score['cohort_id']])] = score
                 score_counts[str(score['score'])] += 1
 
@@ -234,7 +256,18 @@ async def _label(args, output):
             loop_monitor.cancel()
             await asyncio.gather(reporter, loop_monitor, return_exceptions=True)
             await storage.run(write_json, output / 'status.json', snapshot('incomplete'))
-    write_jsonl(output / 'labels.jsonl', (json.loads(completed[k].read_text()) for k in sorted(completed)))
+    def exported_labels():
+        for pair_key in sorted(restored_pairs):
+            for key in scores[pair_key]['question_keys'].values():
+                path = checkpoint_dir / key[:2] / (key + '.json')
+                if not path.exists():
+                    path = checkpoint_dir / (key + '.json')
+                yield json.loads(path.read_text())
+        for key in sorted(completed):
+            yield json.loads(completed[key].read_text())
+    # This is a final flattened distillation export, after LLM work finishes.
+    # It is not used to reconstruct progress or dispatch requests on resume.
+    write_jsonl(output / 'labels.jsonl', exported_labels())
     if gated:
         from .regression import score_balance
         write_jsonl(output / 'scores.jsonl', [scores[k] for k in sorted(scores)])
@@ -242,5 +275,5 @@ async def _label(args, output):
     write_json(output / 'status.json', snapshot('incomplete' if failures else 'complete'))
     if failures:
         raise RuntimeError(f'{len(failures)} unresolved teacher labels; resume this command to retry')
-    return ([json.loads(completed[k].read_text()) for k in sorted(completed)]
+    return (list(exported_labels())
             if getattr(args, 'return_records', True) else None)

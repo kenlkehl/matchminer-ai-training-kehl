@@ -69,6 +69,28 @@ reduce concurrency. Ordinary ceiling edits do not reset the active target.
 The shared client opens a fresh HTTP connection for each request to avoid idle
 keep-alive resets during long inference and checkpoint operations. Checkpoint
 reads run outside the event loop so resumed labeling can keep requests moving.
+Gated labeling also commits each completed pair to `score_journal/scores.jsonl`
+after its required question and reasoning files have been saved. The compact journal
+is bound to the exact teacher, prompts, corpus and candidate manifest. Resume
+loads those small score records sequentially and skips completed pairs before
+prompt construction; it does not replay their individual reasoning checkpoints.
+Partial pairs reuse their saved questions. Batched journal writes are flushed to
+disk before completion is reported, and only a torn final append is recoverable;
+conflicting records or changed identities fail validation. Full reasoning remains
+in `responses/` and the final flattened distillation export.
+
+Older runs require a one-time conversion with the labeler stopped:
+
+```bash
+python colbert_experiments/export_completed_scores.py --source-run RUN \
+  --candidates RUN/mining_all/candidates.jsonl --output RUN/completed_score_import \
+  --workers 16 --reader-threads 8
+python -m colbert_experiments.import_score_journal \
+  --archive RUN/completed_score_import --output RUN/labels
+```
+
+The candidate-aware converter directly reads known checkpoint keys, avoiding a
+large network-filesystem directory walk. Subsequent resumes need no conversion.
 Labeling renders and tokenizes independent prompts in bounded background batches
 (four workers, at most 32 prompts per batch). Full prompt text, exact untruncated
 token counts, question separation, and reasoning checkpoints are preserved.

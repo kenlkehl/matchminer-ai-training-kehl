@@ -123,6 +123,22 @@ def test_missing_compact_export_does_not_silently_start_nfs_inspection(tmp_path)
         smoke.prepare_snapshot(args)
 
 
+def test_candidate_aware_export_avoids_directory_walk(tmp_path, monkeypatch):
+    source = tmp_path/'source'
+    _, _, pairs = live_source(source)
+    manifest = source/'labels/labeling_manifest.json'
+    write_json(manifest, {**json.loads(manifest.read_text()), 'pairs': digest(pairs)})
+    monkeypatch.setattr(packed, 'response_paths', lambda *a: pytest.fail('Unexpected directory walk'))
+    result = packed.export(source, tmp_path/'direct', workers=1,
+                           candidates=source/'mining_all/candidates.jsonl')
+    assert result['counts']['completed_pairs'] == 6
+    assert result['counts']['incomplete_pairs'] == 3
+    write_jsonl(source/'mining_all/candidates.jsonl', pairs[:-1])
+    with pytest.raises(ValueError, match='Candidate file differs'):
+        packed.export(source, tmp_path/'changed', workers=1,
+                      candidates=source/'mining_all/candidates.jsonl')
+
+
 def test_compact_export_omits_incomplete_pairs_and_bypasses_question_inspection(tmp_path, monkeypatch):
     source, output = tmp_path/'source', tmp_path/'out'
     patients, cohorts, _ = live_source(source)
