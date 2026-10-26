@@ -22,7 +22,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source-run', type=Path, default=SOURCE)
     p.add_argument('--output', type=Path, default=OUTPUT)
-    p.add_argument('--gpu', default='0', help='One physical GPU index or UUID on this host')
+    p.add_argument('--gpu', default='0',
+                   help='GPU index within CUDA_VISIBLE_DEVICES when set; otherwise a physical index or UUID')
     p.add_argument('--cache-dir', type=Path, help='Local Hugging Face cache; otherwise use the environment default')
     p.add_argument('--documents-per-query', type=int, default=16)
     p.add_argument('--accumulation', type=int, default=64)
@@ -53,8 +54,28 @@ def command(args):
     return result
 
 
+def selected_gpu(gpu, visible):
+    """Respect the caller's visibility mask; never silently select an excluded GPU."""
+    gpu = gpu.strip()
+    if not gpu or not (gpu.isdigit() or gpu.startswith(('GPU-', 'MIG-'))):
+        raise ValueError('Select one nonnegative GPU index or GPU/MIG UUID')
+    if visible is None:
+        return gpu
+    devices = [item.strip() for item in visible.split(',')]
+    if any(not item or item == '-1' for item in devices):
+        raise ValueError('CUDA_VISIBLE_DEVICES disables CUDA or has an invalid device list')
+    if gpu.isdigit():
+        if int(gpu) >= len(devices):
+            raise ValueError(f'--gpu {gpu} is outside CUDA_VISIBLE_DEVICES={visible}; '
+                             f'use a visible index from 0 to {len(devices) - 1}')
+        return devices[int(gpu)]
+    if gpu not in devices:
+        raise ValueError('Requested GPU UUID is not present in CUDA_VISIBLE_DEVICES')
+    return gpu
+
+
 def ready(source):
-    """Inspect small status files only; the production trainer validates full scores."""
+    """Verify compact training files by content; never scan reasoning checkpoints."""
     from colbert_experiments.score_publication import ready_scores
     publication = ready_scores(source / 'labels', corpus=source / 'corpus_all',
                                candidates=source / 'mining_all/candidates.jsonl', expected_pairs=EXPECTED_PAIRS)
@@ -86,8 +107,9 @@ def main():
     args = parser().parse_args()
     if ',' in args.gpu or min(args.documents_per_query, args.accumulation) < 1:
         raise ValueError('Select one GPU and positive microbatch/accumulation sizes')
+    gpu = selected_gpu(args.gpu, os.environ.get('CUDA_VISIBLE_DEVICES'))
     launch = command(args)
-    print('CUDA_VISIBLE_DEVICES=' + shlex.quote(args.gpu) + ' ' + shlex.join(launch), flush=True)
+    print('CUDA_VISIBLE_DEVICES=' + shlex.quote(gpu) + ' ' + shlex.join(launch), flush=True)
     print(f'Both directions; all {EXPECTED_PAIRS:,} pairs; {args.epochs:g} complete epochs; '
           f'up to {args.documents_per_query * args.accumulation:,} directional pairs per update.', flush=True)
     if args.dry_run:
@@ -95,6 +117,7 @@ def main():
     if socket.gethostname().split('.')[0].lower().startswith('camus'):
         raise RuntimeError('This run was moved off Camus. Run this launcher on the GB300 host.')
     source = args.source_run.resolve()
+    print('Verifying training-file content hashes with sequential reads; no reasoning checkpoints are scanned.', flush=True)
     while True:
         done, status = ready(source)
         if done:
@@ -102,7 +125,7 @@ def main():
         print('Waiting for validated production training scores: ' + json.dumps({key: status.get(key) for key in
               ('state', 'scored_pairs', 'exported_questions', 'total_questions')}), flush=True)
         time.sleep(30)
-    environment = {**os.environ, 'CUDA_VISIBLE_DEVICES': args.gpu, 'PYTHONUNBUFFERED': '1',
+    environment = {**os.environ, 'CUDA_VISIBLE_DEVICES': gpu, 'PYTHONUNBUFFERED': '1',
                    'TOKENIZERS_PARALLELISM': 'false', 'OMP_NUM_THREADS': '4',
                    'MKL_NUM_THREADS': '4', 'OPENBLAS_NUM_THREADS': '4'}
     paths = [str(ROOT)]

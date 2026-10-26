@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -83,3 +84,28 @@ def test_gb300_can_use_validated_scores_after_export_workflow_failure(tmp_path, 
     ready, status = launcher.ready(tmp_path)
     assert ready and status['scored_pairs'] == 2
     assert not (output / 'labels.jsonl').exists()
+
+
+def test_other_mount_timestamp_precision_does_not_reject_identical_content(tmp_path, monkeypatch):
+    from colbert_experiments import score_publication as publication
+    corpus, candidates, output = source(tmp_path)
+    receipt = finalize(corpus, candidates, output, scores_only=True)
+    local_stat = publication.fingerprint
+    def remote_stat(path):
+        value = local_stat(path)
+        return {**value, 'mtime_ns': value['mtime_ns'] // 1_000_000_000 * 1_000_000_000}
+    monkeypatch.setattr(publication, 'fingerprint', remote_stat)
+    assert ready_scores(output, corpus=corpus, candidates=candidates, expected_pairs=2) == receipt
+
+
+def test_same_size_and_timestamp_do_not_hide_changed_bytes(tmp_path):
+    corpus, candidates, output = source(tmp_path)
+    finalize(corpus, candidates, output, scores_only=True)
+    path = output / 'scores.jsonl'
+    stat = path.stat()
+    raw = bytearray(path.read_bytes())
+    raw[2] = ord('X')
+    path.write_bytes(raw)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    with pytest.raises(ValueError, match='content differs.*scores.jsonl'):
+        ready_scores(output, corpus=corpus, candidates=candidates, expected_pairs=2)

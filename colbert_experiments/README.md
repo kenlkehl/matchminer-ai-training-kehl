@@ -17,6 +17,11 @@ Python environment and an available GPU:
 python colbert_experiments/train_full_gb300.py --gpu 0
 ```
 
+`--gpu` indexes the existing `CUDA_VISIBLE_DEVICES` list when it is set. For
+example, `CUDA_VISIBLE_DEVICES=1 python colbert_experiments/train_full_gb300.py
+--gpu 0` uses physical GPU 1. Without a visibility mask, `--gpu` selects the
+physical GPU index or UUID directly.
+
 This one-off launcher waits for validated production training scores, then uses
 `trialspace_training.py train` on all 2,435,540 repaired patient/cohort pairs,
 including all original source splits, in both directions. It starts from the
@@ -32,12 +37,15 @@ checkpoints in `fit/` and the final model in `model/`. Checkpoints save every 25
 updates, keeping at most two. Repeat the command to resume; create `OUTPUT/PAUSE`
 to pause cleanly and remove it before resuming. This run has no Camus time cutoff.
 The launcher refuses to train on Camus and makes no LLM calls. It checks the
-complete-score publication receipt and input/output file identities while waiting,
+complete-score publication receipt and SHA-256 content of the training files,
 then reads finalized numeric scores through the production trainer without
 inspecting individual reasoning checkpoints. The large distillation archive can
 finish separately: a later export/supervisor failure does not invalidate a
 complete, independently verified training-score publication. Missing or changed
 scores, corpus files, candidate files, or teacher identity still prevent training.
+Timestamp differences across host mounts do not invalidate identical content.
+Verification streams the four data files sequentially; it does not enumerate
+the millions of saved reasoning checkpoints.
 Use `--cache-dir` for a local model cache, `--source-run`/`--output` to adjust mount
 locations, and `--dry-run` to print the command without starting anything.
 The GB300 batch configuration has not been benchmarked; microbatch and

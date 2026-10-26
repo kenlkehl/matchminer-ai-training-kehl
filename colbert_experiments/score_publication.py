@@ -13,10 +13,22 @@ def fingerprint(path):
     return dict(bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
 
 
+def content_fingerprint(path):
+    """Portable byte identity; timestamps only detect writes during this read."""
+    before = fingerprint(path)
+    checksum = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        while block := stream.read(8 * 1024 * 1024):
+            checksum.update(block)
+    if fingerprint(path) != before:
+        raise ValueError('File changed during content verification: ' + str(path))
+    return dict(**before, sha256=checksum.hexdigest())
+
+
 def input_fingerprints(corpus, candidates):
-    return dict(patients=fingerprint(Path(corpus) / 'patients.jsonl'),
-                cohorts=fingerprint(Path(corpus) / 'cohorts.jsonl'),
-                candidates=fingerprint(candidates))
+    return dict(patients=content_fingerprint(Path(corpus) / 'patients.jsonl'),
+                cohorts=content_fingerprint(Path(corpus) / 'cohorts.jsonl'),
+                candidates=content_fingerprint(candidates))
 
 
 def publish_scores(output, signature, scores, pairs, *, inputs):
@@ -51,7 +63,7 @@ def publish_scores(output, signature, scores, pairs, *, inputs):
 
 
 def ready_scores(output, *, corpus, candidates, expected_pairs=None):
-    """Check the publication and immutable-file identities without replaying traces."""
+    """Verify published content across mounts without replaying reasoning traces."""
     output = Path(output)
     path = output / 'scores_ready.json'
     if not path.exists():
@@ -65,8 +77,17 @@ def ready_scores(output, *, corpus, candidates, expected_pairs=None):
         raise ValueError('Training-score publication has an invalid or changed teacher identity')
     if expected_pairs is not None and receipt.get('pairs') != expected_pairs:
         raise ValueError('Published training-score count differs from the expected complete candidate set')
-    if receipt.get('inputs') != input_fingerprints(corpus, candidates):
-        raise ValueError('Corpus or candidate files changed after training-score validation')
-    if receipt.get('scores_stat') != fingerprint(output / 'scores.jsonl'):
-        raise ValueError('Training scores changed after atomic publication')
+    paths = dict(patients=Path(corpus) / 'patients.jsonl', cohorts=Path(corpus) / 'cohorts.jsonl',
+                 candidates=Path(candidates), scores=output / 'scores.jsonl')
+    recorded = {**receipt.get('inputs', {}),
+                'scores': {**receipt.get('scores_stat', {}), 'sha256': receipt.get('scores_sha256')}}
+    for name, filename in paths.items():
+        expected = recorded.get(name, {})
+        if not expected.get('sha256'):
+            raise ValueError('Training-score receipt needs portable content hashes: ' + name)
+        actual = content_fingerprint(filename)
+        if any(actual.get(key) != expected.get(key) for key in ('bytes', 'sha256')):
+            raise ValueError(f'Training data content differs from the validated publication: {filename}; '
+                             f'expected bytes={expected.get("bytes")}, sha256={expected.get("sha256")}; '
+                             f'observed bytes={actual["bytes"]}, sha256={actual["sha256"]}')
     return receipt

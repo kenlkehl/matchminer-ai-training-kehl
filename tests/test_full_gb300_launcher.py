@@ -42,6 +42,7 @@ def test_waits_for_full_export_and_rejects_incomplete_or_wrong_coverage(tmp_path
 
 
 def test_dry_run_never_waits_launches_or_writes(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
     monkeypatch.setattr(launcher.sys, 'argv', ['launcher', '--dry-run', '--output', str(tmp_path / 'out')])
     monkeypatch.setattr(launcher, 'ready', lambda path: pytest.fail('must not read source on dry run'))
     monkeypatch.setattr(launcher.subprocess, 'run', lambda *a, **k: pytest.fail('must not launch on dry run'))
@@ -51,8 +52,30 @@ def test_dry_run_never_waits_launches_or_writes(tmp_path, monkeypatch, capsys):
 
 
 def test_camus_cannot_start_training(tmp_path, monkeypatch):
+    monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
     monkeypatch.setattr(launcher.sys, 'argv', ['launcher', '--output', str(tmp_path / 'out')])
     monkeypatch.setattr(launcher.socket, 'gethostname', lambda: 'camus.dfci.harvard.edu')
     monkeypatch.setattr(launcher.subprocess, 'run', lambda *a, **k: pytest.fail('must not train on Camus'))
     with pytest.raises(RuntimeError, match='moved off Camus'):
         launcher.main()
+
+
+@pytest.mark.parametrize('gpu,visible,expected', [
+    ('0', None, '0'), ('1', None, '1'), ('0', '1', '1'), ('1', '3,1', '1'),
+    ('0', 'GPU-first', 'GPU-first'), ('GPU-first', 'GPU-first,GPU-second', 'GPU-first')])
+def test_gpu_selection_respects_existing_visibility_mask(gpu, visible, expected):
+    assert launcher.selected_gpu(gpu, visible) == expected
+
+
+@pytest.mark.parametrize('gpu,visible', [('1', '1'), ('0', ''), ('0', '-1'),
+                                      ('GPU-other', 'GPU-first'), ('-1', None)])
+def test_gpu_selection_cannot_escape_the_callers_mask(gpu, visible):
+    with pytest.raises(ValueError):
+        launcher.selected_gpu(gpu, visible)
+
+
+def test_dry_run_reports_the_physical_gpu_selected_by_the_mask(monkeypatch, capsys):
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '1')
+    monkeypatch.setattr(launcher.sys, 'argv', ['launcher', '--gpu', '0', '--dry-run'])
+    launcher.main()
+    assert capsys.readouterr().out.startswith('CUDA_VISIBLE_DEVICES=1 ')

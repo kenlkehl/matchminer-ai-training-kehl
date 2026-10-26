@@ -86,7 +86,8 @@ preserves every response field, and reports exported-question progress. Once
 every candidate has a validated score, `scores.jsonl` and `scores_ready.json`
 are published before the large reasoning archive. The receipt binds the exact
 teacher, repaired corpus and candidate files, complete pair count, and score-file
-identity. Independent training can use that verified artifact while the reasoning
+content hashes. Readers verify SHA-256 content rather than requiring identical
+host-reported timestamps. Independent training can use that verified artifact while the reasoning
 export continues. The local teacher supervisor stops restarting servers after
 inference finishes, so a server exiting cannot abort CPU-only finalization.
 
