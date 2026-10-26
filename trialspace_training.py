@@ -140,8 +140,11 @@ class TokenStore:
         if not paths or estimated_bytes > budget:
             return None
         vectors = {}
-        for path in paths:
-            vectors.update(torch.load(path, map_location='cpu', weights_only=True))
+        from concurrent.futures import ThreadPoolExecutor
+        # Bound network-filesystem reads while retaining shard/ID order exactly.
+        with ThreadPoolExecutor(max_workers=min(8, len(paths))) as readers:
+            for batch in readers.map(lambda path: torch.load(path, map_location='cpu', weights_only=True), paths):
+                vectors.update(batch)
         # Discard the CPU LRU after the one-time transfer. The packed corpus is
         # replaced between directions, so patient and cohort caches do not add.
         packed = PackedTokens(list(vectors.values()), device)
