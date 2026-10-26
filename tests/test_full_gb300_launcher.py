@@ -61,21 +61,43 @@ def test_camus_cannot_start_training(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('gpu,visible,expected', [
-    ('0', None, '0'), ('1', None, '1'), ('0', '1', '1'), ('1', '3,1', '1'),
-    ('0', 'GPU-first', 'GPU-first'), ('GPU-first', 'GPU-first,GPU-second', 'GPU-first')])
-def test_gpu_selection_respects_existing_visibility_mask(gpu, visible, expected):
+    ('0', None, '0'), ('1', None, '1'), ('1', '1', '1'), ('1', '3,1', '1'),
+    ('0', '1', '0'), ('1', '', '1'), ('GPU-first', 'GPU-second', 'GPU-first')])
+def test_explicit_gpu_is_always_a_physical_selection(gpu, visible, expected):
     assert launcher.selected_gpu(gpu, visible) == expected
 
 
-@pytest.mark.parametrize('gpu,visible', [('1', '1'), ('0', ''), ('0', '-1'),
-                                      ('GPU-other', 'GPU-first'), ('-1', None)])
-def test_gpu_selection_cannot_escape_the_callers_mask(gpu, visible):
+@pytest.mark.parametrize('gpu', ['-1', '', '0,1'])
+def test_invalid_physical_gpu_is_rejected(gpu):
     with pytest.raises(ValueError):
-        launcher.selected_gpu(gpu, visible)
+        launcher.selected_gpu(gpu, None)
 
 
-def test_dry_run_reports_the_physical_gpu_selected_by_the_mask(monkeypatch, capsys):
-    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '1')
-    monkeypatch.setattr(launcher.sys, 'argv', ['launcher', '--gpu', '0', '--dry-run'])
+@pytest.mark.parametrize('visible,index,expected', [
+    (None, None, '0'), ('1', None, '1'), ('3,1', 1, '1'), ('GPU-first', 0, 'GPU-first')])
+def test_omitted_physical_selection_uses_the_visibility_mask(visible, index, expected):
+    assert launcher.selected_gpu(None, visible, visible_index=index) == expected
+
+
+@pytest.mark.parametrize('visible,index', [('', 0), ('-1', 0), ('1', 1), ('1', -1)])
+def test_invalid_visible_selection_is_rejected(visible, index):
+    with pytest.raises(ValueError):
+        launcher.selected_gpu(None, visible, visible_index=index)
+
+
+@pytest.mark.parametrize('visible', [None, '1', '3,1'])
+def test_explicit_gpu_one_dry_run_is_unaffected_by_inherited_mask(monkeypatch, capsys, visible):
+    if visible is None:
+        monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
+    else:
+        monkeypatch.setenv('CUDA_VISIBLE_DEVICES', visible)
+    monkeypatch.setattr(launcher.sys, 'argv', ['launcher', '--gpu', '1', '--dry-run'])
     launcher.main()
-    assert capsys.readouterr().out.startswith('CUDA_VISIBLE_DEVICES=1 ')
+    output = capsys.readouterr().out
+    assert output.startswith('CUDA_VISIBLE_DEVICES=1 ')
+    assert 'physical CUDA device 1 as cuda:0 (explicit --gpu)' in output
+
+
+def test_physical_and_visible_selection_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        launcher.parser().parse_args(['--gpu', '1', '--visible-gpu', '0'])

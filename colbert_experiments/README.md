@@ -17,10 +17,13 @@ Python environment and an available GPU:
 python colbert_experiments/train_full_gb300.py --gpu 0
 ```
 
-`--gpu` indexes the existing `CUDA_VISIBLE_DEVICES` list when it is set. For
-example, `CUDA_VISIBLE_DEVICES=1 python colbert_experiments/train_full_gb300.py
---gpu 0` uses physical GPU 1. Without a visibility mask, `--gpu` selects the
-physical GPU index or UUID directly.
+An explicit `--gpu 1` always selects physical CUDA GPU 1 and overrides inherited
+`CUDA_VISIBLE_DEVICES`. To use an existing visibility mask, omit `--gpu` or use
+`--visible-gpu` to index that mask: `CUDA_VISIBLE_DEVICES=1 python
+colbert_experiments/train_full_gb300.py --visible-gpu 0` selects physical GPU 1.
+With neither option nor a visibility mask, the default is physical GPU 0.
+The printed `CUDA_VISIBLE_DEVICES=...` line describes the training subprocess;
+the launcher does not retain GPU settings between invocations.
 
 This one-off launcher waits for validated production training scores, then uses
 `trialspace_training.py train` on all 2,435,540 repaired patient/cohort pairs,

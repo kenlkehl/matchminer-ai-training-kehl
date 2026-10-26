@@ -22,8 +22,10 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source-run', type=Path, default=SOURCE)
     p.add_argument('--output', type=Path, default=OUTPUT)
-    p.add_argument('--gpu', default='0',
-                   help='GPU index within CUDA_VISIBLE_DEVICES when set; otherwise a physical index or UUID')
+    device = p.add_mutually_exclusive_group()
+    device.add_argument('--gpu', help='Physical CUDA GPU index or UUID; explicitly overrides CUDA_VISIBLE_DEVICES')
+    device.add_argument('--visible-gpu', type=int,
+                        help='Index within inherited CUDA_VISIBLE_DEVICES; default is its first GPU, or GPU 0 if unset')
     p.add_argument('--cache-dir', type=Path, help='Local Hugging Face cache; otherwise use the environment default')
     p.add_argument('--documents-per-query', type=int, default=16)
     p.add_argument('--accumulation', type=int, default=64)
@@ -54,24 +56,25 @@ def command(args):
     return result
 
 
-def selected_gpu(gpu, visible):
-    """Respect the caller's visibility mask; never silently select an excluded GPU."""
-    gpu = gpu.strip()
-    if not gpu or not (gpu.isdigit() or gpu.startswith(('GPU-', 'MIG-'))):
-        raise ValueError('Select one nonnegative GPU index or GPU/MIG UUID')
-    if visible is None:
+def selected_gpu(gpu, visible, *, visible_index=None):
+    """Explicit physical selection wins; visible indexing is a separate option."""
+    if gpu is not None:
+        gpu = gpu.strip()
+        if not gpu or ',' in gpu or not (gpu.isdigit() or gpu.startswith(('GPU-', 'MIG-'))):
+            raise ValueError('Select one nonnegative physical GPU index or GPU/MIG UUID')
         return gpu
+    index = 0 if visible_index is None else visible_index
+    if index < 0:
+        raise ValueError('--visible-gpu must be nonnegative')
+    if visible is None:
+        return str(index)
     devices = [item.strip() for item in visible.split(',')]
     if any(not item or item == '-1' for item in devices):
         raise ValueError('CUDA_VISIBLE_DEVICES disables CUDA or has an invalid device list')
-    if gpu.isdigit():
-        if int(gpu) >= len(devices):
-            raise ValueError(f'--gpu {gpu} is outside CUDA_VISIBLE_DEVICES={visible}; '
-                             f'use a visible index from 0 to {len(devices) - 1}')
-        return devices[int(gpu)]
-    if gpu not in devices:
-        raise ValueError('Requested GPU UUID is not present in CUDA_VISIBLE_DEVICES')
-    return gpu
+    if index >= len(devices):
+        raise ValueError(f'--visible-gpu {index} is outside CUDA_VISIBLE_DEVICES={visible}; '
+                         f'use a visible index from 0 to {len(devices) - 1}')
+    return devices[index]
 
 
 def ready(source):
@@ -105,11 +108,13 @@ def ready(source):
 
 def main():
     args = parser().parse_args()
-    if ',' in args.gpu or min(args.documents_per_query, args.accumulation) < 1:
+    if min(args.documents_per_query, args.accumulation) < 1:
         raise ValueError('Select one GPU and positive microbatch/accumulation sizes')
-    gpu = selected_gpu(args.gpu, os.environ.get('CUDA_VISIBLE_DEVICES'))
+    gpu = selected_gpu(args.gpu, os.environ.get('CUDA_VISIBLE_DEVICES'), visible_index=args.visible_gpu)
     launch = command(args)
     print('CUDA_VISIBLE_DEVICES=' + shlex.quote(gpu) + ' ' + shlex.join(launch), flush=True)
+    selection = 'explicit --gpu' if args.gpu is not None else 'visible GPU selection'
+    print(f'Training subprocess will see physical CUDA device {gpu} as cuda:0 ({selection}).', flush=True)
     print(f'Both directions; all {EXPECTED_PAIRS:,} pairs; {args.epochs:g} complete epochs; '
           f'up to {args.documents_per_query * args.accumulation:,} directional pairs per update.', flush=True)
     if args.dry_run:
