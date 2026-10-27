@@ -4,14 +4,13 @@ import importlib.util
 import json
 from pathlib import Path
 import re
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 import generate_synthetic_data as generation
+import synthetic_event_prompts as prompts
 from remote_vllm_pool import OutputValidationError
 
 
@@ -90,20 +89,6 @@ def test_generation_loads_beam_tokenizer_without_loading_model_architecture(monk
     assert calls == [(backend, model, '/tmp/tokenizer-cache')]
 
 
-@pytest.mark.parametrize('filename', ['1a_make_synthetic_enrollee_prompts.py',
-                                     '1b_make_synthetic_negative_enrollee_prompts.py'])
-def test_prompt_modules_reject_standalone_execution_without_side_effects(tmp_path, filename):
-    module = generation.load_stage(filename)
-    assert callable(module.build_seed_messages) and callable(module.build_patient_messages)
-    result = subprocess.run([sys.executable, '-S', module.__file__, '--help'],
-                            cwd=tmp_path, capture_output=True, text=True, timeout=10)
-    assert result.returncode != 0
-    assert 'import-only prompt module' in result.stderr
-    assert 'generate_synthetic_data.py' in result.stderr
-    assert not result.stdout
-    assert not list(tmp_path.iterdir())
-
-
 def test_patient_ids_do_not_collide_between_spaces_or_classes():
     records = [dict(space_index=space, patient_class=kind, nct_id='NCT1', answer=HISTORIES)
                for space in range(2) for kind in ('positive', 'negative')]
@@ -169,7 +154,6 @@ def test_user_instructions_and_single_seed_reach_the_new_stages(tmp_path, kind, 
     instance = generation.Generator(args, tokenizer)
     item = dict(key=f'{kind}:0', space_index=0, this_space=SPACE, trial_boilerplate_text='Active infection',
                 patient_class=kind, seed_text='Alice is female and was diagnosed with lung cancer at 60 years and 0 weeks.')
-    module = instance.positive if kind == 'positive' else instance.negative
     seed_prompt = instance.build_payload(item, 'seeds')['prompt']
     event_prompt = instance.build_payload(item, 'patient_events')['prompt']
     assert 'exactly five patients' in seed_prompt
@@ -178,11 +162,10 @@ def test_user_instructions_and_single_seed_reach_the_new_stages(tmp_path, kind, 
     assert 'Generate the complete event chronology' not in seed_prompt
     assert '(Beginning of example)' not in seed_prompt
     assert 'short prose paragraphs' in seed_prompt
-    from synthetic_event_prompts import SEED_FORMAT_EXAMPLE
-    assert SEED_FORMAT_EXAMPLE in seed_prompt
+    assert prompts.SEED_FORMAT_EXAMPLE in seed_prompt
     assert 'Do not copy this example into your output' in seed_prompt
     assert 'reuse its patient identity' in seed_prompt
-    assert SEED_FORMAT_EXAMPLE not in event_prompt
+    assert prompts.SEED_FORMAT_EXAMPLE not in event_prompt
     assert '<demographics>' not in seed_prompt and '<diagnosis>' not in seed_prompt
     assert 'verbatim' not in event_prompt
     assert 'exactly one <demographics> line' in event_prompt
@@ -191,22 +174,22 @@ def test_user_instructions_and_single_seed_reach_the_new_stages(tmp_path, kind, 
     assert 'including events at the same age in causal order' in event_prompt
     assert 'Immediately after the tag' in event_prompt
     assert SPACE in seed_prompt and 'Active infection' in seed_prompt
-    assert module.ELIGIBILITY_INSTRUCTIONS in seed_prompt
+    assert prompts.ELIGIBILITY_INSTRUCTIONS in seed_prompt
     assert SPACE not in event_prompt and 'Active infection' not in event_prompt
     assert 'Eligibility criteria:' not in event_prompt
-    assert module.ELIGIBILITY_INSTRUCTIONS not in event_prompt
+    assert prompts.ELIGIBILITY_INSTRUCTIONS not in event_prompt
     assert 'intended fit or mismatch' not in event_prompt
     assert 'supplied criterion' not in event_prompt and 'supplied criteria' not in event_prompt
     for prompt in (seed_prompt, event_prompt):
-        assert module.CONSISTENCY_INSTRUCTIONS in prompt
-        assert module.DIAGNOSIS_INSTRUCTIONS in prompt
+        assert prompts.CONSISTENCY_INSTRUCTIONS in prompt
+        assert prompts.DIAGNOSIS_INSTRUCTIONS in prompt
         assert '50 years and 21 weeks' in prompt
         assert '0 through 51' in prompt
         assert 'organs that would not have been visualized' in prompt
         assert 'presence or absence of brain metastases' in prompt
-    assert module.EVENT_INSTRUCTIONS in event_prompt
+    assert prompts.EVENT_INSTRUCTIONS in event_prompt
     assert 'At age N years and W weeks,' in event_prompt
-    example = module.EVENT_INSTRUCTIONS.split('(Beginning of example)\n')[1].split('(End of example)')[0]
+    example = prompts.EVENT_INSTRUCTIONS.split('(Beginning of example)\n')[1].split('(End of example)')[0]
     example_events = generation.parse_patient_history(
         example, 'John Smith, male, was diagnosed with CNS lymphoma at 70 years and 2 weeks.')
     example_kinds = [event[0] for event in example_events]

@@ -1220,13 +1220,13 @@ Both classes receive a hypothetical prose format example with explicit
 instructions not to reproduce the example or reuse its patient identity.
 After that seed batch
 is saved, five independent calls each expand exactly one patient's chronology.
-The clinical instructions, including chronology/anatomy and trial-reference
-rules, remain in the import-only modules `1a_make_synthetic_enrollee_prompts.py`
-and `1b_make_synthetic_negative_enrollee_prompts.py`. They cannot run generation
-standalone; use `generate_synthetic_data.py` or the pipeline's
-`generate-synthetic` stage. Their named instruction blocks
-feed `build_seed_messages` and `build_patient_messages`; shared stage framing
-lives in `synthetic_event_prompts.py`. A positive patient's eligibility takes
+All seed and patient-history prompt text, including the clinical
+chronology/anatomy and trial-reference rules and the seed format example, lives
+in `synthetic_event_prompts.py`. Positive and negative seeds share every
+instruction block; `seed_messages` varies only the target population and the
+positive-precedence or near-miss requirement, and `patient_messages` is
+class-independent. Run generation through `generate_synthetic_data.py` or the
+pipeline's `generate-synthetic` stage. A positive patient's eligibility takes
 precedence over the optional second-primary diversity request.
 
 Both seed and patient prompts express ages as whole years plus additional weeks
@@ -1234,8 +1234,8 @@ Both seed and patient prompts express ages as whole years plus additional weeks
 to diagnosis ages in seeds and to demographics and every event timestamp in
 histories; chronology checks compare both parts and record reversals as warnings
 without rejecting, sorting, or changing the event list. Downstream synthetic
-dates preserve the week intervals. The warning
-blocks in both prompt modules also prohibit imaging findings, including claims
+dates preserve the week intervals. The consistency
+block also prohibits imaging findings, including claims
 of absence, for organs outside the specified scan's field of view.
 
 Seed and patient calls share one continuous adaptive endpoint pool. Patient
@@ -1462,7 +1462,7 @@ Use the same arguments with `train_all_gcp.sh` or `temp_train_gcp.sh`. Without
 ## Run the complete pipeline or resume at an intermediate stage
 
 `run_pipeline.py` invokes the existing stage implementations; the event and note
-prompts remain owned by `1a`, `1b`, and `2` and are executed by
+prompts remain owned by `synthetic_event_prompts.py` and `2` and are executed by
 `generate_synthetic_data.py`. It does not duplicate generation or matching logic.
 
 | Stage name (`--start-at` / `--stop-after`) | Work and outputs |

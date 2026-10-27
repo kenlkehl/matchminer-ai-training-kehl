@@ -30,6 +30,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from trial_cohort_format import training_rows, patient_generation_criteria, read_clinical_csv
+import synthetic_event_prompts as prompts
 
 from remote_vllm_pool import (
     CompletionSampling, OutputValidationError, RequestSession,
@@ -420,8 +421,6 @@ class Generator:
     def __init__(self, args, tokenizer):
         self.args, self.tokenizer = args, tokenizer
         self.out = Path(args.output_dir)
-        self.positive = load_stage('1a_make_synthetic_enrollee_prompts.py')
-        self.negative = load_stage('1b_make_synthetic_negative_enrollee_prompts.py')
         self.notes = load_stage('2_make_synthetic_notes_sharded.py')
         self.sampling = CompletionSampling(
             model=args.model, request_timeout=args.request_timeout,
@@ -436,8 +435,7 @@ class Generator:
         save_json(self.out / 'status.json', self.status)
 
     def manifest(self):
-        sources = ['generate_synthetic_data.py', '1a_make_synthetic_enrollee_prompts.py',
-                   '1b_make_synthetic_negative_enrollee_prompts.py', '2_make_synthetic_notes_sharded.py',
+        sources = ['generate_synthetic_data.py', '2_make_synthetic_notes_sharded.py',
                    'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py',
                    'trial_cohort_format.py', 'adaptive_controller.py']
         value = dict(version='synthetic-cohort-seeds-patient-events-notes-v5', input_sha256=sha_file(self.args.input_csv),
@@ -466,16 +464,13 @@ class Generator:
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
     def build_payload(self, item, stage):
-        messages = None
-        if stage in ('seeds', 'patient_events'):
-            module = self.positive if item['patient_class'] == 'positive' else self.negative
-            if stage == 'seeds':
-                criteria = patient_generation_criteria(item)
-                messages = module.build_seed_messages(criteria, rng=random.Random(self.args.seed + int(item['space_index'])))
-                max_tokens = self.args.seed_max_tokens
-            else:
-                messages = module.build_patient_messages(item['seed_text'])
-                max_tokens = self.args.event_max_tokens
+        if stage == 'seeds':
+            messages = prompts.seed_messages(patient_generation_criteria(item), item['patient_class'],
+                                             random.Random(self.args.seed + int(item['space_index'])))
+            max_tokens = self.args.seed_max_tokens
+        elif stage == 'patient_events':
+            messages = prompts.patient_messages(item['seed_text'])
+            max_tokens = self.args.event_max_tokens
         else:
             # Preserve the exact step-2 prompt. The larger limit prevents its
             # legacy head/tail truncation; reject an overlong context below.
