@@ -3,8 +3,8 @@
 
 SEED_FORMAT_EXAMPLE = (
     'Marisol Vega, female, was diagnosed with sigmoid colon adenocarcinoma at '
-    '54 years and 19 weeks: site sigmoid colon (C18.7), histology adenocarcinoma, '
-    'NOS (8140/3), grade 2, tumor size 2.8 cm, pT2 pN0 cM0, stage I, summary '
+    '54 years and 19 weeks: site sigmoid colon, histology adenocarcinoma, '
+    'grade 2, tumor size 2.8 cm, pT2 pN0 cM0, stage I, summary '
     'stage localized, 18 regional lymph nodes examined with none positive, '
     'lymphovascular and perineural invasion absent, margins negative; '
     'microsatellite stable, KRAS p.G12D mutation detected, BRAF wild-type.'

@@ -13,14 +13,13 @@ SYSTEM_PROMPT = (
 
 
 DIAGNOSIS_INSTRUCTIONS = (
-    'Diagnosis events should include TNM stage, summary stage, site description and code, histology description '
-    'and code, and all relevant site-specific data elements that a cancer registrar would annotate.\n'
+    'Diagnosis events should include TNM stage, summary stage, primary site/cancer type, and histology. Include key data elements relevant for workup or treatment of that type of cancer, as long as your data elements are compatible with the clinical context provided.\n'
 )
 
 
 DIVERSITY_INSTRUCTIONS = (
-    'To ensure diversity in the generated data, vary patient age, gender, name, stage at diagnosis, biomarkers, '
-    'treatment approaches, and disease course (e.g., stable disease, progression, remission, recurrence).\n'
+    'To ensure diversity in the generated data, vary patient age, gender (if it is a cancer type that occurs in both sexes), name, stage at diagnosis, biomarkers, '
+    'treatment approaches, and disease course (e.g., stable disease, progression, remission, recurrence). However this variation must remain within the bounds of the clinical context provided, and it MUST remain clinically realistic. All anatomy must be accurate, any therapy only given for a certain known biomarker in real life must also only be given for that known biomarker in synthetic data, and so on.\n'
 )
 
 
