@@ -12,7 +12,7 @@ from trialspace_prompt_profiles import PROFILES, SYMMETRIC_PREFIX, model_prompts
 PROMPT_PREFIX = SYMMETRIC_PREFIX
 DEFAULT_BASE_MODEL = "google/embeddinggemma-2"
 DEFAULT_INPUT = "space_specific_eligibility_checks.parquet"
-MAX_TOKENS = 2500
+MAX_TOKENS = 3000
 
 
 def parse_args():

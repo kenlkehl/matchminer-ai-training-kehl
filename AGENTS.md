@@ -1,5 +1,13 @@
 # Synthetic training policy (user instruction, 2026-10-27)
 
+Length defaults (user instruction, October 28): `finetune_embedder.py` and
+`make_top_matches.py` default to a 3,000-token cap (0.4% of the 6,680 named
+cohorts still exceed it), and the teacher label stage defaults to 32,768 output
+tokens. The batch-96 restart below runs frozen source at 2,500 tokens. Label
+`max_tokens` is part of the labeling identity: directories labeled at 8,192
+resume or are reused only with an explicit `--max-tokens 8192`, which the
+comparison workflow's label commands already pass.
+
 ACTIVE RESTART (October 28, 01:19 UTC): the user authorized a fresh start.
 EmbeddingGemma 2 is training from the pinned base model, not checkpoint 200:
 full loss batch 96, gradient-cache encoder chunks 48, token cap 2,500, BF16

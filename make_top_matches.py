@@ -22,7 +22,7 @@ python make_top_matches.py \
   --top_k_patients 40 \
   --encode_batch_size 128 \
   --score_batch_size 2048 \
-  --max_seq_length 2500 \
+  --max_seq_length 3000 \
   --out_cohorts_parquet top_cohorts_tocheck_round1.parquet \
   --out_patients_parquet top_patients_tocheck_round1.parquet
 """
@@ -35,7 +35,7 @@ import numpy as np
 import pandas as pd
 import torch
 from concurrent.futures import ProcessPoolExecutor
-from finetune_embedder import load_text_model
+from finetune_embedder import MAX_TOKENS, load_text_model
 
 # -------------------------
 # Helpers
@@ -88,7 +88,7 @@ def parse_args():
         default=2048,
         help="Batch size for similarity/topk scoring per worker",
     )
-    ap.add_argument("--max_seq_length", type=int, default=1500)
+    ap.add_argument("--max_seq_length", type=int, default=MAX_TOKENS)
     ap.add_argument(
         "--query_prompt",
         default=None,

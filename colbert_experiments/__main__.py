@@ -58,7 +58,7 @@ def parser():
     label.add_argument('--teacher-served-model', help='Endpoint model name when different from the recorded teacher identity; advertised root is verified')
     label.add_argument('--teacher-tokenizer', required=True, help='Underlying model for tokenizer and vendor sampling')
     label.add_argument('--cache-dir')
-    label.add_argument('--max-tokens', type=int, default=8192)
+    label.add_argument('--max-tokens', type=int, default=32768)
     label.add_argument('--teacher-context', type=int, default=250000)
     label.add_argument('--pending-requests', type=int, default=0,
                        help='Pair chains in flight; 0 automatically follows live endpoint capacity')
