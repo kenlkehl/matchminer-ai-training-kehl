@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from generate_synthetic_data import load_stage, Generator
-from trial_cohort_format import training_rows, validate_cohort_rows, complete_cohort_criteria
+from trial_cohort_format import training_rows, validate_cohort_rows, complete_cohort_criteria, file_stamp
 from tests.test_synthetic_generation import Tokenizer, args_for
 
 extract = load_stage('0b_extract_trial_cohorts.py')
@@ -198,7 +198,7 @@ def test_native_cohort_inputs_work_in_patient_preparation_and_retrieval(tmp_path
     pd.DataFrame([dict(pseudo_mrn='1', patient_summary='Synthetic history', split='train')]).to_parquet(patients)
     prepared = load_spaces(cohorts)
     assert prepared.space_index.tolist() == [0, 1]
-    _, trials = load_retrieval_tables(SimpleNamespace(patients_parquet=patients, trials_file=cohorts, splits=['train']))
+    _, trials = load_retrieval_tables(SimpleNamespace(patients_parquet=patients, trials_file=cohorts, splits=['train', 'val', 'test']))
     assert trials.this_space.tolist() == prepared.cohort_eligibility_criteria.tolist()
     assert trials.trial_boilerplate_text.eq('').all()
 
@@ -298,7 +298,7 @@ def test_sample_completed_production_export(tmp_path):
     assert receipt['excluded_non_cancer_trials'] == ['NCT00000001']
     assert receipt['excluded_dfci_trials'] == ['NCT00000004']
     assert receipt['extraction_run_identity'] == 'fixture-run'
-    assert len(receipt['source_sha256']['cohorts.jsonl']) == 64
+    assert receipt['source_stamp']['cohorts.jsonl'] == file_stamp(run / 'cohorts.jsonl')
     second = sample.sample_trial_spaces(None, output, dfci, extraction_dir=run, n_trials=2, chunksize=3)
     pd.testing.assert_frame_equal(first, second)
 
@@ -361,7 +361,7 @@ def test_single_cohort_requires_eligibility_not_title_summary_fallback():
 
 def test_repair_changes_only_single_rows_and_is_idempotent(tmp_path):
     from repair_single_cohort_criteria import repair
-    from trial_cohort_format import file_sha256, load_production_cohorts
+    from trial_cohort_format import load_production_cohorts
     run, _ = production_export(tmp_path)
     rows = pd.read_json(run / 'cohorts.jsonl', lines=True)
     source = pd.read_parquet(run / 'inputs.parquet').set_index('nct_id')
@@ -382,8 +382,8 @@ def test_repair_changes_only_single_rows_and_is_idempotent(tmp_path):
     frame, provenance = load_production_cohorts(run)
     single = frame.multiple_cohorts.eq('no')
     assert frame.loc[single, 'cohort_eligibility_criteria'].eq(frame.loc[single, 'eligibility_criteria']).all()
-    assert provenance['source_sha256']['cohorts.jsonl'] == file_sha256(run / 'cohorts.jsonl')
-    assert 'cohort_rows_repair.json' in provenance['source_sha256']
+    assert provenance['source_stamp']['cohorts.jsonl'] == file_stamp(run / 'cohorts.jsonl')
+    assert 'cohort_rows_repair.json' in provenance['source_stamp']
 
 
 def test_generation_calls_five_positive_and_five_negative_seeds_separately_per_cohort(tmp_path, monkeypatch):

@@ -50,7 +50,7 @@ def parse_args():
     )
     ap.add_argument("--patients-parquet", help="Independent synthetic patient summary table, including IDs and splits")
     ap.add_argument("--trials-file", help="Independent trial-space CSV or parquet")
-    ap.add_argument("--splits", nargs="+", default=["train", "val"], choices=["train", "val", "test"])
+    ap.add_argument("--splits", nargs="+", default=["train", "val", "test"], choices=["train", "val", "test"])
     ap.add_argument("--model", default="google/embeddinggemma-2")
     ap.add_argument(
         "--gpus", default="0", help="Comma-separated CUDA device indices, e.g. '0,1,2,3'"
@@ -299,8 +299,8 @@ def load_retrieval_tables(args):
         import pyarrow.parquet as pq
         available = pq.read_schema(path).names
         return pd.read_parquet(path, columns=[name for name in wanted if name in available])
-    patient_columns = ["pseudo_mrn", "patient_summary", "patient_boilerplate_text", "split"]
-    trial_columns = ["nct_id", "this_space", "trial_boilerplate_text", "split"]
+    patient_columns = ["pseudo_mrn", "patient_summary", "patient_boilerplate_text", "split", "source_split"]
+    trial_columns = ["nct_id", "this_space", "trial_boilerplate_text", "split", "source_split"]
     if bool(args.patients_parquet) != bool(args.trials_file):
         raise ValueError("Supply both --patients-parquet and --trials-file")
     if args.patients_parquet:
@@ -333,14 +333,16 @@ def load_retrieval_tables(args):
         if column not in frame:
             frame[column] = ""
         frame[column] = frame[column].fillna("")
-    patients = patients[patients.split.isin(args.splits)].drop_duplicates("pseudo_mrn")
-    trials = trials[trials.split.isin(args.splits)].copy()
+    from synthetic_pool import pooled_frame, require_all_sources
+    require_all_sources(args.splits)
+    patients = pooled_frame(patients).drop_duplicates("pseudo_mrn")
+    trials = pooled_frame(trials)
     trials["this_space"] = trials.this_space.str.replace(r'^\s*\d+\.', '', regex=True).str.strip()
     trials = trials.drop_duplicates(["nct_id", "this_space"])
     if patients.empty or trials.empty:
         raise ValueError("No patients or trial spaces in the requested splits")
-    return (patients[["pseudo_mrn", "patient_summary", "patient_boilerplate_text", "split"]].reset_index(drop=True),
-            trials[["nct_id", "this_space", "trial_boilerplate_text", "split"]].reset_index(drop=True))
+    return (patients[["pseudo_mrn", "patient_summary", "patient_boilerplate_text", "split", "source_split"]].reset_index(drop=True),
+            trials[["nct_id", "this_space", "trial_boilerplate_text", "split", "source_split"]].reset_index(drop=True))
 
 
 def sample_candidates(patients, spaces, trials_per_patient, patients_per_space, seed):
@@ -430,6 +432,8 @@ def main():
                 "pseudo_mrn": patient_row["pseudo_mrn"],
                 "split": patient_row["split"],
                 "trial_split": space_row["split"],
+                "patient_source_split": patient_row["source_split"],
+                "cohort_source_split": space_row["source_split"],
                 "patient_summary": patient_row["patient_summary"],
                 "patient_boilerplate_text": patient_row["patient_boilerplate_text"],
                 "nct_id": space_row["nct_id"],
@@ -474,6 +478,8 @@ def main():
                 "pseudo_mrn": patient_row["pseudo_mrn"],
                 "split": patient_row["split"],
                 "trial_split": space_row["split"],
+                "patient_source_split": patient_row["source_split"],
+                "cohort_source_split": space_row["source_split"],
                 "patient_summary": patient_row["patient_summary"],
                 "patient_boilerplate_text": patient_row["patient_boilerplate_text"],
                 "nct_id": space_row["nct_id"],

@@ -10,20 +10,21 @@ import time
 
 _READERS = None
 _ROOT = None
+_STORE = None
 
 
 def _initialize(root, threads):
-    global _READERS, _ROOT
+    global _READERS, _ROOT, _STORE
     _ROOT = Path(root)
+    from .label_checkpoints import ResponseStore
+    _STORE = ResponseStore(root, read_only=True)
     _READERS = ThreadPoolExecutor(max_workers=threads)
 
 
 def _read(key):
-    try:
-        raw = (_ROOT / key[:2] / (key + '.json')).read_bytes()
-    except FileNotFoundError:
-        raw = (_ROOT / (key + '.json')).read_bytes()
-    row = json.loads(raw)
+    _, row = _STORE.read(key)
+    if row is None:
+        raise FileNotFoundError('Missing response checkpoint: '+key)
     if row.get('key') != key:
         raise ValueError('Response checkpoint key differs from requested export key: ' + key)
     # Re-encode the entire object; never drop prompt, clinical context or reasoning.

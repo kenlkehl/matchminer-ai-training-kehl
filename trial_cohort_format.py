@@ -90,7 +90,19 @@ stale. Missing common text represents no shared criteria, not a missing cohort.
     return frame
 
 
+def file_stamp(path):
+    """Cheap change detector: byte size and whole-second mtime, without reading content.
+
+    Whole seconds tolerate the differing timestamp precision of NFS clients on
+    other hosts. A copy gets a new mtime, so compare a copy with its source by
+    size alone.
+    """
+    stat = Path(path).stat()
+    return f'{stat.st_size}:{int(stat.st_mtime)}'
+
+
 def file_sha256(path):
+    """Content hash for small source/config files only; use file_stamp for data files."""
     digest = hashlib.sha256()
     with Path(path).open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
@@ -159,12 +171,12 @@ def load_production_cohorts(directory, *, seed=42):
     provenance = dict(source_trials=len(source), cancer_treatment_trials=len(counts),
         excluded_non_cancer_trials=sorted(rejected), extraction_directory=str(directory.resolve()),
         extraction_run_identity=json.loads((directory / 'manifest.json').read_text())['run_identity'],
-        source_sha256={name: file_sha256(directory / name) for name in
+        source_stamp={name: file_stamp(directory / name) for name in
             ('inputs.parquet', 'combined_outputs.json', 'cohorts.jsonl', 'manifest.json')})
     repair = directory / 'cohort_rows_repair.json'
     if repair.exists():
         provenance['cohort_rows_repair'] = str(repair.resolve())
-        provenance['source_sha256'][repair.name] = file_sha256(repair)
+        provenance['source_stamp'][repair.name] = file_stamp(repair)
     return complete, provenance
 
 

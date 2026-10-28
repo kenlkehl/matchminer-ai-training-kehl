@@ -138,11 +138,11 @@ def load_corpus(directory):
 
 def sample_v22(patients_path, cohorts_path, output, *, train_count=256, val_count=64, seed=42):
     """Freeze a diverse patient sample without moving source trials across splits."""
-    from trial_cohort_format import file_sha256
+    from trial_cohort_format import file_stamp
     output = Path(output)
     signature = dict(patient_source=str(Path(patients_path).resolve()),
                      cohort_source=str(Path(cohorts_path).resolve()),
-                     patient_sha256=file_sha256(patients_path), cohort_sha256=file_sha256(cohorts_path),
+                     patient_stamp=file_stamp(patients_path), cohort_stamp=file_stamp(cohorts_path),
                      train_count=train_count, val_count=val_count, seed=seed)
     path = output / 'sample_manifest.json'
     if path.exists():

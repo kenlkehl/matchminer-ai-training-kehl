@@ -75,19 +75,55 @@ def checkpoint_key(prompt, sampling, parser_name, template):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def traced_work(base, root, sampling):
+def trace_reference(path, root, archive=None):
+    member = str(path.relative_to(root))
+    if archive:
+        return dict(trace_path=str(archive) + '#' + member, trace_archive=str(archive), trace_member=member)
+    return dict(trace_path=str(path))
+
+
+def attempt_index(root):
+    result = {}
+    for path in (root / 'attempts').glob('*/*.json'):
+        first = path.name.split('_', 1)[0]
+        if first.isdigit():
+            result.setdefault(int(first), []).append(path)
+    return result
+
+
+def recover_attempt(paths, *, idx, prompt, sampling, identity, root, archive=None, allow_legacy=False):
+    for path in sorted(paths, reverse=True):
+        try:
+            trace = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        saved_identity = trace.get('checkpoint_identity')
+        if saved_identity != identity and (saved_identity is not None or not allow_legacy):
+            continue
+        if (trace.get('chunk_index') != idx or trace.get('prompt') != prompt
+                or trace.get('sampling') != asdict(sampling)
+                or summary_retry_codes(trace.get('answer', ''), trace.get('finish_reason'))):
+            continue
+        return dict(reasoning=trace['reasoning'], summary=normalize_patient_summary(trace['answer']),
+                    **trace_reference(path, root, archive))
+    return None
+
+
+def traced_work(base, root, sampling, archive=None):
     async def work(client, payload):
         reasoning, answer, metadata = await base(client, payload)
         trace = dict(chunk_index=payload['chunk_index'], endpoint=str(client.base_url),
                      prompt=payload['prompt'], reasoning=reasoning, answer=answer,
-                     sampling=asdict(sampling), generated_at=datetime.now(timezone.utc).isoformat(), **metadata)
+                     sampling=asdict(sampling), generated_at=datetime.now(timezone.utc).isoformat(),
+                     checkpoint_identity=payload.get('checkpoint_identity'),
+                     request_max_tokens=payload.get('max_tokens'), **metadata)
         trace['summary_quality'] = check_patient_summary(answer)
         path = root / 'attempts' / f'{payload["chunk_index"] // 256:05d}' / f'{payload["chunk_index"]}_{uuid.uuid4()}.json'
         await asyncio.to_thread(save, path, trace)
         codes = summary_retry_codes(answer, metadata['finish_reason'])
         if codes:
             raise OutputValidationError('Patient summary requires regeneration: ' + ', '.join(codes))
-        return dict(reasoning=reasoning, summary=normalize_patient_summary(answer), trace_path=str(path))
+        return dict(reasoning=reasoning, summary=normalize_patient_summary(answer), **trace_reference(path, root, archive))
     return work
 
 
@@ -109,7 +145,19 @@ async def run_rounds(*, rounds, patient_chunk_order, patient_summaries, all_resu
         args.max_concurrent_per_server = int(args.max_concurrent_requests)
     sampling = CompletionSampling(model=args.model, request_timeout=float(args.request_timeout),
         **{k: getattr(args, k) for k in ('temperature', 'top_k', 'top_p', 'presence_penalty', 'min_p', 'repetition_penalty')})
-    work = traced_work(make_completion_work_fn(sampling, parser_name, tokenizer), root, sampling)
+    archive = getattr(args, 'summary_trace_archive', None)
+    work = traced_work(make_completion_work_fn(sampling, parser_name, tokenizer), root, sampling, archive)
+    attempts = await asyncio.to_thread(attempt_index, root)
+    contract = dict(parser=parser_name, template_sha256=hashlib.sha256(str(tokenizer.chat_template).encode()).hexdigest(),
+                    max_model_len=args.max_model_len, max_tokens=args.max_tokens)
+    proof_path = root / 'resume_contract.json'
+    proof = await asyncio.to_thread(lambda: json.loads(proof_path.read_text()) if proof_path.exists() else {})
+    allow_legacy = proof.get('attempt_identity') == contract
+    reused_chunks = recovered_attempts = 0
+    status_lock = asyncio.Lock()
+    async def update_status(value):
+        async with status_lock:
+            await asyncio.to_thread(save, root / 'status.json', value)
     chunk_to_patient = {cidx: pid for pid, chunks in patient_chunk_order.items() for cidx in chunks}
     total_chunks = sum(map(len, rounds))
     for round_idx in range(completed_rounds, len(rounds)):
@@ -118,15 +166,21 @@ async def run_rounds(*, rounds, patient_chunk_order, patient_summaries, all_resu
                   for pid, idx, first, last, text in items}
         if any(value.lstrip().startswith('ERROR:') for value in priors.values()):
             raise RuntimeError('A failed prior summary must be repaired before continuing')
-        save(root / 'status.json', dict(stage='preparing_prompts', round=round_idx + 1,
+        await update_status(dict(stage='preparing_prompts', round=round_idx + 1,
              rounds=len(rounds), completed_chunks=len(all_results), expected_chunks=total_chunks))
         inputs = [(idx, patient_summaries.get(pid), first, last, text, args.max_model_len)
                   for pid, idx, first, last, text in items]
         prompts = prompt_pool.map(build_prompt, inputs, chunksize=max(1, len(inputs) // (prompt_pool._processes * 4)))
         iterator, completed = iter(prompts), {}
+        gate = getattr(args, 'summary_start_gate', None)
+        if gate and not Path(gate).exists():
+            print(f'Waiting for summary recovery readiness gate: {gate}', flush=True)
+            while not Path(gate).exists():
+                await asyncio.sleep(1)
         registry = build_registry_from_args(args)
         async with RequestSession(registry, work, max_attempts=int(args.max_attempts)) as session:
             async def worker():
+                nonlocal reused_chunks, recovered_attempts
                 while (item := next(iterator, None)) is not None:
                     idx, prompt, tokens = item
                     available = args.max_model_len - tokens - 256
@@ -137,28 +191,37 @@ async def run_rounds(*, rounds, patient_chunk_order, patient_summaries, all_resu
                     # Output budget and the prior summary are part of checkpoint identity.
                     identity = hashlib.sha256((identity + str(max_tokens) + priors[idx]).encode()).hexdigest()
                     path = root / 'chunks' / f'{idx // 256:05d}' / f'{idx:09d}.json'
-                    if path.exists():
+                    if await asyncio.to_thread(path.exists):
                         result = await asyncio.to_thread(lambda: json.loads(path.read_text()))
                         if result['identity'] != identity:
                             raise ValueError('Saved summary prompt or sampling changed')
                         if summary_retry_codes(result['summary']):
                             rejected = root/'quality_rejected'/uuid.uuid4().hex/path.name
                             rejected.parent.mkdir(parents=True, exist_ok=True)
-                            path.replace(rejected)
+                            await asyncio.to_thread(path.replace, rejected)
                             result = None
+                        else:
+                            reused_chunks += 1
                     else:
                         result = None
                     if result is None:
-                        result = await session.submit(dict(chunk_index=idx, prompt=prompt, max_tokens=max_tokens,
-                            include_completion_metadata=True, include_raw_text=True))
+                        result = await asyncio.to_thread(recover_attempt, attempts.get(idx, []), idx=idx,
+                            prompt=prompt, sampling=sampling, identity=identity, root=root, archive=archive,
+                            allow_legacy=allow_legacy)
+                        if result is not None:
+                            recovered_attempts += 1
+                        else:
+                            result = await session.submit(dict(chunk_index=idx, prompt=prompt, max_tokens=max_tokens,
+                                checkpoint_identity=identity, include_completion_metadata=True, include_raw_text=True))
                         if not isinstance(result, dict):
                             raise RuntimeError(f'Patient summary failed for chunk {idx}: {result}')
                         result.update(identity=identity, prior_summary=priors[idx], patient_id=chunk_to_patient[idx])
                         await asyncio.to_thread(save, path, result)
                     completed[idx] = (result['reasoning'], result['summary'], priors[idx])
                     if len(completed) % 32 == 0 or len(completed) == len(items):
-                        save(root / 'status.json', dict(stage='summarizing', round=round_idx + 1,
-                             rounds=len(rounds), completed_chunks=len(all_results) + len(completed), expected_chunks=total_chunks))
+                        await update_status(dict(stage='summarizing', round=round_idx + 1,
+                             rounds=len(rounds), completed_chunks=len(all_results) + len(completed), expected_chunks=total_chunks,
+                             reused_chunks=reused_chunks, recovered_attempts=recovered_attempts))
             tasks = [asyncio.create_task(worker()) for _ in range(min(pending, len(items)))]
             try:
                 await asyncio.gather(*tasks)
@@ -173,4 +236,5 @@ async def run_rounds(*, rounds, patient_chunk_order, patient_summaries, all_resu
         all_results.update(completed)
         for idx, (_, summary, _) in completed.items():
             patient_summaries[chunk_to_patient[idx]] = summary
-    save(root / 'status.json', dict(stage='completed', completed_chunks=len(all_results), expected_chunks=total_chunks))
+    await update_status(dict(stage='completed', completed_chunks=len(all_results), expected_chunks=total_chunks,
+                             reused_chunks=reused_chunks, recovered_attempts=recovered_attempts))

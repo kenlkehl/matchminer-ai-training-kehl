@@ -868,6 +868,8 @@ def configure_mean_bce_accumulation(model: Any) -> None:
 
 
 def run_train(args: argparse.Namespace) -> None:
+    if args.split_strategy != 'none':
+        raise ValueError('Production uses all synthetic data without holdouts')
     from datasets import Dataset
     from transformers import (
         AutoModelForSequenceClassification,
@@ -1276,7 +1278,7 @@ def add_train_arguments(
     parser.add_argument("--checkpoint-dir", default=str(DEFAULT_CHECKPOINT_DIR))
     parser.add_argument("--resume-from-checkpoint", default="")
     parser.add_argument(
-        "--split-strategy", choices=("patient_drug", "none"), default="patient_drug"
+        "--split-strategy", choices=("none",), default="none"
     )
     parser.add_argument("--patient-validation-fraction", type=float, default=0.20)
     parser.add_argument("--drug-validation-fraction", type=float, default=0.20)

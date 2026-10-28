@@ -10,9 +10,13 @@ import argparse
 from datetime import date, timedelta
 from itertools import groupby
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
+import tempfile
+import time
 
 import numpy as np
 import pandas as pd
@@ -85,7 +89,86 @@ def ordered_dates(rows, anchor):
             for row, offset in zip(rows, offsets)]
 
 
-def prepare_notes(source, spaces_path, destination, patients_path, *, anchor='2025-01-01'):
+def _atomic_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    temporary.write_text(json.dumps(value, indent=2) + '\n')
+    temporary.replace(path)
+
+
+def _copy_verified(source, destination, progress, phase):
+    """Bulk sequential I/O; size-checked before atomic publication, without a readback."""
+    source, destination = Path(source), Path(destination)
+    before = source.stat()
+    copied = 0
+    with source.open('rb') as reader, destination.open('wb') as writer:
+        while block := reader.read(8 * 1024**2):
+            writer.write(block)
+            copied += len(block)
+            progress(phase, copied, before.st_size)
+        writer.flush()
+        os.fsync(writer.fileno())
+    after = source.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError('Source changed during copy: ' + str(source))
+    if copied != before.st_size or destination.stat().st_size != copied:
+        raise ValueError('Copy size check failed: ' + str(destination))
+    return dict(bytes=copied)
+
+
+def prepare_notes(source, spaces_path, destination, patients_path, *, anchor='2025-01-01',
+                  scratch_dir=None, stage_input=False):
+    """Work in private local scratch; publish verified products to requested paths."""
+    source, destination, patients_path = map(Path, (source, destination, patients_path))
+    if len({p.resolve() for p in (source, destination, patients_path)}) != 3:
+        raise ValueError('Prepared outputs must be distinct and must not overwrite the original generated notes')
+    if scratch_dir is not None:
+        Path(scratch_dir).mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix='mmai-note-prep-', dir=scratch_dir))
+    status_path = destination.with_suffix('.preparation.status.json')
+    started, last_update, last_phase = time.monotonic(), 0, None
+    def progress(phase, completed=0, total=None, **extra):
+        nonlocal last_update, last_phase
+        now = time.monotonic()
+        if phase == last_phase and now - last_update < 10 and completed != total:
+            return
+        value = dict(phase=phase, completed=completed, total=total, elapsed_seconds=now-started,
+                     updated_at=time.time(), scratch_directory=str(work), **extra)
+        _atomic_json(status_path, value)
+        print('[prepare-notes] ' + json.dumps(value), flush=True)
+        last_update, last_phase = now, phase
+    try:
+        local_source = source
+        if stage_input:
+            local_source = work / 'input.parquet'
+            _copy_verified(source, local_source, progress, 'staging_input')
+        local_notes, local_patients = work / 'notes.parquet', work / 'patients.parquet'
+        report = _prepare_notes_local(local_source, spaces_path, local_notes, local_patients,
+                                      anchor=anchor, progress=progress)
+        report['source'] = str(source.resolve())
+        report['products'] = {}
+        for local, target, kind, rows in [(local_notes, destination, 'notes', report['notes']),
+                                           (local_patients, patients_path, 'patients', report['patients'])]:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(target.name + '.' + work.name + '.tmp')
+            record = _copy_verified(local, temporary, progress, 'publishing_' + kind)
+            if pq.ParquetFile(temporary).metadata.num_rows != rows:
+                raise ValueError('Published Parquet row count differs from prepared output')
+            temporary.replace(target)
+            report['products'][kind] = dict(path=str(target.resolve()), rows=rows, **record)
+        _atomic_json(destination.with_suffix('.preparation.json'), report)
+        progress('complete', report['notes'], report['notes'], products=report['products'])
+    except BaseException as error:
+        progress('failed', error=repr(error), scratch_retained=True)
+        raise
+    else:
+        # Only this operation's private directory, after both products verify.
+        shutil.rmtree(work)
+        return report
+
+
+def _prepare_notes_local(source, spaces_path, destination, patients_path, *, anchor='2025-01-01', progress=None):
     source, destination, patients_path = map(Path, (source, destination, patients_path))
     if source.resolve() in (destination.resolve(), patients_path.resolve()):
         raise ValueError('Prepared outputs must not overwrite the original generated notes')
@@ -105,9 +188,15 @@ def prepare_notes(source, spaces_path, destination, patients_path, *, anchor='20
     db = sqlite3.connect(database)
     writer = patient_writer = None
     count = 0
+    indexed = dated_count = 0
+    total = parquet.metadata.num_rows
+    progress = progress or (lambda *args, **kwargs: None)
     try:
         db.execute('PRAGMA foreign_keys=ON')
         db.execute('PRAGMA journal_mode=OFF')
+        db.execute('PRAGMA synchronous=OFF')  # Disposable scratch, never the published artifacts.
+        db.execute('PRAGMA temp_store=MEMORY')
+        db.execute('PRAGMA cache_size=-262144')  # 256 MiB; avoid random scratch reads during date assignment.
         db.executescript('''
             CREATE TABLE patients (mrn TEXT PRIMARY KEY, patient_id TEXT UNIQUE,
                 space_index INTEGER, patient_class TEXT, nct_id TEXT, split TEXT,
@@ -139,6 +228,8 @@ def prepare_notes(source, spaces_path, destination, patients_path, *, anchor='20
                            (row['row_id'], *key, row['event_number'], age_years(row['event_text']),
                             str(row['date']) if row.get('date') is not None else None, None))
             db.commit()
+            indexed += len(batch)
+            progress('indexing', indexed, total)
         coverage = {(space, kind): count for space, kind, count in db.execute(
             'SELECT space_index,patient_class,COUNT(*) FROM patients GROUP BY space_index,patient_class')}
         expected = {(int(space), kind): 5 for space in spaces.index for kind in ('positive', 'negative')}
@@ -149,6 +240,8 @@ def prepare_notes(source, spaces_path, destination, patients_path, *, anchor='20
             dated = ordered_dates([row[1:] for row in rows], anchor)
             db.executemany('UPDATE notes SET date=?,date_provenance=? WHERE row_id=?',
                            [(day, provenance, key) for key, day, provenance in dated])
+            dated_count += len(dated)
+            progress('dating', dated_count, total)
         db.commit()
         for batch in parquet.iter_batches(batch_size=1024):
             table = pa.Table.from_batches([batch])
@@ -163,6 +256,7 @@ def prepare_notes(source, spaces_path, destination, patients_path, *, anchor='20
                 writer = pq.ParquetWriter(temporary, table.schema, compression='zstd')
             writer.write_table(table)
             count += len(table)
+            progress('writing_notes', count, total)
         if writer is None:
             raise ValueError('No synthetic notes to prepare')
         writer.close()
@@ -236,12 +330,15 @@ def main():
     notes.add_argument('--output', required=True)
     notes.add_argument('--patients', required=True)
     notes.add_argument('--date-anchor', default='2025-01-01')
+    notes.add_argument('--scratch-dir', type=Path, help='Local SSD scratch root; defaults to the system temporary directory')
+    notes.add_argument('--stage-input', action='store_true', help='Copy and verify source notes into scratch before both read passes')
     summaries = sub.add_parser('summaries')
     summaries.add_argument('--input', required=True)
     summaries.add_argument('--patients', required=True)
     summaries.add_argument('--output', required=True)
     args = parser.parse_args()
-    result = (prepare_notes(args.input, args.sampled_spaces, args.output, args.patients, anchor=args.date_anchor)
+    result = (prepare_notes(args.input, args.sampled_spaces, args.output, args.patients, anchor=args.date_anchor,
+                            scratch_dir=args.scratch_dir, stage_input=args.stage_input)
               if args.stage == 'notes' else prepare_summaries(args.input, args.patients, args.output))
     print(json.dumps(result))
 

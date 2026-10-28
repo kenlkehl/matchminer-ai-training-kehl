@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import csv
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -13,11 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCAL_INFERENCE = ROOT.parent / 'matchminer-ai-inference-kehl' / 'src'
 if LOCAL_INFERENCE.is_dir():
     sys.path.insert(0, str(LOCAL_INFERENCE))
+sys.path.append(str(ROOT))
 
 from matchminer_ai.patients.summary_quality import (  # noqa: E402 - use sibling checkout
     SUMMARY_QUALITY_VERSION,
     check_patient_summary,
 )
+from trial_cohort_format import file_stamp  # noqa: E402 - repository root module
 
 TEXT_COLUMNS = ('patient_summary', 'text', 'cancer_history_summary')
 ID_COLUMNS = ('patient_id', 'id', 'pseudo_mrn')
@@ -87,10 +88,8 @@ def audit(input_path, output, *, text_column=None, id_column=None, include_text=
                 result['summary_text'] = text
             jsonl.write(json.dumps(result) + '\n')
             csv_out.writerow({**result, 'codes': ';'.join(codes), 'findings': json.dumps(check['findings'])})
-    with input_path.open('rb') as source:
-        digest = hashlib.file_digest(source, 'sha256').hexdigest()
     report = dict(version=SUMMARY_QUALITY_VERSION, source=str(input_path.resolve()),
-                  source_sha256=digest, include_text=include_text,
+                  source_stamp=file_stamp(input_path), include_text=include_text,
                   counts=dict(counts), by_code=dict(by_code),
                   by_source_split={k:dict(v) for k,v in by_split.items()},
                   cancer_section_counts=dict(sections),

@@ -22,7 +22,7 @@ def digest(value):
 
 
 def register(run_dir, pipeline_dir=None, *, standalone=False):
-    from run_pipeline import file_record
+    from run_pipeline import file_record, source_record
 
     run_dir = Path(run_dir).resolve()
     pipeline_dir = Path(pipeline_dir).resolve() if pipeline_dir else run_dir / 'pipeline'
@@ -56,7 +56,7 @@ def register(run_dir, pipeline_dir=None, *, standalone=False):
             identity = {key: request[key] for key in ('command', 'inputs', 'sources')}
             if digest(identity) != request['fingerprint']:
                 raise ValueError('Invalid recorded generator request fingerprint')
-            if any(file_record(row['path'], {}) != row for row in identity['inputs']):
+            if any(file_record(row['path']) != row for row in identity['inputs']):
                 raise ValueError('Validation upgrade cannot change generation inputs')
             saved = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
             if saved:
@@ -87,10 +87,9 @@ def register(run_dir, pipeline_dir=None, *, standalone=False):
         identity = {key: request[key] for key in ('command', 'inputs', 'sources')}
         if digest(identity) != request['fingerprint']:
             raise ValueError('Invalid original pipeline request fingerprint')
-        cache = {}
         current = {**identity,
-                   'inputs': [file_record(row['path'], cache) for row in identity['inputs']],
-                   'sources': [file_record(row['path'], cache) for row in identity['sources']]}
+                   'inputs': [file_record(row['path']) for row in identity['inputs']],
+                   'sources': [source_record(row['path']) for row in identity['sources']]}
         if current['inputs'] != identity['inputs']:
             raise ValueError('Validation upgrade cannot change generation inputs')
         driver = str(ROOT / 'generate_synthetic_data.py')

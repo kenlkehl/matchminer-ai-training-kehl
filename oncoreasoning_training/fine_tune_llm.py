@@ -99,19 +99,18 @@ def parser():
     return p
 
 
-def select_task_dataset(dataset, task, *, max_eval_examples=256, seed=42, training_splits=('train',)):
+def select_task_dataset(dataset, task, *, max_eval_examples=256, seed=42, training_splits=('train', 'validation', 'test')):
     """Filter by category before removing metadata, without decoding token columns."""
     from datasets import DatasetDict, concatenate_datasets
     if task not in c.TASKS:
         raise ValueError("Select exactly one adapter task")
     selected, counts = {}, {}
-    included = set(training_splits)
-    if not included or not included.issubset({'train', 'validation', 'test'}):
-        raise ValueError('Select valid source partitions for adapter training')
+    from synthetic_pool import require_all_sources
+    require_all_sources(training_splits)
     training_parts = []
     for split, rows in dataset.items():
-        if split not in included and split != 'validation':
-            continue
+        if split not in {'train', 'val', 'validation', 'test'}:
+            raise ValueError('Unknown synthetic source partition: ' + split)
         if "category" not in rows.column_names:
             raise ValueError("Prepared dataset needs category labels to separate adapters")
         rows = rows.filter(lambda categories: [value == task for value in categories],
@@ -119,12 +118,7 @@ def select_task_dataset(dataset, task, *, max_eval_examples=256, seed=42, traini
         counts[split] = len(rows)
         if not len(rows):
             continue
-        if split in included:
-            training_parts.append(rows.select_columns(['input_ids', 'attention_mask', 'labels']))
-            continue
-        if split == "validation" and len(rows) > max_eval_examples:
-            rows = rows.shuffle(seed=seed).select(range(max_eval_examples))
-        selected[split] = rows.select_columns(["input_ids", "attention_mask", "labels"])
+        training_parts.append(rows.select_columns(['input_ids', 'attention_mask', 'labels']))
     if not training_parts:
         raise ValueError(f"No training examples for {task}")
     selected['train'] = (training_parts[0] if len(training_parts) == 1

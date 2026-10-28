@@ -8,7 +8,6 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime, timezone
 import fcntl
-import hashlib
 from itertools import islice
 import json
 import multiprocessing
@@ -204,7 +203,6 @@ def _export(source_run, output, *, workers, reader_threads, candidates=None):
     filename = f'scores-{cutoff_ns}.jsonl'
     destination = output/filename
     temporary = destination.with_suffix('.jsonl.tmp')
-    hasher = hashlib.sha256()
     split_counts, score_counts = Counter(), Counter()
     with temporary.open('wb') as stream:
         for (patient_id, cohort_id), answers in pairs.items():
@@ -215,14 +213,13 @@ def _export(source_run, output, *, workers, reader_threads, candidates=None):
                 continue
             raw = (json.dumps(row, separators=(',', ':')) + '\n').encode()
             stream.write(raw)
-            hasher.update(raw)
             counts['completed_pairs'] += 1
             split_counts[pmap[patient_id].get('source_split', pmap[patient_id]['split'])] += 1
             score_counts[str(row['score'])] += 1
         stream.flush()
         os.fsync(stream.fileno())
     temporary.replace(destination)
-    manifest = dict(format='completed-gated-scores-v1', scores_file=filename, scores_sha256=hasher.hexdigest(),
+    manifest = dict(format='completed-gated-scores-v1', scores_file=filename, scores_bytes=destination.stat().st_size,
         teacher_manifest=teacher, cutoff_utc=datetime.fromtimestamp(cutoff_ns/1e9, timezone.utc).isoformat(),
         created_at=datetime.now(timezone.utc).isoformat(), counts=dict(counts),
         by_patient_source_split=dict(split_counts), score_distribution=dict(score_counts),

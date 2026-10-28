@@ -17,6 +17,7 @@ import sys
 import time
 
 import train_from_summaries as training
+from trial_cohort_format import file_stamp
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = ROOT.parent / 'data/no_phi'
@@ -72,6 +73,13 @@ def parser():
                    help='Observe the existing generation job until complete; never launch or interrupt it')
     p.add_argument('--generation-wait-timeout', type=float, default=0, help='Seconds; 0 waits indefinitely')
     p.add_argument('--synthetic-date-anchor', default='2025-01-01')
+    p.add_argument('--note-preparation-scratch-dir', type=Path,
+                   help='Local SSD scratch for SQLite and temporary prepared notes; final products stay in --data-dir')
+    p.add_argument('--stage-note-preparation-input', action='store_true',
+                   help='Copy source notes to local scratch before preparation')
+    p.add_argument('--summary-resume-dir', type=Path)
+    p.add_argument('--summary-start-gate', type=Path)
+    p.add_argument('--summary-scratch-dir', type=Path)
     p.add_argument('--summary-chunk-size', type=int, default=50000)
     p.add_argument('--summary-chunk-overlap', type=int, default=500)
     p.add_argument('--summary-max-tokens', type=int, default=20000)
@@ -129,6 +137,8 @@ def training_command(args):
         elif isinstance(action, argparse._AppendAction):
             for item in value:
                 command += [option, str(item)]
+        elif isinstance(value, (list, tuple)):
+            command += [option, *map(str, value)]
         else:
             command += [option, str(value)]
     return command
@@ -193,7 +203,9 @@ def build_plan(args):
         Stage('prepare-notes', [py, str(ROOT / 'prepare_synthetic_training.py'), 'notes',
               '--input', str(args.raw_synthetic_notes), '--sampled-spaces', str(args.sampled_spaces),
               '--output', str(args.synthetic_notes), '--patients', str(patient_map),
-              '--date-anchor', args.synthetic_date_anchor],
+              '--date-anchor', args.synthetic_date_anchor,
+              *(['--scratch-dir', str(args.note_preparation_scratch_dir)] if args.note_preparation_scratch_dir else []),
+              *(['--stage-input'] if args.stage_note_preparation_input else [])],
               [args.raw_synthetic_notes, args.sampled_spaces], [args.synthetic_notes, patient_map], source('prepare_synthetic_training.py', 'trial_cohort_format.py')),
         Stage('summarize-patients', [py, str(ROOT / '6_summarize_patients.py'),
               '--input_parquet', str(args.synthetic_notes), '--output_parquet', str(d / 'patient_serial_summaries.parquet'),
@@ -203,9 +215,12 @@ def build_plan(args):
               '--scheduler-adaptive-concurrency' if args.generation_scheduler_adaptive_concurrency else '--no-scheduler-adaptive-concurrency',
               '--initial-concurrent-per-server', str(args.generation_initial_concurrency_per_server),
               '--pending-requests', str(args.generation_pending_requests),
+              *(['--summary-resume-dir', str(args.summary_resume_dir)] if args.summary_resume_dir else []),
+              *(['--summary-start-gate', str(args.summary_start_gate)] if args.summary_start_gate else []),
+              *(['--summary-scratch-dir', str(args.summary_scratch_dir)] if args.summary_scratch_dir else []),
               *model, *(['--download_dir', str(args.download_dir)] if args.download_dir else []), *remote],
               [args.synthetic_notes], [raw_summaries, d / 'patient_serial_summaries.parquet'],
-              [*source('6_summarize_patients.py', 'summary_pool.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py'),
+              [*source('6_summarize_patients.py', 'summary_pool.py', 'summary_workspace.py', 'retrieval_workspace.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py'),
                inference_sources / 'patients/postprocess.py', inference_sources / 'patients/prompt_builder.py',
                inference_sources / 'patients/summary_quality.py',
                inference_sources / 'prompts/patient.serial.user.primer.txt',
@@ -227,20 +242,16 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
-def file_record(path, cache):
+def file_record(path):
+    """Stage inputs/outputs are large data files: identify them by size and mtime, never by reading them."""
     path = Path(path).resolve()
-    stat = path.stat()
-    key = str(path)
-    prior = cache.get(key, {})
-    if prior.get('bytes') == stat.st_size and prior.get('mtime_ns') == stat.st_mtime_ns:
-        return prior['identity']
-    digest = hashlib.sha256()
-    with path.open('rb') as stream:
-        while block := stream.read(8 * 1024 * 1024):
-            digest.update(block)
-    identity = dict(path=key, bytes=stat.st_size, sha256=digest.hexdigest())
-    cache[key] = dict(bytes=stat.st_size, mtime_ns=stat.st_mtime_ns, identity=identity)
-    return identity
+    return dict(path=str(path), stamp=file_stamp(path))
+
+
+def source_record(path):
+    """Source files are small; content hashes survive checkouts that only touch mtimes."""
+    path = Path(path).resolve()
+    return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
 
 
 def generation_active(directory):
@@ -258,7 +269,7 @@ def generation_active(directory):
 def wait_generation(args):
     """Read only: the existing supervisor remains responsible for restart/recovery."""
     manifest = json.loads((args.generation_dir / 'manifest.json').read_text())
-    if manifest['input_sha256'] != file_record(args.sampled_spaces, {})['sha256']:
+    if manifest['input_stamp'] != file_stamp(args.sampled_spaces):
         raise ValueError('Running generation uses different sampled trial spaces')
     deadline = time.monotonic() + args.generation_wait_timeout if args.generation_wait_timeout else None
     while True:
@@ -289,8 +300,6 @@ def execute(args, plan):
         raise ValueError('Upstream LLM stages require --server-urls-file for an existing serving pool')
     args.pipeline_dir.mkdir(parents=True, exist_ok=True)
     args.data_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = args.pipeline_dir / 'file_identities.json'
-    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     with (args.pipeline_dir / 'pipeline.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         env = dict(os.environ, PYTHONPATH=str(args.inference_repo / 'src') + os.pathsep + str(ROOT),
@@ -300,8 +309,8 @@ def execute(args, plan):
             try:
                 identity = dict(command=(training.training_identity_command(stage.command)
                                          if stage.name == 'train' else stage.command),
-                                inputs=[file_record(p, cache) for p in stage.inputs],
-                                sources=[file_record(p, cache) for p in [Path(__file__), *stage.sources]])
+                                inputs=[file_record(p) for p in stage.inputs],
+                                sources=[source_record(p) for p in [Path(__file__), *stage.sources]])
                 fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
                 request = args.pipeline_dir / 'requests' / f'{stage.name}.json'
                 receipt = args.pipeline_dir / 'completed' / f'{stage.name}.json'
@@ -309,12 +318,11 @@ def execute(args, plan):
                     raise ValueError(f'Inputs, code, or options changed for {stage.name}; use a fresh pipeline directory')
                 if receipt.exists():
                     saved = json.loads(receipt.read_text())
-                    if saved['fingerprint'] != fingerprint or saved['outputs'] != [file_record(p, cache) for p in stage.outputs]:
+                    if saved['fingerprint'] != fingerprint or saved['outputs'] != [file_record(p) for p in stage.outputs]:
                         raise ValueError(f'Changed or missing completed output for {stage.name}')
                     print(f'[skip] {stage.name}', flush=True)
                     continue
                 atomic_json(request, dict(fingerprint=fingerprint, **identity, execution_command=stage.command))
-                atomic_json(cache_path, cache)
                 atomic_json(status_path, dict(stage=stage.name, status='running'))
                 if stage.name == 'sample-trials' and generation_active(args.generation_dir):
                     raise RuntimeError('Cannot resample an active generation run; start at generate-synthetic with --wait-for-generation')
@@ -330,9 +338,8 @@ def execute(args, plan):
                         stage_env = dict(env, MMAI_LLM_TRACE_DIR=str(args.pipeline_dir / 'llm_traces' / stage.name),
                                          MMAI_LLM_TRACE_STAGE=stage.name)
                         subprocess.run(stage.command, cwd=ROOT, env=stage_env, check=True, stdout=stream, stderr=subprocess.STDOUT)
-                outputs = [file_record(p, cache) for p in stage.outputs]
+                outputs = [file_record(p) for p in stage.outputs]
                 atomic_json(receipt, dict(fingerprint=fingerprint, outputs=outputs))
-                atomic_json(cache_path, cache)
                 print(f'[done] {stage.name}', flush=True)
             except BaseException as exc:
                 atomic_json(status_path, dict(stage=stage.name, status='failed', error=str(exc)))

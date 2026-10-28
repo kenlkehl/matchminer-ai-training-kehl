@@ -166,7 +166,8 @@ must first have their original patient assignments restored.
 Preparation records both categories in `training_manifest.json`. Training filters
 each adapter's examples strictly to its task, then merges train, validation, and
 test into its training set. There is no cross-task mixture ratio or oversampling.
-Use `--training-splits train` to deliberately retain validation as a holdout. Use
+Production rejects `--training-splits train` and other source-partition subsets.
+Use
 `prepare --tasks summarization` or `--tasks clinical_qa` to prepare one category,
 and `fine_tune_llm.py --task summarization` or `--task clinical_qa` to train it.
 Use `--max-patients` / `--max-pairs` for small preparation checks.
@@ -207,13 +208,11 @@ vocabulary logits. Full-parameter fine-tuning is disabled. LoRA defaults:
 | Batch | One example per GPU, eight accumulation steps: 64 examples on eight GPUs |
 | Checkpoint/evaluation interval | Every 100 optimizer steps |
 | Training partitions | All synthetic train, validation, and test examples |
-| Optional held-out validation | With `--training-splits train`, fixed seeded subset of at most 256 examples per task |
+| Synthetic held-out validation | None; source partitions are provenance only |
 
 These are conservative starting settings, not a guarantee of output quality.
-By default the final artifact uses the final training checkpoint; there is no
-held-out synthetic validation. When validation is explicitly excluded from
-training, the artifact uses the checkpoint with the lowest measured task-specific
-validation loss when evaluation checkpoints exist, and saves validation metrics.
+The final artifact uses the final training checkpoint; there is no held-out
+synthetic validation or validation-based checkpoint selection in production.
 Non-finite loss stops training. The [PEFT LoRA documentation](https://huggingface.co/docs/peft/en/package_reference/lora)
 describes all-linear targeting and the default initialization, which leaves the
 base model's initial outputs unchanged. The base is never merged or updated.

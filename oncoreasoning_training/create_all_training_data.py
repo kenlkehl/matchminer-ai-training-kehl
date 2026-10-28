@@ -24,6 +24,7 @@ if __package__ in (None, ""):
 from oncoreasoning_training import contracts as c
 from oncoreasoning_training.teacher import TeacherPool, server_urls, worker_count, sampling_parameters
 from oncoreasoning_training.scheduling import run_tasks
+from trial_cohort_format import file_stamp
 
 
 def file_digest(path):
@@ -63,7 +64,7 @@ def check_manifest(directory, name, manifest, *, transport_keys=()):
 
 def source_record(path):
     path = Path(path).expanduser().resolve()
-    return {"path": str(path), "sha256": file_digest(path)}
+    return {"path": str(path), "stamp": file_stamp(path)}
 
 
 def preparation_inputs(paths, pipeline_manifest=None, *, required_recorded=()):
@@ -196,6 +197,8 @@ def component_tasks(pair, sources, catalog=None, pack_evidence=None):
 
 
 def prepare(args, tokenizer=None):
+    from synthetic_pool import require_all_sources
+    require_all_sources(args.splits)
     import pandas as pd
     tokenizer = tokenizer or c.load_chat_tokenizer(args.model_name)
     c.letter_token_ids(tokenizer)
@@ -320,7 +323,7 @@ def prepare(args, tokenizer=None):
         temporary.unlink()
         raise ValueError("No examples for a selected category; check inputs and splits")
     temporary.replace(output / "requests.jsonl")
-    atomic_json(output / "prepared.json", {"requests_sha256": file_digest(output / "requests.jsonl"),
+    atomic_json(output / "prepared.json", {"requests_stamp": file_stamp(output / "requests.jsonl"),
                                          "manifest_sha256": c.digest(manifest), "counts": counts})
     print(f"Prepared {dict(counts)}")
 
@@ -332,7 +335,7 @@ def load_prepared(directory):
         raise ValueError("Prepared manifest is incompatible or changed")
     if manifest["contract_sha256"] != file_digest(c.__file__):
         raise ValueError("Prompt contract changed; prepare a fresh run")
-    if prepared["requests_sha256"] != file_digest(directory / "requests.jsonl"):
+    if prepared["requests_stamp"] != file_stamp(directory / "requests.jsonl"):
         raise ValueError("Prepared requests changed; prepare a fresh run")
     return manifest, prepared
 

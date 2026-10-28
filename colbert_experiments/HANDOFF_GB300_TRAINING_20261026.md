@@ -1,8 +1,374 @@
+# Current correction: full synthetic pool (2026-10-27)
+
+Latest batch update (October 27): EmbeddingGemma 2 uses **128 pairs per optimizer
+step**, with both ranking losses computed over that full batch. Encoder chunks
+of eight use gradient caching with RNG/autocast replay; texts are sorted by
+length only within each sampled batch and restored to original pair order before
+the loss. This is not gradient accumulation of independent eight-pair losses.
+MNRL masks off-diagonal pairs known to be eligible (score >= 1), including repeated
+patient/cohort text identities, so those are not false negatives. CoSENT, the
+positive threshold, proportional dataset sampling, all-row coverage, three epochs,
+learning rate 2e-5 and 1% warmup remain the same. No synthetic holdouts.
+
+Live flags: `--batch-size 128 --loss-mini-batch-size 8 --mask-known-positives
+--no-gradient-checkpointing --save-steps 200 --logging-steps 25`. Checkpoint and
+logging intervals count optimizer steps, not encoder chunks. The initial batch-10
+run was stopped before its first checkpoint; its logs and SSD state are retained
+under the comparison run's `recovery/larger_batches_20261027/` audit and the
+referenced local archive. The larger-batch run starts a fresh optimizer schedule
+and retains the original public model/checkpoint destinations. The controller
+unit is `mmai-trialspace-comparison-batch128-20261027.service`; consult `launch.json`
+for current identity. All cloud VMs remain off; the round-two local/LAN plan holds.
+
+Latest storage update (October 27): training-pair preparation and EmbeddingGemma
+optimizer work use local SSD too. A complete `scores_ready.json` with matching
+corpus, candidates, teacher manifest and file hashes can release local training
+before the large reasoning archive finishes publication. Copy those immutable
+inputs into an independent SSD workspace before the labeler can clean its own
+workspace. Keep the label publisher supervised; join and verify its publication
+before diagnostics/shared-artifact consumption or round-two judgment reuse.
+Publish independent training-pair tables concurrently with fitting. Optimizer
+checkpoints, input Parquets, model cache and final weights stay on SSD during
+training; copy retained checkpoints and final weights back to the original
+shared no_phi destinations with SHA256 readback. Retain local state for resume
+on failure. All eight cloud VMs must be live-verified TERMINATED before training.
+
+
+Latest plan (October 27): after round-one EmbeddingGemma 2 training and its
+in-sample diagnostics, retrieve again with the **round-one trained model** over
+all 66,800 patients and 6,680 cohorts in both directions, then label those round-two
+candidates using **only the GB300 and authorized LAN teachers**. Keep all eight
+cloud VMs TERMINATED throughout round-two retrieval and labeling; do not restart
+the cloud fleet after round-one training. ColBERT-only labeling is deferred.
+Round-two outputs are separate under `round2_embeddinggemma2/`; round-one and
+ColBERT artifacts remain intact. Reuse only intersecting pair judgments after
+verifying unchanged corpus, prompts, teacher settings and full response integrity.
+Keep original answers/reasoning unchanged and physically include reused scores
+in round-two exports. Stop after round-two label exports for review unless the
+user authorizes the next optimizer pass. Active retrieval/label state stays on
+local SSD and final products are verified at the shared no_phi destination.
+
+This section supersedes source-partition and runtime claims in the historical
+entries below. User policy is permanent in `AGENTS.md`: no synthetic train/cal/
+validation/test holdouts in production retrieval, labeling, or optimization.
+
+The corrected corpus contains 66,800 patients and 6,680 cohorts. Active `split`
+is `train`; `source_split` preserves original assignments. Both old candidate
+rankings were partition-restricted and must be rebuilt. The old outputs are in
+`archive/split_restricted_20261027/` under the comparison run. The portable
+label snapshot preserves **151,728 completed pair scores and 237,266 full
+question responses**; it is a complete storage snapshot of unfinished labeling.
+New labeling imports only current pairs with identical clinical text, rubric,
+teacher settings and verified responses. Encodings are reused after exact
+identity/hash checks; rankings are never imported.
+
+All eight cloud VMs were verified TERMINATED at the user's request. The new
+controller restarts the fleet only after corrected dense retrieval finishes,
+then supports Spot retries throughout labeling. It verifies shutdown again
+before EmbeddingGemma 2 training. The new unit is
+`mmai-trialspace-comparison-ssd-training-20261027.service`; use the run's `launch.json`
+and `status.json` for actual live identity/state. Recovery audits/source backups
+are in `recovery/full_pool_20261027/`. The old controller and split-restricted
+ColBERT miner have stopped. Summaries and generation are complete and unchanged.
+
+User reminder, October 27: after the active full-pool ColBERT scoring finishes,
+restart the GB300 teacher on port 8000 and return it to labeling immediately.
+The controller's `mine_colbert_and_restore_teacher()` verifies complete local
+products and free GPU memory, then restores the teacher while shared copy-back
+continues. It joins and verifies publication before downstream consumption.
+Do not wait for dense labels. It launches the pinned
+NVIDIA Gemma 4 31B IT NVFP4 model, verifies health/model readiness, and publishes
+`http://127.0.0.1:8000/v1` to the live registry with a 768 concurrency ceiling.
+Latest pool instruction, October 27 at 18:28 UTC: Camus 8000/8001 are restored
+at the user's request. All four Camus ports are in the labeling registry via
+18100–18103. The returning pair starts at concurrency 32, ceiling 128 per server.
+Do not rearm the old retirement cutoff. This supersedes earlier removal notes.
+
+The publication handoff preserved labeler PID 3884183, publisher PID 3884301,
+all eight SSH tunnels and running VMs. New controller PID: 4000615; fleet PID:
+4000985. Audits/backups are in `recovery/retrieval_publication_overlap_20261027/`.
+Copy-back finished at 15:57:40 UTC during the handoff, before teacher startup;
+the overlap capability is installed but did not overlap the teacher in this run.
+
+Subsequent teacher startup exposed a missing virtualenv bin directory in the
+service PATH (`ninja` was installed but not discoverable). Failure cleanup stopped
+labeling and the eight VMs. Recovery under `recovery/teacher_path_20261027/`
+resumes the existing SSD checkpoint and restarts the fleet. Current PIDs:
+controller 4006530, labeler 4007097, GB300 teacher 4007111, fleet 4007512.
+The production teacher launcher preserves its virtualenv bin directory in PATH;
+the active configuration explicitly includes CUDA_HOME and the CUDA compiler bin.
+Resumed labeling starts before waiting for teacher readiness. Consult current
+status and registry files rather than assuming startup has completed.
+
+See `COMPARISON_GB300_20261026.md` for current artifacts and policy.
+
+---
+
 # GB300 ColBERT training optimization handoff
 
 Prepared 2026-10-26 from Camus for a Codex session running directly on
 `sn4622130540`. This is an implementation/debugging handoff, not a published
 model release. Paths below assume the same shared mount.
+
+## Labeling moved to SSD (latest, 2026-10-27)
+
+The dense labeler was paused at 12:53 UTC to move its hot working set off the
+shared mount. The verified snapshot preserves 24,909 committed pair scores and
+37,312 full question responses. Every committed score's question keys were
+checked against the compressed SQLite database; response bytes were verified
+during import. Original shared checkpoints remain intact. The snapshot is
+`/tmp/mmai-label-recovery-20261027/state/`, and the active workspace is
+`/tmp/mmai-labels/9165dcaf456d4b0c42622fdb/`.
+
+The replacement controller is
+`mmai-trialspace-comparison-label-ssd-20261027.service`; `launch.json` and
+`processes/labeling_dense.json` contain current identities. It adopts the exact
+unchanged ColBERT miner, PID 3799303/start ticks 540389493. The miner never stopped.
+Fleet handoff preserves all eight SSH control masters and the remote vLLM workers;
+the supervisor remains responsible for Spot recovery and final VM shutdown.
+Recovery configuration/source backups and audits are under
+`recovery/label_ssd_20261027/`. Earlier service names below are historical.
+
+The normal `trialspace_training.py label` entrypoint now uses
+`label_workspace.py`: corpus, candidates, reused labels, response checkpoints,
+score journals, and metrics stay local. Responses use zlib-compressed SQLite
+with durable commits and content hashes, preserving complete prompt/answer/
+reasoning objects. Status is mirrored outside the request loop. Final
+`labels.jsonl` streams to the original shared destination; the portable database,
+scores, and metadata are copied back with checksum verification before scratch
+cleanup. `storage_complete.json` records publication. Failed runs retain scratch.
+The later union labeler uses this same production path and reads only the active
+published response products, avoiding a second copy of retired JSON checkpoints.
+
+Validation covers concurrent durable writes, corruption/disk reserve failures,
+legacy/SQLite reuse, complete reasoning export, interrupted resume, copy-back
+failure, prompt identity rejection, PID reuse, GPU ownership, and verified miner
+completion. The normal labeling entrypoint was exercised end to end. Clinical
+rubrics, candidates, denominators, sampling, and separate model label exports
+are unchanged. The GB300 teacher's absent endpoint was removed only from the
+temporary tuning target list while retrieval owns the GPU; its 768 concurrency
+ceiling remains configured for its return.
+
+## Retrieval overlaps summary archive publication (2026-10-27)
+
+The user requested overlapping retrieval and labeling with copy-back. The active
+comparison config now enables `overlap_summary_publication: true`. The controller
+waits until the summary callback has closed its final patient Parquets, retains a
+local snapshot, checks complete patient/metadata coverage, and publishes the
+smaller raw/attached patient tables first. It then prepares the full corpus and
+runs exhaustive EmbeddingGemma 2 retrieval on the GB300 while the original summary
+process continues archiving and publishing all traces/checkpoints. Dense labeling
+starts when its candidate set is complete, alongside ColBERT retrieval. No smaller
+patient denominator or partial corpus is used.
+
+`summary_retrieval_ready.json` records the exact early input hashes and whether
+archive publication remains pending. The original summary pipeline stays under
+supervision; failures stop the workflow. Before final union labeling, the
+controller joins that pipeline and verifies the canonical published patient
+products against the early retrieval hashes. All final outputs still go to the
+original shared destinations. Cloud shutdown is still verified before training.
+
+The new unit is `mmai-trialspace-comparison-overlap-20261027.service`; read
+`launch.json` for its current PID. It adopted the unchanged running upstream
+pipeline PID 3739646 and summary process PID 3739718. The handoff moved service
+ownership of these processes and the eight live SSH control masters; generation
+and active network requests were not restarted. Temporary holding/bridge units
+are removed after fleet reattachment. Config/source backups, process identities,
+and test evidence are under `recovery/summary_publication_overlap_20261027/`.
+
+New reusable modules are `summary_overlap.py` and `adopted_pipeline.py`. The
+latter requires exact PID/start-time/command identity and verifies upstream
+completion receipts/output hashes; a dead process alone is never success.
+25 targeted tests passed, including full-denominator gating, unchanged final
+products, adopted-process failures, stage order, and copy-back failure barriers.
+A real isolated service-group transfer test also confirmed that adopted children
+survive stopping their former parent service.
+
+## Summary checkpoint recovery (2026-10-27)
+
+The shared mount blocked summary checkpoint I/O while all 72 inference servers
+were healthy and idle. The normal `6_summarize_patients.py` entrypoint now uses
+`summary_workspace.py` to keep prepared chunks, attempts, chunk checkpoints,
+metrics, and output assembly on local SSD. Shared status mirroring runs outside
+the asyncio request loop. Final Parquets retain the original `prepared/` paths;
+traces/checkpoints are bulk-published as `summaries/checkpoints.tar.gz`, with
+hash/row verification recorded in `storage_complete.json` before SSD cleanup.
+Failures retain scratch for resume. 39 summary recovery and pipeline tests passed.
+
+The old workflow was frozen and its 70,060 immutable files verified onto SSD:
+33,574 chunk checkpoints, 36,485 attempt traces, and the prepared-patient cache.
+Valid orphaned attempts are reusable only with exact prompt/sampling matches;
+legacy attempts also require the verified template/context/budget recovery
+contract. The snapshot and contract live in
+`/tmp/mmai-summary-recovery-20261027/`. The original shared checkpoints remain
+in `upstream_local_scratch_20261027/summaries/`.
+
+The new upstream directory is `upstream_summary_ssd_20261027/`. Active checkpoint
+storage is `/tmp/mmai-summaries/a40e75c33194e9009b8c1932/checkpoints/`; its live
+`status.json` and `concurrency_status.json` are also mirrored to the new shared
+`summaries/` directory. Read `launch.json` for current process identities. The
+new unit is `mmai-trialspace-comparison-summary-ssd-20261027.service`.
+
+At 2026-10-27T11:04:32.019027+00:00, all 72 endpoints were actively generating. Resume reused
+33,574 chunk checkpoints and recovered 2,910 valid orphaned attempts. A further
+161 fresh summaries were already saved locally; three fresh traces passed
+identity, finish-reason, and quality checks. Shared progress mirroring was
+verified. The detailed receipt is `recovery/summary_local_ssd_20261027/verified.json`.
+Recovery configs, source backups, and receipts are under
+`recovery/summary_local_ssd_20261027/` in the comparison directory.
+
+The fleet supervisor was rebound through a bounded temporary bridge without
+stopping VM inference workers. It retains its Spot retry logic and automatic
+shutdown after final union labeling or workflow failure. Cloud shutdown is still
+verified before training. The GB300 teacher and all LAN servers were preserved.
+
+## Retrieval on local SSD (2026-10-27)
+
+The user authorized moving retrieval work off the shared filesystem. Both
+`trialspace_training.py mine` and `trialspace_comparison.py dense-mine` now
+stage the corpus, vectors/token shards, query checkpoints, and exports in a
+persistent private workspace under `/tmp/mmai-retrieval/`. The default reserves
+16 GiB free disk; actual network scratch mounts are rejected. CLI overrides are
+`--retrieval-scratch-dir`, `--retrieval-min-free-gb`, and `--no-local-retrieval`.
+Single-host distributed ranks share one workspace and publish through rank zero.
+
+All resulting files, including token shards and query checkpoints, are copied
+back to the original `candidates/{embeddinggemma2,colbert_modernbert}/` directories.
+Every copy receives SHA-256 readback verification and an atomic rename. The
+native `complete.json` is published last, before scratch cleanup. Failures retain
+local work for resume; input/settings changes are rejected. Each candidate
+directory has `retrieval_status.json` for the local workspace and current phase,
+and `retrieval_storage.json` records all published file hashes.
+
+The live controller does not need restarting: it will launch the updated frozen
+retrieval entrypoints after summaries finish. The source overlay and archived
+originals are recorded in `retrieval_storage_overlay_20261027.json` and its
+recovery directory, including test results and unchanged active-source hashes.
+At that deployment, active summary sources and process identities were unchanged;
+the later summary recovery above supersedes those identities. Model revisions,
+retrieval scoring, source partitions, candidate counts, and label exports are unchanged. Local disk had about 233 GiB available before retrieval starts.
+
+## Cloud resumed by user (latest, 2026-10-27 09:30 UTC)
+
+The user explicitly requested bringing VMs back into the active pool. The fleet
+supervisor was relaunched as PID 3663563/start ticks 539493875 and rebound to the
+current comparison controller PID 3609705/start ticks 538751693. Read the live
+fleet `launch.json` for authoritative identities. The old STOP and shutdown
+receipts were archived under fleet `recovery/resume_20261027T093012Z/`; STOP is
+now cleared. The comparison receipt is `cloud_resume_20261027.json`.
+
+The same eight allowlisted RTX Pro 6000 x8 Spot VMs and frozen NVIDIA Gemma 4
+31B IT NVFP4 worker configuration are used. Unavailable/preempted VMs retry at
+five-minute intervals; healthy per-GPU endpoints automatically join the live
+registry while all eight local/LAN servers continue working. This resumed
+fleet stays attached through final union labeling and shuts down before student
+training, or on workflow failure/controller lease expiry. Initial resume state
+is warming; consult fleet status and live summary metrics for admitted workers.
+This authorization supersedes the stop-only instructions below.
+
+At 2026-10-27T09:37:28.577463+00:00 the fleet had 40 healthy cloud
+GPU servers; summary metrics showed 24 admitted cloud endpoints, 2304
+cloud requests in flight, and 0 successful cloud summaries. GCP confirmed
+`rtxpro` and `rtxpro-2` were immediately preempted after the initial starts;
+five-minute retries remain active. Live counts are in
+`cloud_resume_progress_20261027.json` and the fleet/summary status files.
+
+## Local scratch recovery (latest, 2026-10-27 07:26 UTC)
+
+The user authorized restarting preparation on local SSD, then summarizing on
+the eight non-cloud endpoints. They explicitly require all finished products
+at the original shared `data/no_phi/` destinations. The comparison controller
+was restarted as PID 3609705/start ticks 538751693; use `launch.json` for the
+current identity. Its upstream directory is now `upstream_local_scratch_20261027`.
+Recovery receipts, original config/source, and the incomplete old SQLite DB
+are retained in `recovery/local_scratch_20261027T0724Z/`.
+
+Production `prepare_synthetic_training.py` now performs SQLite/date/output
+preparation in a private temporary directory. `run_pipeline.py` forwards
+`--note-preparation-scratch-dir` and `--stage-note-preparation-input`. This run
+uses `/tmp/mmai-note-preparation-20261027/`. Completed notes and patient metadata
+are copied back to `prepared/`, verified by SHA-256 readback and Parquet row
+count, and atomically published before temporary files are deleted. Failed
+publication retains local products. Progress is in
+`prepared/all_synthetic_notes.preparation.status.json`; durable checksums and
+counts are in `prepared/all_synthetic_notes.preparation.json` on completion.
+All 49 preparation/pipeline/cohort tests passed, including content/date/split
+parity and failure/corruption handling. The frozen source snapshot has an
+explicit two-file overlay; the old source/manifest is in the recovery directory.
+
+Preparation completed in 355.7 seconds at 07:32 UTC, including input staging
+and verified publication to the shared mount. The final notes contain 1,137,527
+rows; patient metadata contains 66,800 patients. The private scratch directory
+was removed only after both products were verified. Patient summarization then
+started (child PID 3613070); as of 07:47 UTC it is still concatenating and
+tokenizing patient histories before sending requests. Read the current
+`upstream_local_scratch_20261027/logs/summarize-patients.log` and eventual
+`summaries/status.json` for progress. All summaries/checkpoints use shared paths.
+
+All eight local/LAN endpoints passed model/context checks. Initial summary
+concurrency is 128 on GB300 and 32 per 172.24.216.113/Camus endpoint, with
+adaptive ceilings 768/256/128. At 09:25 UTC the four requested Camus caps were
+corrected from 16 to the controller minimum 32; the invalid cap had rejected
+the entire tuning document. The live JSON was validated with `apply_tuning`
+and updated without restarting inference; the previous configuration and
+scheduler state are in `recovery/concurrency_minimum_20261027T0925Z/`. The cloud fleet remains stopped;
+do not restart it without a new instruction. Other comparison settings,
+including separate pair exports and EmbeddingGemma-only training candidates,
+are retained.
+
+At 09:23 UTC summarization was active on all eight endpoints, with 9,888 of
+66,800 patient chunks complete (one chunk per patient). No request or
+validation errors were recorded. Recent 30-minute throughput was about 7,400
+patients/hour, roughly 7.7 hours remaining at that pace. Shared chunk
+checkpoints and response traces are under the active upstream `summaries/`.
+
+## Cloud stopped by user (2026-10-27 07:14 UTC)
+
+The user requested stopping the VMs while `prepare-notes` was blocked on
+network-mounted SQLite I/O. All eight allowlisted RTX VMs in `profile-notes`
+and `kehllab-caia-v2` were verified `TERMINATED`. The fleet `STOP` marker is
+present and its service is inactive; do not restart cloud workers without a
+new user instruction. Receipt: comparison run `user_vm_stop_20261027.json`.
+The comparison controller and current note preparation were left running.
+All 1,137,527 raw notes were completed/assembled at 06:17 UTC. LLM patient
+summarization had not started as of 07:14 UTC. The scratch database is under
+`prepared/all_synthetic_notes.preparation.sqlite` on the shared mount; the
+existing adapter deletes/recreates that scratch database on startup, so merely
+copying it does not provide resume support.
+
+## Queued comparative experiment (latest, 2026-10-27 00:35 UTC)
+
+User service `mmai-trialspace-comparison-20261026.service` is waiting for the
+current notes to finish. Its run directory is
+`data/no_phi/trialspace_comparison_namedcohorts_5000_20261026/`; read its
+`config.json`, `status.json`, and `launch.json` for authoritative commands and
+process identities. Initial controller PID 3230485/start ticks 536278864.
+Full plan and artifact contract: [COMPARISON_GB300_20261026.md](COMPARISON_GB300_20261026.md).
+
+The fleet is now attached to this workflow in **labeling mode**, keeping cloud
+inference alive through summaries, exhaustive GB300 retrieval for both models,
+and shared-union labeling. Its supervisor-only handoff preserved all 64 healthy
+cloud servers and active note generation. New fleet PID 3231589; verify its
+current launch receipt before signaling. The temporary handoff override was
+removed and normal `KillMode=control-group`/30-second restart delay restored.
+Receipts are in the comparison's `fleet_handoff/` directory. Cloud shutdown is
+required after final label inference, with live GCP termination verified before
+student training. Earlier note-completion shutdown descriptions below are historical.
+
+Separate `pair_labels/embeddinggemma2/` and `pair_labels/colbert_modernbert/`
+exports are mandatory; overlaps appear in both with identical shared judgments.
+Each includes all pairs plus patient-centric and cohort-centric Parquet files
+and `scores.jsonl`. The union and reasoning traces remain available separately.
+The user selected **only EmbeddingGemma 2 candidates** for its training;
+`training_candidates.json` records this choice and is read when training starts.
+Both retrievals preserve source partitions and search every document in each
+partition, with identical top-k/exploration settings and clinical instruction.
+
+Camus 8000/8001 rejoined at 00:08 UTC; the user cancelled their cutoff. All four
+Camus ports, 172.24.216.113 ports 8001–8003, and GB300 8000 remain in the pool.
+Do not rearm the old retirement timer. The comparison freezes source snapshots
+from both repos. New comparison changes are in the training working tree;
+inference remains at 9b1bf81. Existing note generation was not restarted.
 
 ## Fresh synthetic generation (latest request, 2026-10-26 19:25 UTC)
 
@@ -644,3 +1010,5 @@ software and actual platform before relying on specific behavior.
 - [Poolside: C2C Activation Offloading on Grace Blackwell](https://poolside.ai/blog/tools-of-the-trade-c2c-activation-offloading-on-grace-blackwell)
   — workload-specific offload/recompute comparisons; not proof of direct-access
   PyTorch saved activations or a speedup for this model.
+
+GB300 serving was verified at 2026-10-27T16:08:38.126272+00:00: 260 successful requests, 96 in flight, no request errors, ceiling 768. All 696,592 saved pair judgments were restored and new scoring resumed. `recovery/teacher_path_20261027/verified_serving.json` records evidence. The active controller retains the cosmetic `restoring_gb300` phase while waiting for dense labels; registry/metrics confirm serving. That display is corrected for subsequent launches.

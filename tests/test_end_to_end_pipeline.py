@@ -1,5 +1,4 @@
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -97,6 +96,8 @@ def test_shell_training_defaults_use_fast_shared_colbert(tmp_path, wrapper):
 def test_training_only_retains_original_default_identity(tmp_path):
     args = arguments(tmp_path)
     command = pipeline.training_command(args)
+    parsed = pipeline.training.parser().parse_args(command[2:])
+    assert parsed.synthetic_training_splits == ['train', 'val', 'test']
     assert '--trial-spaces' not in command
     assert '--patient-summaries' not in command
     assert '--synthetic-notes' not in command
@@ -170,9 +171,10 @@ def test_preparation_preserves_ids_content_intervals_and_trial_cosplits(tmp_path
     assert set(merged.pseudo_mrn) == set(frame.pseudo_mrn.astype(str))
     from make_top_matches import load_retrieval_tables
     mined_patients, mined_spaces = load_retrieval_tables(SimpleNamespace(
-        patients_parquet=str(result), trials_file=str(spaces), splits=['train', 'val']))
+        patients_parquet=str(result), trials_file=str(spaces), splits=['train', 'val', 'test']))
     assert len(mined_patients) == 20 and len(mined_spaces) == 2
-    assert set(mined_patients.split) == {'train', 'val'}
+    assert set(mined_patients.split) == {'train'}
+    assert set(mined_patients.source_split) == {'train', 'val'}
 
 
 def test_dates_preserve_supplied_timestamps_and_label_ordinal_fallback():
@@ -276,7 +278,7 @@ def test_attach_wait_is_read_only_and_never_launches_a_second_generator(tmp_path
     args = arguments(tmp_path, '--start-at', 'generate-synthetic', '--stop-after', 'generate-synthetic', '--wait-for-generation')
     args.generation_dir.mkdir(parents=True)
     args.sampled_spaces.write_text('nct_id,this_space\nNCT1,space\n')
-    manifest = {'input_sha256': hashlib.sha256(args.sampled_spaces.read_bytes()).hexdigest()}
+    manifest = {'input_stamp': pipeline.file_stamp(args.sampled_spaces)}
     (args.generation_dir / 'manifest.json').write_text(json.dumps(manifest))
     status = args.generation_dir / 'status.json'
     status.write_text(json.dumps({'stage': 'events', 'stage_completed': 10}))

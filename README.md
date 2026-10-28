@@ -26,6 +26,37 @@ and retrieval share `trial_cohort_format.read_clinical_csv`. Literal clinical
 text such as `None`, `NA`, and `N/A` is preserved; only empty cells are missing.
 This applies to direct script invocations as well as orchestrated production runs.
 
+Retrieval stages (`trialspace_training.py mine` and
+`trialspace_comparison.py dense-mine`) stage the corpus, embeddings/token shards,
+query checkpoints, and exports under `/tmp/mmai-retrieval/` by default. Select
+another local SSD with `--retrieval-scratch-dir`; `--retrieval-min-free-gb`
+defaults to a 16 GiB reserve. Shared/network scratch is rejected. Both paths
+preserve the same scoring, sampling, and candidate outputs.
+
+After retrieval, every artifact is copied to the requested `--output` with its
+source mtime preserved, size-checked, and atomically renamed. `complete.json` is published last;
+only then is local scratch deleted. Failed/interrupted runs retain a stable
+local workspace and resume checkpoints with unchanged input/settings checks.
+The shared destination has `retrieval_status.json` for phase/workspace location
+and `retrieval_storage.json` for the published file hashes. All ranks in a
+single-host distributed run share this workspace; explicit multi-host/shared
+storage runs can use `--no-local-retrieval`.
+
+Teacher labeling also uses local SSD by default, through the normal
+`trialspace_training.py label` entrypoint. `label_workspace.py` stages the corpus,
+candidates, and reused labels under `/tmp/mmai-labels/`. Question checkpoints use
+compressed SQLite with durable commits and content hashes; full prompts, raw
+answers, and reasoning are retained. The score journal and live metrics stay
+local, with progress mirrored to the requested shared output directory.
+
+After inference, the complete `labels.jsonl` export streams to the requested
+destination. Scores, the portable response database, and other artifacts are
+copied back and verified before `storage_complete.json` is written and scratch
+is removed. Interrupted runs retain local checkpoints. Set
+`MMAI_LABEL_SCRATCH_DIR` to choose another local SSD; a 16 GiB free-space reserve
+protects checkpoint storage. `MMAI_LOCAL_LABEL_STORAGE=0` explicitly selects the
+legacy storage path. Native label reuse and reasoning export support both formats.
+
 ```bash
 ~/thisenv/bin/python train_from_summaries.py --dry-run
 PYTHON=~/thisenv/bin/python bash train_all_gcp.sh
@@ -90,9 +121,9 @@ The final export uses bounded parallel checkpoint reads and atomic publication,
 preserves every response field, and reports exported-question progress. Once
 every candidate has a validated score, `scores.jsonl` and `scores_ready.json`
 are published before the large reasoning archive. The receipt binds the exact
-teacher, repaired corpus and candidate files, complete pair count, and score-file
-content hashes. Readers verify SHA-256 content rather than requiring identical
-host-reported timestamps. Independent training can use that verified artifact while the reasoning
+teacher, repaired corpus and candidate files, complete pair count, and file
+sizes. Readers check those sizes without re-reading the score files.
+Independent training can use that artifact while the reasoning
 export continues. The local teacher supervisor stops restarting servers after
 inference finishes, so a server exiting cannot abort CPU-only finalization.
 
@@ -205,10 +236,11 @@ or cohort holdouts. Candidate exports retain `patient_source_split` and
 This is the default for direct `trialspace_training.py` commands and both
 `train_all*.sh` paths. Production fitting requires labeled query coverage for
 every selected patient and cohort. The downstream OncoReasoning adapters also
-fit all three source partitions. For a deliberate holdout experiment, use
-`--synthetic-training-splits train` in the orchestrator, or prepare a fresh corpus
-with `--no-merge-source-splits` and explicitly select training/mining splits.
-Changing this policy requires new retrieval and labeling outputs.
+fit all three source partitions. Production rejects source-split subsets and
+`--no-merge-source-splits`; a holdout study requires separately authorized
+research code and fresh outputs. Previously split-restricted rankings must be
+rebuilt in both directions. Unchanged encodings and prompt-identical judgments
+may be reused only after the explicit identity checks in the recovery tools.
 
 The training-only defaults are `DATA_DIR/patient_summaries_with_spaces.parquet`,
 `DATA_DIR/trial_cohort_lineitems.csv`, and `DATA_DIR/all_synthetic_notes.parquet`.
@@ -408,7 +440,7 @@ MSE and MAE/RMSE remain explicitly named diagnostics, not calibration claims.
 CoSENT magnitude depends on comparison count; compare a fixed probe over time,
 not its loss against MSE or differently sized batches. These are fixed candidate-pool
 training diagnostics, not held-out validation or full-corpus recall estimates.
-An explicitly excluded validation partition enables separate held-out probes.
+Production does not reserve an excluded synthetic validation partition.
 
 New defaults are `../data/no_phi/colbert_pipeline_v1` and
 `../models/colbert_pipeline_v1`. Final models are `trialspace_round1` and
@@ -659,8 +691,8 @@ queries. The patient labeling prompt contains only the patient summary followed
 by clean summaries for scoreable drugs; it omits URLs, queries, source IDs,
 trial metadata, controls, fetch notices, and raw evidence passages.
 
-To repeat the prototype on all currently completed synthetic label shards without
-patient, trial, or drug holdouts, snapshot with `train_good_option_cosplit.py
+The prototype also defaults to all completed synthetic label shards without
+patient, trial, or drug holdouts. Snapshot with `train_good_option_cosplit.py
 prepare --all-labels --run-dir <new-run-directory>`, then run its `train` stage
 under torchrun with `--num-train-epochs 2`. The prepared manifest records zero
 holdouts; invalid statuses and conflicting patient-drug targets retain the
@@ -971,7 +1003,7 @@ and the original input, year/phase filters, and seed. This validates complete
 coverage, unchanged trial data and splits, successful responses, boolean
 decisions, and screening-model provenance before selecting positive trials.
 It makes no screening requests and leaves the source CSV unchanged. A
-`screening_input_manifest.json` records its path, content hash and screening
+`screening_input_manifest.json` records its path, size/mtime stamp and screening
 models; extraction records its own model and prompt configuration separately.
 `--screening-input` and `--screening-only` are mutually exclusive.
 
@@ -1204,7 +1236,7 @@ must not be reused with v3 inputs.
 This mode checks the saved combined decisions, all cohort rows, and the original
 `inputs.parquet` against each other before sampling. It preserves existing source
 splits or assigns them once per trial using seed 42. The sampling receipt includes
-rejected trial IDs, DFCI exclusions, the extraction run identity, and source hashes.
+rejected trial IDs, DFCI exclusions, the extraction run identity, and source file stamps.
 
 `generate_synthetic_data.py` creates five matching and five near-miss patients
 per sampled cohort in two stages. For each class, one call creates five diverse
@@ -1321,6 +1353,27 @@ reasoning for every returned attempt, and rejects empty, failed or token-limited
 answers before they can become a later chunk's prior summary. An interrupted
 round resumes its saved chunks using prompt/sampling identity checks. The
 upstream generation concurrency controls also apply to summarization.
+
+Patient summarization now keeps prepared chunks, per-attempt traces, per-chunk
+checkpoints, status, and result assembly on local SSD by default, under
+`/tmp/mmai-summaries/`. Use `--summary-scratch-dir` to select another local disk;
+the direct summary entrypoint accepts `--no-local-summary-storage` to opt out.
+A background thread mirrors progress to the requested shared `--shard_dir`.
+After generation, the two requested Parquet outputs are copied back with hash
+and row-count verification. Traces and checkpoints are published together as
+`SHARD_DIR/checkpoints.tar.gz`; `storage_complete.json` records their hashes.
+Local work is removed only after verified publication, and retained on failure.
+
+The comparison controller can set `overlap_summary_publication: true`. It waits
+for closed final Parquets (not merely completed chunk counts), validates the full
+patient denominator, and publishes the smaller retrieval inputs first. Retrieval
+then proceeds on the GB300 while the summary process archives and copies its
+traces. Dense candidate labeling starts on the remaining inference servers while
+ColBERT retrieval runs. The controller still monitors publication failures and
+joins/verifies the original summary pipeline before final union labeling; archive
+copy-back and verified VM shutdown remain required before training.
+An exact prompt/sampling identity also allows a valid saved attempt to recover
+an interrupted checkpoint write without another inference request.
 
 Patient-level output has one `patient_summary` text column, containing all
 cancer-history sections followed by `Other relevant history:` and, on the next
@@ -1548,7 +1601,8 @@ when ready to wait and execute the selected downstream stages.
 
 Upstream state lives in `RUN_DIR/upstream` (override with `--pipeline-dir`),
 separate from the training runner's existing manifest and locks. Each stage saves
-its exact command, input/source hashes, logs and verified output identities.
+its exact command, input and output file stamps (size and whole-second mtime;
+large data files are never re-read), source-code hashes, and logs.
 Rerunning the same command skips completed stages; changed inputs, code, options
 or completed outputs fail rather than silently reusing stale checkpoints.
 `--dry-run` prints the complete selected plan, including downstream training

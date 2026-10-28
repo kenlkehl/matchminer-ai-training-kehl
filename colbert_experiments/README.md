@@ -197,7 +197,7 @@ The training host does **not** need to enumerate/open individual question files
 or scan the candidate table. A negative eligibility gate is complete;
 a positive gate requires all four specificity answers. Missing answers never
 become zero scores. Compact-score contracts, corpus hashes, gated answers and
-the archive checksum are validated during the sequential read. Source reasoning
+the archive size are validated during the sequential read. Source reasoning
 traces stay in place and remain linked by question keys and the source archive.
 The default `--train-pairs 0` includes every original-training-patient pair in
 the archive's fixed cutoff snapshot.

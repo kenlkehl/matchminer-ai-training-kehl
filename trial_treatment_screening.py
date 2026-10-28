@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from remote_vllm_pool import OutputValidationError
+from trial_cohort_format import file_stamp
 
 
 from matchminer_ai.trials.cohort_schema import (
@@ -116,11 +117,7 @@ def load_screening_results(trials, input_path, work_dir):
     if audit.is_cancer_treatment_trial.tolist() != [d["is_cancer_treatment_trial"] for d in decisions]:
         raise ValueError("Saved screening decisions disagree with the validated model responses")
 
-    digest = hashlib.sha256()
-    with source.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    identity = {"input_path": str(source.resolve()), "sha256": digest.hexdigest(),
+    identity = {"input_path": str(source.resolve()), "stamp": file_stamp(source),
                 "rows": len(audit), "screening_models": sorted(models.unique().tolist())}
     path = Path(work_dir) / "screening_input_manifest.json"
     if path.exists():

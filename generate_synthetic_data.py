@@ -29,7 +29,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from trial_cohort_format import training_rows, patient_generation_criteria, read_clinical_csv
+from trial_cohort_format import training_rows, patient_generation_criteria, read_clinical_csv, file_stamp
 import synthetic_event_prompts as prompts
 
 from remote_vllm_pool import (
@@ -438,7 +438,7 @@ class Generator:
         sources = ['generate_synthetic_data.py', '2_make_synthetic_notes_sharded.py',
                    'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py',
                    'trial_cohort_format.py', 'adaptive_controller.py']
-        value = dict(version='synthetic-cohort-seeds-patient-events-notes-v5', input_sha256=sha_file(self.args.input_csv),
+        value = dict(version='synthetic-cohort-seeds-patient-events-notes-v5', input_stamp=file_stamp(self.args.input_csv),
                      source_sha256={name: sha_file(HERE / name) for name in sources},
                      sampling=asdict(self.sampling), tokenizer=self.args.tokenizer_model or self.args.model,
                      chat_template_kwargs=resolve_chat_template_kwargs(self.args.tokenizer_model or self.args.model),

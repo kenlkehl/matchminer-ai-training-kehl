@@ -61,7 +61,8 @@ async def label(args):
     output.mkdir(parents=True, exist_ok=True)
     with (output / 'labeling.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return await _label(args, output)
+        from label_workspace import run_local_label
+        return await run_local_label(args, _label)
 
 
 async def _label(args, output):
@@ -136,7 +137,8 @@ async def _label(args, output):
             raise ValueError('Candidate-subset reuse requires gated labels')
         from .label_reuse import import_completed_sources
         write_json(output / 'status.json', dict(state='waiting_for_source_labels', **timing))
-        imported = await asyncio.to_thread(import_completed_sources, output, signature, pmap, cmap, pairs)
+        imported = await asyncio.to_thread(import_completed_sources, output, signature, pmap, cmap, pairs,
+            compact=getattr(args, 'compact_response_store', False))
         print(f'[labels] imported {imported} completed candidate-subset pairs with their reasoning traces', flush=True)
     restored_pairs = set()
     scheduled_pairs = pairs
@@ -217,7 +219,9 @@ async def _label(args, output):
                 return path, row
             return path, None
 
-        response_store = await storage.run(ResponseStore, checkpoint_dir)
+        response_store = await storage.run(ResponseStore, checkpoint_dir,
+            compact=getattr(args, 'compact_response_store', False))
+        stack.callback(response_store.close)
 
         async def ask(item):
             path, row = await checkpoint_reads.run(load_checkpoint, item)
@@ -289,7 +293,8 @@ async def _label(args, output):
         timing['training_scores_ready'] = True
     def export_progress(values):
         write_json(output / 'status.json', dict(snapshot('exporting_labels'), **values))
-    export_labels(checkpoint_dir, output / 'labels.jsonl', export_keys(),
+    export_path = Path(getattr(args, 'labels_export_path', output / 'labels.jsonl'))
+    export_labels(checkpoint_dir, export_path, export_keys(),
                   total=restored_questions + len(completed), progress=export_progress)
     if gated and failures:
         from .regression import score_balance
@@ -298,5 +303,5 @@ async def _label(args, output):
     write_json(output / 'status.json', snapshot('incomplete' if failures else 'complete'))
     if failures:
         raise RuntimeError(f'{len(failures)} unresolved teacher labels; resume this command to retry')
-    return (read_jsonl(output / 'labels.jsonl')
+    return (read_jsonl(export_path)
             if getattr(args, 'return_records', True) else None)

@@ -74,6 +74,49 @@ def terminal_reason(status, alive):
     return None
 
 
+def label_inference_complete(status):
+    return bool(status and status.get('inference_complete') is True
+        and status.get('state') in ('publishing_scores', 'training_scores_ready', 'exporting_labels', 'complete')
+        and not status.get('failures')
+        and status.get('scored_pairs') == status.get('total_pairs')
+        and status.get('total_pairs', 0) > 0)
+
+
+def label_process_identity(pid):
+    try:
+        root = Path(f'/proc/{pid}')
+        fields = (root/'stat').read_text().rsplit(')', 1)[1].split()
+        if fields[0] == 'Z':
+            return None
+        return dict(pid=pid, start_ticks=int(fields[19]),
+                    command=(root/'cmdline').read_bytes().decode().rstrip('\0').split('\0'))
+    except FileNotFoundError:
+        return None
+
+
+def registered_label_inference_reason(workflow, registrations):
+    """Stop for completed inference even while a registered labeler exports."""
+    active = []
+    for entry in registrations.values():
+        process_path, status_path = Path(entry['process_file']), Path(entry['status_file'])
+        if not process_path.exists():
+            continue
+        expected = json.loads(process_path.read_text())
+        current = label_process_identity(expected['pid'])
+        if current is not None and current != expected:
+            return None  # Do not trust a reused PID or a different command.
+        if current is None and workflow.get('phase') not in entry.get('phases', []):
+            continue  # Completed prior stages cannot stop a later inference pass.
+        if not status_path.exists():
+            return None
+        status = json.loads(status_path.read_text())
+        if status.get('pid') != expected['pid']:
+            return None
+        active.append(label_inference_complete(status))
+    # If label stages ever overlap, all live labelers must finish inference.
+    return 'label_inference_finished' if active and all(active) else None
+
+
 def workflow_terminal_reason(generation, generator_alive, workflow, workflow_alive, *, mode='summarization',
                              label_status=None):
     """Watch the explicitly selected inference stage, including its preparation."""
@@ -83,13 +126,9 @@ def workflow_terminal_reason(generation, generator_alive, workflow, workflow_ali
         return 'downstream_workflow_failed'
     if mode == 'labeling' and workflow.get('phase') == 'completed':
         return 'labeling_finished'
-    if (mode == 'labeling' and label_status and label_status.get('inference_complete') is True
+    if (mode == 'labeling' and label_inference_complete(label_status)
             and workflow.get('phase') == 'labeling' and workflow.get('child_pid') is not None
-            and label_status.get('pid') == workflow['child_pid']
-            and label_status.get('state') in ('publishing_scores', 'training_scores_ready', 'exporting_labels', 'complete')
-            and not label_status.get('failures')
-            and label_status.get('scored_pairs') == label_status.get('total_pairs')
-            and label_status.get('total_pairs', 0) > 0):
+            and label_status.get('pid') == workflow['child_pid']):
         return 'label_inference_finished'
     if not workflow_alive:
         return 'downstream_controller_exited'
@@ -340,6 +379,8 @@ class Fleet:
     def shutdown(self, reason):
         self.stop = True
         self.shutdown_record('shutdown_requested.json', dict(reason=reason, at=now()))
+        self.shutdown_record('status.json', dict(state='stopping', reason=reason, at=now(),
+            supervisor_pid=os.getpid(), healthy_gpu_servers=0, expected_gpu_servers=64))
         try:
             self.publish([])
         except Exception as error:
@@ -350,6 +391,8 @@ class Fleet:
                 active = [v for v in self.vms if states.get((v['project'], v['name']), {}).get('status') != 'TERMINATED']
                 if not active:
                     self.shutdown_record('shutdown_complete.json', dict(at=now(), reason=reason, all_terminated=True))
+                    self.shutdown_record('status.json', dict(state='terminated', reason=reason, at=now(),
+                        supervisor_pid=os.getpid(), healthy_gpu_servers=0, expected_gpu_servers=64))
                     return
                 def stop(vm):
                     try:
@@ -389,6 +432,8 @@ class Fleet:
                             if self.config.get('workflow_mode') == 'labeling' and label_path.exists() else None)
                         reason = workflow_terminal_reason(status, alive, workflow, workflow_alive,
                             mode=self.config.get('workflow_mode', 'summarization'), label_status=label_status)
+                        if not reason and self.config.get('workflow_mode') == 'labeling':
+                            reason = registered_label_inference_reason(workflow, workflow_config.get('label_stages', {}))
                     else:
                         reason = terminal_reason(status, alive)
                     if self.stop or (self.root / 'STOP').exists():
@@ -413,6 +458,7 @@ class Fleet:
                         completed_notes=(status.get('stage_completed') if status['stage'] in ('notes', 'assembling', 'completed') else None),
                         expected_notes=status.get('expected_notes'),
                         healthy_gpu_servers=len(endpoints), expected_gpu_servers=64,
+                        label_inference_watches=list((workflow_config or {}).get('label_stages', {})),
                         automatic_vm_shutdown=True, workflow_mode=self.config.get('workflow_mode', 'summarization'),
                         shutdown_on=(['workflow_failure', 'labeling_complete', 'controller_lease_expiry']
                             if self.config.get('workflow_mode') == 'labeling' else

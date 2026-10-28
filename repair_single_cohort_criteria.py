@@ -8,13 +8,14 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import shutil
 
 import pandas as pd
 
-from trial_cohort_format import REPRESENTATION, LEGACY_REPRESENTATION, cohort_components, file_sha256
+from trial_cohort_format import REPRESENTATION, LEGACY_REPRESENTATION, cohort_components, file_stamp
 
 
 def atomic_json(path, value):
@@ -35,19 +36,19 @@ def repair_locked(directory):
     receipt_path = directory / 'cohort_rows_repair.json'
     source_path = directory / 'inputs.parquet'
     decisions_path = directory / 'combined_outputs.json'
-    source_sha = file_sha256(source_path)
-    decisions_sha = file_sha256(decisions_path)
-    current_sha = file_sha256(target)
+    source_stamp = file_stamp(source_path)
+    decisions_stamp = file_stamp(decisions_path)
+    current_stamp = file_stamp(target)
     pending_path = receipt_path.with_suffix('.pending.json')
     if receipt_path.exists() or pending_path.exists():
         saved = json.loads((receipt_path if receipt_path.exists() else pending_path).read_text())
-        if saved['inputs_sha256'] != source_sha or saved['decisions_sha256'] != decisions_sha:
+        if saved['inputs_stamp'] != source_stamp or saved['decisions_stamp'] != decisions_stamp:
             raise ValueError('Source inputs/decisions changed since the repair')
-        if current_sha == saved['after_sha256']:
+        if current_stamp == saved['after_stamp']:
             if not receipt_path.exists():
                 pending_path.replace(receipt_path)
             return saved
-        if receipt_path.exists() or current_sha != saved['before_sha256']:
+        if receipt_path.exists() or current_stamp != saved['before_stamp']:
             raise ValueError('Cohort export changed since the repair')
     status = json.loads((directory / 'status.json').read_text())
     if status.get('state') != 'complete' or status.get('errors') != 0:
@@ -64,7 +65,7 @@ def repair_locked(directory):
     backup = directory / 'repairs' / 'single_cohort_eligibility_v3' / 'cohorts.before.jsonl'
     backup.parent.mkdir(parents=True, exist_ok=True)
     if backup.exists():
-        if file_sha256(backup) != current_sha:
+        if backup.stat().st_size != target.stat().st_size:
             raise ValueError('Existing backup does not match the cohort export')
     else:
         shutil.copy2(target, backup)
@@ -109,17 +110,17 @@ def repair_locked(directory):
             dst.write(line)
     if counts != expected or len(ids) != status['cohort_rows']:
         raise ValueError('Incomplete cohort export; original file preserved')
-    if file_sha256(target) != current_sha:
+    if file_stamp(target) != current_stamp:
         raise ValueError('Export changed during repair')
     receipt = dict(representation_version=REPRESENTATION if named_rows else LEGACY_REPRESENTATION,
         repaired_at=datetime.now(timezone.utc).isoformat(),
         extraction_run_identity=json.loads((directory / 'manifest.json').read_text())['run_identity'],
-        inputs_sha256=source_sha, decisions_sha256=decisions_sha,
-        before_sha256=current_sha, after_sha256=file_sha256(temp),
+        inputs_stamp=source_stamp, decisions_stamp=decisions_stamp,
+        before_stamp=current_stamp, after_stamp=file_stamp(temp),
         backup=str(backup.resolve()), changed_single_cohort_rows=changed,
         cohort_rows=len(ids), multi_cohort_rows_unchanged=True,
         raw_checkpoint_policy='Original extraction checkpoints are retained unchanged as historical evidence.',
-        repair_code_sha256=file_sha256(__file__))
+        repair_code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
     atomic_json(pending_path, receipt)
     temp.replace(target)
     pending_path.replace(receipt_path)

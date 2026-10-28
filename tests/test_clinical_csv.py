@@ -64,7 +64,7 @@ def test_csv_text_survives_sampling_generation_and_both_retrieval_paths(tmp_path
     prepared = load_spaces(sampled_path)
     assert prepared.this_space.tolist() == expected
     ps, cs = load_retrieval_tables(SimpleNamespace(
-        patients_parquet=patients, trials_file=sampled_path, splits=['train']))
+        patients_parquet=patients, trials_file=sampled_path, splits=['train', 'val', 'test']))
     assert ps.patient_boilerplate_text.tolist() == [literal]
     assert cs.this_space.tolist() == expected
 

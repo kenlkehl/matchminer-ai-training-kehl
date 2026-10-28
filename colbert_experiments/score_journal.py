@@ -5,7 +5,6 @@ after all required question responses are saved. Resume reads this sequential
 file, never the completed pairs' individual response files.
 """
 import asyncio
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -171,20 +170,20 @@ def import_archive(archive, output):
     marker = journal.root / 'IMPORTING'
     marker.touch()
     temporary = journal.path.with_suffix('.jsonl.tmp')
-    hasher, count = hashlib.sha256(), 0
+    count = 0
     with (archive / exported['scores_file']).open('rb') as source, temporary.open('wb') as dest:
         for raw in source:
             if not raw.endswith(b'\n'):
                 raise ValueError('Truncated compact export')
-            hasher.update(raw)
             dest.write(raw)
             count += 1
         dest.flush()
         os.fsync(dest.fileno())
-    if hasher.hexdigest() != exported['scores_sha256'] or count != exported['counts']['completed_pairs']:
-        raise ValueError('Compact export checksum or pair count mismatch')
+    size = temporary.stat().st_size
+    if size != exported['scores_bytes'] or count != exported['counts']['completed_pairs']:
+        raise ValueError('Compact export size or pair count mismatch')
     temporary.replace(journal.path)
     write_json(journal.root / 'import.json', dict(archive=str(archive.resolve()),
-               completed_pairs=count, sha256=hasher.hexdigest()))
+               completed_pairs=count, bytes=size))
     marker.unlink()
     return count

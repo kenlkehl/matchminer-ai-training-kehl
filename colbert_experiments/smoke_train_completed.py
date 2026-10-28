@@ -39,17 +39,10 @@ from colbert_experiments.model import BASE_MODEL, ColBERT, maxsim
 from colbert_experiments.ordinal_ranking import cached_ranking_backward, ranking_loss
 from colbert_experiments import regression as regression
 from colbert_experiments.export_completed_scores import validate_score
+from trial_cohort_format import file_stamp
 
 DEFAULT_RUN = ROOT.parent / 'data/no_phi/synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025'
 VERSION = 'completed-pairs-patient-holdout-smoke-v1'
-
-
-def sha256(path):
-    hasher = hashlib.sha256()
-    with Path(path).open('rb') as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b''):
-            hasher.update(block)
-    return hasher.hexdigest()
 
 
 def source_split(patient):
@@ -66,11 +59,10 @@ def candidate_sample(path, patients, capacities, seed):
     reservoirs = {s: [] for s in capacities}
     seen = Counter()
     rng = {s: random.Random(f'{seed}:{s}:candidates') for s in capacities}
-    hasher = hashlib.sha256()
     before = path.stat()
+    stamp = file_stamp(path)
     with path.open('rb') as stream:
         for number, line in enumerate(stream, 1):
-            hasher.update(line)
             row = json.loads(line)
             split = source_split(patients[row['patient_id']])
             if split not in ('train', 'val'):
@@ -93,7 +85,7 @@ def candidate_sample(path, patients, capacities, seed):
         raise ValueError('Candidate file changed during snapshot selection; retry')
     for split in reservoirs:
         rng[split].shuffle(reservoirs[split])
-    return reservoirs, dict(candidates_sha256=hasher.hexdigest(), available_candidates=dict(seen))
+    return reservoirs, dict(candidates_stamp=stamp, available_candidates=dict(seen))
 
 
 def all_candidates(path, patients, split):
@@ -198,11 +190,11 @@ def compact_snapshot(args, patients, cohorts, teacher):
     counts = Counter()
     seen = set()
     rng = {s: random.Random(f'{args.seed}:{s}:completed_scores') for s in targets}
-    hasher = hashlib.sha256()
+    stamp = file_stamp(path)
     with path.open('rb') as stream:
-        source_mtime = os.fstat(stream.fileno()).st_mtime
+        opened = os.fstat(stream.fileno())
+        source_mtime = opened.st_mtime
         for number, line in enumerate(stream, 1):
-            hasher.update(line)
             row = json.loads(line)
             validate_score(row, pmap, cmap, teacher['contract'], teacher['aggregation_contract'])
             key = row['patient_id'], row['cohort_id']
@@ -222,9 +214,9 @@ def compact_snapshot(args, patients, cohorts, teacher):
                         reservoir[index] = row
             if number % 100000 == 0:
                 print(f'[snapshot] {number:,} compact completed-score rows loaded', flush=True)
-    if exported and (hasher.hexdigest() != exported['scores_sha256']
+    if exported and (opened.st_size != exported['scores_bytes']
                      or len(seen) != exported['counts']['completed_pairs']):
-        raise ValueError('Compact score archive checksum or row count differs from its manifest')
+        raise ValueError('Compact score archive size or row count differs from its manifest')
     report = {}
     for split, rows in selected.items():
         if len({row['score'] > 0 for row in rows}) < 2:
@@ -237,7 +229,7 @@ def compact_snapshot(args, patients, cohorts, teacher):
     cutoff = exported['cutoff_utc'] if exported else datetime.fromtimestamp(source_mtime, timezone.utc).isoformat()
     print(f'[snapshot] completed-score cutoff={cutoff}; individual response files inspected=0', flush=True)
     return dict(scores=selected['train'] + selected['val'], counts=report, cutoff_utc=cutoff,
-        report=dict(source_score_file=str(path), source_scores_sha256=hasher.hexdigest(),
+        report=dict(source_score_file=str(path), source_scores_stamp=stamp,
                     available_completed_by_patient_split=dict(counts), checkpoint_files_inspected=0),
         sampling='All completed original-training pairs; uniform reservoir for capped partitions. '
                  'Compact aggregate contracts verified without reopening LLM response files.')
@@ -252,7 +244,7 @@ def freeze_snapshot(snapshot, settings, teacher, patients, cohorts, scores, coun
         teacher_manifest=teacher, counts=counts, **report,
         split_policy='Optimizer: original train patients only; validation: original val patients; test patients excluded. '
                      'Cohorts may be shared across patient partitions.', sampling=sampling,
-        files={name: sha256(snapshot / name) for name in ('patients.jsonl', 'cohorts.jsonl', 'scores.jsonl')})
+        files={name: file_stamp(snapshot / name) for name in ('patients.jsonl', 'cohorts.jsonl', 'scores.jsonl')})
     write_json(snapshot / 'manifest.json', manifest)
     return manifest
 
@@ -272,7 +264,7 @@ def prepare_snapshot(args):
         manifest = json.loads(manifest_path.read_text())
         if manifest['settings'] != settings:
             raise ValueError('Snapshot settings changed; use a new --output directory')
-        if any(sha256(snapshot / name) != expected for name, expected in manifest['files'].items()):
+        if any(file_stamp(snapshot / name) != expected for name, expected in manifest['files'].items()):
             raise ValueError('Frozen smoke-test snapshot changed')
         print('[snapshot] reusing fixed completed-pair snapshot', flush=True)
         return manifest
@@ -470,7 +462,7 @@ def fit(args, device, rank, world, pause):
     torch.manual_seed(args.seed)
     model = ColBERT(args.model, query_length=args.context, document_length=args.context,
                     cache_dir=args.cache_dir, checkpointing=True).to(device)
-    identity = dict(version=VERSION, snapshot=sha256(snapshot / 'manifest.json'), base=model.fingerprint(),
+    identity = dict(version=VERSION, snapshot=file_stamp(snapshot / 'manifest.json'), base=model.fingerprint(),
         steps=total_steps, epochs=args.epochs if args.steps is None else None,
         world_size=world, accumulation=args.accumulation, documents_per_query=args.documents_per_query,
         learning_rate=args.learning_rate, seed=args.seed, directions=directions, eval_every=args.eval_every,

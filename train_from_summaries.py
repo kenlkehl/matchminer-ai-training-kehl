@@ -166,10 +166,11 @@ def stages(args):
     result = [Stage('prepare-trialspace', [py, 'trialspace_training.py', 'prepare',
         '--patients', str(inputs['patient_summaries']), '--cohorts', str(inputs['trial_spaces']),
         '--output', str(corpus),
-        '--merge-source-splits' if set(args.synthetic_training_splits) == {'train', 'val', 'test'}
-        else '--no-merge-source-splits'], [corpus / 'prepared.json'])]
+        '--merge-source-splits'], [corpus / 'prepared.json'])]
     common = ['--corpus', str(corpus), '--query-length', str(args.trialspace_context),
               '--document-length', str(args.trialspace_context)]
+    from synthetic_pool import require_all_sources
+    require_all_sources(args.synthetic_training_splits)
     training_splits = args.synthetic_training_splits
     mining_splits = ['train', 'val', 'test'] if 'test' in training_splits else ['train', 'val']
     if args.trialspace_cache_dir:
@@ -484,6 +485,7 @@ def main():
     from colbert_experiments.regression import score_contract
     identity['trialspace_contract'] = score_contract()
     source_paths = [ROOT / 'train_from_summaries.py', ROOT / 'trialspace_training.py',
+                    ROOT / 'retrieval_workspace.py', ROOT / 'label_workspace.py', ROOT / 'synthetic_pool.py', ROOT / 'retrieval_cache_import.py',
                     ROOT / 'trial_cohort_format.py',
                     ROOT / 'remote_vllm_pool.py', ROOT / 'adaptive_controller.py',
                     ROOT / 'train_good_option_checker.py',

@@ -369,7 +369,8 @@ def save_prepared_chunks(
             })
     chunk_df = pd.DataFrame(rows)
     path = os.path.join(shard_dir, "prepared_chunks.parquet")
-    chunk_df.to_parquet(path, index=False)
+    chunk_df.to_parquet(path + ".tmp", index=False)
+    os.replace(path + ".tmp", path)
     print(f"Saved prepared chunks: {path} ({len(chunk_df)} chunks)")
 
 
@@ -1084,6 +1085,8 @@ def main():
                          "max_model_len=120000, chunk_size=50000, max_tokens=10000")
     from summary_pool import add_arguments
     add_arguments(ap)
+    from summary_workspace import add_arguments as add_storage_arguments
+    add_storage_arguments(ap)
     args = ap.parse_args()
 
     if args.server_urls and args.server_urls_file:
@@ -1127,6 +1130,12 @@ def main():
         print("Deterministic mode: temperature=0.0, top_k=1, repetition_penalty=1.0, "
               "max_model_len=120000, chunk_size=50000, max_tokens=10000")
 
+    from summary_workspace import run_summary
+    return run_summary(args, lambda local: summarize(local, remote_mode=remote_mode,
+        tokenizer_model=tokenizer_model, reasoning_parser=reasoning_parser))
+
+
+def summarize(args, *, remote_mode, tokenizer_model, reasoning_parser):
     # Load tokenizer up front — used for chunking (when not cached) AND for
     # parsing server responses through the reasoning parser.
     print("Loading tokenizer...")

@@ -8,7 +8,6 @@ LLM rubric over drug and class evidence. Kept to reproduce earlier checkers.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import warnings
 from pathlib import Path
@@ -19,6 +18,7 @@ from matchminer_ai.matching import RUBRIC_CRITERIA
 from matchminer_ai.trials import load_good_option_catalog
 
 import train_good_option_checker as core
+from trial_cohort_format import file_stamp
 
 
 def split_lookup(frame: pd.DataFrame, key: str) -> pd.Series:
@@ -51,6 +51,8 @@ def assign_source_splits(labels, patients, trials):
 
 
 def prepare(args):
+    if not args.all_labels:
+        raise ValueError("Synthetic production training uses all labels without holdouts")
     run = args.run_dir
     for path in (args.shards, args.catalog):
         if not core._inside_no_phi(path):
@@ -120,7 +122,7 @@ def finalize(args):
     manifest = core.build_split_manifest(data, strategy="none" if all_labels else "original_patient_trial_cosplit", seed=42,
         patient_validation_fraction=0, drug_validation_fraction=0, catalog=catalog)
     manifest["source_label_counts"] = metadata["label_counts"]
-    manifest["prepared_sha256"] = hashlib.sha256((run / "prepared.parquet").read_bytes()).hexdigest()
+    manifest["prepared_stamp"] = file_stamp(run / "prepared.parquet")
     manifest["shared_drugs"] = 0 if all_labels else len(set(parts[0].drug_id) & set(parts[1].drug_id))
     manifest["conflict_exclusions"] = {key: {k:v for k,v in audit.items() if k != "excluded_patient_drug_ids"} for key,audit in audits.items()}
     (run / "conflict_audit.json").write_text(json.dumps(audits, indent=2))
@@ -134,8 +136,10 @@ def train(args):
     set_seed(42)
     run = args.run_dir
     manifest = json.loads((run / "split_manifest.json").read_text())
-    if hashlib.sha256((run / "prepared.parquet").read_bytes()).hexdigest() != manifest["prepared_sha256"]:
-        raise ValueError("Prepared training snapshot checksum mismatch")
+    if manifest["split_strategy"] != "none":
+        raise ValueError("Reprepare all synthetic labels before production fitting")
+    if file_stamp(run / "prepared.parquet") != manifest["prepared_stamp"]:
+        raise ValueError("Prepared training snapshot changed")
     frame = pd.read_parquet(run / "prepared.parquet")
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, local_files_only=True)
     model = AutoModelForSequenceClassification.from_pretrained(args.base_model,
@@ -211,7 +215,7 @@ if __name__ == "__main__":
     )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=["prepare", "finalize", "train"])
-    parser.add_argument("--all-labels", action="store_true", help="Use all valid labels without holdouts")
+    parser.add_argument("--all-labels", action="store_true", default=True, help="Use all valid labels without holdouts")
     parser.add_argument("--num-train-epochs", type=float, default=3)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--shards", type=Path, default=core.DEFAULT_LABEL_SHARDS)

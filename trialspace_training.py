@@ -27,7 +27,8 @@ from colbert_experiments.model import ColBERT
 from colbert_experiments.packed_scoring import PackedTokens, score_pairs
 from colbert_experiments.regression import regression_query, score_contract
 from colbert_experiments.retrieval import merge_candidates, proposal_indices, top_indices
-from trial_cohort_format import file_sha256
+from trial_cohort_format import file_stamp
+from retrieval_workspace import add_retrieval_storage_args, run_retrieval, require_free_space
 
 VERSION = 'trialspace-colbert-regression-v1'
 
@@ -40,16 +41,18 @@ def identity_file(path, identity):
 
 
 def prepare_corpus(patients, cohorts, output, *, merge_source_splits=True):
+    if not merge_source_splits:
+        raise ValueError('Production cannot hold out synthetic source splits; use --merge-source-splits')
     output = Path(output)
     identity = dict(version=VERSION, patients=str(Path(patients).resolve()), cohorts=str(Path(cohorts).resolve()),
-                    patient_sha256=file_sha256(patients), cohort_sha256=file_sha256(cohorts), contract=score_contract(),
+                    patient_stamp=file_stamp(patients), cohort_stamp=file_stamp(cohorts), contract=score_contract(),
                     merge_source_splits=merge_source_splits)
     identity_file(output / 'input_manifest.json', identity)
     complete = output / 'prepared.json'
     if complete.exists():
         saved = json.loads(complete.read_text())
-        for name, expected in saved['output_sha256'].items():
-            if file_sha256(output / name) != expected:
+        for name, expected in saved['output_stamp'].items():
+            if file_stamp(output / name) != expected:
                 raise ValueError('Prepared TrialSpace corpus changed')
         return saved
     prepare(patients, cohorts, output, merge_source_splits=merge_source_splits)
@@ -63,7 +66,7 @@ def prepare_corpus(patients, cohorts, output, *, merge_source_splits=True):
     write_jsonl(output / 'source_trial_pairs.jsonl', lineage)
     result = dict(version=VERSION, patients=len(ps), cohorts=len(cs), trials=len(by_trial),
                   source_trial_pairs=len(lineage), contract=score_contract(),
-                  output_sha256={name: file_sha256(output / name) for name in
+                  output_stamp={name: file_stamp(output / name) for name in
                                  ('patients.jsonl', 'cohorts.jsonl', 'source_trial_pairs.jsonl')})
     write_json(complete, result)
     return result
@@ -91,9 +94,10 @@ def score_documents(query, documents, *, query_block=128, document_block=2048):
 
 class TokenStore:
     """Atomic document batches on disk with a bounded CPU shard cache."""
-    def __init__(self, root, patients, cohorts, splits, batch_size, *, cache_batches=32):
+    def __init__(self, root, patients, cohorts, splits, batch_size, *, cache_batches=32, disk_reserve_gb=0):
         self.root, self.batches, self.locations = Path(root), [], {}
         self.cache, self.cache_batches = OrderedDict(), cache_batches
+        self.disk_reserve_gb = disk_reserve_gb
         for kind, rows in [('patients', patients), ('cohorts', cohorts)]:
             ordered = sorted((r for r in rows if r['split'] in splits), key=lambda r: (len(r['text']), r['id']))
             for start in range(0, len(ordered), batch_size):
@@ -109,6 +113,9 @@ class TokenStore:
                 continue
             vectors = model.encode_batch([r['text'] for r in rows], is_query=False)
             temporary = path.with_suffix('.tmp')
+            if self.disk_reserve_gb:
+                require_free_space(self.root, sum(v.numel() * v.element_size() + 4096 for v in vectors),
+                                   self.disk_reserve_gb)
             torch.save({row['id']: vector for row, vector in zip(rows, vectors, strict=True)}, temporary)
             temporary.replace(path)
             if index % (world * 20) == rank:
@@ -188,24 +195,31 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
         temporary.replace(path)
 
 
-def finalize_candidate_exports(corpus, output, *, pair_count, query_count):
-    """Publish full-text tables and their checksums after query JSON is durable."""
+def finalize_candidate_exports(corpus, output, *, pair_count, query_count, exhaustive=False):
+    """Publish full-text tables and their file stamps after query JSON is durable."""
     output = Path(output)
     export_candidates(corpus, output / 'candidates.jsonl', output / 'patient_to_cohort.parquet',
                       output / 'cohort_to_patient.parquet')
     write_json(output / 'complete.json', dict(pairs=pair_count, queries=query_count,
-        candidate_scope='exact MaxSim over recorded lexical/random proposal pools',
-        outputs={name: file_sha256(output / name) for name in
+        candidate_scope=('exhaustive MaxSim over the full synthetic corpus' if exhaustive else
+                         'exact MaxSim over recorded lexical/random proposal pools'),
+        outputs={name: file_stamp(output / name) for name in
                  ('candidates.jsonl', 'rankings.jsonl', 'patient_to_cohort.parquet', 'cohort_to_patient.parquet')}))
 
 
 def mine(args, model=None):
+    from synthetic_pool import require_full_corpus, require_all_sources
+    require_full_corpus(args.corpus)
+    require_all_sources(args.splits)
+    if getattr(args, 'exhaustive', False):
+        args.candidate_limit = None
     rank, world, local = (int(os.environ.get(k, default)) for k, default in
                           [('RANK', '0'), ('WORLD_SIZE', '1'), ('LOCAL_RANK', '0')])
     if world > 1:
         dist.init_process_group('gloo')
     try:
-        _mine(args, model, rank=rank, world=world, local=local)
+        run_retrieval(args, lambda local_args: _mine(local_args, model, rank=rank, world=world, local=local),
+                      distributed=dist if world > 1 else None)
     finally:
         if world > 1:
             dist.destroy_process_group()
@@ -264,13 +278,15 @@ def _mine(args, model, *, rank, world, local):
             'proposal_strategy', 'cohort_query_limit', 'splits', 'seed', 'document_batch_size',
             'query_batch_size', 'score_batch_size')})
     if rank == 0:
+        from retrieval_cache_import import validate_encoding_import
+        validate_encoding_import(output, signature)
         identity_file(output / 'mining_manifest.json', signature)
     if world > 1:
         dist.barrier()
     completion = output / 'complete.json'
     if completion.exists():
         saved = json.loads(completion.read_text())
-        if any(file_sha256(output / name) != value for name, value in saved['outputs'].items()):
+        if any(file_stamp(output / name) != value for name, value in saved['outputs'].items()):
             raise ValueError('Completed mining artifacts changed')
         return
     device = 'cpu' if args.device == 'cpu' else f'cuda:{local}'
@@ -278,7 +294,9 @@ def _mine(args, model, *, rank, world, local):
         torch.cuda.set_device(local)
     model.to(device)
     store = TokenStore(output / 'tokens', patients, cohorts, args.splits, args.document_batch_size,
-                       cache_batches=args.cache_batches)
+                       cache_batches=args.cache_batches,
+                       disk_reserve_gb=getattr(args, 'retrieval_min_free_gb', 16)
+                       if getattr(args, '_local_retrieval_active', False) else 0)
     store.encode(model, rank=rank, world=world)
     if world > 1:
         dist.barrier()
@@ -388,7 +406,8 @@ def _mine(args, model, *, rank, world, local):
         pairs = merge_candidates(patients, cohorts, hits)
         write_jsonl(output / 'candidates.jsonl', pairs)
         write_jsonl(output / 'rankings.jsonl', [h for h in hits if h['source'] == 'colbert'])
-        finalize_candidate_exports(args.corpus, output, pair_count=len(pairs), query_count=len(query_paths))
+        finalize_candidate_exports(args.corpus, output, pair_count=len(pairs), query_count=len(query_paths),
+                                   exhaustive=args.candidate_limit is None)
     if world > 1:
         dist.barrier()
 
@@ -401,7 +420,10 @@ def parser():
         help='Pool all synthetic patients/cohorts for retrieval and fitting; retain source_split provenance')
     sub.choices['mine'].set_defaults(objective='gated_regression', candidate_limit=256,
                                     proposal_strategy='lexical_random', splits=['train', 'val', 'test'])
+    add_retrieval_storage_args(sub.choices['mine'])
     sub.choices['mine'].add_argument('--query-batch-size', type=int, default=16)
+    sub.choices['mine'].add_argument('--exhaustive', action='store_true',
+        help='Score every document in the full synthetic pool; overrides the bounded candidate limit')
     sub.choices['mine'].add_argument('--score-batch-size', type=int, default=16)
     sub.choices['mine'].add_argument('--cache-batches', type=int, default=32)
     sub.choices['mine'].add_argument('--device-token-cache', action=argparse.BooleanOptionalAction, default=True)
@@ -441,10 +463,15 @@ def main():
             raise ValueError('Production TrialSpace requires gated regression')
         mine(args)
     elif args.command == 'label':
+        from synthetic_pool import require_full_corpus
+        require_full_corpus(args.corpus)
         from colbert_experiments.labeling import label
         args.scheduler_metrics_file = args.scheduler_metrics_file or str(Path(args.output) / 'concurrency_status.json')
         asyncio.run(label(args))
     elif args.command == 'train':
+        from synthetic_pool import require_full_corpus, require_all_sources
+        require_full_corpus(args.corpus)
+        require_all_sources(args.training_splits)
         if args.objective != 'gated_regression':
             raise ValueError('Production TrialSpace requires gated regression')
         from colbert_experiments.training import train
