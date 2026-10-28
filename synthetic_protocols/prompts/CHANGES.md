@@ -255,3 +255,42 @@ the eleventh is headed "Section 6. Study Population"). Synopses give abbreviated
 key criteria and point to the full section; layout 3 produced core criteria
 plus "Additional inclusion/exclusion criteria for Part A/B/C" in a later
 section. v9 is the current candidate for a new batch.
+
+User review of a v9 protocol (NCT07134088, layout 3): eligibility rules leaked
+into the background/rationale (excluded/permitted groups with justifications),
+and the study population intro described how core and part-specific lists
+combine ("...none of the core exclusion criteria apply. Part-specific
+additional criteria are provided in Section 7 and must be reviewed in
+conjunction with this section"). Core-plus-module and disease-specific
+subsection layouts are real but rare (about 2 of 59 surveyed multi-cohort
+protocols each), so they were over-weighted at 1/7.
+
+## from_registry.v10 (+ layouts reweighted 20:9:1:1)
+
+- Outside the synopsis and study population section, who enrolls is described
+  only at study-design level; no listing, previewing or justifying of
+  individual eligibility rules elsewhere.
+- List openings: one short sponsor-style sentence, without explaining how
+  lists in different sections combine; module sections open with "In addition
+  to the inclusion criteria in Section 5.1, patients in Part B must meet...".
+- Layout weights approximate the survey: ~65% differences inside criteria,
+  ~29% inline qualifiers, ~3% disease-specific subsection, ~3% core + modules.
+
+Runs: 11 seeds (sn4622130540:8000, all stop). Layouts now 0/1 apart from one
+layout 2; vocabulary headings, echoes, assignment criteria and blanket labels
+0/11; NCT07134088's population intro is a plain sponsor sentence with part/arm
+differences as sub-items of one disease-status criterion. Background leakage
+fell but persisted where the seed's own description states eligibility
+(NCT07134088: prior CD19 therapy permitted, Ph+ TKI-intolerant eligible).
+
+## from_registry.v11
+
+- Seed bullet: eligibility details in the record's title, summary or
+  description go only in the study population section and synopsis.
+
+Runs: same 11 seeds (sn4622130540:8000, all stop). NCT07134088's background
+no longer restates eligibility (its leaked rules had come from the seed's
+eligibility criteria; the seed has a 125-character summary and no detailed
+description). Background leakage 1/11 (a sentence justifying "disease-specific
+inclusion criteria" in NCT06257758); vocabulary headings, echoes, assignment
+criteria and blanket labels 0/11; intro sentence in every located section.
