@@ -1,5 +1,26 @@
 # Synthetic training policy (user instruction, 2026-10-27)
 
+ACTIVE RESTART (October 28, 01:19 UTC): the user authorized a fresh start.
+EmbeddingGemma 2 is training from the pinned base model, not checkpoint 200:
+full loss batch 96, gradient-cache encoder chunks 48, token cap 2,500, BF16
+parameters plus BF16 autocast, four persistent loader workers/prefetch two,
+expandable CUDA segments. Keep known-positive masking (eligible score >=1),
+CoSENT, proportional sampling, all source partitions, 3 epochs, LR 2e-5 and
+1% warmup. Save every 200 optimizer steps; log every 25. Single-process
+Accelerate uses GB300 physical GPU 1. All eight cloud VMs were live-verified
+TERMINATED. Controller unit `mmai-trialspace-comparison-batch96-20261028.service`;
+use comparison `launch.json` for identity. Old controller was killed without
+SIGCONT. Old shared checkpoint/logs and original metadata are preserved in
+`recovery/restart96_20261028/`; old SSD state is
+`/tmp/mmai-training-restart96-20261028/previous_batch128_ssd`.
+New SSD workspace reuses `/tmp/mmai-training/af03c2d69805c49782b23d47` with
+fresh inputs/settings/checkpoints. Active source is frozen at
+`/tmp/mmai-training-restart96-20261028/source`, published under comparison
+`source/restart96_20261028/matchminer-ai-training-kehl`. Public model destination
+is unchanged. Round-two retrieval uses the trained model with the 2,500-token
+cap, then local/LAN-only labeling; ColBERT remains deferred. Earlier pause and
+benchmark paragraphs below are historical. Saved v22 code is unchanged.
+
 Data-loading audit (October 28, 01:02 UTC): the working `finetune_embedder.py`
 now defaults to four native persistent DataLoader workers, two prefetched batches
 per worker, pinned memory and nonblocking CUDA transfers. Inputs are already

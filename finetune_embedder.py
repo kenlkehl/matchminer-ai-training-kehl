@@ -62,6 +62,8 @@ def parse_args():
     parser.add_argument('--max-tokens', type=int, default=MAX_TOKENS)
     parser.add_argument('--model-revision')
     parser.add_argument('--model-cache-dir')
+    parser.add_argument('--model-dtype', choices=('float32', 'bfloat16'), default='float32',
+                        help='Model/optimizer parameter dtype; BF16 autocast is enabled separately on CUDA.')
     parser.add_argument('--local-only', action='store_true', help='Never dispatch this training job to GCP')
     from training_workspace import add_training_storage_args
     add_training_storage_args(parser)
@@ -106,13 +108,15 @@ def load_and_concat(parquet_files):
 
 
 def load_text_model(base_model, device, *, prompt_profile='sentence_similarity',
-                    max_tokens=MAX_TOKENS, revision=None, cache_dir=None):
+                    max_tokens=MAX_TOKENS, revision=None, cache_dir=None, model_dtype='float32'):
     """Keep Google's mean pooling/normalization, loading only the text encoder."""
     from sentence_transformers import SentenceTransformer
     from transformers import AutoConfig
 
     if not 1 <= max_tokens <= 8192:
         raise ValueError('EmbeddingGemma 2 requires a token limit between 1 and 8192')
+    if model_dtype not in ('float32', 'bfloat16'):
+        raise ValueError('EmbeddingGemma 2 model dtype must be float32 or bfloat16')
     config = AutoConfig.from_pretrained(base_model, revision=revision, cache_dir=cache_dir)
     if config.model_type != "embedding_gemma2":
         raise ValueError(
@@ -125,9 +129,10 @@ def load_text_model(base_model, device, *, prompt_profile='sentence_similarity',
         revision=revision,
         cache_folder=cache_dir,
         config_kwargs={"vision_config": None, "audio_config": None},
-        # FP32 master weights; the trainer uses BF16 autocast on supported GPUs.
-        # EmbeddingGemma 2 does not support FP16.
-        model_kwargs={"dtype": torch.float32},
+        # The trainer uses BF16 autocast independently of parameter precision.
+        # BF16 parameters reproduce v22's native loading for the memory-limited
+        # larger-encoder-batch configuration. FP16 is unsupported.
+        model_kwargs={"dtype": getattr(torch, model_dtype)},
     )
     model.max_seq_length = max_tokens
     model.prompts.update(model_prompts(prompt_profile))
@@ -188,6 +193,7 @@ def train(args):
     from trial_cohort_format import file_stamp
     identity = dict(inputs={str(Path(p).resolve()): file_stamp(p) for p in input_files},
         base_model=args.base_model, revision=args.model_revision, max_tokens=args.max_tokens,
+        model_dtype=args.model_dtype,
         prompts=model_prompts(args.prompt_profile), loss=['MultipleNegativesRankingLoss', 'CoSENTLoss'],
         positive_score_minimum=1, normalization='score / 5 * 2 - 1',
         batch_size=args.batch_size, gradient_checkpointing=args.gradient_checkpointing,
@@ -272,7 +278,8 @@ def train(args):
     print(f"\n[INFO] Using device: {device}")
     model = load_text_model(args.base_model, device, prompt_profile=args.prompt_profile,
                             max_tokens=args.max_tokens, revision=args.model_revision,
-                            cache_dir=args.model_cache_dir)
+                            cache_dir=args.model_cache_dir, model_dtype=args.model_dtype)
+    print(f'[INFO] Model parameter dtype: {next(model.parameters()).dtype}')
     if args.gradient_checkpointing:
         # Enable through ST directly: Transformers 5.19's Trainer passes new
         # keyword arguments that ST 6.1's wrapper does not yet accept.

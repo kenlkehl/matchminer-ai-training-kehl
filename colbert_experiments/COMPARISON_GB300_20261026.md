@@ -1,5 +1,86 @@
 # EmbeddingGemma 2 / ModernColBERT comparison
 
+KRAS G12C diagnostic (October 28): preserved checkpoint 8,400 and retrieved all
+6,680 cohorts for existing patient `patient_90679739-22a8-53a4-a96a-c230e6224d89`,
+selected before ranking: metastatic lung adenocarcinoma, G12C, progression after
+platinum/pemetrexed/pembrolizumab, ECOG 0, no prior KRAS inhibitor recorded.
+Same prompts and 2,500-token cap as the preceding diagnostic. Four top-ten and
+six top-twenty cohorts explicitly require G12C (base: one in either cutoff).
+Three top-twenty hits are G12C solid-tumor baskets across two trials:
+NCT04699188 (#3/#6) and NCT04585035 (#17). These are not confirmed eligibility:
+#1 NCT07483983 requires G12D; #5 NCT06248606 requires brain metastases not
+documented; #9 NCT05788926 requires prior G12C-targeted therapy not recorded.
+Changing only G12C to G12D lowers the six G12C cohorts from ranks
+2/3/5/6/14/17 to 3/6/11/12/38/32, but the G12D-only cohort stays #1 for both.
+Thus there is biomarker and basket-retrieval signal, with poor exact-allele and
+other eligibility enforcement. One selected in-sample diagnostic, not validation.
+No labels/settings changed; trainer PID 260991 continued. Products:
+`retrieval_spotchecks/checkpoint8400_kras_g12c_20261028/` (report.html, reviewed
+top 20, full ranks, criteria, control, model snapshot, publication receipt);
+local `/tmp/mmai-kras-g12c-retrieval-20261028/`.
+
+Random-patient spot check (October 28, ~09:52 UTC): checkpoint 8,000, the latest
+complete checkpoint at selection, was preserved and compared with the pinned base
+model over all 6,680 cohorts. Identical clinical prompts, 2,500-token limit,
+normalization and exact cosine ranking; no proposal filter. Uniform random seed
+44620770835024375 selected patient index 43,372:
+`patient_c3e97cc1-23bc-5f36-ac23-3f82611c4eda` (progressive metastatic SCLC, ECOG 3,
+prior platinum/etoposide/atezolizumab, apparent lurbinectedin, treated brain metastasis).
+Base top ten had four clear histology mismatches; checkpoint top ten had none,
+but seven still conflict with ECOG 3. Base #1 explicitly excludes SCLC and moved
+to #2,643. Checkpoint #1/#3 are the two NCT07278479 cohorts (base #156/#243),
+allowing stable CNS metastases/stable grade-2 sensory neuropathy and listing no
+ECOG cutoff in the extracted text. These need screening, not confirmed eligibility.
+Top-ten overlap was zero. All base top-ten pairs were available training negatives;
+none of the checkpoint top-ten pairs were previously labeled for this patient.
+This is one in-sample qualitative check, not a generalization metric.
+
+A likely teacher-label error was preserved: base #10, `NCT05874401-cohort-0`
+(checkpoint #81), was scored zero because the teacher called the summary's
+"lurbinectedam" a topoisomerase-I inhibitor. If lurbinectedin was intended,
+that rationale is wrong: FDA prescribing information describes an alkylating drug
+(https://www.accessdata.fda.gov/drugsatfda_docs/label/2025/213702s010lbl.pdf, §12.1).
+Drug spelling and the target need adjudication. No production labels or training
+settings were changed. The original full response/prompts/reasoning are saved.
+Training continued throughout and the auxiliary GPU process has exited.
+Products, full criteria, reviewed CSV, all ranks, vectors and the preserved model:
+comparison `retrieval_spotchecks/checkpoint8000_random_patient_20261028/`;
+local `/tmp/mmai-random-patient-retrieval-20261028/`. Start with `report.html`.
+
+Active fresh training restart — October 28, 01:19 UTC. The user authorized
+starting over after the loader audit. The original checkpoint 200, logs and
+controller metadata are archived at `recovery/restart96_20261028/`; the old
+SSD workspace is `/tmp/mmai-training-restart96-20261028/previous_batch128_ssd`.
+The old controller was killed without SIGCONT. New unit:
+`mmai-trialspace-comparison-batch96-20261028.service`; see `launch.json`.
+
+The pinned base `google/embeddinggemma-2` initializes fresh optimizer/scheduler
+state. Settings: 96 pairs per full loss, encoder chunks 48 with gradient replay,
+2,500-token cap, BF16 model parameters and autocast, expandable CUDA segments,
+four persistent native loader workers with prefetch factor two, pinned memory
+and nonblocking copies. Single-process Accelerate uses GB300 physical GPU 1.
+Unlike the stock-MNRL speed benchmark, production preserves known-positive
+masking (eligible score >=1); both losses use the existing CachedEmbeddingLoss
+wrapper. CoSENT, proportional sampling, all source partitions, three epochs,
+LR 2e-5 and 1% warmup remain. Save every 200 optimizer steps, log every 25.
+Eleven existing/updated tiny-model training, prompt, resume and dtype checks
+passed. This adds an explicit `--model-dtype bfloat16` option; default parameter
+dtype elsewhere remains FP32. Saved v22 source is unchanged.
+
+Inputs and checkpoints use a fresh `/tmp/mmai-training/af03c2d69805c49782b23d47`.
+Active source is `/tmp/mmai-training-restart96-20261028/source`, copied to
+`source/restart96_20261028/matchminer-ai-training-kehl` for durable provenance.
+The intended public model path is unchanged. All eight cloud VMs were
+live-verified TERMINATED before launch. After training: publish, in-sample
+diagnostics, fresh round-two retrieval at the trained 2,500-token limit, then
+local/LAN-only labeling and stop for review. ColBERT labeling stays deferred.
+
+Controller-only historical hash receipts were archived and migrated to size/
+mtime stamps; publication completion and required product sizes were checked
+without large-file hashing/readback. A legacy summary receipt lacked the new
+metadata byte-size field; it was added after matching the preserved SSD copy.
+Clinical text, candidates, original judgments and their manifests are unchanged.
+
 Data-loading audit (October 28, 01:02 UTC): paused checkpoint 200 used zero
 workers, pinned memory, no worker prefetching and blocking device transfers.
 Active inputs/checkpoints/model cache are on SSD; training materializes Arrow

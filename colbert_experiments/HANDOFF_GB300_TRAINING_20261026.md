@@ -1,5 +1,42 @@
 # Current correction: full synthetic pool (2026-10-27)
 
+KRAS G12C diagnostic (October 28): checkpoint 8,400 retrieves six explicitly
+G12C-requiring cohorts in the top 20 versus one for base EmbeddingGemma 2,
+including three solid-tumor basket cohorts across two trials. However, #1 is
+G12D-only, and other high ranks miss brain-metastasis/prior-treatment conditions.
+A one-field G12D control lowers G12C cohorts but does not remove them from
+high ranks. Existing synthetic patient, selected before retrieval; all 6,680
+cohorts searched. In-sample qualitative result only. Training continued;
+no production labels/settings changed. See comparison notes and
+`retrieval_spotchecks/checkpoint8400_kras_g12c_20261028/report.html`.
+
+Latest diagnostic (October 28, ~09:52 UTC): one uniformly random patient was
+retrieved against all 6,680 cohorts with checkpoint 8,000 and base EmbeddingGemma 2.
+The checkpoint improves histology relevance (four base mismatches → zero),
+but seven of its top ten still violate ECOG. A likely original teacher error
+misclassified an apparent lurbinectedin misspelling as a topoisomerase-I inhibitor;
+the negative label and its complete trace are preserved for adjudication.
+No labels/settings were changed; training continued. See comparison notes and
+`retrieval_spotchecks/checkpoint8000_random_patient_20261028/report.html`.
+
+ACTIVE (October 28, 01:19 UTC): user-authorized fresh EmbeddingGemma 2 training
+has restarted. Full loss batch 96, cached encoder chunks 48 (with replay),
+2,500-token cap, BF16 parameters/autocast, four persistent workers/prefetch two,
+expandable segments, native single-process Accelerate on physical GPU 1.
+Known-positive masking remains enabled (score >=1); CoSENT, proportional
+sampling, all source partitions, LR 2e-5, 1% warmup and three epochs are retained.
+Checkpoints every 200 steps, logging every 25. All eight cloud VMs are OFF.
+Unit: `mmai-trialspace-comparison-batch96-20261028.service`; comparison
+`launch.json` records identity. The old frozen controller was killed without
+SIGCONT. Archives: comparison `recovery/restart96_20261028/` and local
+`/tmp/mmai-training-restart96-20261028/previous_batch128_ssd`.
+Active checkpoints use the fresh `/tmp/mmai-training/af03c2d69805c49782b23d47`;
+source uses `/tmp/mmai-training-restart96-20261028/source` with a durable copy
+under comparison `source/restart96_20261028/matchminer-ai-training-kehl`.
+The existing output-model path and local/LAN-only round-two plan remain.
+Diagnostics and round-two retrieval use 2,500 tokens. The following pause
+paragraphs describe the archived run, not the current process.
+
 Data-loading update (October 28, 01:02 UTC): working-repo dense training defaults
 to four native persistent workers with prefetch factor two, pinned memory and
 nonblocking CUDA copies. Loader-only measurement: 1,752–1,810 pairs/s; tokens,

@@ -129,6 +129,12 @@ class TrialSpaceEmbeddingTests(unittest.TestCase):
                 self.assertEqual(ids[0, 0].item(), 2)  # BOS
                 self.assertEqual(ids[0, -1].item(), 1)  # EOS
 
+    def test_explicit_bfloat16_parameter_loading(self):
+        import torch
+        model = self.training.load_text_model(str(self.base), 'cpu', model_dtype='bfloat16')
+        self.assertEqual({p.dtype for p in model.parameters()}, {torch.bfloat16})
+        self.assertTrue(model[1].include_prompt)
+
     def test_mining_uses_saved_query_prompt_and_allows_explicit_override(self):
         import torch
         import make_top_matches
