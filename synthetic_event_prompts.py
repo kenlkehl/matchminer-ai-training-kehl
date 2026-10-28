@@ -12,8 +12,14 @@ SYSTEM_PROMPT = (
 
 
 DIAGNOSIS_INSTRUCTIONS = (
-    'Diagnosis events should include TNM stage, summary stage, primary site/cancer type, and histology. Include key data elements relevant for workup or treatment of that type of cancer, as long as your data elements are compatible with the clinical context provided.\n'
-    'Use clinical staging (cTNM) unless the primary tumor was surgically resected; give pathologic staging '
+    'Diagnosis events should include primary site/cancer type, histology, and stage where defined. Include key data elements relevant for workup or treatment of that type of cancer, as long as your data elements are compatible with the clinical context provided.\n'
+    'Give a stage only when staging is a defined concept for that cancer, using its standard system: TNM stage '
+    'and summary stage for solid tumors staged that way, or the cancer\'s own system where one applies, such as '
+    'Lugano (Ann Arbor) stage for lymphoma, Rai or Binet stage for CLL, or R-ISS stage for multiple myeloma. Give '
+    'no stage for cancers without a defined staging system, such as acute leukemias, myelodysplastic syndromes, or '
+    'most primary brain tumors; give the cancer\'s standard '
+    'classification, grade, or risk group instead, such as WHO grade for a glioma or ELN risk for AML.\n'
+    'For TNM, use clinical staging (cTNM) unless the primary tumor was surgically resected; give pathologic staging '
     '(pTNM, or ypTNM after neoadjuvant therapy) only for a resected primary. Patients with distant metastases '
     'at diagnosis usually do not have the primary resected; include that only when it is standard for the '
     'cancer and situation, such as cytoreductive nephrectomy or resection of limited colorectal liver metastases.\n'
@@ -156,8 +162,8 @@ def seed_messages(criteria, patient_class, rng):
         'integer weeks from 0 through 51; include both units even when weeks is '
         'zero. Give ages only for diagnoses; the later event-generation call '
         'will determine the age at the beginning of the complete history. '
-        'Include relevant cancer site, histology, stage, and biomarkers in the '
-        'prose. If a prior unrelated cancer is included, describe its diagnosis '
+        'Include relevant cancer site, histology, stage where staging is defined, '
+        'and biomarkers in the prose. If a prior unrelated cancer is included, describe its diagnosis '
         'and its own age at diagnosis. Keep each seed brief and limited to these '
         'facts plus the concise clinical facts needed to establish the patient\'s '
         'state at the end of the history against these criteria, including prior '
