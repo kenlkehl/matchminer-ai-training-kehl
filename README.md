@@ -423,12 +423,22 @@ direct `trialspace_training.py` execution; no background supervisor is needed.
 Encoder batch sizes and text/scoring
 contracts remain part of the strict mining identity.
 
+Each patient searches only the cohorts of 500 trials sampled independently for
+that patient, approximating one cancer center's open-trial volume rather than
+every synthetic trial. The sample depends only on the seed and patient ID, so every
+mining round and both the ColBERT and EmbeddingGemma 2
+(`trialspace_comparison.py dense-mine`) paths search the same per-patient
+portfolio. Cohort queries still search every patient.
+`--trialspace-patient-trial-sample` (`--patient-trial-sample` on the mining
+commands) sets the count; 0 searches all trials.
+
 The default candidate pool is 256 lexical/random proposals per query. Exact
 MaxSim selects 20 cohorts per patient and 40 patients per cohort within that pool;
-five TF-IDF and five random proposals from
-the full pooled corpus are also included. Known source-trial relationships and optional
+five TF-IDF and five random proposals from the searched cohorts or patients are
+also included. Known source-trial relationships and optional
 `--trialspace-extra-pairs` add independent/challenge candidates without assuming
-positive labels. This is bounded candidate mining, not exhaustive corpus search.
+positive labels, whether or not the source trial is in the patient's sample.
+This is bounded candidate mining, not exhaustive corpus search.
 `--trialspace-candidate-limit`, `--trialspace-top-k`, `--trialspace-lexical-k`,
 `--trialspace-random-k`, and batching controls expose those choices. Both retrieval
 directions are scored independently; directional MaxSim is never transposed.

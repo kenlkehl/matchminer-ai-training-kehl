@@ -114,6 +114,8 @@ def parser():
     p.add_argument('--trialspace-top-k-cohort-to-patient', type=int, default=40)
     p.add_argument('--trialspace-lexical-k', type=int, default=5)
     p.add_argument('--trialspace-random-k', type=int, default=5)
+    p.add_argument('--trialspace-patient-trial-sample', type=int, default=500,
+                   help="Trials sampled per patient for patient-to-cohort mining, like one center's open trials (0 = all)")
     p.add_argument('--trialspace-encode-batch-size', type=int, default=16)
     p.add_argument('--trialspace-score-batch-size', type=int, default=16)
     p.add_argument('--trialspace-pair-batch-size', type=int, default=512)
@@ -184,6 +186,7 @@ def stages(args):
             '--output', str(mining), '--candidate-limit', str(args.trialspace_candidate_limit),
             '--proposal-strategy', 'lexical_random', '--top-k', str(args.trialspace_top_k),
             '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
+            '--patient-trial-sample', str(args.trialspace_patient_trial_sample),
             '--document-batch-size', str(args.trialspace_encode_batch_size),
             '--query-batch-size', str(args.trialspace_encode_batch_size),
             '--score-batch-size', str(args.trialspace_score_batch_size),

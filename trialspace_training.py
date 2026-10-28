@@ -26,7 +26,7 @@ from colbert_experiments.data import digest, load_corpus, prepare, read_jsonl, w
 from colbert_experiments.model import ColBERT
 from colbert_experiments.packed_scoring import PackedTokens, score_pairs
 from colbert_experiments.regression import regression_query, score_contract
-from colbert_experiments.retrieval import merge_candidates, proposal_indices, top_indices
+from colbert_experiments.retrieval import TrialSampler, merge_candidates, proposal_indices, top_indices
 from trial_cohort_format import file_stamp
 from retrieval_workspace import add_retrieval_storage_args, run_retrieval, require_free_space
 
@@ -195,14 +195,18 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
         temporary.replace(path)
 
 
-def finalize_candidate_exports(corpus, output, *, pair_count, query_count, exhaustive=False):
+def finalize_candidate_exports(corpus, output, *, pair_count, query_count, exhaustive=False,
+                               patient_trial_sample=0):
     """Publish full-text tables and their file stamps after query JSON is durable."""
     output = Path(output)
     export_candidates(corpus, output / 'candidates.jsonl', output / 'patient_to_cohort.parquet',
                       output / 'cohort_to_patient.parquet')
+    scope = ('exhaustive MaxSim over the full synthetic corpus' if exhaustive else
+             'exact MaxSim over recorded lexical/random proposal pools')
+    if patient_trial_sample:
+        scope += f'; each patient searches the cohorts of {patient_trial_sample} sampled trials'
     write_json(output / 'complete.json', dict(pairs=pair_count, queries=query_count,
-        candidate_scope=('exhaustive MaxSim over the full synthetic corpus' if exhaustive else
-                         'exact MaxSim over recorded lexical/random proposal pools'),
+        candidate_scope=scope,
         outputs={name: file_stamp(output / name) for name in
                  ('candidates.jsonl', 'rankings.jsonl', 'patient_to_cohort.parquet', 'cohort_to_patient.parquet')}))
 
@@ -276,7 +280,7 @@ def _mine(args, model, *, rank, world, local):
         patients=digest(patients), cohorts=digest(cohorts), extra_pairs=digest(extra), directional_top_k=directional_top_k,
         **{k: getattr(args, k) for k in ('top_k', 'lexical_k', 'random_k', 'candidate_limit',
             'proposal_strategy', 'cohort_query_limit', 'splits', 'seed', 'document_batch_size',
-            'query_batch_size', 'score_batch_size')})
+            'query_batch_size', 'score_batch_size', 'patient_trial_sample')})
     if rank == 0:
         from retrieval_cache_import import validate_encoding_import
         validate_encoding_import(output, signature)
@@ -337,6 +341,9 @@ def _mine(args, model, *, rank, world, local):
                 continue
             lexical = TfidfVectorizer(ngram_range=(1, 2), lowercase=True)
             matrix = lexical.fit_transform(t['text'] for t in targets)
+            # Patients search only their sampled trials' cohorts; cohorts search every patient.
+            sampler = TrialSampler(targets, args.patient_trial_sample if direction == 'patient_to_cohort' else 0,
+                                   args.seed)
             work_batch_size = args.query_batch_size * (args.score_query_batches if resident else 1)
             for offset in range(0, len(jobs), work_batch_size):
                 started = time.perf_counter()
@@ -349,11 +356,14 @@ def _mine(args, model, *, rank, world, local):
                         for row, _ in batch[start:start + args.query_batch_size]], is_query=True))
                 encoded_at = time.perf_counter()
                 lexical_batch = (lexical.transform([row['text'] for row, _ in batch]) @ matrix.T).toarray()
-                proposals_batch, random_states = [], []
+                proposals_batch, random_states, allowed_batch = [], [], []
                 for (row, _), lexical_scores in zip(batch, lexical_batch, strict=True):
                     rng = random.Random(f'{args.seed}:{direction}:{row["id"]}')
-                    proposals_batch.append(proposal_indices(lexical_scores, args.candidate_limit, rng, args.proposal_strategy))
+                    allowed = sampler(row['id'])
+                    proposals_batch.append([allowed[i] for i in proposal_indices(
+                        lexical_scores[allowed], args.candidate_limit, rng, args.proposal_strategy)])
                     random_states.append(rng)
+                    allowed_batch.append(allowed)
                 proposed_at = time.perf_counter()
                 scores_batch = []
                 if resident:
@@ -376,8 +386,8 @@ def _mine(args, model, *, rank, world, local):
                         scores_batch.append(values)
                 scored_at = time.perf_counter()
                 checkpoint_rows = {}
-                for (row, path), lexical_scores, proposals, values, rng in zip(
-                        batch, lexical_batch, proposals_batch, scores_batch, random_states, strict=True):
+                for (row, path), lexical_scores, proposals, values, rng, allowed in zip(
+                        batch, lexical_batch, proposals_batch, scores_batch, random_states, allowed_batch, strict=True):
                     hits = []
                     def add(index, source, rank_value=None, value=None):
                         pid, cid = (row['id'], targets[index]['id']) if direction == 'patient_to_cohort' else (targets[index]['id'], row['id'])
@@ -385,9 +395,9 @@ def _mine(args, model, *, rank, world, local):
                                          task='gated_score' if source == 'colbert' else None, rank=rank_value, score=value))
                     for place, index in enumerate(top_indices(values, directional_top_k[direction]), 1):
                         add(proposals[index], 'colbert', place, values[index])
-                    for place, index in enumerate(top_indices(lexical_scores, args.lexical_k), 1):
-                        add(index, 'tfidf_baseline', place, float(lexical_scores[index]))
-                    for index in rng.sample(range(len(targets)), min(args.random_k, len(targets))):
+                    for place, index in enumerate(top_indices(lexical_scores[allowed], args.lexical_k), 1):
+                        add(allowed[index], 'tfidf_baseline', place, float(lexical_scores[allowed[index]]))
+                    for index in rng.sample(allowed, min(args.random_k, len(allowed))):
                         add(index, 'random_exploration')
                     checkpoint_rows[path.stem] = hits
                 checkpoints.write_batch(checkpoint_rows)
@@ -407,7 +417,7 @@ def _mine(args, model, *, rank, world, local):
         write_jsonl(output / 'candidates.jsonl', pairs)
         write_jsonl(output / 'rankings.jsonl', [h for h in hits if h['source'] == 'colbert'])
         finalize_candidate_exports(args.corpus, output, pair_count=len(pairs), query_count=len(query_paths),
-                                   exhaustive=args.candidate_limit is None)
+                                   exhaustive=args.candidate_limit is None, patient_trial_sample=args.patient_trial_sample)
     if world > 1:
         dist.barrier()
 
@@ -441,6 +451,8 @@ def parser():
         help='ColBERT cohort picks per patient; overrides --top-k for this direction')
     sub.choices['mine'].add_argument('--top-k-cohort-to-patient', type=int, default=40,
         help='ColBERT patient picks per cohort; overrides --top-k for this direction')
+    sub.choices['mine'].add_argument('--patient-trial-sample', type=int, default=500,
+        help='Trials randomly sampled per patient; the patient searches only their cohorts (0 = all trials)')
     sub.choices['label'].set_defaults(gated_regression=True, return_records=False)
     sub.choices['train'].set_defaults(objective='gated_regression', loss='legacy_ranking',
                                      learning_rate=2e-5, lr_scheduler='linear', warmup_ratio=.01,

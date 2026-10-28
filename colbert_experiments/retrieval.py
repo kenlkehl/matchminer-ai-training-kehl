@@ -20,6 +20,32 @@ def top_indices(scores, count):
     return np.argsort(-np.asarray(scores, dtype=np.float64), kind='stable')[:count].tolist()
 
 
+class TrialSampler:
+    """Cohort indices of a random trial sample for each patient query.
+
+    A patient searches the cohorts of ``trials`` sampled trials, approximating one
+    cancer center's open-trial portfolio instead of every synthetic trial. The sample
+    depends only on the seed and patient ID, so every mining round and embedder
+    searches the same portfolio. ``trials`` of 0 or None keeps every cohort.
+    """
+
+    def __init__(self, cohorts, trials, seed):
+        if trials is not None and trials < 0:
+            raise ValueError('Patient trial sample must be nonnegative')
+        self.by_trial = defaultdict(list)
+        for index, cohort in enumerate(cohorts if trials else ()):
+            self.by_trial[cohort['trial_id']].append(index)
+        self.trial_ids = sorted(self.by_trial)
+        self.trials, self.seed = trials, seed
+        self.all = list(range(len(cohorts)))
+
+    def __call__(self, patient_id):
+        if not self.trials or self.trials >= len(self.trial_ids):
+            return self.all
+        chosen = random.Random(f'{self.seed}:patient_trial_sample:{patient_id}').sample(self.trial_ids, self.trials)
+        return sorted(index for trial in chosen for index in self.by_trial[trial])
+
+
 def proposal_indices(scores, limit, rng, strategy='random'):
     """Bound expensive MaxSim while retaining lexical and random coverage."""
     if strategy not in ('random', 'lexical_random'):

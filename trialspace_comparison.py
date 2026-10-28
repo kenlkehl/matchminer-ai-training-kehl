@@ -14,7 +14,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from colbert_experiments.contracts import DIRECTIONS, TASKS, contract_hash
 from colbert_experiments.data import digest, load_corpus, read_jsonl, write_json, write_jsonl
 from colbert_experiments.regression import score_contract
-from colbert_experiments.retrieval import merge_candidates, top_indices
+from colbert_experiments.retrieval import TrialSampler, merge_candidates, top_indices
 from colbert_experiments.score_publication import ready_scores
 from finetune_embedder import load_text_model
 from trial_cohort_format import file_stamp
@@ -84,8 +84,8 @@ def encode_corpus(args, patients, cohorts):
 
 
 def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128,
-               patient_k=20, cohort_k=40, lexical_k=5, random_k=5, seed=42):
-    """Every query searches the complete synthetic denominator."""
+               patient_k=20, cohort_k=40, lexical_k=5, random_k=5, seed=42, patient_trial_sample=0):
+    """Cohort queries search every patient; patients search their sampled trials' cohorts."""
     from synthetic_pool import require_full_pool
     require_full_pool(patients, cohorts)
     hits = []
@@ -103,6 +103,7 @@ def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128
             refs = torch.tensor(np.asarray(vectors[dkind][di]), device=device)
             lexical = TfidfVectorizer(ngram_range=(1, 2), lowercase=True) if lexical_k else None
             matrix = lexical.fit_transform(row['text'] for row in targets) if lexical else None
+            sampler = TrialSampler(targets, patient_trial_sample if qkind == 'patients' else 0, seed)
             for start in range(0, len(qi), score_batch_size):
                 chosen = qi[start:start + score_batch_size]
                 q = torch.tensor(np.asarray(vectors[qkind][chosen]), device=device)
@@ -115,13 +116,14 @@ def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128
                         p, c = (row, targets[j]) if qkind == 'patients' else (targets[j], row)
                         hits.append(dict(patient_id=p['id'], cohort_id=c['id'], direction=direction,
                                          source=source, task='gated_score', rank=rank, score=score))
-                    for rank, j in enumerate(top_indices(values, k), 1):
-                        add(j, 'embeddinggemma2', rank, float(values[j]))
+                    allowed = sampler(row['id'])
+                    for rank, j in enumerate(top_indices(values[allowed], k), 1):
+                        add(allowed[j], 'embeddinggemma2', rank, float(values[allowed[j]]))
                     if lexical:
-                        for rank, j in enumerate(top_indices(lex[index], lexical_k), 1):
-                            add(j, 'tfidf_baseline', rank, float(lex[index, j]))
+                        for rank, j in enumerate(top_indices(lex[index][allowed], lexical_k), 1):
+                            add(allowed[j], 'tfidf_baseline', rank, float(lex[index, allowed[j]]))
                     rng = random.Random(f'{seed}:{direction}:{row["id"]}')
-                    for j in rng.sample(range(len(targets)), min(random_k, len(targets))):
+                    for j in rng.sample(allowed, min(random_k, len(allowed))):
                         add(j, 'random_exploration')
                 print(f'[dense mine] {direction}/{split}: {start + len(chosen)}/{len(qi)}', flush=True)
     return hits
@@ -143,7 +145,7 @@ def _dense_mine(args):
         model=args.model, revision=args.revision, prompts=model_prompts('colbert_matching'),
         max_tokens=args.max_tokens, dimension=768, scope='exhaustive full synthetic corpus',
         patient_k=args.patient_k, cohort_k=args.cohort_k, lexical_k=args.lexical_k,
-        random_k=args.random_k, seed=args.seed)
+        random_k=args.random_k, seed=args.seed, patient_trial_sample=args.patient_trial_sample)
     model_path = Path(args.model)
     if model_path.is_dir():
         # A mutable local model path must never make old encodings look reusable.
@@ -157,7 +159,8 @@ def _dense_mine(args):
     vectors = encode_corpus(args, patients, cohorts)
     hits = rank_dense(patients, cohorts, vectors, device=args.device,
                      score_batch_size=args.score_batch_size, patient_k=args.patient_k,
-                     cohort_k=args.cohort_k, lexical_k=args.lexical_k, random_k=args.random_k, seed=args.seed)
+                     cohort_k=args.cohort_k, lexical_k=args.lexical_k, random_k=args.random_k, seed=args.seed,
+                     patient_trial_sample=args.patient_trial_sample)
     lineage = Path(args.corpus) / 'source_trial_pairs.jsonl'
     if lineage.exists():
         hits.extend(dict(patient_id=p['patient_id'], cohort_id=p['cohort_id'], direction='both',
@@ -169,7 +172,9 @@ def _dense_mine(args):
                       output / 'cohort_to_patient.parquet')
     finish(output, ['candidates.jsonl', 'rankings.jsonl', 'patient_to_cohort.parquet',
                    'cohort_to_patient.parquet', 'patients.npy', 'cohorts.npy'], pairs=len(pairs),
-           candidate_scope='exhaustive cosine similarity over the full synthetic corpus')
+           candidate_scope='exhaustive cosine similarity over the full synthetic corpus'
+           + (f'; each patient searches the cohorts of {args.patient_trial_sample} sampled trials'
+              if args.patient_trial_sample else ''))
 
 
 def union_candidates(corpus, sources, output):
@@ -331,6 +336,8 @@ def main():
     parser.add_argument('--cohort-k', type=int, default=40)
     parser.add_argument('--lexical-k', type=int, default=5)
     parser.add_argument('--random-k', type=int, default=5)
+    parser.add_argument('--patient-trial-sample', type=int, default=500,
+                        help='Trials randomly sampled per patient; the patient searches only their cohorts (0 = all trials)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--embeddinggemma', type=Path)
     parser.add_argument('--colbert', type=Path)
