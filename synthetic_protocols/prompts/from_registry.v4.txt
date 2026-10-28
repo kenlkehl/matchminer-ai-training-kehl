@@ -1,0 +1,35 @@
+[system]
+You are an experienced oncology clinical-trial protocol author and medical writer.
+[user]
+Below is the public ClinicalTrials.gov registry record for a clinical trial. Write the full study protocol for this trial in Markdown, as the sponsor's protocol document would read.
+
+<registry_record>
+Study title: {{title}}
+
+Brief summary:
+{{brief_summary}}
+
+Detailed description:
+{{detailed_description}}
+
+Eligibility criteria:
+{{eligibility_criteria}}
+</registry_record>
+
+Requirements:
+- Faithfulness: the protocol must describe this trial. Keep the design, arms, interventions, doses and schedules, population and endpoints stated in the record. Where the record is silent, supply realistic detail typical of a protocol for this kind of trial, sponsor and era, and never contradict the record.
+- Timing: write the protocol as approved before enrollment began, in the present and future tense ("participants will receive"). Registry records are often updated later and may be written in the past tense or describe later events such as enrollment halts, terminations, parts that were never started, end-of-trial dates or results. Do not include those events, an enrollment or study status, or anything else that would not be known before the first participant enrolled; describe every planned part of the study as planned.
+- Eligibility is the most important section. Write numbered inclusion and exclusion criteria at the level of detail of a full sponsor protocol, whose eligibility section typically runs 2,000 to 4,000 words. Use lettered sub-criteria, definitions and explicit exceptions where a protocol would, including: explicit laboratory thresholds with units; acceptable specimen types, assay methods, laboratory accreditation and positivity thresholds for every biomarker; prior-therapy rules (number of prior lines, required or excluded agents, washout periods); central nervous system metastasis rules; and cardiac, infection, organ-function, gastrointestinal, reproductive, radiotherapy and surgery criteria, plus the other standard criteria a protocol for this trial would contain.
+- Every criterion in the record must appear, preserving its meaning. Before writing, list each registry criterion and confirm that it maps to at least one numbered protocol criterion.
+- Cohorts: if the study has parts, phases, cohorts, arms or groups that enroll different populations, define each one in its own subsection of the study population section, with a name, its population, and its cohort-specific inclusion and exclusion criteria written at full protocol detail (disease and histology, stage or disease extent, biomarker status with specimen and assay requirements, required and excluded prior therapies with line counts, measurable-disease and biopsy requirements). Keep criteria common to all participants in a separate common section and state which cohorts each common criterion applies to. Do not create cohorts that the record does not describe or imply.
+- Criterion form: every inclusion criterion states a requirement and every exclusion criterion states a condition that makes a person ineligible. Write permissions, exceptions and clarifications as part of the criterion they qualify; never list them as stand-alone entries (such as something being "permitted", "not required" or "not an exclusion criterion"). Give each criterion one unambiguous reading, without circular conditions or clauses that negate or empty the rest of the criterion.
+- Criterion placement: put a criterion in the common section when it applies to every cohort, even if it concerns the disease or treatment of one cohort's population; cohort subsections contain only what differs between cohorts. Each criterion appears once, at the level where it applies.
+- Study-treatment criteria: for every study agent, including any comparator, check its approved label or known toxicity profile for histology or indication limits, renal and hepatic function limits, contraindications, drug interactions and contraception durations after the last dose. Carry each into eligibility, concomitant-medication rules and contraception requirements; where agents differ, apply the strictest requirement to participants who receive them.
+- Names: use the drug names and codes that appear in the record. Do not invent additional codes or names for those products.
+- Structure: title page (protocol number, version, date, sponsor), protocol synopsis, schedule of activities table, background and rationale, objectives and endpoints table, study design, study population, study treatments with dose-modification and toxicity-management tables, concomitant medications, study assessments and procedures, adverse-event definitions and reporting, statistical considerations (hypotheses, sample size and its assumptions, analysis populations, interim analyses, multiplicity), data management, ethics and regulatory considerations, and appendices.
+- Write every section in full prose and tables at the length of a complete sponsor protocol, which typically exceeds 15,000 words. Do not use placeholders such as "[to be added]" or "TBD", and do not abbreviate with "etc." or "per standard practice" where a protocol would state the rule.
+- Consistency: before writing, settle the key parameters (arms, doses, cycle length, visit schedule and windows, washout periods, sample size and statistical assumptions) and use them identically in every section. Check the sample-size and alpha-spending arithmetic. Before finishing, check each eligibility criterion for internal contradictions (for example, a threshold that a later sentence relaxes) and confirm that eligibility, treatment, concomitant-medication and schedule sections agree.
+- Do not include any statement, disclaimer, note or watermark saying the document is synthetic, fictional, reconstructed or AI-generated, and do not comment on the registry record. Write the document as the protocol itself.
+- Do not cite specific publications or include a reference list; describe the background evidence in prose.
+
+Output only the protocol document in Markdown.

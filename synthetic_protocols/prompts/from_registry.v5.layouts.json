@@ -1,0 +1,6 @@
+[
+  "use a single numbered inclusion list and a single numbered exclusion list for all participants. Mark criteria that apply only to some populations inline at the start of the criterion (for example \"Part 2 only:\" or \"For Cohort B:\"), and give per-population requirements as sub-items of a shared criterion where that reads naturally.",
+  "give core inclusion and exclusion criteria that apply to all participants, followed by a subsection for each population with its additional inclusion and exclusion criteria. Leave out any subsection or list that would be empty.",
+  "give each population its own complete, self-contained numbered inclusion list and exclusion list, repeating shared criteria in every list as some sponsors do, so that each population's criteria can be read on their own.",
+  "give core inclusion and exclusion criteria in the study population section, and put population-specific criteria in separate modules later in the document (a section or appendix per cohort or part). Each module lists its additional and modified criteria and refers back to the core criteria by number."
+]

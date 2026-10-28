@@ -1,0 +1,28 @@
+[system]
+You are an experienced oncology clinical-trial protocol author and medical writer.
+[user]
+Below is the public ClinicalTrials.gov registry record for a clinical trial. Write the full study protocol for this trial in Markdown, as the sponsor's protocol document would read.
+
+<registry_record>
+Study title: {{title}}
+
+Brief summary:
+{{brief_summary}}
+
+Detailed description:
+{{detailed_description}}
+
+Eligibility criteria:
+{{eligibility_criteria}}
+</registry_record>
+
+Requirements:
+- Faithfulness: the protocol must describe this trial. Keep the design, arms, interventions, doses and schedules, population and endpoints stated in the record. Where the record is silent, supply realistic detail typical of a protocol for this kind of trial, sponsor and era, and never contradict the record.
+- Eligibility is the most important section. Include every criterion in the record, preserving its meaning, and write numbered inclusion and exclusion criteria at the level of detail of a full protocol: explicit laboratory thresholds with units; testing requirements for any biomarker; prior-therapy rules (number of prior lines, required or excluded agents, washout periods); central nervous system metastasis rules; and cardiac, infection, organ-function, gastrointestinal, reproductive, radiotherapy and surgery criteria, plus the other standard criteria a protocol for this trial would contain.
+- Structure: title page (protocol number, version, date, sponsor), protocol synopsis, schedule of activities table, background and rationale, objectives and endpoints table, study design, study population, study treatments with dose-modification and toxicity-management tables, concomitant medications, study assessments and procedures, adverse-event definitions and reporting, statistical considerations (hypotheses, sample size and its assumptions, analysis populations, interim analyses, multiplicity), data management, ethics and regulatory considerations, and appendices.
+- Write every section in full prose and tables at the length of a complete sponsor protocol. Do not use placeholders such as "[to be added]" or "TBD", and do not abbreviate with "etc." or "per standard practice" where a protocol would state the rule.
+- Consistency: before writing, settle the key parameters (arms, doses, cycle length, visit schedule and windows, washout periods, sample size and statistical assumptions) and use them identically in every section. Check the sample-size and alpha-spending arithmetic.
+- Do not include any statement, disclaimer, note or watermark saying the document is synthetic, fictional, reconstructed or AI-generated, and do not comment on the registry record. Write the document as the protocol itself.
+- Do not cite specific publications or include a reference list; describe the background evidence in prose.
+
+Output only the protocol document in Markdown.
