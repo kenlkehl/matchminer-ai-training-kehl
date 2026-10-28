@@ -24,7 +24,7 @@ if SIBLING.exists():
 
 from colbert_experiments.contracts import TASKS, contract_hash, judge_messages, parse_judgment, prompt_sources
 from colbert_experiments.data import digest, load_corpus, read_jsonl, write_json
-from colbert_experiments.regression import GATE, SPECIFICITY, score_contract
+from colbert_experiments.regression import GATE, MAX_SCORE, SPECIFICITY, gated_points, score_contract
 
 TASK_ORDER = tuple(TASKS)
 DEFAULT_RUN = ROOT.parent / 'data/no_phi/synthetic_cohorts_5000_gemma4_31b_20261024/post_notes_colbert_20261025'
@@ -41,9 +41,9 @@ def score_from_answers(patient_id, cohort_id, split, values, question_contract, 
     if any(answers[t] is None for t in asked):
         return None
     answers = {task: answers[task] if task in asked else None for task in TASK_ORDER}
-    score = sum(answer == 'yes' for answer in answers.values())
+    score = gated_points(answers)
     return dict(patient_id=patient_id, cohort_id=cohort_id, split=split,
-        score=score, normalized_score=score/5, answers=answers, asked_tasks=asked,
+        score=score, normalized_score=score/MAX_SCORE, answers=answers, asked_tasks=asked,
         skipped_tasks=[task for task in TASK_ORDER if task not in asked],
         question_keys={task: digest([patient_id, cohort_id, task]) for task in asked},
         question_contract=question_contract, contract=aggregate_contract)

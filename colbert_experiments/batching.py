@@ -2,6 +2,8 @@
 from collections import defaultdict
 import random
 
+from .regression import MAX_SCORE
+
 
 POLICY = 'direction_score_stratified_v1'
 
@@ -21,8 +23,8 @@ class RegressionBatchSampler:
             if not group['labels'] or len(group['labels']) != len(group['documents']):
                 raise ValueError('Regression groups need aligned, nonempty labels')
             for score in sorted(set(group['labels'])):
-                if type(score) is not int or not 0 <= score <= 5:
-                    raise ValueError('Regression batch scores must be integers in 0..5')
+                if type(score) is not int or not 0 <= score <= MAX_SCORE:
+                    raise ValueError(f'Regression batch scores must be integers in 0..{MAX_SCORE}')
                 self.buckets[group['direction'], score].append(index)
         self.strata = sorted(self.buckets)
         if not self.strata:

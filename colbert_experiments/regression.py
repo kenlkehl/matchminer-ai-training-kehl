@@ -12,15 +12,22 @@ from matchminer_ai.embedding.colbert_contract import INSTRUCTION, regression_que
 from .contracts import TASKS, DIRECTIONS, contract_hash, judge_messages, parse_judgment, prompt_sources
 from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl, selected_splits
 
-VERSION = 'cohort-colbert-gated-score-v1'
+VERSION = 'cohort-colbert-gated-score-v2'
 GATE = 'potentially_eligible'
 SPECIFICITY = tuple(task for task in TASKS if task != GATE)
+# A documented biomarker that the cohort targets earns two points; every other yes earns one.
+POINTS = {task: 2 if task == 'biomarker' else 1 for task in TASKS}
+MAX_SCORE = sum(POINTS.values())
+
+
+def gated_points(answers):
+    return sum(POINTS[task] for task, answer in answers.items() if answer == 'yes')
 
 
 def score_contract(question_contract=None):
     return digest(dict(version=VERSION, questions=question_contract or contract_hash(), gate=GATE,
-                       specificity=SPECIFICITY, score='number_of_yes_answers', normalization=5,
-                       query_instruction=INSTRUCTION))
+                       specificity=SPECIFICITY, score='points_for_yes_answers', points=POINTS,
+                       normalization=MAX_SCORE, query_instruction=INSTRUCTION))
 
 
 def aggregate_pair(pair, judgments, *, question_contract=None):
@@ -42,9 +49,9 @@ def aggregate_pair(pair, judgments, *, question_contract=None):
     if any(task not in by_task for task in asked):
         raise ValueError('Missing required specificity judgment; do not impute zero')
     answers = {task: by_task[task]['answer'] if task in asked else None for task in TASKS}
-    score = sum(answer == 'yes' for answer in answers.values())
+    score = gated_points(answers)
     return dict(patient_id=pair['patient_id'], cohort_id=pair['cohort_id'], split=pair['split'],
-                score=score, normalized_score=score / 5, answers=answers, asked_tasks=asked,
+                score=score, normalized_score=score / MAX_SCORE, answers=answers, asked_tasks=asked,
                 skipped_tasks=[task for task in TASKS if task not in asked],
                 question_keys={task: by_task[task]['key'] for task in asked},
                 question_contract=expected, contract=score_contract(expected))
@@ -138,12 +145,12 @@ def build_groups(patients, cohorts, scores, *, split='train'):
         if (set(answers) != set(TASKS) or answers.get(GATE) not in ('yes', 'no')
                 or any(answers[t] not in ('yes', 'no') if t in asked else answers[t] is not None for t in TASKS)
                 or type(row['score']) is not int
-                or row['score'] != sum(v == 'yes' for v in answers.values())
-                or row['normalized_score'] != row['score'] / 5
+                or row['score'] != gated_points(answers)
+                or row['normalized_score'] != row['score'] / MAX_SCORE
                 or row['asked_tasks'] != asked
                 or row['skipped_tasks'] != [t for t in TASKS if t not in asked]
                 or row['question_contract'] != question_contract):
-            raise ValueError('Score must be the gated sum of binary answers')
+            raise ValueError('Score must be the gated points of binary answers')
         key = (p['id'], c['id'])
         if key in seen:
             if seen[key] != row['score']:
@@ -174,9 +181,10 @@ def prediction(scores, link='identity'):
 
 def regression_loss(scores, labels, *, link='identity'):
     target = torch.as_tensor(labels, device=scores.device, dtype=torch.float32)
-    if scores.shape != target.shape or not torch.isfinite(target).all() or not ((target >= 0) & (target <= 5)).all():
-        raise ValueError('Regression scores need aligned targets in [0, 5]')
-    return F.mse_loss(prediction(scores, link), target / 5)
+    if (scores.shape != target.shape or not torch.isfinite(target).all()
+            or not ((target >= 0) & (target <= MAX_SCORE)).all()):
+        raise ValueError(f'Regression scores need aligned targets in [0, {MAX_SCORE}]')
+    return F.mse_loss(prediction(scores, link), target / MAX_SCORE)
 
 
 def make_probes(groups, *, per_stratum=16, documents_per_class=4, seed=42):
@@ -200,7 +208,7 @@ def make_probes(groups, *, per_stratum=16, documents_per_class=4, seed=42):
 
 
 def score_statistics(scores, labels, link='identity'):
-    predicted = prediction(scores, link).detach().cpu().numpy() * 5
+    predicted = prediction(scores, link).detach().cpu().numpy() * MAX_SCORE
     raw, target = scores.detach().float().cpu().numpy(), np.asarray(labels, dtype=float)
     differing = target[:, None] > target[None, :]
     margins = (raw[:, None] - raw[None, :])[differing]

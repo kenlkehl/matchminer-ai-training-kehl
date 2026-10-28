@@ -30,6 +30,8 @@ python llm_check_trials.py \
 """
 
 from matchminer_ai.llm.reasoning import reasoning_system_prompt
+# Highest score in the llm_match_quality.user.txt rubric this script uses.
+from matchminer_ai.matching.llm_checks import MAX_MATCH_QUALITY_SCORE as MAX_SCORE
 from vllm_reasoning_utils import resolve_chat_template_kwargs
 
 import os
@@ -82,12 +84,12 @@ def parse_score_from_response(response_text: str) -> Tuple[int, str]:
     tail = response_text[-60:].replace("*", "").replace(" ", " ")
     m = TRIAL_CHECK_SCORE_PATTERN.search(tail)
     if m:
-        score = min(int(m.group(1)), 5)
+        score = min(int(m.group(1)), MAX_SCORE)
         return score, f"Score:{score}"
     tail_upper = tail.upper()
     fallback_m = re.search(r"SCORE\s*[:\-=]\s*(\d)", tail_upper)
     if fallback_m:
-        score = min(int(fallback_m.group(1)), 5)
+        score = min(int(fallback_m.group(1)), MAX_SCORE)
         return score, f"Score:{score}"
     if "NOT REASONABLE" in tail_upper or "NOT A REASONABLE" in tail_upper:
         return 0, "Score:0"
@@ -140,7 +142,7 @@ def ask_about_trials_loosely(patient_summaries: List[str],
         m = SCORE_PATTERN.search(tail)
         if m:
             score = int(m.group(1))
-            score = min(score, 5)  # clamp to max
+            score = min(score, MAX_SCORE)  # clamp to max
             eligibility_results.append(score)
             eligibility_verdicts.append(f"Score:{score}")
         else:
@@ -148,7 +150,7 @@ def ask_about_trials_loosely(patient_summaries: List[str],
             tail_upper = tail.upper()
             fallback_m = re.search(r"SCORE\s*[:\-=]\s*(\d)", tail_upper)
             if fallback_m:
-                score = min(int(fallback_m.group(1)), 5)
+                score = min(int(fallback_m.group(1)), MAX_SCORE)
                 eligibility_results.append(score)
                 eligibility_verdicts.append(f"Score:{score}")
             elif "NOT REASONABLE" in tail_upper or "NOT A REASONABLE" in tail_upper:

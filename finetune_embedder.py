@@ -190,12 +190,13 @@ def train(args):
         raise ValueError('Choose gradient caching or retained encoder chunks, not both')
     input_files = expand_inputs(args.input_parquet)
     from colbert_experiments.data import write_json
+    from colbert_experiments.regression import MAX_SCORE
     from trial_cohort_format import file_stamp
     identity = dict(inputs={str(Path(p).resolve()): file_stamp(p) for p in input_files},
         base_model=args.base_model, revision=args.model_revision, max_tokens=args.max_tokens,
         model_dtype=args.model_dtype,
         prompts=model_prompts(args.prompt_profile), loss=['MultipleNegativesRankingLoss', 'CoSENTLoss'],
-        positive_score_minimum=1, normalization='score / 5 * 2 - 1',
+        positive_score_minimum=1, normalization=f'score / {MAX_SCORE} * 2 - 1',
         batch_size=args.batch_size, gradient_checkpointing=args.gradient_checkpointing,
         loss_mini_batch_size=args.loss_mini_batch_size,
         encoder_mini_batch_size=args.encoder_mini_batch_size, encoder_token_budget=args.encoder_token_budget,
@@ -253,8 +254,7 @@ def train(args):
     # Drop rows where the LLM could not parse a score
     trial_checks = trial_checks[trial_checks.eligibility_result >= 0].copy()
 
-    # Normalize eligibility_result (raw score 0–5) to [-1, 1] for cosine-similarity-scale labels
-    MAX_SCORE = 5
+    # Normalize eligibility_result (raw gated score 0 to MAX_SCORE) to [-1, 1] for cosine-similarity-scale labels
     trial_checks["eligibility_label"] = (trial_checks["eligibility_result"] / MAX_SCORE) * 2 - 1
 
     print("\n[INFO] Dataframe info after filtering:")

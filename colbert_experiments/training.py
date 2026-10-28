@@ -180,7 +180,7 @@ def _train(args, world, rank, local_rank, pause):
     if regression:
         identity.update(contract=continuous.score_contract(), loss='mse_normalized_gated_score',
                         documents_per_query=args.documents_per_query, prediction_link=args.prediction_link,
-                        normalization=5, query_instruction=continuous.INSTRUCTION,
+                        normalization=continuous.MAX_SCORE, query_instruction=continuous.INSTRUCTION,
                         batch_sampling=batch_sampler.report(),
                         query_groups_per_update=world * args.accumulation,
                         max_pairs_per_update=world * args.accumulation * args.documents_per_query)
@@ -390,7 +390,7 @@ def _train(args, world, rank, local_rank, pause):
                 for key in ('output_scale', 'sigmoid_scale', 'sigmoid_center'):
                     scoring.pop(key)
                 scoring.update(objective=loss_name, calibrated=False,
-                    semantics='Ordinal retrieval score learned from gated labels; not a probability or predicted 0-5 score')
+                    semantics='Ordinal retrieval score learned from gated labels; not a probability or predicted gated score')
             write_json(model_output / 'regression_scoring.json', scoring)
         write_json(output / 'metrics.json', dict(history=history, evaluations=evaluations, groups=group_report,
             gpu_count=world if device.type == 'cuda' else 0,

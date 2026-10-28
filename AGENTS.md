@@ -1,5 +1,15 @@
 # Synthetic training policy (user instruction, 2026-10-27)
 
+STOPPED at user request (October 28): the batch-96 training run and its full
+controller service were terminated so the user can make adjustments. Trainer,
+launcher, controller and loader workers exited; GB300 is idle. Last complete
+resumable checkpoint is 11,600 (epoch 0.39647), retained on SSD and preserved
+under comparison `recovery/user_stop_20261028_checkpoint11600/checkpoint-11600`.
+See comparison `operator_stop.json` for shutdown/publication evidence. The unit
+has `Restart=no`; its failed result reflects the deliberate termination. Do not
+restart training or downstream retrieval/labeling without the user's revised
+instructions. The ACTIVE RESTART description below is now historical.
+
 Length defaults (user instruction, October 28): `finetune_embedder.py` and
 `make_top_matches.py` default to a 3,000-token cap (0.4% of the 6,680 named
 cohorts still exceed it), and the teacher label stage defaults to 32,768 output

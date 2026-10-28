@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from colbert_experiments.regression import MAX_SCORE
 from finetune_embedder import load_text_model
 from trialspace_embedding_losses import KnownPositiveRankingLoss, CachedEmbeddingLoss, RetainedEmbeddingLoss
 from trialspace_prompt_profiles import model_prompts
@@ -99,7 +100,7 @@ def main():
                 real_tokens.append(int(values['attention_mask'].sum()))
                 features.append({k:v.to('cuda:0') if isinstance(v,torch.Tensor) else v for k,v in values.items()})
             labels = (torch.tensor(identities[selected],device='cuda:0') if kind=='mnrl' else
-                      torch.tensor(frame.iloc[selected].eligibility_result.to_numpy()/2.5-1,device='cuda:0',dtype=torch.float32))
+                      torch.tensor(frame.iloc[selected].eligibility_result.to_numpy()/(MAX_SCORE/2)-1,device='cuda:0',dtype=torch.float32))
             with torch.autocast('cuda',dtype=torch.bfloat16): loss=losses[kind](features, labels)
             loss.backward()
             optimizer.step()

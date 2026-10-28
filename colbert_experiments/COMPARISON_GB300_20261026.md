@@ -1,5 +1,33 @@
 # EmbeddingGemma 2 / ModernColBERT comparison
 
+USER STOP (October 28): stopped `mmai-trialspace-comparison-batch96-20261028.service`
+with its entire control group for forthcoming user adjustments. Controller
+260587, launcher 260979, trainer 260991 and four loader workers all exited.
+GB300 returned to 0% utilization and 331 MiB used. `Restart=no`; systemd's
+failed/exit-code result is from the deliberate shutdown, not a spontaneous
+training failure. Last complete checkpoint: 11,600, epoch 0.39647276. SSD
+workspace remains intact. Full resumable checkpoint (including optimizer/RNG)
+is preserved at `recovery/user_stop_20261028_checkpoint11600/checkpoint-11600`;
+see `operator_stop.json` and recovery `stop.json` for publication evidence.
+No final model promotion, round-two retrieval, labeling or teacher restart was
+started. Await the user's adjusted plan before restarting anything below.
+
+Repeated KRAS G12C diagnostic (October 28): latest complete checkpoint 11,000
+(epoch 0.37597), same patient and exact inference/corpus settings as 8,400;
+base scores verified identical. Seven top-ten cohorts overlap. G12C-requiring
+cohorts remain 4/10 but fall from 6/20 to 4/20. G12D-only NCT07483983 remains #1.
+G12C NSCLC NCT06764771 moves #14 → #7; the brain-metastasis-requiring
+NCT06248606 falls #5 → #23 and prior-G12C-targeted-treatment-requiring
+NCT05788926 falls #9 → #29. G12C basket NCT04699188 remains at #5/#9,
+but NCT04585035 falls #17 → #51. Five of the six previously reviewed G12C
+cohorts have slightly stronger score preference for the G12C query over its
+G12D-only counterfactual; one is slightly weaker. Wrong-allele #1 persists.
+Mixed qualitative change, not clear overall improvement or held-out validation.
+No labels/settings changed; training continued. Preserved outputs:
+`retrieval_spotchecks/checkpoint11000_kras_g12c_20261028/` (report.html,
+comparison_top20.csv, allele_comparison.json, all ranks and inference snapshot);
+local `/tmp/mmai-kras-g12c-rerun-20261028/`.
+
 KRAS G12C diagnostic (October 28): preserved checkpoint 8,400 and retrieved all
 6,680 cohorts for existing patient `patient_90679739-22a8-53a4-a96a-c230e6224d89`,
 selected before ranking: metastatic lung adenocarcinoma, G12C, progression after

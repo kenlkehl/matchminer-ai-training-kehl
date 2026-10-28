@@ -1,5 +1,23 @@
 # Current correction: full synthetic pool (2026-10-27)
 
+STOPPED at user request (October 28) for adjustments. The batch-96 controller,
+trainer, launcher and all four loader workers have exited; GB300 is idle.
+The service has `Restart=no`. Its failed result follows deliberate termination.
+Latest complete checkpoint 11,600 (epoch 0.39647) remains on SSD and is
+preserved with optimizer/RNG at comparison
+`recovery/user_stop_20261028_checkpoint11600/checkpoint-11600`; publication
+evidence is in `operator_stop.json` / recovery `stop.json`. No downstream stage
+started. Do not resume training, retrieve, or label until the user's revised
+instructions. The ACTIVE descriptions below are historical.
+
+Repeat of the same KRAS G12C patient (October 28): checkpoint 11,000, identical
+all-cohort retrieval and 2,500-token settings, seven top-ten cohorts overlap with
+8,400. G12C-specific top-ten count stays four; top-twenty count falls six to four.
+G12D-only cohort remains #1. Some eligibility-conflicting hits drop, but one
+relevant G12C basket falls #17 → #51. Mixed result, not clear overall improvement.
+Training continued; no production labels/settings changed. Full comparison:
+`retrieval_spotchecks/checkpoint11000_kras_g12c_20261028/report.html`.
+
 KRAS G12C diagnostic (October 28): checkpoint 8,400 retrieves six explicitly
 G12C-requiring cohorts in the top 20 versus one for base EmbeddingGemma 2,
 including three solid-tumor basket cohorts across two trials. However, #1 is

@@ -16,6 +16,7 @@ import pandas as pd
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 SCORE_PATTERN = re.compile(r"[Ff]inal\s+[Ss]core\s*:\s*(\d)")
+MAX_SCORE = 6  # llm_match_quality.user.txt: biomarker earns 2 points, others 1
 
 
 def reject_if_inside_skill(path: Path, label: str) -> None:
@@ -33,12 +34,12 @@ def parse_one(txt: str) -> tuple[int, str]:
     tail = txt[-60:].replace("*", "").replace("\u202f", " ")
     m = SCORE_PATTERN.search(tail)
     if m:
-        score = min(int(m.group(1)), 5)
+        score = min(int(m.group(1)), MAX_SCORE)
         return score, f"Score:{score}"
     tail_upper = tail.upper()
     fallback = re.search(r"SCORE\s*[:\-=]\s*(\d)", tail_upper)
     if fallback:
-        score = min(int(fallback.group(1)), 5)
+        score = min(int(fallback.group(1)), MAX_SCORE)
         return score, f"Score:{score}"
     if "NOT REASONABLE" in tail_upper or "NOT A REASONABLE" in tail_upper:
         return 0, "Score:0"

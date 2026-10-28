@@ -1,6 +1,6 @@
 ---
 name: claude-trialcheck-oracle
-description: Score sampled patient-trial candidate matches for clinical-trial reasonableness (0-5) using the same prompt and rubric as llm_check_trials.py, with Claude acting as the oracle model. Use when the user asks to run trialcheck / oracle scoring on a parquet or CSV of candidate matches, or mentions llm_check_trials / space_specific_eligibility_checks.
+description: Score sampled patient-trial candidate matches for clinical-trial reasonableness (0-6) using the same prompt and rubric as llm_check_trials.py, with Claude acting as the oracle model. Use when the user asks to run trialcheck / oracle scoring on a parquet or CSV of candidate matches, or mentions llm_check_trials / space_specific_eligibility_checks.
 disable-model-invocation: true
 argument-hint: [input_parquet_or_csv]
 allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *) Bash(wc *) Bash(: *)
@@ -67,7 +67,7 @@ For each row, Read `<work_dir>/rows/row_NN.txt` (where `NN` is the zero-padded
 `patient_summary` and `this_space` blocks. Treat `patient_summary` as
 `{patient_summary}` and `this_space` as `{trial_summary}` and internally
 assemble the exact two-message prompt below. Then produce a response with
-your own reasoning that ends on a line `Final score: X` (X in 0-5).
+your own reasoning that ends on a line `Final score: X` (X in 0-6).
 
 Do not re-split the staging file to a temp directory; the per-row files in
 `<work_dir>/rows/` exist precisely so the model doesn't have to create any
@@ -119,18 +119,18 @@ Biomarker criteria have to be considered carefully. If a required biomarker is k
 Many trials describe required washout periods for prior treatments for eligibility. For example, the eligibility criteria might state that patients may not have received radiation or chemotherapy in the last 14 days or 30 days. It is CRITICAL that you IGNORE these eligibility criteria when considering prior treatment requirements. Assume that patients could wait for the washout period to enroll. Also CRITICAL: Ignore your knowledge of today's current date. Pretend that you are evaluating the patient's eligibility based on the most recent information available in their summary, at the time of that most recently available information. Do not provide ethical judgments or comment on resource constraints with respect whether the trial is a reasonable clinical consideration; just evaluate whether it is, given the available information.
 
 SCORING INSTRUCTIONS:
-After reasoning step by step, compute a score from 0 to 5 using the following rubric:
+After reasoning step by step, compute a score from 0 to 6 using the following rubric:
 
 Start with 0 points.
 1) REASONABLENESS (0 or 1 point): If the trial is at least a reasonable consideration for this patient (i.e., the patient does not clearly meet an exclusion criterion such as wrong cancer type, wrong age group, wrong sex, having an excluded biomarker, etc.), award 1 point. If the trial is NOT reasonable, the final score is 0 — skip the remaining categories.
 2) CANCER TYPE SPECIFICITY (+1 point): If the trial specifies the patient's cancer type (e.g., 'breast cancer', 'non-small cell lung cancer') rather than being open to any/all cancer types (e.g., 'solid tumors', 'advanced cancers'), award +1 point.
 3) CANCER BURDEN/STAGE SPECIFICITY (+1 point): If the trial specifies a particular disease stage or burden (e.g., 'metastatic', 'locally advanced', 'stage III-IV') that matches the patient's disease status, award +1 point. If the trial has no stage/burden requirements or is open to any stage, do not award a point.
 4) PRIOR TREATMENT SPECIFICITY (+1 point): If the trial has specific prior treatment requirements (e.g., 'must have progressed on platinum-based chemotherapy', 'prior immunotherapy required') and the patient's treatment history matches those requirements, award +1 point. If the trial has no specific prior treatment requirements, do not award a point.
-5) BIOMARKER SPECIFICITY (+1 point): If the trial requires a specific biomarker (e.g., 'EGFR mutation', 'PD-L1 ≥ 50%', 'HER2-positive') AND the patient is known to have that biomarker, award +1 point. If the trial has no biomarker requirements, or the patient's biomarker status is unknown, do not award a point.
+5) BIOMARKER SPECIFICITY (+2 points): If the trial requires a specific biomarker (e.g., 'EGFR mutation', 'PD-L1 ≥ 50%', 'HER2-positive') AND the patient is known to have that biomarker, award +2 points. If the trial has no biomarker requirements, or the patient's biomarker status is unknown, do not award these points.
 
 Your response MUST end with the following line and nothing else after it:
 Final score: X
-where X is the total score (an integer from 0 to 5).
+where X is the total score (an integer from 0 to 6).
 ```
 
 ### 5. Finalize

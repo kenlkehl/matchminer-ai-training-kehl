@@ -467,7 +467,7 @@ def fit(args, device, rank, world, pause):
         world_size=world, accumulation=args.accumulation, documents_per_query=args.documents_per_query,
         learning_rate=args.learning_rate, seed=args.seed, directions=directions, eval_every=args.eval_every,
         eval_pairs=digest(probes), eval_batch_size=args.eval_batch_size,
-        objective='MSE(mean_MaxSim, score/5)', auroc='raw mean_MaxSim predicts score > 0; zero is negative',
+        objective='MSE(mean_MaxSim, normalized gated score)', auroc='raw mean_MaxSim predicts score > 0; zero is negative',
         batch_sampling=sampler.report(), loss_weighting='equal labeled pairs within each update', device_type=device.type)
     # Keep the original default identity exactly resumable for existing MSE runs.
     if args.loss != 'mse':
@@ -613,7 +613,7 @@ def fit(args, device, rank, world, pause):
         if args.loss != 'mse':
             scoring.pop('output_scale')
             scoring.update(objective=args.loss, calibrated=False,
-                semantics='Ordinal retrieval score learned from gated labels; not a probability or predicted 0-5 score')
+                semantics='Ordinal retrieval score learned from gated labels; not a probability or predicted gated score')
         write_json(args.output / 'model/regression_scoring.json', scoring)
         write_json(output / 'metrics.json', dict(history=history, evaluations=evaluations))
         write_json(output / 'status.json', dict(state='complete', steps=total_steps,

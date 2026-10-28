@@ -1,6 +1,6 @@
 ---
 name: eval-trialcheck
-description: Judge whether MM-AI agrees with itself on patient x trial-space reasoning. Reads MM-AI's reasoning and 0-5 score and produces a 5-point Likert agreement plus a disagreement category. Distinct from the rubric-replicating claude-trialcheck-oracle skill. Use when the user asks to evaluate MM-AI trialcheck reasoning with Claude as judge, or mentions vllm_parallel_trialcheck / eligibility_result eval.
+description: Judge whether MM-AI agrees with itself on patient x trial-space reasoning. Reads MM-AI's reasoning and 0-6 score and produces a 5-point Likert agreement plus a disagreement category. Distinct from the rubric-replicating claude-trialcheck-oracle skill. Use when the user asks to evaluate MM-AI trialcheck reasoning with Claude as judge, or mentions vllm_parallel_trialcheck / eligibility_result eval.
 disable-model-invocation: true
 argument-hint: [trialcheck_output_parquet_or_csv]
 allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *) Bash(wc *) Bash(: *)
@@ -95,7 +95,7 @@ Use Claude's supported extended-thinking controls. Do not prepend the GPT-OSS-on
 #### User message template (verbatim — fill in the four placeholders)
 
 ```
-You are a brilliant oncologist serving as a judge in an AI evaluation. Another AI system (MM-AI) has been asked to decide whether a clinical trial space is a reasonable consideration for a specific patient, and to score how targeted the trial is for that patient on a 0–5 rubric. You will be shown the patient summary, the trial space, MM-AI's free-text reasoning, and MM-AI's final score.
+You are a brilliant oncologist serving as a judge in an AI evaluation. Another AI system (MM-AI) has been asked to decide whether a clinical trial space is a reasonable consideration for a specific patient, and to score how targeted the trial is for that patient on a 0–6 rubric. You will be shown the patient summary, the trial space, MM-AI's free-text reasoning, and MM-AI's final score.
 
 Scoring rubric (for reference — this is what MM-AI was using):
 Start with 0.
@@ -103,7 +103,7 @@ Start with 0.
 2) CANCER TYPE SPECIFICITY (+1): +1 if the trial specifies the patient's cancer type (e.g. "breast cancer") rather than "solid tumors"/"any cancer".
 3) CANCER BURDEN/STAGE SPECIFICITY (+1): +1 if the trial specifies a particular stage/burden that matches the patient.
 4) PRIOR TREATMENT SPECIFICITY (+1): +1 if the trial has specific prior-treatment requirements and the patient's history matches them.
-5) BIOMARKER SPECIFICITY (+1): +1 if the trial requires a specific biomarker and the patient is known to have it.
+5) BIOMARKER SPECIFICITY (+2): +2 if the trial requires a specific biomarker and the patient is known to have it.
 
 MMAI's directive specifically told it to:
 - IGNORE washout periods when judging reasonableness — assume the patient could wait. Do NOT penalize MMAI for not down-scoring a trial on washout grounds.
@@ -121,7 +121,7 @@ Here is the trial space:
 Here is MM-AI's reasoning:
 {mm_ai_reasoning}
 
-Here is MM-AI's final score (0–5):
+Here is MM-AI's final score (0–6):
 {mm_ai_score}
 
 Your job: decide whether MM-AI's reasoning supports MM-AI's score, and whether both are correct given the patient/trial pair AND the directive above. Do NOT simply re-score from scratch — focus on MM-AI's chain of thought, catching hallucinations, criterion mis-reads, misattributed biomarkers, etc.

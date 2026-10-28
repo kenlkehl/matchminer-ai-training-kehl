@@ -13,7 +13,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 from colbert_experiments.contracts import DIRECTIONS, TASKS, contract_hash
 from colbert_experiments.data import digest, load_corpus, read_jsonl, write_json, write_jsonl
-from colbert_experiments.regression import score_contract
+from colbert_experiments.regression import MAX_SCORE, score_contract
 from colbert_experiments.retrieval import TrialSampler, merge_candidates, top_indices
 from colbert_experiments.score_publication import ready_scores
 from finetune_embedder import load_text_model
@@ -224,7 +224,7 @@ def project_labels(corpus, union, labels, sources, output, *, reasoning_source=N
             if (score['contract'] != contract or score['question_contract'] != question_contract
                     or score['split'] != p['split'] or p['split'] != c['split']
                     or pair['split'] != p['split'] or type(score['score']) is not int
-                    or not 0 <= score['score'] <= 5):
+                    or not 0 <= score['score'] <= MAX_SCORE):
                 raise ValueError('Invalid/cross-split shared label')
             projected.append(score)
             rows.append(dict(patient_id=p['id'], cohort_id=c['id'], cohort_trial_id=c['id'],

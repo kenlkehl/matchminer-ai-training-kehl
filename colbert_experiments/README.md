@@ -242,7 +242,7 @@ in both patient partitions: this is a patient holdout, not a cohort holdout.
 
 The student uses the production base model, complete 8,192-token inputs without
 silent truncation, gradient checkpointing, BF16 and two-rank DDP. By default it retains
-`MSE(mean_MaxSim, score / 5)`. Complete-pass batching visits every directional
+`MSE(mean_MaxSim, score / 6)`. Complete-pass batching visits every directional
 pair exactly once per epoch, mixes scores within each query, and spreads
 direction/score strata throughout the epoch without replacement sampling. Each
 forward pass encodes one query with up to **two candidates** together; 32
@@ -362,7 +362,7 @@ AUROCs still use raw MaxSim to predict `score > 0`. MSE is retained separately a
 `mse_diagnostic`, not as evidence of calibrated scores. CoSENT magnitude depends
 on the number of comparisons, so compare fixed validation probes over time,
 not its numeric value against MSE or differently sized batches. Export metadata
-marks ranking scores as uncalibrated and does not claim a 0–5 prediction scale.
+marks ranking scores as uncalibrated and does not claim a 0–6 prediction scale.
 This objective change needs full-corpus retrieval checks as well as AUROC:
 it does not guarantee removal of candidate preferences, especially without
 fresh hard negatives from the current model.
@@ -381,7 +381,7 @@ suppress useful specificity information, so inspect gate disagreements separatel
 
 The MSE experiment uses one short aggregate retrieval instruction plus the complete
 patient or cohort text, in both directions. With `--loss mse`, training minimizes
-`MSE(mean_MaxSim, score / 5)` with explicit, labeled candidates grouped by query.
+`MSE(mean_MaxSim, score / 6)` with explicit, labeled candidates grouped by query.
 Constant-label groups are retained. There are no implicit in-batch negatives.
 Regression update batches balance available direction/score anchors and retain
 the sampled query's score range. The experimental CLI keeps its smaller
@@ -393,16 +393,18 @@ counts are logged, and the sampling policy is part of checkpoint identity.
 This is the token-level analogue of Sentence Transformers'
 [CosineSimilarityLoss](https://sbert.net/docs/package_reference/sentence_transformer/losses.html#cosinesimilarityloss),
 whose stock implementation instead compares pooled cosine embeddings.
-The integer spacing is an explicit modeling assumption: one matched specificity
-criterion adds one point. This composite score is not an eligibility probability.
+The integer spacing is an explicit modeling assumption: the eligibility gate and each
+matched specificity criterion add one point, except a documented biomarker that the
+cohort targets, which adds two (maximum 6). This composite score is not an eligibility
+probability.
 
 `--prediction-link sigmoid` optionally changes the prediction to
-`sigmoid(20 * (mean_MaxSim - 0.5))`; targets remain `score / 5`. The default is
+`sigmoid(20 * (mean_MaxSim - 0.5))`; targets remain `score / 6`. The default is
 identity. The link has fixed constants and no learned calibration head; saved
 models include `regression_scoring.json` with the instruction and link contract.
 Mining uses raw MaxSim because both links preserve ordering. With identity, raw
 predictions can be negative; they are not silently clipped during evaluation.
-Fixed probes record MSE, MAE/RMSE in 0–5 score units, unequal-label ordering
+Fixed probes record MSE, MAE/RMSE in 0–6 score units, unequal-label ordering
 accuracy, and tie-aware NDCG@10 with linear graded gains. These metrics are
 macro-averaged over query groups and directions. Singleton/all-zero groups have
 no NDCG; constant-label groups have no ordering comparisons. Counts are reported.

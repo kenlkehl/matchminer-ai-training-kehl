@@ -4,6 +4,8 @@ import heapq
 import math
 import random
 
+from .regression import MAX_SCORE
+
 
 POLICY = 'complete_query_pair_epochs_v1'
 
@@ -21,8 +23,8 @@ class CompletePassBatchSampler:
         for group in groups:
             if not group['labels'] or len(group['labels']) != len(group['documents']):
                 raise ValueError('Every query needs aligned, nonempty labels and documents')
-            if any(type(score) is not int or not 0 <= score <= 5 for score in group['labels']):
-                raise ValueError('Scores must be integers in 0..5')
+            if any(type(score) is not int or not 0 <= score <= MAX_SCORE for score in group['labels']):
+                raise ValueError(f'Scores must be integers in 0..{MAX_SCORE}')
             self.microbatches += math.ceil(len(group['documents']) / documents_per_query)
             self.pairs += len(group['documents'])
         self.updates_per_epoch = math.ceil(self.microbatches / query_groups_per_update)

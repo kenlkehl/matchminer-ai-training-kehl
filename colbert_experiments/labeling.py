@@ -152,7 +152,8 @@ async def _label(args, output):
     iterator = iter(groups() if gated else questions(pairs, patients, cohorts, sources=sources))
     completed, failures, scores = {}, {}, {}
     restored_questions = 0
-    score_counts = {str(i): 0 for i in range(6)}
+    from .regression import MAX_SCORE
+    score_counts = {str(i): 0 for i in range(MAX_SCORE + 1)}
     loop_lag = dict(latest_seconds=0.0, max_seconds=0.0)
     client_stats = {}
     def snapshot(state='labeling'):

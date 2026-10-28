@@ -12,7 +12,7 @@ OncoReasoning summarization and clinical-QA adapters.
 entrypoint. The native ColBERT encoder, retrieval instruction, and packed MaxSim
 scorer are owned by the inference dependency and imported by both production
 and [`colbert_experiments`](colbert_experiments/README.md). Production uses the
-gated 0–5 teacher labels with **CoSENT plus a contrastive loss on known negatives**.
+gated 0–6 teacher labels with **CoSENT plus a contrastive loss on known negatives**.
 
 Use a local-disk virtual environment, outside the network-mounted checkout, and
 install this repository plus the sibling `matchminer-ai-inference-kehl` package.
@@ -274,7 +274,7 @@ The default inverse temperature is 20 and the contrastive weight is 1.
 One aggregate retrieval instruction precedes the complete query text; the
 complete opposite-side text is the document. Existing gated labels and reasoning
 traces are reused without relabeling. Exported scores are uncalibrated ranking
-signals, not probabilities or predicted 0–5 scores.
+signals, not probabilities or predicted 0–6 scores.
 
 Production fits use **32 query groups per GPU per optimizer update**, with up to
 **8 labeled candidates per query**: up to 256 scored pairs per GPU, or 1,024 on
@@ -305,7 +305,7 @@ Collective pause polls occur every eight ranking microbatches and at phase
 boundaries, allowing workers with different text lengths to progress independently
 between polls. Configure the effective batch with
 `--trialspace-accumulation` and `--trialspace-documents-per-query`. Every update
-logs its actual pair count, 0–5 histogram and score range. Batch policy and sizes
+logs its actual pair count, 0–6 histogram and score range. Batch policy and sizes
 are checkpointed and cannot silently change on resume. Logs also include counts
 of ordinal comparisons and queries with known positive/negative contrasts.
 Direct training supports `--no-gradient-checkpointing` to trade more GPU memory
@@ -1629,8 +1629,8 @@ preserved without the GPT-OSS header. Unknown model identities receive no header
 [`colbert_experiments`](colbert_experiments/README.md) explores native token-level
 late interaction with `lightonai/GTE-ModernColBERT-v1`, complete patient/cohort
 text, and bidirectional retrieval. It supports both five independent binary
-tasks and gated 0–5 objectives: ask potential eligibility
-first, ask four specificity questions separately only after yes, then count yes
-answers in Python. The production entrypoint learns their ordering with CoSENT
+tasks and gated 0–6 objectives: ask potential eligibility
+first, ask four specificity questions separately only after yes, then add points
+for yes answers in Python (two for a documented targeted biomarker, one otherwise). The production entrypoint learns their ordering with CoSENT
 plus known-negative contrast, using the shared experimental loss implementation.
 The binary-task and MSE experiments remain available for controlled comparisons.
