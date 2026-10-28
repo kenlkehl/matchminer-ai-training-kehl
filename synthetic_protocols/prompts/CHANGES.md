@@ -181,3 +181,10 @@ sample_trial_cohort_lineitems.csv, v5, run_batch.py, servers
 sn4622130540:8000 (32 concurrent), 172.24.216.113:8001-8003 and
 camus:8002-8003 (16 each); output
 data/no_phi/synthetic_protocols_from_registry/batch_v5_sample5000_20261028/.
+
+Batch stopped at user request 2026-10-28 ~22:55 UTC with 3,861 of 4,981
+protocols complete (camus:8003 removed at 22:04 via disabled_servers.txt).
+User review: most sections are acceptable, but the eligibility division mirrors
+what the downstream extraction prompt asks for (named study populations,
+cohort-specific vs common criteria) too closely to be realistic. Next prompt
+versions target realistic protocol eligibility structure for Nemotron.
