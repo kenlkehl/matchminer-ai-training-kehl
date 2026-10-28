@@ -1,5 +1,57 @@
 # EmbeddingGemma 2 / ModernColBERT comparison
 
+Data-loading audit (October 28, 01:02 UTC): paused checkpoint 200 used zero
+workers, pinned memory, no worker prefetching and blocking device transfers.
+Active inputs/checkpoints/model cache are on SSD; training materializes Arrow
+datasets in RAM and uses native batched tokenization with dynamic padding.
+The working `finetune_embedder.py` now defaults to `--dataloader-num-workers 4`
+and `--dataloader-prefetch-factor 2`, persistent workers, pinned memory and
+nonblocking CUDA copies. Zero workers remains an explicit supported option.
+No custom DataLoader or token-cache implementation was introduced.
+
+Native-loader-only measurements on the existing 8,192-pair sample with the
+production clinical prompt (50 GPU-delivered batches, first five excluded):
+
+| Full loss batch / token cap | Zero workers | Two workers | Four workers |
+| --- | ---: | ---: | ---: |
+| 128 / 8,192 | 436 pairs/s | 841 pairs/s | 1,752 pairs/s |
+| 96 / 2,500 | 464 pairs/s | 891 pairs/s | 1,810 pairs/s |
+
+Four-worker mean batch preparation/delivery was 73 ms and 53 ms respectively.
+Exact tokens, masks, labels and dataset/batch order matched across worker counts.
+The final 96/four-worker loader test briefly overlapped CPU unit tests; these
+are loader capacity measurements, not claimed end-to-end training speedups.
+All ten existing dense training/prompt/resume tests passed with the new defaults.
+Saved v22 source bytes/mtime are unchanged. Production remains paused, and its
+frozen source snapshot/checkpoint settings were not edited. A future deliberate
+resume must refresh source/settings; never SIGCONT the old controller.
+Evidence, harness, measured tensors' digests, source copy and test log are in
+`recovery/dataloader_audit_20261028/` (local `/tmp/mmai-dataloader-audit-20261028`).
+
+Latest diagnostic (October 28, 00:54 UTC): encoder chunks **48**, full loss
+batch **96**, 2,500-token cap, native BF16 weights/autocast, expandable segments.
+Retaining the four chunk graphs without replay OOMed before update 1 at
+246.76 GiB. Gradient caching completed 25 updates (20 timed),
+averaging **22.79 pairs/s**, **4.213 seconds/update**, peak
+**212.43 GiB**. This successful option DOES replay the encoder.
+MNRL uses native CachedMultipleNegativesRankingLoss, mini_batch_size=48;
+CoSENT uses the existing CachedEmbeddingLoss wrapper. Runtime assertions verified
+two MNRL 48x96 score blocks, CoSENT comparisons over all 96 pairs, and four initial
+48-text forwards plus four replay forwards per update. Gradient accumulation is
+1; these are full 96-pair comparisons, not two independent 48-pair losses.
+Production remains paused at checkpoint 200. No configuration/weights were
+promoted, and saved v22 code is unchanged. Benchmark-only stock MNRL does not
+remove production known-positive masking. Artifacts and exact commands:
+comparison run `recovery/encoder48_effective96_20261028/`.
+
+Latest diagnostic (October 28, 00:46 UTC): actual encoder batch **64** with a
+**2,500-token cap** also OOMed after 0 completed optimizer updates. This used
+native v22 Trainer/losses, BF16 weights/autocast, one GB300 Accelerate worker,
+expandable segments, no gradient cache and no activation checkpointing.
+Failed input shapes: `[[64, 505], [64, 2500]]`; peak allocated memory was 247.10 GiB.
+Production remains paused at checkpoint 200, and the saved v22 source is unchanged.
+Evidence and exact command: comparison run `recovery/actual_encoder64_2500_20261028/`.
+
 Latest diagnostic (October 28, 00:43 UTC): an actual 128-text encoder batch
 was tested with the native v22 Trainer/losses, BF16 weights/autocast, one GB300
 Accelerate worker, no gradient cache and no activation checkpointing. At the

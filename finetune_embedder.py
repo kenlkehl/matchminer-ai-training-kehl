@@ -43,6 +43,10 @@ def parse_args():
         help="EmbeddingGemma 2 model ID or a local TrialSpace checkpoint from this model family."
     )
     parser.add_argument('--batch-size', type=int, default=10)
+    parser.add_argument('--dataloader-num-workers', type=int, default=4,
+                        help='Background tokenization/data-loading workers per training process; 0 runs inline.')
+    parser.add_argument('--dataloader-prefetch-factor', type=int, default=2,
+                        help='Batches prepared ahead per worker (ignored with zero workers).')
     parser.add_argument('--loss-mini-batch-size', type=int, default=0,
                         help='Encoder chunk size for gradient caching of both full-batch losses; 0 disables caching.')
     parser.add_argument('--encoder-mini-batch-size', type=int, default=0,
@@ -167,6 +171,12 @@ def train(args):
     from pathlib import Path
     if args.batch_size < 2:
         raise ValueError('Ranking losses require batch size at least two')
+    if args.dataloader_num_workers < 0 or args.dataloader_prefetch_factor < 1:
+        raise ValueError('Data-loader workers must be nonnegative and prefetch factor positive')
+    if args.dataloader_num_workers:
+        # Parallelize whole batches in native DataLoader workers. Avoid nesting
+        # a tokenizer thread pool inside every worker (and before Linux fork).
+        os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
     if args.loss_mini_batch_size < 0:
         raise ValueError('Loss mini-batch size cannot be negative')
     if args.encoder_mini_batch_size < 0 or args.encoder_token_budget < 1:
@@ -313,6 +323,12 @@ def train(args):
     args_st = SentenceTransformerTrainingArguments(
         output_dir=args.ckpt_dir,
         per_device_train_batch_size=args.batch_size,
+        dataloader_num_workers=args.dataloader_num_workers,
+        dataloader_pin_memory=True,
+        dataloader_persistent_workers=bool(args.dataloader_num_workers),
+        dataloader_prefetch_factor=(args.dataloader_prefetch_factor
+                                   if args.dataloader_num_workers else None),
+        accelerator_config={'non_blocking': torch.cuda.is_available()},
         gradient_checkpointing=False,  # Already enabled on the model above when requested.
         learning_rate=2e-5,
         lr_scheduler_type="linear",
@@ -337,6 +353,12 @@ def train(args):
         train_dataset=train_dataset,
         loss=losses_map,
     )
+
+    print(f'[INFO] Data loader: {args_st.dataloader_num_workers} workers, '
+          f'prefetch={args_st.dataloader_prefetch_factor}, '
+          f'persistent={args_st.dataloader_persistent_workers}, '
+          f'pin_memory={args_st.dataloader_pin_memory}, '
+          f'non_blocking={args_st.accelerator_config.non_blocking}')
 
     print("\n[INFO] Starting training...")
     if checkpoint:

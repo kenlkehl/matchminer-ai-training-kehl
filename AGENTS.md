@@ -1,5 +1,40 @@
 # Synthetic training policy (user instruction, 2026-10-27)
 
+Data-loading audit (October 28, 01:02 UTC): the working `finetune_embedder.py`
+now defaults to four native persistent DataLoader workers, two prefetched batches
+per worker, pinned memory and nonblocking CUDA transfers. Inputs are already
+SSD-staged, loaded into RAM, and dynamically padded. Loader-only benchmarks
+delivered 1,752–1,810 pairs/s, with exact token/label/batch-order agreement versus
+zero workers; ten existing training/prompt/resume tests passed. Training remains
+paused at checkpoint 200. Its saved args and the frozen controller's source
+snapshot still have zero workers; refresh the snapshot/settings deliberately
+when resuming, never SIGCONT that controller. See comparison recovery
+`dataloader_audit_20261028/`. Saved v22 code remains unchanged.
+
+Latest diagnostic (October 28, 00:54 UTC): encoder chunks **48**, full loss
+batch **96**, 2,500-token cap, native BF16 weights/autocast, expandable segments.
+Retaining the four chunk graphs without replay OOMed before update 1 at
+246.76 GiB. Gradient caching completed 25 updates (20 timed),
+averaging **22.79 pairs/s**, **4.213 seconds/update**, peak
+**212.43 GiB**. This successful option DOES replay the encoder.
+MNRL uses native CachedMultipleNegativesRankingLoss, mini_batch_size=48;
+CoSENT uses the existing CachedEmbeddingLoss wrapper. Runtime assertions verified
+two MNRL 48x96 score blocks, CoSENT comparisons over all 96 pairs, and four initial
+48-text forwards plus four replay forwards per update. Gradient accumulation is
+1; these are full 96-pair comparisons, not two independent 48-pair losses.
+Production remains paused at checkpoint 200. No configuration/weights were
+promoted, and saved v22 code is unchanged. Benchmark-only stock MNRL does not
+remove production known-positive masking. Artifacts and exact commands:
+comparison run `recovery/encoder48_effective96_20261028/`.
+
+Latest diagnostic (October 28, 00:46 UTC): actual encoder batch **64** with a
+**2,500-token cap** also OOMed after 0 completed optimizer updates. This used
+native v22 Trainer/losses, BF16 weights/autocast, one GB300 Accelerate worker,
+expandable segments, no gradient cache and no activation checkpointing.
+Failed input shapes: `[[64, 505], [64, 2500]]`; peak allocated memory was 247.10 GiB.
+Production remains paused at checkpoint 200, and the saved v22 source is unchanged.
+Evidence and exact command: comparison run `recovery/actual_encoder64_2500_20261028/`.
+
 Latest diagnostic (October 28, 00:43 UTC): an actual 128-text encoder batch
 was tested with the native v22 Trainer/losses, BF16 weights/autocast, one GB300
 Accelerate worker, no gradient cache and no activation checkpointing. At the
