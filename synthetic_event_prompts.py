@@ -107,6 +107,22 @@ EVENT_INSTRUCTIONS = (
 )
 
 
+SEED_COMORBIDITY_INSTRUCTIONS = (
+    'Give each patient realistic non-cancer comorbidities, usually one to four, chosen for the patient\'s age, sex, '
+    'cancer type, and risk factors (for example, COPD in a heavy former smoker or type 2 diabetes with obesity), '
+    'with each condition\'s current severity or control and its treatment. If the patient received prior cancer '
+    'treatment, also give the toxicities that treatment realistically caused, such as oxaliplatin neuropathy, '
+    'immune-related colitis or hypothyroidism after a checkpoint inhibitor, or anthracycline cardiomyopathy: name '
+    'the causing treatment, the CTCAE grade, the management (for example, dose reduction, treatment hold, '
+    'corticosteroids, or discontinuation), and the toxicity\'s status at the end of the history. A patient with no '
+    'prior cancer treatment has no treatment toxicities. Comorbidities and toxicities must agree with the supplied '
+    'criteria: for matching patients, none may violate an exclusion or an organ-function, performance-status, or '
+    'washout requirement (for example, keep residual neuropathy within any allowed grade, and give no active '
+    'autoimmune disease when the criteria exclude it). For near-miss patients, a comorbidity or toxicity may be the '
+    'feature that narrowly misses a criterion.\n'
+)
+
+
 SECOND_PRIMARY_INSTRUCTION = (
     "In this particular group of patients, each patient have had a second primary prior unrelated cancer history before "
     "the cancer relevant to the trial. Incorporate events for the prior cancer as well as the current cancer into your output."
@@ -145,10 +161,11 @@ def seed_messages(criteria, patient_class, rng):
         'and its own age at diagnosis. Keep each seed brief and limited to these '
         'facts plus the concise clinical facts needed to establish the patient\'s '
         'state at the end of the history against these criteria, including prior '
-        'treatment/response, performance status, organ function, and comorbidities '
-        'when relevant. Do not write a full event chronology or reports here. '
+        'treatment/response and its toxicities, performance status, organ function, '
+        'and comorbidities. Do not write a full event chronology or reports here. '
         'A separate call will expand each seed into its clinical events.\n'
-        + DIAGNOSIS_INSTRUCTIONS + ELIGIBILITY_INSTRUCTIONS + DIVERSITY_INSTRUCTIONS + CONSISTENCY_INSTRUCTIONS
+        + DIAGNOSIS_INSTRUCTIONS + SEED_COMORBIDITY_INSTRUCTIONS + ELIGIBILITY_INSTRUCTIONS
+        + DIVERSITY_INSTRUCTIONS + CONSISTENCY_INSTRUCTIONS
     )
     if rng.randrange(10) == 5:
         content += '\n' + SECOND_PRIMARY_INSTRUCTION + '\n'
@@ -185,8 +202,9 @@ def patient_messages(seed):
         'the complete tagged event list. Generate the wording of every event, '
         'including demographics and diagnoses. Preserve the seed\'s name, sex, '
         'diagnoses, ages at diagnosis, cancer sites, histologies, and biomarker '
-        'facts, including any specified prior treatment/response, performance '
-        'status, organ function, comorbidities, and final clinical state. '
+        'facts, including any specified prior treatment/response, treatment '
+        'toxicities, performance status, organ function, comorbidities, and final '
+        'clinical state. '
         'Include each seed diagnosis as a <diagnosis> event at its assigned '
         'age, in its correct chronological position. '
         'Begin the output with exactly one <demographics> line giving name, sex, '
@@ -208,6 +226,20 @@ def patient_messages(seed):
         'gives no prior treatment describes an untreated patient. Earlier events '
         'may include the symptoms, workup, staging, and stated treatment needed '
         'to reach that state.\n'
+        'Incorporate the seed\'s comorbidities and treatment toxicities into the '
+        'history. Record each toxicity as an <adverse_event> with its grade at a '
+        'plausible time after its causing treatment began, and reflect its '
+        'management, such as a dose reduction, treatment hold, corticosteroids, '
+        'or discontinuation, in later events. Document comorbidities and ongoing '
+        'toxicities, with their treatment and current status, in the clinical '
+        'notes where an oncologist would record them, especially the first '
+        'oncology consultation. Report imaging or pathology findings of these '
+        'conditions only when that study would show them, such as emphysema or '
+        'pneumonitis on a chest CT. Use <diagnosis> only for cancers, not for '
+        'comorbidities. Supportive treatment of a stated comorbidity or toxicity, '
+        'such as levothyroxine for hypothyroidism, is not new cancer treatment. '
+        'Add no clinically significant comorbidity or toxicity beyond the seed; '
+        'minor expected effects such as grade 1 nausea or fatigue are acceptable.\n'
         'Start each event line with its event tag. Immediately after the tag, '
         'every non-demographic event must begin with "At age N years and W weeks," '
         'using nonnegative integer years and integer weeks from 0 through 51. '
