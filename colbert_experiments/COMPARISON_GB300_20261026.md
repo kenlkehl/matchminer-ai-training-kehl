@@ -1,5 +1,159 @@
 # EmbeddingGemma 2 / ModernColBERT comparison
 
+Latest diagnostic (October 28, 00:43 UTC): an actual 128-text encoder batch
+was tested with the native v22 Trainer/losses, BF16 weights/autocast, one GB300
+Accelerate worker, no gradient cache and no activation checkpointing. At the
+2,500-token cohort limit it OOMed before its first optimizer step, even with
+`PYTORCH_ALLOC_CONF=expandable_segments:True` (247.3 GiB allocated). With only
+cohorts capped at 512 and that allocator setting, 25 steps completed: 82.69 pairs/s
+after five warmups, 240.44 GiB peak. A matched actual-batch-10 control gave
+29.42 pairs/s and 19.47 GiB: batch 128 improved throughput 2.81x at the same cap.
+The default allocator failed after three capped steps with about 30 GiB reserved
+but unused; expandable segments avoided that failure in this short test.
+Production remains paused at checkpoint 200. Do not promote the artificial
+512-token cap or infer full-corpus/long-patient stability from this benchmark.
+The saved v22 script remains byte-for-byte and mtime unchanged. Artifacts and
+commands are in the comparison run's `recovery/actual_encoder128_20261028/`.
+
+| Actual encoder batch | Cohort limit | Allocator | Result | Peak allocated GiB |
+| ---: | ---: | --- | --- | ---: |
+| 128 | 2,500 | default | OOM before update 1 | 245.54 |
+| 128 | 2,500 | expandable segments | OOM before update 1 | 247.29 |
+| 128 | 512 | default | OOM after 3 updates | 224.50 |
+| 128 | 512 | expandable segments | 82.69 pairs/s; 25 updates | 240.44 |
+| 10 | 512 | expandable segments | 29.42 pairs/s; 25 updates | 19.47 |
+
+The successful 128 test averaged 1.548 seconds per optimizer step over its 20
+measured steps. Hooks verified exactly two encoder calls per update, each with
+128 texts (one patient column and one cohort column); all logged gradients were
+finite. The matched control likewise encoded ten texts per call. The earlier
+128-pair cached production configuration still means encoder chunks of eight;
+these tests do not silently modify that paused configuration.
+
+The cohort-only cap uses the native `SentenceTransformerDataCollator` per-task
+length override. It includes the original v22 prompt in the 512-token limit.
+Token/mask assertions verified that patient preprocessing was unchanged from
+the preceding v22 baseline (dynamic padding, maximum 2,500). Both runs use the
+same 8,192-pair sample and original v22 prompt/loss/sampling code, with BF16
+weights and autocast. No manual optimizer loop, encoder chunk wrapper or replay
+was used. The patient/cohort tensors in the failed longer-input run were
+`[128, 540]` and `[128, 2500]`.
+
+The allocator change applies only to benchmark subprocesses. It does not change
+training math, the sampled rows, encoder batch size, or sequence lengths.
+The 512-token success is a short-run throughput result, not permission to drop
+eligibility criteria or evidence that all patient outliers will fit. No benchmark
+weights were exported. Production training and the cloud fleet were not resumed.
+The original v22 source was verified by its small-file SHA256 and unchanged
+mtime. Benchmark products were copied with size checks and preserved mtimes,
+without whole-data hashing or readback.
+
+Full source copies/diffs, native collator checks, per-step timings/input shapes,
+OOM records and exact commands are at
+`/ksg/kehl_mm_data/mmai/v23/data/no_phi/trialspace_comparison_namedcohorts_5000_20261026/recovery/actual_encoder128_20261028/`.
+The local working directory is `/tmp/mmai-actual-encoder128-20261028`.
+
+Latest diagnostic (October 28, 00:31 UTC): an isolated copy of v22's
+`finetune_embedder.py` was benchmarked on 8,192 sampled current pairs using its
+original prompt, 2,500-token cap, batch 10 and native SentenceTransformers losses.
+Forty timed steps after five warmups: EmbeddingGemma 2 direct launch 17.69 pairs/s;
+Accelerate BF16 17.48; Accelerate BF16 with FP32 weights 17.06; original Qwen3
+0.6B with Accelerate BF16 17.34. All completed with finite logged gradients.
+The v22 source bytes and mtime were verified unchanged. This used current
+libraries, not the historical v22 environment. Production remains paused at
+checkpoint 200; no benchmark weights were exported and no production settings
+were changed. Artifacts and exact commands are in the comparison run's
+`recovery/v22_baseline_20261028/`. See COMPARISON_GB300_20261026.md for details.
+
+The benchmark copy changes only timing/stop callbacks, logging/reporting and
+suppression of the final model export. The FP32 control is a second copy with
+only `model_kwargs={"dtype": torch.float32}` added to model loading. No custom
+Trainer, optimizer, cache/replay or retained-graph loss code is used. The original
+v22 loader defaults to BF16 weights; its Trainer already sets `bf16=True`.
+
+| Model / launch / weights | Pairs/sec | Peak allocated GiB |
+| --- | ---: | ---: |
+| EmbeddingGemma 2 / direct / native BF16 | 17.69 | 53.72 |
+| EmbeddingGemma 2 / Accelerate BF16 / native BF16 | 17.48 | 53.72 |
+| EmbeddingGemma 2 / Accelerate BF16 / FP32 weights | 17.06 | 59.03 |
+| Qwen3-Embedding-0.6B / Accelerate BF16 / native BF16 | 17.34 | 66.97 |
+
+All runs used the same current pair sample, v22's unchanged filtering and dataset
+sampling, and one GB300 process. The sampler produced identical input shapes in
+the two EmbeddingGemma launcher runs. The 8,192-row sample became 8,174 CoSENT rows
+and 1,388 positive MNRL rows under the original clinical/score filters. This is a
+bounded timing experiment, not a production partition or convergence experiment.
+Average padded cohort width was 1,663 tokens with EmbeddingGemma and 1,736 with
+Qwen; patient widths were 448 and 466. Data lengths and effective batching differ
+from historical v22, so the old eight-GPU elapsed time is not a matched control.
+
+The environment is torch 2.13.0+cu130, transformers 5.19.0, SentenceTransformers
+6.1.0 and Accelerate 1.14.0. The default EmbeddingGemma loader includes unused
+vision/audio branches (744M total parameters, 271M active text parameters); only
+text inputs are supplied. This preserves v22's loading call for the baseline.
+The first direct precision probe was outside wrapped autocast, and the first
+Accelerate precision probe selected an unused branch; neither is evidence about
+internal autocast. Both runs verified BF16 loaded weights and Accelerator BF16
+state. Subsequent FP32/Qwen controls also verified BF16 autocast inside the active
+encoder. The timing callback itself was unchanged across runs.
+
+The installed environment has no `accelerate` console script, so launch used the
+supported equivalent `python -m accelerate.commands.launch --num_processes 1
+--num_machines 1 --mixed_precision bf16 --dynamo_backend no
+--num_cpu_threads_per_process 8`, with `CUDA_VISIBLE_DEVICES=1`.
+Full commands, source copy/diffs, timing hooks, logs, per-step JSON, sample and
+source-unchanged checks are published under
+`/ksg/kehl_mm_data/mmai/v23/data/no_phi/trialspace_comparison_namedcohorts_5000_20261026/recovery/v22_baseline_20261028/`.
+Copies were checked by size with mtimes preserved; only the small original Python
+source was content-hashed. The current pair input is the paused run's local SSD
+`/tmp/mmai-training/af03c2d69805c49782b23d47/inputs/0000.parquet` (2,403,278 rows);
+there is no v24 directory on this machine.
+
+Latest diagnostic (October 28, 00:22 UTC): a benchmark-only 512-token cohort
+cap leaves patient inputs at their 8,192-token maximum (dynamic padding).
+Without gradient caching, retained chunks or activation checkpointing, batch 128
+completed only one measured ordinary batch at 42.2 pairs/sec before OOM. Batch
+64 completed 20 ordinary batches at 24.2 pairs/sec, then OOMed on the first
+longest-observed-patient stress batch. Stock CoSENT alone averaged 21.2 pairs/sec;
+the MNRL subclass with known-positive masking averaged 28.2. These are short,
+unstable benchmark configurations, not a full-run ETA or production settings.
+A separate 8-pair stock-CoSENT profile used BF16 memory-efficient SDPA kernels
+(no math fallback observed) and retained about 13.4 GiB of unique saved activation
+storage, with many FP32 normalization/residual/rotary intermediates. Current
+loading explicitly requests FP32 master weights; v22's saved weights are BF16.
+Their performance impact has not been isolated. Production still uses the standard
+SentenceTransformerTrainer, with custom optional loss wrappers; no custom Trainer
+or optimizer loop. The timing harness alone drives forward/backward manually.
+Evidence is published under `recovery/cohort512_20261028/` in the comparison run.
+Production remains paused at checkpoint 200; do not apply the cap or restart it.
+
+Current status (October 28, 00:01 UTC): the user stopped training to test
+execution without encoder replay. Training remains **stopped** after the tests;
+checkpoint 200 is retained at
+`/tmp/mmai-training/af03c2d69805c49782b23d47/checkpoints/checkpoint-200`.
+The ordinary 128-pair forward ran out of memory at about 247 GiB. Length-sorted
+encoder chunks retaining all graphs also ran out of memory at 128, on ordinary
+batch 6. The retained 64-pair benchmark passed both losses and full 8,192-token
+stress inputs, peaking at 197.5 GiB allocated, but averaged only 11.4 pairs/sec
+on ordinary batches. No replay and no activation checkpointing were enabled.
+The preceding cached-128 benchmark was 13.3 pairs/sec; the smaller stable
+configuration did not improve throughput. Do not silently restart the cached run.
+
+The optional no-replay implementation is `RetainedEmbeddingLoss` in
+`trialspace_embedding_losses.py`; use `--loss-mini-batch-size 0
+--encoder-mini-batch-size 8 --encoder-token-budget 4096` plus the selected full
+loss `--batch-size`. It encodes each text once, retains all activation graphs,
+restores pair order, and computes the loss over the entire sampled batch.
+Six gradient/encoder-call checks and ten tiny-model training/prompt checks passed.
+Benchmarks, process identities and resume information are preserved in the
+comparison run's `recovery/no_replay_20261028/`. All eight cloud VMs remain off.
+
+The controller recorded in `launch.json` (PID 205256) is SIGSTOP-frozen; its old
+training child has exited. CPU label publication was left running. Resume needs
+a deliberate controller handoff and preserved checkpoint/settings migration;
+**do not SIGCONT the old controller**, which would see its terminated child as a
+failure. The prior training configuration below is historical, not a live run.
+
 Latest batch update (October 27): EmbeddingGemma 2 uses **128 pairs per optimizer
 step**, with both ranking losses computed over that full batch. Encoder chunks
 of eight use gradient caching with RNG/autocast replay; texts are sorted by

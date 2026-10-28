@@ -18,7 +18,7 @@ DIAGNOSIS_INSTRUCTIONS = (
 
 DIVERSITY_INSTRUCTIONS = (
     'To ensure diversity in the generated data, vary patient age, gender (if it is a cancer type that occurs in both sexes), name, stage at diagnosis, biomarkers, '
-    'treatment approaches, and disease course (e.g., stable disease, progression, remission, recurrence). However this variation must remain within the bounds of the clinical context provided, and it MUST remain clinically realistic. All anatomy must be accurate, any therapy only given for a certain known biomarker in real life must also only be given for that known biomarker in synthetic data, and so on.\n'
+    'treatment approaches, and disease course (e.g., stable disease, progression, remission, recurrence). However, this variation must remain within the bounds of the clinical context provided, and it MUST remain clinically realistic. All anatomy must be accurate, any therapy only given for a certain known biomarker in real life must also only be given for that known biomarker in synthetic data, and so on.\n'
 )
 
 
@@ -26,7 +26,7 @@ CONSISTENCY_INSTRUCTIONS = (
     'VERY IMPORTANT: All events MUST be in chronological order and must be internally consistent in that context. '
     'For example, an event from a younger age must not follow an event from an older age, and an organ that has '
     'been removed must not later be described as present.\n'
-    'For patients who have surgical resection for their cancer diagnosis, the diagnosis event line item should follow the resection.\n'
+    'For patients who have surgical resection for their cancer diagnosis, the diagnosis event line item should follow the resection event.\n'
     'CRITICAL: Do not add findings, including claims that disease is absent, for organs that would not have been '
     'visualized by the specified scan type and field of view; for example, a CT of the chest, abdomen, and '
     'pelvis cannot establish the presence or absence of brain metastases.\n'
@@ -55,10 +55,11 @@ EVENT_INSTRUCTIONS = (
     'NGS reports should be very detailed; they should include both any key actionable alterations if present, and '
     'comutations/fusions/copy number alterations; most reports should describe alterations in many genes, even '
     'though only some of those will be clinically relevant. \n'
-    'CRITICAL: Genomic findings should make sense based on known mutation and comutation patterns. For example, '
+    'CRITICAL: Genomic findings should be realistic based on known mutation and comutation patterns. For example, '
     'remember that EGFR mutant lung cancers almost never have KRAS co-mutations. \n'
     'There should be one event per line of text in your output, and each event should be formatted as a sentence. \n'
-    'Most patients will have many events along their disease trajectories (20-30). \n'
+    'Most patients will have many events along their disease trajectories (often 20-30), but never '
+    'extend a history past its final clinical state to add events. \n'
     'Tag each event with an event type at the beginning of the line. Acceptable event types include '
     '<demographics>, <diagnosis>, <systemic>, <surgery>, <radiation>, <adverse_event>, <clinical_note>, '
     '<imaging_report>, <pathology_report>, and <ngs_report>.\n'
@@ -196,16 +197,21 @@ def patient_messages(seed):
         'only after the examination, procedure, or test that establishes them; '
         'for example, do not report surgical margins, lymph-node counts, or '
         'pathologic staging before the relevant surgery and pathology. '
-        'Later recurrences or metastases may be added consistently with the seed.\n'
+        'The seed\'s final clinical state is the patient\'s state at the last '
+        'event; end the history there. Add no treatment, surgery, radiation, '
+        'recurrence, progression, or other change after that state, and add no '
+        'treatment the seed neither states nor clearly implies. A seed that '
+        'gives no prior treatment describes an untreated patient. Earlier events '
+        'may include the symptoms, workup, staging, and stated treatment needed '
+        'to reach that state.\n'
         'Start each event line with its event tag. Immediately after the tag, '
         'every non-demographic event must begin with "At age N years and W weeks," '
         'using nonnegative integer years and integer weeks from 0 through 51. '
         'Include both units even when weeks is zero. Use weeks to distinguish '
         'events within the same year; do not round every event to a whole year. '
         'Output events in nondecreasing age order, comparing both years and weeks. Include '
-        'all diagnoses and other events in one complete history of about 20–30 '
-        'events. Do not output <new_patient>, another patient, headings, closing '
-        'tags, or an explanation. Do not describe trial screening, eligibility '
-        'decisions, study entry, or enrollment in any event.'
+        'all diagnoses and other events in one complete history, usually about 20–30 '
+        'events; use fewer rather than extending past the final clinical state. Do not output <new_patient>, another patient, headings, closing '
+        'tags, or an explanation.'
     )
     return [{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': content}]

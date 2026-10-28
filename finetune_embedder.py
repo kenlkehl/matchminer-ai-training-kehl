@@ -45,6 +45,10 @@ def parse_args():
     parser.add_argument('--batch-size', type=int, default=10)
     parser.add_argument('--loss-mini-batch-size', type=int, default=0,
                         help='Encoder chunk size for gradient caching of both full-batch losses; 0 disables caching.')
+    parser.add_argument('--encoder-mini-batch-size', type=int, default=0,
+                        help='Encode length-sorted chunks once and retain their graphs for the full loss; 0 disables chunking.')
+    parser.add_argument('--encoder-token-budget', type=int, default=8192,
+                        help='Padded-token limit per retained encoder chunk; a longer single text runs alone.')
     parser.add_argument('--gradient-checkpointing', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--mask-known-positives', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--save-steps', type=int, default=2500,
@@ -165,6 +169,10 @@ def train(args):
         raise ValueError('Ranking losses require batch size at least two')
     if args.loss_mini_batch_size < 0:
         raise ValueError('Loss mini-batch size cannot be negative')
+    if args.encoder_mini_batch_size < 0 or args.encoder_token_budget < 1:
+        raise ValueError('Encoder chunk size cannot be negative and token budget must be positive')
+    if args.loss_mini_batch_size and args.encoder_mini_batch_size:
+        raise ValueError('Choose gradient caching or retained encoder chunks, not both')
     input_files = expand_inputs(args.input_parquet)
     from colbert_experiments.data import write_json
     from trial_cohort_format import file_stamp
@@ -174,7 +182,8 @@ def train(args):
         positive_score_minimum=1, normalization='score / 5 * 2 - 1',
         batch_size=args.batch_size, gradient_checkpointing=args.gradient_checkpointing,
         loss_mini_batch_size=args.loss_mini_batch_size,
-        sort_encoder_chunks_by_length=bool(args.loss_mini_batch_size),
+        encoder_mini_batch_size=args.encoder_mini_batch_size, encoder_token_budget=args.encoder_token_budget,
+        sort_encoder_chunks_by_length=bool(args.loss_mini_batch_size or args.encoder_mini_batch_size),
         negative_mask='known_positive_pairs' if args.mask_known_positives else None, epochs=3, learning_rate=2e-5, warmup_ratio=.01,
         multi_dataset_batch_sampler='proportional', seed=42, training_pool='all_synthetic_training', diagnostics_held_out=False)
     manifest = Path(args.ckpt_dir) / 'training_identity.json'
@@ -294,6 +303,10 @@ def train(args):
     if args.loss_mini_batch_size:
         from trialspace_embedding_losses import CachedEmbeddingLoss
         losses_map = {name: CachedEmbeddingLoss(loss, args.loss_mini_batch_size)
+                      for name, loss in losses_map.items()}
+    if args.encoder_mini_batch_size:
+        from trialspace_embedding_losses import RetainedEmbeddingLoss
+        losses_map = {name: RetainedEmbeddingLoss(loss, args.encoder_mini_batch_size, args.encoder_token_budget)
                       for name, loss in losses_map.items()}
 
     # --- Trainer ---

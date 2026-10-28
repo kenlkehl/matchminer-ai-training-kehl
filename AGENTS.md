@@ -1,5 +1,77 @@
 # Synthetic training policy (user instruction, 2026-10-27)
 
+Latest diagnostic (October 28, 00:43 UTC): an actual 128-text encoder batch
+was tested with the native v22 Trainer/losses, BF16 weights/autocast, one GB300
+Accelerate worker, no gradient cache and no activation checkpointing. At the
+2,500-token cohort limit it OOMed before its first optimizer step, even with
+`PYTORCH_ALLOC_CONF=expandable_segments:True` (247.3 GiB allocated). With only
+cohorts capped at 512 and that allocator setting, 25 steps completed: 82.69 pairs/s
+after five warmups, 240.44 GiB peak. A matched actual-batch-10 control gave
+29.42 pairs/s and 19.47 GiB: batch 128 improved throughput 2.81x at the same cap.
+The default allocator failed after three capped steps with about 30 GiB reserved
+but unused; expandable segments avoided that failure in this short test.
+Production remains paused at checkpoint 200. Do not promote the artificial
+512-token cap or infer full-corpus/long-patient stability from this benchmark.
+The saved v22 script remains byte-for-byte and mtime unchanged. Artifacts and
+commands are in the comparison run's `recovery/actual_encoder128_20261028/`.
+
+Latest diagnostic (October 28, 00:31 UTC): an isolated copy of v22's
+`finetune_embedder.py` was benchmarked on 8,192 sampled current pairs using its
+original prompt, 2,500-token cap, batch 10 and native SentenceTransformers losses.
+Forty timed steps after five warmups: EmbeddingGemma 2 direct launch 17.69 pairs/s;
+Accelerate BF16 17.48; Accelerate BF16 with FP32 weights 17.06; original Qwen3
+0.6B with Accelerate BF16 17.34. All completed with finite logged gradients.
+The v22 source bytes and mtime were verified unchanged. This used current
+libraries, not the historical v22 environment. Production remains paused at
+checkpoint 200; no benchmark weights were exported and no production settings
+were changed. Artifacts and exact commands are in the comparison run's
+`recovery/v22_baseline_20261028/`. See COMPARISON_GB300_20261026.md for details.
+
+Latest diagnostic (October 28, 00:22 UTC): a benchmark-only 512-token cohort
+cap leaves patient inputs at their 8,192-token maximum (dynamic padding).
+Without gradient caching, retained chunks or activation checkpointing, batch 128
+completed only one measured ordinary batch at 42.2 pairs/sec before OOM. Batch
+64 completed 20 ordinary batches at 24.2 pairs/sec, then OOMed on the first
+longest-observed-patient stress batch. Stock CoSENT alone averaged 21.2 pairs/sec;
+the MNRL subclass with known-positive masking averaged 28.2. These are short,
+unstable benchmark configurations, not a full-run ETA or production settings.
+A separate 8-pair stock-CoSENT profile used BF16 memory-efficient SDPA kernels
+(no math fallback observed) and retained about 13.4 GiB of unique saved activation
+storage, with many FP32 normalization/residual/rotary intermediates. Current
+loading explicitly requests FP32 master weights; v22's saved weights are BF16.
+Their performance impact has not been isolated. Production still uses the standard
+SentenceTransformerTrainer, with custom optional loss wrappers; no custom Trainer
+or optimizer loop. The timing harness alone drives forward/backward manually.
+Evidence is published under `recovery/cohort512_20261028/` in the comparison run.
+Production remains paused at checkpoint 200; do not apply the cap or restart it.
+
+Current status (October 28, 00:01 UTC): the user stopped training to test
+execution without encoder replay. Training remains **stopped** after the tests;
+checkpoint 200 is retained at
+`/tmp/mmai-training/af03c2d69805c49782b23d47/checkpoints/checkpoint-200`.
+The ordinary 128-pair forward ran out of memory at about 247 GiB. Length-sorted
+encoder chunks retaining all graphs also ran out of memory at 128, on ordinary
+batch 6. The retained 64-pair benchmark passed both losses and full 8,192-token
+stress inputs, peaking at 197.5 GiB allocated, but averaged only 11.4 pairs/sec
+on ordinary batches. No replay and no activation checkpointing were enabled.
+The preceding cached-128 benchmark was 13.3 pairs/sec; the smaller stable
+configuration did not improve throughput. Do not silently restart the cached run.
+
+The optional no-replay implementation is `RetainedEmbeddingLoss` in
+`trialspace_embedding_losses.py`; use `--loss-mini-batch-size 0
+--encoder-mini-batch-size 8 --encoder-token-budget 4096` plus the selected full
+loss `--batch-size`. It encodes each text once, retains all activation graphs,
+restores pair order, and computes the loss over the entire sampled batch.
+Six gradient/encoder-call checks and ten tiny-model training/prompt checks passed.
+Benchmarks, process identities and resume information are preserved in the
+comparison run's `recovery/no_replay_20261028/`. All eight cloud VMs remain off.
+
+The controller recorded in `launch.json` (PID 205256) is SIGSTOP-frozen; its old
+training child has exited. CPU label publication was left running. Resume needs
+a deliberate controller handoff and preserved checkpoint/settings migration;
+**do not SIGCONT the old controller**, which would see its terminated child as a
+failure. The prior training configuration below is historical, not a live run.
+
 Latest batch update (October 27): EmbeddingGemma 2 uses **128 pairs per optimizer
 step**, with both ranking losses computed over that full batch. Encoder chunks
 of eight use gradient caching with RNG/autocast replay; texts are sorted by

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resumable event lists and notes using the existing 1a/1b/2 prompts.
+"""Resumable event lists and notes using the synthetic_event_prompts and step-2 note prompts.
 
 One shared live endpoint pool serves both classes of histories and all notes.
 Bounded preparation and atomic shards avoid materializing millions of prompts.

@@ -197,6 +197,10 @@ class TrialSpaceEmbeddingTests(unittest.TestCase):
         self._tiny_training('colbert_matching', extra=['--batch-size','4',
             '--mask-known-positives','--loss-mini-batch-size','1'])
 
+    def test_tiny_retained_training_and_resume_both_losses(self):
+        self._tiny_training('colbert_matching', extra=['--batch-size','4',
+            '--mask-known-positives','--encoder-mini-batch-size','1','--encoder-token-budget','32'])
+
     def _tiny_training(self, profile, extra=None):
         import pandas as pd
         from sentence_transformers import SentenceTransformerTrainingArguments, SentenceTransformer
