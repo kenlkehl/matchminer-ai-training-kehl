@@ -13,6 +13,10 @@ SYSTEM_PROMPT = (
 
 DIAGNOSIS_INSTRUCTIONS = (
     'Diagnosis events should include TNM stage, summary stage, primary site/cancer type, and histology. Include key data elements relevant for workup or treatment of that type of cancer, as long as your data elements are compatible with the clinical context provided.\n'
+    'Use clinical staging (cTNM) unless the primary tumor was surgically resected; give pathologic staging '
+    '(pTNM, or ypTNM after neoadjuvant therapy) only for a resected primary. Patients with distant metastases '
+    'at diagnosis usually do not have the primary resected; include that only when it is standard for the '
+    'cancer and situation, such as cytoreductive nephrectomy or resection of limited colorectal liver metastases.\n'
 )
 
 
