@@ -185,7 +185,9 @@ def seed_messages(criteria, patient_class, rng):
            'at least one supplied inclusion or exclusion requirement while '
            'remaining a plausible near-miss case.\n')
         + 'Express these features as patient facts; do not mention eligibility, '
-        'screening, enrollment, or positive/negative labels in the seed.\n'
+        'screening, enrollment, or positive/negative labels in the seed. Do not '
+        'state a life expectancy or other prognosis estimate, such as "life '
+        'expectancy greater than 3 months"; describe the clinical facts instead.\n'
         + '\nThe following is one hypothetical prose seed, provided only to '
         'illustrate formatting. Do not copy this example into your output or '
         'reuse its patient identity. Generate five new patients. '
