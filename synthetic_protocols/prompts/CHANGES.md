@@ -188,3 +188,70 @@ User review: most sections are acceptable, but the eligibility division mirrors
 what the downstream extraction prompt asks for (named study populations,
 cohort-specific vs common criteria) too closely to be realistic. Next prompt
 versions target realistic protocol eligibility structure for Nemotron.
+
+## from_registry.v6 (+ from_registry.v6.layouts.json; weighted layouts)
+
+Goal (user, 2026-10-28): eligibility should read like real protocols, not like
+the extraction schema. A survey of 59 real multi-cohort protocols from the
+sample (pdftotext, heuristic) found mostly one inclusion and one exclusion list,
+cohort differences expressed inside criteria (disease-keyed sub-items,
+part-keyed thresholds, NOTE exceptions), inline part/cohort qualifiers in about
+a third, and only a few separate lists (core + modules, "disease-specific
+inclusion criteria", tiers). Cohorts are defined in the design section.
+- Removed population/common/cohort-specific vocabulary; such headings banned.
+- Study design defines parts/cohorts/arms with a schema.
+- Layouts weighted 3:2:1:1 (differences inside criteria; inline qualifiers;
+  disease-specific subsection; core + module sections).
+- Texture: sponsor intro sentence, numbering/nesting, NOTE lines, references to
+  sections/appendices that must exist; synopsis lists key criteria only.
+- choose_layout accepts {"weight", "text"} entries (v5 hashing unchanged).
+
+Runs (9 seeds, sn4622130540:8000, 106-167 s, all stop): extraction-vocabulary
+headings 0/9 (v5: 6/9); intro sentence 9/9 (v5: 5/9); NOTE lines in 5/9 (v5:
+0/9); no dangling section/appendix references. Problems: the treatment-
+assignment rule was echoed as protocol text in 5/9 ("cohort assignment is a
+treatment-group designation, not a randomisation outcome"); layout 1 tagged
+every criterion "[All participants]".
+
+## from_registry.v7
+
+- Assignment rule reworded ("assigned after enrollment, so eligibility criteria
+  do not depend on them"); new closing instruction not to restate or explain
+  any requirement in the document.
+- Layout 1: only criteria limited to some parts/cohorts/arms carry a qualifier.
+
+Runs: same 9 seeds plus NCT04599634, NCT04659629, NCT04455620 (12 total,
+sn4622130540:8000, all stop; two reruns after ClinicalTrials.gov 429s, now
+retried in registry_record). Extraction-vocabulary headings 0/12; blanket
+"all participants" labels 0/12 (v6: 29 in one protocol); intro sentence 12/12;
+NOTE lines 8/12; no dangling references. Remaining: the study-design sentence
+was still echoed in 5/12 ("dose levels are assigned after enrollment;
+eligibility criteria do not depend on treatment assignment").
+
+## from_registry.v8
+
+- Dropped the assignment sentence from the study-design requirement and the
+  example from the no-restate instruction; checked for assignment-based
+  criteria returning.
+
+Runs: same 12 seeds (sn4622130540:8000, all stop). Echo 0/12 (one false
+positive: "participants are not re-assigned after enrollment"); assignment-based
+eligibility criteria 0/12 without the rule; extraction-vocabulary headings
+0/12; intro 12/12. Remaining: layout 1 tagged 33 criteria "(All parts)" in
+NCT04659629 (v7: none for that seed); one protocol referenced a nonexistent
+Section 4.5 (left as realistic messiness).
+
+## from_registry.v9
+
+- Prompt text identical to v8; layout 1 now says most criteria carry no label
+  and must never be tagged "(All parts)" or "[All participants]".
+
+Runs: the 5 layout-1 seeds plus 6 unseen multi-cohort seeds (two each for
+layouts 0, 2, 3; sn4622130540:8000, all stop). Blanket labels 0/11 apart from
+one layout-2 heading "Other Inclusion Criteria (All Parts)"; echo 0/11;
+assignment-based criteria 0/11; extraction-vocabulary headings 0/11; intro
+sentence in every protocol whose eligibility section the checker located (10/11;
+the eleventh is headed "Section 6. Study Population"). Synopses give abbreviated
+key criteria and point to the full section; layout 3 produced core criteria
+plus "Additional inclusion/exclusion criteria for Part A/B/C" in a later
+section. v9 is the current candidate for a new batch.

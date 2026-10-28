@@ -3,8 +3,8 @@
 The prompt template (prompts/*.txt, "[system]" then "[user]" blocks) receives the
 official title, brief summary, detailed description and eligibility criteria.
 A template that asks for {{eligibility_layout}} gets one entry of its sibling
-<stem>.layouts.json, chosen by a stable hash of the NCT ID unless --layout-index
-is given. An optional editor template then reviews the draft and returns JSON
+<stem>.layouts.json, chosen by a stable hash of the NCT ID (weighted when
+entries carry weights) unless --layout-index is given. An optional editor template then reviews the draft and returns JSON
 edits; each is applied only where its target occurs exactly once (allowing for
 whitespace differences), so the editor cannot silently rewrite the document.
 Each run gets its own directory holding the templates, registry inputs with
@@ -14,6 +14,7 @@ usage, so prompt versions stay comparable as they change.
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import itertools
 import json
 from pathlib import Path
 import re
@@ -39,7 +40,11 @@ def now():
 
 
 def registry_record(nct_id):
-    response = httpx.get(API_URL.format(nct_id), params={"fields": FIELDS}, timeout=60)
+    for attempt in range(6):
+        response = httpx.get(API_URL.format(nct_id), params={"fields": FIELDS}, timeout=60)
+        if response.status_code not in (429, 500, 502, 503, 504):
+            break
+        time.sleep(2 ** attempt)
     response.raise_for_status()
     return record_from_protocol(response.json()["protocolSection"])
 
@@ -68,10 +73,14 @@ def render(template, fields):
 
 
 def choose_layout(prompt, nct_id, index):
+    """Entries are strings or {"weight": w, "text": ...}; weights default to 1."""
     layouts = json.loads(prompt.with_name(prompt.stem + ".layouts.json").read_text())
     if index is None:
-        index = int(hashlib.sha256(nct_id.encode()).hexdigest(), 16) % len(layouts)
-    return index, layouts[index]
+        weights = [entry.get("weight", 1) if isinstance(entry, dict) else 1 for entry in layouts]
+        point = int(hashlib.sha256(nct_id.encode()).hexdigest(), 16) % sum(weights)
+        index = next(i for i, bound in enumerate(itertools.accumulate(weights)) if point < bound)
+    entry = layouts[index]
+    return index, entry["text"] if isinstance(entry, dict) else entry
 
 
 def complete(client, args, messages, settings, label):
