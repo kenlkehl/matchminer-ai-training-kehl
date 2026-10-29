@@ -1,8 +1,11 @@
 # Prompt changes
 
-Only the current version (v11, with its layouts file) is kept in the tree; earlier
-versions and the dropped editor prompt were removed on 2026-10-28 and remain in
-git history. Every run directory under `data/no_phi/synthetic_protocols_from_registry/`
+The current version, v11, now lives in the inference package as
+`trial.synthetic_protocol.system.txt` / `trial.synthetic_protocol.user.txt` with
+layouts in `matchminer_ai/data/synthetic_protocol_layouts.json`, run through
+`matchminer_ai.trials.generate_synthetic_protocols` (driver:
+`synthetic_protocols/generate_batch.py`). Earlier versions, the dropped editor
+prompt and the original scripts remain in git history. Every run directory under `data/no_phi/synthetic_protocols_from_registry/`
 holds a copy of the template it used.
 
 ## from_registry.v1
