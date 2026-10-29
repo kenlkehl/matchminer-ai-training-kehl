@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
 Pull current ClinicalTrials.gov cancer trials, extract trial spaces, and
-pre-embed those spaces for browser_app import.
+pre-embed those spaces for the real-time evaluation scripts in
+real_eval_code/real_time_eval/ (spacify_trials_freshly.py drives it by NCT ID).
 
-This is an offline/manual orchestration script. It mirrors the browser app's
-ClinicalTrials.gov denominator query, then calls:
+This is an offline/manual orchestration script. It queries open phase 0-3
+interventional cancer trials (or specific NCT IDs), then calls:
 
-  1. 0b_create_trial_spaces.py
+  1. legacy_trial_space_extraction.py (pre-cohort trial-space extraction)
   2. real_eval_code/real_time_eval/embed_trial_spaces.py --input-spaces ...
 
-Unknown CLI arguments are forwarded to 0b_create_trial_spaces.py so advanced
+The embedding step also writes a JSON index in the format the deleted browser
+app imported; the real-time scripts read the parquet.
+
+Unknown CLI arguments are forwarded to legacy_trial_space_extraction.py so advanced
 vLLM flags can still be supplied without teaching this wrapper every option.
 
 Example:
@@ -87,15 +91,15 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
 
     parser.add_argument("--trials-json", default=None, help="Raw CT.gov studies JSON output path.")
     parser.add_argument("--pull-metadata", default=None, help="CT.gov pull metadata JSON output path.")
-    parser.add_argument("--trials-csv", default=None, help="CSV input path for 0b_create_trial_spaces.py.")
+    parser.add_argument("--trials-csv", default=None, help="CSV input path for legacy_trial_space_extraction.py.")
     parser.add_argument("--trials-with-spaces-csv", default=None, help="Per-trial spacifier output CSV path.")
     parser.add_argument("--spaces-csv", default=None, help="Trial-space line-items CSV path.")
     parser.add_argument("--parquet-output", default=None, help="Embedded parquet output path.")
     parser.add_argument("--browser-json-output", default=None, help="Browser-loadable embedded JSON output path.")
 
-    parser.add_argument("--spacify-script", default=str(REPO_ROOT / "0b_create_trial_spaces.py"))
-    parser.add_argument("--spacify-work-dir", default=None, help="Shard work directory for 0b_create_trial_spaces.py.")
-    parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs for local 0b_create_trial_spaces.py mode.")
+    parser.add_argument("--spacify-script", default=str(REPO_ROOT / "legacy_trial_space_extraction.py"))
+    parser.add_argument("--spacify-work-dir", default=None, help="Shard work directory for legacy_trial_space_extraction.py.")
+    parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs for local legacy_trial_space_extraction.py mode.")
     parser.add_argument(
         "--gpus-per-instance",
         "--gpus-per-server",
@@ -111,14 +115,14 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "--spacification-model",
         dest="spacify_model",
         default=DEFAULT_SPACIFICATION_MODEL,
-        help="Model passed to 0b_create_trial_spaces.py --model.",
+        help="Model passed to legacy_trial_space_extraction.py --model.",
     )
-    parser.add_argument("--spacify-download-dir", default=None, help="Value for 0b_create_trial_spaces.py --download-dir.")
-    parser.add_argument("--spacify-batch-size", type=int, default=None, help="Value for 0b_create_trial_spaces.py --batch-size.")
-    parser.add_argument("--spacify-max-model-len", type=int, default=None, help="Value for 0b_create_trial_spaces.py --max-model-len.")
-    parser.add_argument("--spacify-max-tokens", type=int, default=None, help="Value for 0b_create_trial_spaces.py --max-tokens.")
-    parser.add_argument("--spacify-temperature", type=float, default=None, help="Value for 0b_create_trial_spaces.py --temperature.")
-    parser.add_argument("--reasoning-parser", default=None, help="Value for 0b_create_trial_spaces.py --reasoning-parser.")
+    parser.add_argument("--spacify-download-dir", default=None, help="Value for legacy_trial_space_extraction.py --download-dir.")
+    parser.add_argument("--spacify-batch-size", type=int, default=None, help="Value for legacy_trial_space_extraction.py --batch-size.")
+    parser.add_argument("--spacify-max-model-len", type=int, default=None, help="Value for legacy_trial_space_extraction.py --max-model-len.")
+    parser.add_argument("--spacify-max-tokens", type=int, default=None, help="Value for legacy_trial_space_extraction.py --max-tokens.")
+    parser.add_argument("--spacify-temperature", type=float, default=None, help="Value for legacy_trial_space_extraction.py --temperature.")
+    parser.add_argument("--reasoning-parser", default=None, help="Value for legacy_trial_space_extraction.py --reasoning-parser.")
 
     parser.add_argument("--embed-script", default=str(REPO_ROOT / "real_eval_code" / "real_time_eval" / "embed_trial_spaces.py"))
     parser.add_argument("--embedding-gpu", default="0", help="GPU ID for embedding stage.")
@@ -126,7 +130,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--embedding-max-seq-length", type=int, default=2500)
 
     parser.add_argument("--skip-pull", action="store_true", help="Reuse --trials-csv instead of querying CT.gov.")
-    parser.add_argument("--skip-spacify", action="store_true", help="Reuse --spaces-csv instead of running 0b_create_trial_spaces.py.")
+    parser.add_argument("--skip-spacify", action="store_true", help="Reuse --spaces-csv instead of running legacy_trial_space_extraction.py.")
     parser.add_argument("--skip-embed", action="store_true", help="Stop after producing trial-space line items.")
     parser.add_argument("--dry-run", action="store_true", help="Print child commands without running them.")
 
@@ -452,7 +456,7 @@ def ensure_spacify_backend(args: argparse.Namespace) -> None:
     if args.gpus or args.server_urls or args.server_urls_file:
         return
     raise SystemExit(
-        "0b_create_trial_spaces.py needs a vLLM backend. Pass --gpus for local mode, "
+        "legacy_trial_space_extraction.py needs a vLLM backend. Pass --gpus for local mode, "
         "or --server_urls / --server_urls_file for remote mode."
     )
 
