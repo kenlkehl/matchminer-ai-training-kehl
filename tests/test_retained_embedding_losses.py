@@ -1,7 +1,14 @@
 """Full comparison-set gradients and encoder call counts for retained chunks."""
 import copy
+import importlib.metadata
 
+from packaging.version import Version
 import pytest
+
+# trialspace_embedding_losses uses the sentence-transformers 6 module layout (pyproject pin).
+if Version(importlib.metadata.version("sentence-transformers")) < Version("6.1"):
+    pytest.skip("Requires sentence-transformers>=6.1", allow_module_level=True)
+
 import torch
 from sentence_transformers.sentence_transformer.losses import CoSENTLoss
 
