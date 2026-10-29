@@ -1,12 +1,22 @@
 # OncoReasoning answer-first distillation
 
+> **Provisional (2026-10-29).** Checked against the code on this date: format
+> `oncoreasoning-answer-first-v6-combined-space`, the 0-6 TrialChecker rubric
+> and all-synthetic training. The upstream trial inputs are moving to cohorts
+> extracted from synthetic protocols (`../synthetic_protocols/`), so expect
+> further revisions. The code is authoritative where this file disagrees.
+
 The student defaults to `google/gemma-4-E4B-it`, with only the text model loaded.
 Select a future base using `prepare --model-name`; the trainer reads that choice
 from the prepared manifest. Use a new data and model directory when changing it.
 The two training categories are patient summarization and clinical question
 answering. Each has its own LoRA adapter on the same frozen base. The integrated
-`train_all*.sh` pipeline trains them sequentially after TrialSpace and catalog
-construction; QA includes all three checker families.
+runner, `train_from_summaries.py` (the `train` stage of `run_pipeline.py`, which
+`train_all*.sh` runs), trains them sequentially after the ColBERT TrialSpace
+rounds, the GoodOption catalog and exclusion extraction, through the stages
+`prepare-exclusions`, `prepare-oncoreasoning`, `distill-oncoreasoning`,
+`build-oncoreasoning` and `train-oncoreasoning`. QA includes all three checker
+families.
 
 Google documents Gemma's [model and chat format](https://huggingface.co/google/gemma-4-E4B-it)
 and [thinking control](https://huggingface.co/docs/transformers/model_doc/gemma4).
@@ -38,19 +48,28 @@ TrialChecker supplies six independent matching questions: age, sex, cancer type
 and histology, burden/stage, treatment history, and biomarkers. Four additional
 questions cover its cancer-type, burden, prior-treatment, and biomarker
 specificity points. The reasonableness gate and final aggregate score are not
-asked in these component examples. To reconstruct the old trial score, all six
-matching answers must be Yes; otherwise the score is zero. When they are all
-Yes, the score is one plus the four specificity points.
+asked in these component examples. To reconstruct the current 0-6 aggregate
+TrialChecker score (`llm_match_quality.user.txt`), all six matching answers must
+be Yes; otherwise the score is zero. When they are all Yes, the score is one,
+plus one each for cancer-type, burden and prior-treatment specificity, plus two
+for biomarker specificity.
 
 Matching questions reuse only the relevant reasonableness clauses from the
 current aggregate TrialChecker prompt. These include required/excluded prior
 therapies and responses, ignored washout periods, and the distinction between
 routine and novel screening biomarkers. Specificity questions require support
 for the complete criterion and reuse the current general guidance verbatim.
+Every TrialChecker question also carries the rubric's paragraph on combined
+trial-space requirements (required and prohibited prior exposures, positive and
+negative biomarker conditions, AND/OR logic and exceptions). The
+prior-treatment specificity question requires response or progression on a
+required therapy to have occurred while the patient was receiving it.
 Instructions, decision rules, and answer options precede variable context in
 every QA family so that repeated components share a cacheable prefix.
 
-The format version is `oncoreasoning-answer-first-v4-instructions-first`. Aggregate teacher
+The format version is `oncoreasoning-answer-first-v6-combined-space` (v4 put
+instructions first, v5 added the on-therapy rule, v6 the combined-requirements
+paragraph). Aggregate teacher
 labeling loads the same fingerprinted inference prompt in local and remote modes.
 Labels from the earlier rubric, TrialSpace weights trained on them, and candidates
 mined with those weights must not be resumed under this version. Regenerate
@@ -102,7 +121,10 @@ The production orchestrator records archive locations in `reasoning_archives.jso
 
 ## Commands
 
-Use the existing environment on this machine, outside the network-mounted repo:
+The integrated runner passes these stages their inputs, writing data to
+`<run>/oncoreasoning/` and adapters to `<models-dir>/oncoreasoning/`. For a
+manual run, use the existing environment on this machine, outside the
+network-mounted repo:
 
 ```bash
 PY=~/thisenv/bin/python
@@ -206,13 +228,16 @@ vocabulary logits. Full-parameter fine-tuning is disabled. LoRA defaults:
 | Weight decay / gradient clipping | 0.01 / maximum norm 1.0 |
 | Epochs | One per adapter |
 | Batch | One example per GPU, eight accumulation steps: 64 examples on eight GPUs |
-| Checkpoint/evaluation interval | Every 100 optimizer steps |
+| Checkpoint interval | Every 100 optimizer steps (`--save-steps`) |
 | Training partitions | All synthetic train, validation, and test examples |
 | Synthetic held-out validation | None; source partitions are provenance only |
 
 These are conservative starting settings, not a guarantee of output quality.
 The final artifact uses the final training checkpoint; there is no held-out
 synthetic validation or validation-based checkpoint selection in production.
+Every partition goes into each adapter's training set, so no evaluation runs
+during training; `--max-eval-examples` is recorded in the run identity but
+selects nothing.
 Non-finite loss stops training. The [PEFT LoRA documentation](https://huggingface.co/docs/peft/en/package_reference/lora)
 describes all-linear targeting and the default initialization, which leaves the
 base model's initial outputs unchanged. The base is never merged or updated.
@@ -223,15 +248,16 @@ Each adapter's contract records its actual trainable parameter count.
 With `--task both` (the default), the output directory contains `summarization/`
 and `clinical_qa/`, plus an `oncoreasoning_contract.json` collection index written
 only after both succeed. Both adapters start independently from the original
-base, with separate optimizers, schedules, checkpoints, and validation results.
+base, with separate optimizers, schedules and checkpoints.
 Choose the corresponding adapter at inference time. `--resume-from-checkpoint
 auto` skips completed adapters and restores the latest complete checkpoint for
 an unfinished one. For an explicit checkpoint path, select one `--task` and its
 adapter directory as `--output-dir`. Resume requires identical training settings.
 
-The existing integrated pipeline command remains valid, so a running pipeline
-loads this trainer when it reaches `train-oncoreasoning`. Follow the root
-README's scoped upgrade registration after pulling; do not restart active work.
+An integrated run loads this trainer when it reaches `train-oncoreasoning`.
+Resuming a run after a code change requires a scoped upgrade receipt
+(`scripts/register_oncoreasoning_upgrade.py`; see the root README's resume
+rules); do not restart active work.
 
 ## One-token preview
 

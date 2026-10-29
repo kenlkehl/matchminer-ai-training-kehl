@@ -247,7 +247,7 @@ state and decisions for the current comparison are recorded in `AGENTS.md` and
 | `generate_synthetic_data.py`, `synthetic_event_prompts.py`, `2_make_synthetic_notes_sharded.py`, `prepare_synthetic_training.py`, `synthetic_pool.py` | Synthetic patients and notes | Current (the note script's standalone modes are legacy) |
 | `6_summarize_patients.py`, `summary_pool.py`, `summary_workspace.py` | Serial summarization | Current |
 | `train_from_summaries.py`, `trialspace_training.py`, `colbert_experiments/`, `retrieval_workspace.py`, `label_workspace.py`, `retrieval_cache_import.py` | Retriever mining, labeling and training | Current |
-| `oncoreasoning_training/` | Exclusion extraction, distillation, OncoReasoning adapters | Current (its README is stale) |
+| `oncoreasoning_training/` | Exclusion extraction, distillation, OncoReasoning adapters | Current (its README is provisional) |
 | `train_good_option_checker.py` | GoodOption catalog (`catalog`, `validate-catalog`) | Current; its `label`/`train` checker modes are deprecated |
 | `remote_vllm_pool.py`, `adaptive_controller.py`, `vllm_reasoning_utils.py` | Server pool, adaptive concurrency, reasoning parsers | Current |
 | `synthetic_protocols/` | Synthetic protocol corpus and its cohort extraction | Current |
