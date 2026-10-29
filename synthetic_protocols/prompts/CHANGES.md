@@ -1,7 +1,9 @@
 # Prompt changes
 
-Each version is kept unchanged once it has been run; every run directory under
-`data/no_phi/synthetic_protocols_from_registry/` holds a copy of its template.
+Only the current version (v11, with its layouts file) is kept in the tree; earlier
+versions and the dropped editor prompt were removed on 2026-10-28 and remain in
+git history. Every run directory under `data/no_phi/synthetic_protocols_from_registry/`
+holds a copy of the template it used.
 
 ## from_registry.v1
 

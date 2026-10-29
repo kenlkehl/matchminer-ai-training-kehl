@@ -4,12 +4,9 @@ The prompt template (prompts/*.txt, "[system]" then "[user]" blocks) receives th
 official title, brief summary, detailed description and eligibility criteria.
 A template that asks for {{eligibility_layout}} gets one entry of its sibling
 <stem>.layouts.json, chosen by a stable hash of the NCT ID (weighted when
-entries carry weights) unless --layout-index is given. An optional editor template then reviews the draft and returns JSON
-edits; each is applied only where its target occurs exactly once (allowing for
-whitespace differences), so the editor cannot silently rewrite the document.
-Each run gets its own directory holding the templates, registry inputs with
-their retrieval date, rendered requests, draft, edits, protocol, reasoning and
-usage, so prompt versions stay comparable as they change.
+entries carry weights) unless --layout-index is given. Each run gets its own
+directory holding the template, registry inputs with their retrieval date, the
+rendered request, protocol, reasoning and usage.
 """
 import argparse
 from datetime import datetime, timezone
@@ -32,7 +29,6 @@ RECORD_FIELDS = ("title", "brief_summary", "detailed_description", "eligibility_
 MISSING = "Not provided in the registry record."
 DEFAULT_OUTPUT = HERE.parents[1] / "data" / "no_phi" / "synthetic_protocols_from_registry"
 PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
-HEADING = re.compile(r"^(#{1,6})\s")
 
 
 def now():
@@ -105,42 +101,6 @@ def complete(client, args, messages, settings, label):
     return "".join(content), "".join(reasoning), meta
 
 
-def parse_edits(text):
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    return json.loads(text[text.find("{"):text.rfind("}") + 1])["edits"]
-
-
-def delete_section(text, heading):
-    lines = text.split("\n")
-    starts = [i for i, line in enumerate(lines) if line.strip() == heading.strip() and HEADING.match(line)]
-    if len(starts) != 1:
-        return text, "not_found" if not starts else "ambiguous"
-    start, level = starts[0], len(HEADING.match(lines[starts[0]]).group(1))
-    end = next((i for i in range(start + 1, len(lines))
-                if HEADING.match(lines[i]) and len(HEADING.match(lines[i]).group(1)) <= level), len(lines))
-    return "\n".join(lines[:start] + lines[end:]), "applied"
-
-
-def replace_once(text, find, replace):
-    if text.count(find) == 1:
-        return text.replace(find, replace), "applied"
-    matches = list(re.finditer(r"\s+".join(map(re.escape, find.split())), text)) if find.strip() else []
-    if len(matches) == 1:
-        return text[:matches[0].start()] + replace + text[matches[0].end():], "applied_whitespace"
-    return text, "not_found" if not matches else "ambiguous"
-
-
-def apply_edits(text, edits):
-    results = []
-    for edit in edits:
-        if edit.get("delete_heading"):
-            text, status = delete_section(text, edit["delete_heading"])
-        else:
-            text, status = replace_once(text, edit.get("find", ""), edit.get("replace", ""))
-        results.append({**edit, "status": status})
-    return text, results
-
-
 def main(args):
     record = registry_record(args.nct_id)
     fields = {key: record[key].strip() or MISSING for key in RECORD_FIELDS}
@@ -165,26 +125,6 @@ def main(args):
     meta = dict(model=args.model, base_url=args.base_url, layout_index=layout_index, generation=generation)
     ok = generation["finish_reason"] == "stop"
 
-    if args.editor_prompt and ok:
-        (run_dir / "protocol_draft.md").write_text(protocol)
-        shutil.copy2(args.editor_prompt, run_dir / "editor_template.txt")
-        editor_messages = render(args.editor_prompt.read_text(), {"protocol": protocol})
-        editor_settings = dict(temperature=args.editor_temperature, top_p=args.top_p, max_tokens=args.editor_max_tokens)
-        (run_dir / "editor_request.json").write_text(json.dumps(
-            dict(prompt=str(args.editor_prompt), messages=editor_messages, **editor_settings), indent=2))
-        response, editor_reasoning, editing = complete(client, args, editor_messages, editor_settings, "edit")
-        (run_dir / "editor_response.txt").write_text(response)
-        (run_dir / "editor_reasoning.txt").write_text(editor_reasoning)
-        try:
-            protocol, results = apply_edits(protocol, parse_edits(response))
-        except (ValueError, KeyError, TypeError) as exc:
-            results, editing["parse_error"] = [], f"{type(exc).__name__}: {exc}"
-            ok = False
-        (run_dir / "edits.json").write_text(json.dumps(results, indent=2))
-        editing["edits"] = {status: sum(r["status"] == status for r in results) for status in {r["status"] for r in results}}
-        meta["editing"] = editing
-        ok = ok and editing["finish_reason"] == "stop"
-
     (run_dir / "protocol.md").write_text(protocol)
     (run_dir / "response_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
@@ -195,7 +135,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--nct-id", required=True)
     parser.add_argument("--prompt", type=Path, required=True, help="Versioned template under prompts/")
-    parser.add_argument("--editor-prompt", type=Path, help="Optional versioned editor template under prompts/")
     parser.add_argument("--layout-index", type=int, help="Override the hashed eligibility-layout choice")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--base-url", default="http://sn4622130540:8000/v1")
@@ -203,6 +142,4 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-tokens", type=int, default=120_000)
-    parser.add_argument("--editor-temperature", type=float, default=0.6)
-    parser.add_argument("--editor-max-tokens", type=int, default=32_768)
     sys.exit(main(parser.parse_args()))
