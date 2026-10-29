@@ -16,10 +16,14 @@ extraction and matching; it is **not** a set of real trial criteria.
 | Eligibility layouts | `matchminer_ai/data/synthetic_protocol_layouts.json` |
 | Config | `synthetic_protocol_generation` section of the inference preset |
 | Batch driver | `synthetic_protocols/generate_batch.py` (this repository) |
+| Cohort extraction API | `matchminer_ai.trials.extract_protocol_cohorts` (inference package) |
+| Cohort extraction driver | `synthetic_protocols/extract_cohorts.py` (this repository) |
 | Prompt history and findings | [`PROMPT_HISTORY.md`](PROMPT_HISTORY.md) |
 | Real protocol PDFs (comparison data) | `scripts/download_ctgov_protocols.py` |
 
-Requires the inference package at commit `acb37a0` or later (overlapping chunks).
+Requires the inference package at commit `acb37a0` or later (overlapping
+chunks); cohort extraction needs `cbd7aff` or later (saved, resumable decisions
+and Markdown input).
 
 ## What the prompt does
 
@@ -104,6 +108,53 @@ Empty or truncated outputs (Nemotron occasionally returns reasoning with no
 answer) are retried up to `max_attempts` (3); trials that still fail are listed
 in `run_metadata.json`.
 
+## Extracting cohorts and eligibility criteria
+
+```bash
+python -I synthetic_protocols/extract_cohorts.py --batch-dir "$B" \
+  --server http://sn4622130540:8000=256 \
+  --server http://172.24.216.113:8001=32 --server http://172.24.216.113:8002=32 \
+  --server http://172.24.216.113:8003=32 --server http://localhost:8002=128
+```
+
+The driver takes every protocol in the batch whose `meta.json` records a
+completed generation, checks that its seed matches `seeds.jsonl`, and sends the
+whole Markdown document to `extract_protocol_cohorts` with the full-protocol
+prompt and JSON-schema structured outputs (default model Nemotron 3.5 Super VL
+NVFP4, 50,000 completion tokens, chunks of 500 with two in flight). It refuses a
+batch that mixes generation prompt versions. Servers, adaptive concurrency,
+stopping and resuming work as for generation: each accepted decision is saved
+when its chunk returns and reused on rerun when the extraction prompt, schema and
+protocol bytes are unchanged. Output goes to `<batch-dir>/cohort_extraction/`
+(or `--output-dir`):
+
+```text
+cohort_extraction/
+  servers.json           live endpoint registry
+  trials/<NCT>/
+    extraction.json      raw answer, parsed decision, attempts with endpoint and
+                         model, prompt hash, schema, protocol SHA-256
+    reasoning.txt        the model's reasoning trace
+  cohorts.parquet, .csv  one row per extracted cohort, with provenance
+  trials.parquet, .csv   one row per protocol: provenance and extraction status
+  run_metadata.json      git commits of both repositories, settings, servers,
+                         status counts, failures, seeds without a protocol
+  trial_attempts.json    every attempt, including failed trials
+```
+
+Each row in `cohorts` and `trials` carries its provenance:
+
+| Columns | Source |
+| --- | --- |
+| `protocol_origin` (`synthetic`), `protocol_path`, `protocol_sha256` | The synthetic protocol |
+| `synthetic_prompt_sha256`, `synthetic_layout_index`, `synthetic_attempt`, `synthetic_completed_at`, `synthetic_endpoint`, `synthetic_model` | Its generation (`meta.json`) |
+| `registry_title`, `registry_brief_summary`, `registry_detailed_description`, `registry_eligibility_criteria`, `registry_last_update_post_date`, `registry_retrieved_at` | The ClinicalTrials.gov seed record, including its original eligibility criteria |
+| `extraction_status`, `cohort_count`, `extraction_error`, `extraction_attempts`, `extraction_endpoint`, `extraction_model`, `extraction_prompt_sha256`, `extraction_schema_version`, `extraction_decision_path` | The extraction |
+
+`cohorts` also has the inference package's cohort columns (`COHORT_COLUMNS`,
+`cohort_criteria_source` = `protocol`). `extraction_status` is `cohorts`,
+`not_cancer_treatment` or `failed`; only `cohorts` trials have cohort rows.
+
 ## Caveats
 
 - These are fabricated documents. Label any dataset built from them as
@@ -116,11 +167,14 @@ in `run_metadata.json`.
   shifts the cohort-count distribution relative to the seeds.
 - Training is planned on this synthetic corpus, not on real protocols; real
   protocol PDFs are for comparison and evaluation only. Nothing in
-  `train_all.sh` or `run_pipeline.py` consumes the corpus yet.
+  `train_all.sh` or `run_pipeline.py` consumes the corpus or its extracted
+  cohorts yet.
+- Extracted criteria come from the synthetic protocol, not the registry; the
+  `registry_*` columns are the seed, which the protocol may refine or differ from.
 
 ## Batches
 
 | Directory under `data/no_phi/synthetic_protocols_from_registry/` | Prompt | Status |
 | --- | --- | --- |
 | `batch_v5_sample5000_20261028/` | v5 | Stopped at 3,861 of 4,981; eligibility structure mirrored the extraction schema (superseded) |
-| `batch_v11_sample5000_20261029/` | v11 via the inference package | Current |
+| `batch_v11_sample5000_20261029/` | v11 via the inference package | Current; cohort extraction into `cohort_extraction/` starts when generation finishes |

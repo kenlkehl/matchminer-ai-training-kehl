@@ -215,10 +215,14 @@ covering one or more cohorts. Generation runs through
 [`synthetic_protocols/README.md`](synthetic_protocols/README.md). Training is
 planned on these synthetic protocols, not on real ones. Real protocol PDFs posted
 on ClinicalTrials.gov (`scripts/download_ctgov_protocols.py`; check licensing
-before redistributing) are for comparison and evaluation only. Cohort criteria
-can be extracted from full protocols with
-`matchminer_ai.trials.extract_protocol_cohorts`. Neither the synthetic corpus nor
-protocol extraction is used by the pipeline above yet.
+before redistributing) are for comparison and evaluation only.
+`synthetic_protocols/extract_cohorts.py` extracts each synthetic protocol's
+cohorts and eligibility criteria with
+`matchminer_ai.trials.extract_protocol_cohorts`, keeping every cohort's
+provenance: the synthetic protocol and its generation, and the original
+ClinicalTrials.gov record and eligibility criteria it was seeded from. Neither
+the synthetic corpus nor its extracted cohorts are used by the pipeline above
+yet.
 
 ## Experimental: EmbeddingGemma 2 comparison track
 
@@ -246,14 +250,14 @@ state and decisions for the current comparison are recorded in `AGENTS.md` and
 | `oncoreasoning_training/` | Exclusion extraction, distillation, OncoReasoning adapters | Current (its README is stale) |
 | `train_good_option_checker.py` | GoodOption catalog (`catalog`, `validate-catalog`) | Current; its `label`/`train` checker modes are deprecated |
 | `remote_vllm_pool.py`, `adaptive_controller.py`, `vllm_reasoning_utils.py` | Server pool, adaptive concurrency, reasoning parsers | Current |
-| `synthetic_protocols/` | Synthetic protocol corpus | Current |
+| `synthetic_protocols/` | Synthetic protocol corpus and its cohort extraction | Current |
 | `scripts/` | GCP fleet (`gcp_note_fleet.py`, `gcp_note_worker.py`, `bootstrap_gcp.sh`), remote TrialSpace jobs, `teacher_proxy.py`, `post_notes_workflow.py`, `label_to_trialspace.py`, `check_patient_summaries.py`, `download_ctgov_protocols.py`, comparison workflow, one-off `register_*_upgrade.py` resume upgrades | Mixed; see each docstring |
 | `claude_oracle/` | Claude Code plugin with judge skills for evaluations | Current |
 | `real_eval_code/` | Retrospective evaluations on real (PHI) data | Current; some scripts use the legacy extractor |
 | `legacy_trial_space_extraction.py`, `trial_hierarchy*.py`, `trial_prompts/`, `trial_space_export.py`, `trial_treatment_screening.py` | Pre-cohort trial-space extraction, superseded by `0b` | Legacy |
 | `llm_check_trials.py`, `14_check_boilerplate.py`, `make_top_matches.py`, `train_good_option_cosplit.py` | Earlier checker labeling and retrieval, superseded by gated labeling and OncoReasoning | Legacy |
 | `gcp_vllm_orchestrator.py`, `pdfify_synthetic_notes.py`, `synthetic_eval_code/` | Earlier fleet management, synthetic-note PDFs, a one-patient demo | Legacy |
-| `pull_spacify_and_embed_ctgov` | Pulls and embeds trials for the browser app | Broken: calls a removed script |
+| `pull_spacify_and_embed_ctgov` | Pulls current ClinicalTrials.gov cancer trials, extracts legacy trial spaces and embeds them for `real_eval_code/real_time_eval/` | Legacy (uses the legacy extractor) |
 
 ## Tests
 
@@ -265,7 +269,9 @@ state and decisions for the current comparison are recorded in `AGENTS.md` and
 sampling, synthetic seed and event validation, note preparation, pipeline
 planning and resume, CSV literals, the remote pool, embedder losses and the
 labeling-prompt contract. Operational scaffolding (supervisors, fleets, receipts)
-is not tested here by policy.
+is not tested here by policy. Embedder tests skip in environments older than the
+`pyproject.toml` pins (sentence-transformers 6.1, transformers 5.19), such as
+`/data1/ken/envs/gptoss3` on camus.
 
 ## Data and clinical safety
 
