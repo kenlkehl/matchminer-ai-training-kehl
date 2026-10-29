@@ -35,6 +35,74 @@ server registry (`--server-urls-file` / `--teacher-servers-file`, a JSON file
 re-read while running) or fixed URLs; the integrated training runner can also
 start one vLLM teacher per local GPU.
 
+## Current workflow (October 2026)
+
+The process now being followed, with the runs that produced the current
+artifacts (paths under `../data/no_phi`; `AR` is
+`archives/trialspace_reset_20261026T190832Z`). Steps 1–4 and 7–8 have run on
+registry-derived cohorts; steps 5–6 are the synthetic-protocol track, and
+generating patients from its cohorts (step 7) is not wired up yet.
+
+1. **ClinicalTrials.gov export.** The JSON export
+   `cancer_OR_tumor_OR_oncology_OR_lymphoma_OR_leukemia_OR_carcinoma_OR_sarcoma_OR_melanoma_OR_myelodysplastic_OR_myeloproliferative_OR_myeloma_OR_malignancy_ctgov_10-15-26.json`
+   (the search query is the file name; downloaded 2026-10-15) is parsed without
+   filtering by `parse-trials` (`0a_parse_ctgov_json.py`) into
+   `ctgov_trials.csv`: 148,056 trials.
+2. **Treatment screening and registry cohorts, before sampling.** Trials first
+   posted in 2020 or later, interventional, with every phase in early phase 1
+   to phase 4 (30,167 trials) go to the inference package's combined cohort
+   prompt (`trial.cohorts.user.txt`, schema `trial-treatment-cohorts-v3`). One
+   answer decides whether the trial is a cancer treatment trial and, if so, its
+   cohorts; there is no separate screening pass. This ran on all 30,167 trials
+   on 2026-10-24, 01:37–03:03 UTC, with Gemma 4 31B (NVFP4 on
+   `sn4622130540:8000`, FP8 on `172.24.216.113:8001`; thinking on, 50,000
+   completion tokens): 23,818 treatment trials and 6,349 others, with no errors
+   (`AR/ctgov_treatment_cohorts_since2020_gemma4_31b_20261023/`). `extract-cohorts`
+   (`0b_extract_trial_cohorts.py`) is the pipeline form of this step.
+3. **Sample 5,000 trials.** `sample-trials` (`0c_sample_trial_spaces.py`) keeps
+   screened treatment trials with complete cohort sets, excludes DFCI trials
+   open in 2025–2026 (`dfci_trials_summary_10-18-26.csv`), leaving 22,734, and
+   draws 5,000 with `random_state=42` (2026-10-24).
+4. **Re-extract the sample with named cohorts.** The same 5,000 were extracted
+   again on 2026-10-26 with Gemma 4 31B NVFP4 (cohort names, representation
+   `trial-treatment-cohorts-v4`). 19 were rejected and not replaced, leaving
+   **4,981 trials and 6,680 cohorts** in `sample_trial_cohort_lineitems.csv`
+   (`cohort_reextract_named_sample5000_gemma4_31b_20261026/`).
+5. **Synthetic protocols.** For each of the 4,981 trials, a synthetic full
+   protocol is generated from its registry record, fetched again from the
+   ClinicalTrials.gov API on 2026-10-28 (so the text can differ slightly from
+   the 10-15 export), by Nemotron 3.5 Super VL (NVFP4 and FP8) with prompt v11:
+   `synthetic_protocols/generate_batch.py`, into
+   `synthetic_protocols_from_registry/batch_v11_sample5000_20261029/`.
+6. **Extract cohorts from the synthetic protocols.**
+   `synthetic_protocols/extract_cohorts.py` (Nemotron, schema
+   `trial-protocol-cohorts-v1` with structured outputs) writes
+   `cohort_extraction/cohorts` and `trials` tables that keep each cohort's
+   synthetic protocol and its original registry record and eligibility
+   criteria. The protocol prompt decides again whether each trial is a cancer
+   treatment trial (`extraction_status` `not_cancer_treatment`). See
+   [`synthetic_protocols/README.md`](synthetic_protocols/README.md).
+7. **Patient seeds, event histories, notes and summaries.** `generate-synthetic`
+   (`generate_synthetic_data.py`) writes five positive and five near-miss
+   patient seeds per cohort from the cohort's eligibility criteria alone, then
+   event histories, then notes; then `prepare-notes`, `summarize-patients`
+   (serial summaries) and `prepare-training`. The default model is the teacher,
+   `nvidia/Gemma-4-31B-IT-NVFP4`. The last completed run used the registry
+   cohorts from step 4: 66,800 patients, 1,661,021 events and 1,137,527 notes
+   (`synthetic_namedcohorts_5000_gemma4_31b_20261026/`, 2026-10-26 to 10-27).
+   Before it can use the step-6 cohorts, an adapter has to add a contiguous
+   `cohort_index` and a `split`, and handle single-cohort rows, whose
+   `cohort_criteria_source` is `protocol`, without substituting the registry
+   criteria.
+8. **Retrieve, label, train.** The current round is the experimental
+   EmbeddingGemma 2 track (`trialspace_comparison_namedcohorts_5000_20261026/`;
+   [below](#experimental-embeddinggemma-2-comparison-track)): retrieval in both
+   directions over all patients and cohorts, gated 0–6 labels from the Gemma 4
+   31B NVFP4 teacher (2,403,278 pairs), and EmbeddingGemma 2 training, stopped
+   by the user at checkpoint 11,600 on 2026-10-28. The integrated runner,
+   `train_from_summaries.py` (ColBERT plus OncoReasoning), is described under
+   [Training](#training-train_from_summariespy).
+
 ## Pipeline
 
 `train_all.sh`, `train_all_gcp.sh` and `temp_train_gcp.sh` are identical
