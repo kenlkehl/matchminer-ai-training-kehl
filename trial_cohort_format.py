@@ -73,7 +73,11 @@ stale. Missing common text represents no shared criteria, not a missing cohort.
             return (f'Cohort-specific eligibility criteria:\n{specific}\n\n'
                     f'Common eligibility criteria:\n{common}') if common else specific
         if row.multiple_cohorts == 'no':
-            if 'eligibility_criteria' in frame:
+            if row.get('cohort_criteria_source') == 'protocol':
+                # Full-protocol extraction returns the sole cohort's own criteria;
+                # registry eligibility text must not replace them.
+                eligibility = row.cohort_eligibility_criteria
+            elif 'eligibility_criteria' in frame:
                 eligibility = row.eligibility_criteria
             elif row.get('cohort_criteria_source') == 'eligibility_criteria':
                 eligibility = row.cohort_eligibility_criteria
@@ -85,8 +89,11 @@ stale. Missing common text represents no shared criteria, not a missing cohort.
         return row.cohort_eligibility_criteria
     if not frame.empty:
         frame['cohort_eligibility_criteria'] = frame.apply(text, axis=1)
-        if frame.multiple_cohorts.eq('no').any():
-            frame.loc[frame.multiple_cohorts.eq('no'), 'cohort_criteria_source'] = 'eligibility_criteria'
+        single = frame.multiple_cohorts.eq('no')
+        if 'cohort_criteria_source' in frame:
+            single &= frame.cohort_criteria_source.ne('protocol')
+        if single.any():
+            frame.loc[single, 'cohort_criteria_source'] = 'eligibility_criteria'
     return frame
 
 

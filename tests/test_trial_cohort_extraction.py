@@ -359,6 +359,17 @@ def test_single_cohort_requires_eligibility_not_title_summary_fallback():
         complete_cohort_criteria(frame)
 
 
+def test_protocol_single_cohort_keeps_protocol_criteria_over_registry_text():
+    frame = pd.DataFrame(cohort_rows('NCT00000001', 1))
+    frame['cohort_eligibility_criteria'] = 'Inclusion criteria:\n1. Protocol-defined criterion.'
+    frame['cohort_criteria_source'] = 'protocol'
+    fixed = complete_cohort_criteria(frame)
+    assert fixed.cohort_eligibility_criteria.iloc[0] == frame.cohort_eligibility_criteria.iloc[0]
+    assert fixed.cohort_eligibility_criteria.iloc[0] != frame.eligibility_criteria.iloc[0]
+    assert fixed.cohort_criteria_source.iloc[0] == 'protocol'
+    assert training_rows(frame).this_space.iloc[0] == frame.cohort_eligibility_criteria.iloc[0]
+
+
 def test_repair_changes_only_single_rows_and_is_idempotent(tmp_path):
     from repair_single_cohort_criteria import repair
     from trial_cohort_format import load_production_cohorts

@@ -39,9 +39,9 @@ start one vLLM teacher per local GPU.
 
 The process now being followed, with the runs that produced the current
 artifacts (paths under `../data/no_phi`; `AR` is
-`archives/trialspace_reset_20261026T190832Z`). Steps 1–4 and 7–8 have run on
+`archives/trialspace_reset_20261026T190832Z`). Steps 1–4 and 8 have run on
 registry-derived cohorts; steps 5–6 are the synthetic-protocol track, and
-generating patients from its cohorts (step 7) is not wired up yet.
+step 7 is now generating patients from its cohorts.
 
 1. **ClinicalTrials.gov export.** The JSON export
    `cancer_OR_tumor_OR_oncology_OR_lymphoma_OR_leukemia_OR_carcinoma_OR_sarcoma_OR_melanoma_OR_myelodysplastic_OR_myeloproliferative_OR_myeloma_OR_malignancy_ctgov_10-15-26.json`
@@ -80,7 +80,9 @@ generating patients from its cohorts (step 7) is not wired up yet.
    `cohort_extraction/cohorts` and `trials` tables that keep each cohort's
    synthetic protocol and its original registry record and eligibility
    criteria. The protocol prompt decides again whether each trial is a cancer
-   treatment trial (`extraction_status` `not_cancer_treatment`). See
+   treatment trial (`extraction_status` `not_cancer_treatment`). The run on
+   2026-10-29 (03:40–06:00 UTC) gave 7,716 cohorts from 4,850 trials; 130 were
+   judged not cancer treatment and 1 failed at the output limit. See
    [`synthetic_protocols/README.md`](synthetic_protocols/README.md).
 7. **Patient seeds, event histories, notes and summaries.** `generate-synthetic`
    (`generate_synthetic_data.py`) writes five positive and five near-miss
@@ -90,10 +92,10 @@ generating patients from its cohorts (step 7) is not wired up yet.
    `nvidia/Gemma-4-31B-IT-NVFP4`. The last completed run used the registry
    cohorts from step 4: 66,800 patients, 1,661,021 events and 1,137,527 notes
    (`synthetic_namedcohorts_5000_gemma4_31b_20261026/`, 2026-10-26 to 10-27).
-   Before it can use the step-6 cohorts, an adapter has to add a contiguous
-   `cohort_index` and a `split`, and handle single-cohort rows, whose
-   `cohort_criteria_source` is `protocol`, without substituting the registry
-   criteria.
+   For the step-6 cohorts, `synthetic_protocols/patient_cohorts.py` builds the
+   generation input (contiguous `cohort_index`, source `split`, protocol
+   criteria kept for single cohorts), and generation runs with Nemotron 3.5
+   Super VL in `synthetic_protocolcohorts_v11_nemotron35_20261029/`.
 8. **Retrieve, label, train.** The current round is the experimental
    EmbeddingGemma 2 track (`trialspace_comparison_namedcohorts_5000_20261026/`;
    [below](#experimental-embeddinggemma-2-comparison-track)): retrieval in both

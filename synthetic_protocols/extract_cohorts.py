@@ -134,6 +134,9 @@ def main(args):
     settings["remote"]["model_name"] = args.model_name
     settings["remote"]["request_params"]["max_tokens"] = args.max_tokens
     decisions_dir = output_dir / "trials"
+    # Record the code that runs, before either repository can change during a long run.
+    repositories = {"training_repo": git_revision(Path(__file__).resolve().parents[1]),
+                    "inference_repo": git_revision(Path(matchminer_ai.__file__).resolve().parents[2])}
     started_at, started = datetime.now(timezone.utc).isoformat(timespec="seconds"), time.time()
     cohorts, metadata = extract_protocol_cohorts(
         trials[["trial_id", "protocol_path"]], config=config, output_dir=decisions_dir, return_metadata=True,
@@ -151,9 +154,7 @@ def main(args):
     (output_dir / "trial_attempts.json").write_text(json.dumps(metadata["trial_attempts"], default=str))
     (output_dir / "run_metadata.json").write_text(json.dumps({
         "started_at": started_at, "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "batch_dir": str(args.batch_dir.resolve()), "servers": servers,
-        "training_repo": git_revision(Path(__file__).resolve().parents[1]),
-        "inference_repo": git_revision(Path(matchminer_ai.__file__).resolve().parents[2]),
+        "batch_dir": str(args.batch_dir.resolve()), "servers": servers, **repositories,
         "settings": {"model_name": args.model_name, "max_tokens": args.max_tokens, "chunk_size": args.chunk_size,
                      "limit": args.limit},
         "synthetic_prompt_sha256": provenance.synthetic_prompt_sha256.iloc[0],

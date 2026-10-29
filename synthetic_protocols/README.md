@@ -155,6 +155,25 @@ Each row in `cohorts` and `trials` carries its provenance:
 `cohort_criteria_source` = `protocol`). `extraction_status` is `cohorts`,
 `not_cancer_treatment` or `failed`; only `cohorts` trials have cohort rows.
 
+## Patient-generation input
+
+```bash
+python -I synthetic_protocols/patient_cohorts.py --batch-dir "$B" \
+  --output ../data/no_phi/<generation-run>/sample_trial_cohort_lineitems.csv
+```
+
+`patient_cohorts.py` turns `cohort_extraction/cohorts.parquet` into the cohort
+table that `generate_synthetic_data.py` (`run_pipeline.py --sampled-cohorts`)
+reads: accepted cohorts in seed order with a contiguous `cohort_index`, each
+trial's source `split` copied from the registry sample it was seeded from
+(`--splits-from`, default `../data/no_phi/sample_trial_cohort_lineitems.csv`),
+and every provenance column. Single-cohort rows keep `cohort_criteria_source`
+`protocol`, so the generator uses the protocol's criteria; the table has no
+`eligibility_criteria` column, and the registry text stays in
+`registry_eligibility_criteria`. The script checks that the generator's own
+adapter reproduces the extracted criteria exactly, and writes
+`<output>.provenance.json` (source stamps, counts, failures, prompt hashes).
+
 ## Caveats
 
 - These are fabricated documents. Label any dataset built from them as
@@ -166,9 +185,9 @@ Each row in `cohorts` and `trials` carries its provenance:
 - Single-cohort seeds sometimes gain dose-escalation or expansion parts, which
   shifts the cohort-count distribution relative to the seeds.
 - Training is planned on this synthetic corpus, not on real protocols; real
-  protocol PDFs are for comparison and evaluation only. Nothing in
-  `train_all.sh` or `run_pipeline.py` consumes the corpus or its extracted
-  cohorts yet.
+  protocol PDFs are for comparison and evaluation only. The extracted cohorts
+  reach patient generation through `patient_cohorts.py` and
+  `run_pipeline.py --sampled-cohorts`; nothing selects them by default.
 - Extracted criteria come from the synthetic protocol, not the registry; the
   `registry_*` columns are the seed, which the protocol may refine or differ from.
 
@@ -177,4 +196,4 @@ Each row in `cohorts` and `trials` carries its provenance:
 | Directory under `data/no_phi/synthetic_protocols_from_registry/` | Prompt | Status |
 | --- | --- | --- |
 | `batch_v5_sample5000_20261028/` | v5 | Stopped at 3,861 of 4,981; eligibility structure mirrored the extraction schema (superseded) |
-| `batch_v11_sample5000_20261029/` | v11 via the inference package | Current; cohort extraction into `cohort_extraction/` starts when generation finishes |
+| `batch_v11_sample5000_20261029/` | v11 via the inference package | Current: 4,981 protocols (2026-10-29); `cohort_extraction/` has 7,716 cohorts from 4,850 trials, 130 judged not cancer treatment, 1 failed (output limit) |
