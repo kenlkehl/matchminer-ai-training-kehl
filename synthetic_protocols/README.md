@@ -114,7 +114,9 @@ in `run_metadata.json`.
   records the endpoint and model that produced it.
 - Single-cohort seeds sometimes gain dose-escalation or expansion parts, which
   shifts the cohort-count distribution relative to the seeds.
-- Nothing in `train_all.sh` or `run_pipeline.py` consumes the corpus yet.
+- Training is planned on this synthetic corpus, not on real protocols; real
+  protocol PDFs are for comparison and evaluation only. Nothing in
+  `train_all.sh` or `run_pipeline.py` consumes the corpus yet.
 
 ## Batches
 

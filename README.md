@@ -212,10 +212,11 @@ storage. There is no Hugging Face upload code in this repository.
 seeded by registry records, with realistic, often messily specified eligibility
 covering one or more cohorts. Generation runs through
 `matchminer_ai.trials.generate_synthetic_protocols`; see
-[`synthetic_protocols/README.md`](synthetic_protocols/README.md). Real protocol
-PDFs posted on ClinicalTrials.gov can be downloaded with
-`scripts/download_ctgov_protocols.py` (check licensing before redistributing).
-Cohort criteria can be extracted from full protocols with
+[`synthetic_protocols/README.md`](synthetic_protocols/README.md). Training is
+planned on these synthetic protocols, not on real ones. Real protocol PDFs posted
+on ClinicalTrials.gov (`scripts/download_ctgov_protocols.py`; check licensing
+before redistributing) are for comparison and evaluation only. Cohort criteria
+can be extracted from full protocols with
 `matchminer_ai.trials.extract_protocol_cohorts`. Neither the synthetic corpus nor
 protocol extraction is used by the pipeline above yet.
 
