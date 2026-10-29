@@ -1,11 +1,14 @@
 """Generate registry-seeded synthetic protocols with matchminer_ai.trials.generate_synthetic_protocols.
 
-Seeds are a JSON-lines file of registry records (nct_id, title, brief_summary,
-detailed_description, eligibility_criteria). Requests go through the inference
-package's endpoint pool with adaptive concurrency and vLLM load feedback. The
-servers come from <output-dir>/servers.json, written from --server on first run
-and re-read while running: edit it to add or remove a server without restarting.
-Each server entry carries its own served model ID. Reruns skip completed trials.
+Seeds are registry records (nct_id, title, brief_summary, detailed_description,
+eligibility_criteria): either an existing JSON-lines file (--seeds) or fetched
+from the ClinicalTrials.gov API for the nct_id column of a CSV (--nct-ids-from)
+into <output-dir>/seeds.jsonl, with the retrieval time. Requests go through the
+inference package's endpoint pool with adaptive concurrency and vLLM load
+feedback. The servers come from <output-dir>/servers.json, written from --server
+on first run and re-read while running: edit it to add or remove a server
+without restarting. Each server entry carries its own served model ID. Reruns
+skip completed trials. See synthetic_protocols/README.md.
 """
 import argparse
 from datetime import datetime, timezone
@@ -19,6 +22,39 @@ import pandas as pd
 
 from matchminer_ai import load_default_preset
 from matchminer_ai.trials import generate_synthetic_protocols
+
+
+API_URL = "https://clinicaltrials.gov/api/v2/studies"
+FIELDS = "NCTId,BriefTitle,OfficialTitle,BriefSummary,DetailedDescription,EligibilityCriteria,LastUpdatePostDate"
+IDS_PER_REQUEST = 200
+
+
+def fetch_seeds(nct_ids, path):
+    """Fetch registry records in batches and write them, in input order, as JSON lines."""
+    retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    seeds = {}
+    with httpx.Client(timeout=120) as client:
+        for i in range(0, len(nct_ids), IDS_PER_REQUEST):
+            params = {"filter.ids": ",".join(nct_ids[i:i + IDS_PER_REQUEST]), "fields": FIELDS, "pageSize": 1000}
+            for attempt in range(6):
+                response = client.get(API_URL, params=params)
+                if response.status_code not in (429, 500, 502, 503, 504):
+                    break
+                time.sleep(2 ** attempt)
+            response.raise_for_status()
+            for study in response.json()["studies"]:
+                protocol = study["protocolSection"]
+                ident, description = protocol["identificationModule"], protocol.get("descriptionModule", {})
+                seeds[ident["nctId"]] = dict(
+                    nct_id=ident["nctId"], title=ident.get("officialTitle") or ident.get("briefTitle", ""),
+                    brief_summary=description.get("briefSummary", ""),
+                    detailed_description=description.get("detailedDescription", ""),
+                    eligibility_criteria=protocol.get("eligibilityModule", {}).get("eligibilityCriteria", ""),
+                    last_update_post_date=protocol.get("statusModule", {}).get("lastUpdatePostDateStruct", {}).get("date", ""),
+                    retrieved_at=retrieved_at)
+    missing = [n for n in nct_ids if n not in seeds]
+    path.write_text("".join(json.dumps(seeds[n]) + "\n" for n in nct_ids if n in seeds))
+    print(f"fetched {len(seeds)} seed records; {len(missing)} NCT IDs not returned by the API", flush=True)
 
 
 def served_model(url):
@@ -41,7 +77,11 @@ def main(args):
     print(f"[{datetime.now(timezone.utc):%H:%M:%S}] servers: " + ", ".join(
         f"{s['url']} ({s['model'].split('/')[-1]}, cap {s['upstream_concurrency']})" for s in servers), flush=True)
 
-    seeds = pd.read_json(args.seeds, lines=True).rename(columns={"nct_id": "trial_id"})
+    seeds_path = args.seeds or args.output_dir / "seeds.jsonl"
+    if args.seeds is None and not seeds_path.exists():
+        nct_ids = list(dict.fromkeys(pd.read_csv(args.nct_ids_from, usecols=["nct_id"]).nct_id.dropna().astype(str)))
+        fetch_seeds(nct_ids, seeds_path)
+    seeds = pd.read_json(seeds_path, lines=True).rename(columns={"nct_id": "trial_id"})
     if args.limit:
         seeds = seeds.head(args.limit)
     config = load_default_preset()
@@ -72,7 +112,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--seeds", type=Path, required=True, help="JSON lines of registry records")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--seeds", type=Path, help="Existing JSON lines of registry records")
+    source.add_argument("--nct-ids-from", type=Path,
+                        help="CSV with an nct_id column; records are fetched into <output-dir>/seeds.jsonl once")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--server", action="append", default=[], help="BASE_URL[=MAX_CONCURRENCY] for a new servers.json")
     parser.add_argument("--model-name", default="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4")

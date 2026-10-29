@@ -1,12 +1,14 @@
-# Prompt changes
+# Synthetic protocol prompt history
 
 The current version, v11, now lives in the inference package as
 `trial.synthetic_protocol.system.txt` / `trial.synthetic_protocol.user.txt` with
 layouts in `matchminer_ai/data/synthetic_protocol_layouts.json`, run through
 `matchminer_ai.trials.generate_synthetic_protocols` (driver:
 `synthetic_protocols/generate_batch.py`). Earlier versions, the dropped editor
-prompt and the original scripts remain in git history. Every run directory under `data/no_phi/synthetic_protocols_from_registry/`
-holds a copy of the template it used.
+prompt and the original scripts remain in git history. Prompt-development runs
+under `data/no_phi/synthetic_protocols_from_registry/<NCT>__from_registry.vN__*/` hold a
+copy of the template they used; package runs record the prompt and layouts as
+`prompt_sha256` in each trial's `meta.json`.
 
 ## from_registry.v1
 
