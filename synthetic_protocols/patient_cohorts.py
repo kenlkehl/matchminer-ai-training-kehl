@@ -1,6 +1,7 @@
 """Turn a synthetic protocol batch's extracted cohorts into the patient-generation cohort table.
 
-Reads <batch-dir>/cohort_extraction/{cohorts,trials}.parquet from extract_cohorts.py
+Reads {cohorts,trials}.parquet from an extract_cohorts.py output directory
+(--extraction-dir, default <batch-dir>/cohort_extraction)
 and writes a CSV that generate_synthetic_data.py (run_pipeline.py --sampled-cohorts)
 accepts: the accepted cancer-treatment cohorts in seed order with a contiguous
 cohort_index, each trial's source split copied from the registry sample it was
@@ -56,7 +57,7 @@ def build(cohorts, trials, splits):
 
 
 def main(args):
-    extraction = args.batch_dir / "cohort_extraction"
+    extraction = args.extraction_dir or args.batch_dir / "cohort_extraction"
     metadata = json.loads((extraction / "run_metadata.json").read_text())
     if metadata["trial_errors"]:
         print(f"note: {len(metadata['trial_errors'])} trials failed extraction and have no cohorts", flush=True)
@@ -95,6 +96,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--batch-dir", type=Path, required=True, help="A generate_batch.py output directory")
+    parser.add_argument("--extraction-dir", type=Path, help="extract_cohorts.py output; default <batch-dir>/cohort_extraction")
     parser.add_argument("--output", type=Path, required=True, help="Generation input CSV to write")
     parser.add_argument("--splits-from", type=Path, default=DATA / "sample_trial_cohort_lineitems.csv",
                         help="Registry cohort sample whose nct_id/split columns give each trial's source split")
