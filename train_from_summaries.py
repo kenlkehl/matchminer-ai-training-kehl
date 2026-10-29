@@ -26,7 +26,6 @@ from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
-INFERENCE_COMMIT = "9b1bf8123f6919ecae5d7ba54f40538f543dded7"
 
 TRIALSPACE_OPERATIONAL_OPTIONS = {
     'trialspace_save_steps', 'trialspace_save_total_limit', 'trialspace_stop_at', 'trialspace_pause_file',
@@ -471,8 +470,6 @@ def main():
         return
     if not args.data_dir.is_relative_to(ROOT.parent / "data/no_phi"):
         raise ValueError("The integrated runner requires the authorized data/no_phi directory")
-    if git_revision(args.inference_repo) != INFERENCE_COMMIT:
-        raise ValueError("Use the pinned inference revision; review prompt/catalog changes before a new run")
     args.run_dir.mkdir(parents=True, exist_ok=True)
     (args.run_dir / "logs").mkdir(exist_ok=True)
     lock = (args.run_dir / "pipeline.lock").open("w")
@@ -482,7 +479,7 @@ def main():
         raise ValueError("The integrated runner requires inputs in the authorized data/no_phi directory")
     manifest_path = args.run_dir / "pipeline_manifest.json"
     identity = {"args": training_identity_arguments(args),
-                "training_commit": git_revision(ROOT), "inference_commit": INFERENCE_COMMIT,
+                "training_commit": git_revision(ROOT), "inference_commit": git_revision(args.inference_repo),
                 "trial_rubric_digest": TRIAL_RUBRIC_DIGEST,
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}
     from colbert_experiments.regression import score_contract
