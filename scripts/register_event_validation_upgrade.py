@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Register the validation-only correction for a stopped event-generation run.
+"""Register a generator-only upgrade for a stopped event-generation run.
 
-Prompts, seeds, sampling, input data, and the original patient-ID namespace stay
+Kinds: a validation-only correction (default), or seed replacement for patients
+whose histories fail validation on every attempt. Prompts, saved seeds and
+patients, sampling, input data, and the original patient-ID namespace stay
 fixed. Only the generator source may change. Both writer locks must be free.
 """
 import argparse
@@ -14,15 +16,19 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from generate_synthetic_data import VALIDATION_REVISION, now, save_json, sha_file
+from generate_synthetic_data import SEED_REPLACEMENT_REVISION, VALIDATION_REVISION, now, save_json, sha_file
+
+KINDS = {'validation': VALIDATION_REVISION, 'seed-replacement': SEED_REPLACEMENT_REVISION}
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def register(run_dir, pipeline_dir=None, *, standalone=False):
+def register(run_dir, pipeline_dir=None, *, standalone=False, kind='validation'):
     from run_pipeline import file_record, source_record
+
+    revision = KINDS[kind]
 
     run_dir = Path(run_dir).resolve()
     pipeline_dir = Path(pipeline_dir).resolve() if pipeline_dir else run_dir / 'pipeline'
@@ -67,13 +73,13 @@ def register(run_dir, pipeline_dir=None, *, standalone=False):
                     raise ValueError('Invalid prior validation approval')
                 if (saved.get('execution_mode') == 'recorded-generator-only'
                         and saved['approved_manifest_sha256'] == digest(approved)
-                        and saved['kind'] == VALIDATION_REVISION):
+                        and saved['kind'] == revision):
                     return saved
                 (backup / 'receipts').mkdir(parents=True, exist_ok=True)
                 save_json(backup / 'receipts' / (digest(saved) + '.json'), saved)
             backup.mkdir(parents=True, exist_ok=True)
             save_json(backup / 'manifest.json', original)
-            receipt = dict(kind=VALIDATION_REVISION, registered_at=now(),
+            receipt = dict(kind=revision, registered_at=now(),
                 execution_mode='recorded-generator-only', command=identity['command'],
                 original_manifest_sha256=digest(original), approved_manifest_sha256=digest(approved),
                 original_generator_sha256=original['source_sha256']['generate_synthetic_data.py'],
@@ -105,7 +111,7 @@ def register(run_dir, pipeline_dir=None, *, standalone=False):
         existing = json.loads(request_path.read_text())
         if existing not in (request, updated_request):
             raise ValueError('Pipeline request changed outside this upgrade')
-        receipt = dict(kind=VALIDATION_REVISION, registered_at=now(),
+        receipt = dict(kind=revision, registered_at=now(),
                        original_manifest_sha256=digest(original), approved_manifest_sha256=digest(approved),
                        original_request_sha256=request['fingerprint'],
                        approved_request_sha256=updated_request['fingerprint'],
@@ -138,5 +144,6 @@ if __name__ == '__main__':
     parser.add_argument('--pipeline-dir', type=Path)
     parser.add_argument('--standalone', action='store_true',
                         help='Approve only the recorded generator command; leave coordinator identities untouched')
+    parser.add_argument('--kind', choices=sorted(KINDS), default='validation')
     args = parser.parse_args()
-    print(json.dumps(register(args.run_dir, args.pipeline_dir, standalone=args.standalone), indent=2))
+    print(json.dumps(register(args.run_dir, args.pipeline_dir, standalone=args.standalone, kind=args.kind), indent=2))

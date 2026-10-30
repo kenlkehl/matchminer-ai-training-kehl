@@ -380,6 +380,91 @@ def test_saved_attempt_recovery_revalidates_and_retains_original_provenance():
     assert len(json.loads(warned['validation_warnings'])) == 1
 
 
+def replacement_session(monkeypatch, requests, bad, error):
+    """Seed batches: SEEDS first, then a redrawn batch; the history for ``bad`` returns ``error``."""
+    fresh = SEEDS.replace('Patient', 'Redrawn')
+
+    class Session:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def submit(self, payload):
+            requests.append((payload['stage'], payload['key']))
+            if payload['stage'] == 'seeds':
+                answer = SEEDS if requests.count(('seeds', payload['key'])) == 1 else fresh
+            elif payload['seed_text'] == bad:
+                return error
+            else:
+                answer = expand_seed(payload['seed_text'])
+            return dict(answer=answer, reasoning='r', raw_response='raw', transport='completions', finish_reason='stop',
+                        model='m', endpoint='e', generated_at=generation.now(), prompt_sha256='p',
+                        validation_revision=generation.VALIDATION_REVISION, validation_warnings='[]')
+
+    monkeypatch.setattr(generation, 'RequestSession', Session)
+    monkeypatch.setattr(generation, 'build_registry_from_args', lambda args: None)
+    return fresh
+
+
+def replacement_run(tmp_path):
+    args = args_for(tmp_path)
+    args.max_seed_replacements = 1
+    spaces = pd.DataFrame([dict(space_index=0, this_space=SPACE, trial_boilerplate_text='Active infection', nct_id='NCT0')])
+    return generation.Generator(args, Tokenizer()), spaces, generation.parse_seeds(SEEDS)[2]
+
+
+@pytest.mark.parametrize('error,replaced', [
+    ("ERROR: OutputValidationError('Include the seed diagnoses at their assigned ages: 60 years and 0 weeks')", True),
+    ('ERROR: APIConnectionError()', False),
+])
+def test_exhausted_patient_gets_a_new_seed_only_after_validation_failures(tmp_path, monkeypatch, error, replaced):
+    instance, spaces, bad = replacement_run(tmp_path)
+    requests = []
+    fresh = replacement_session(monkeypatch, requests, bad, error)
+    if not replaced:
+        # Transport failures keep the seed and leave the patient unresolved.
+        with pytest.raises(RuntimeError, match='2 generation items remain unresolved'):
+            asyncio.run(instance.generate_patient_events(spaces))
+        assert requests.count(('seeds', 'positive:0')) == 1 and not (tmp_path / 'patient_seed_replacements').exists()
+        assert json.loads((tmp_path / 'generation_failures/positive_0_2.json').read_text())['seed_text'] == bad
+        return
+    asyncio.run(instance.generate_patient_events(spaces))
+    saved = pd.concat(pd.read_parquet(p) for p in generation.checkpoint_paths(tmp_path / 'patient_events')).set_index('key')
+    assert len(saved) == 10 and saved.loc['positive:0:2', 'seed_text'] == 'Redrawn 2' + bad.removeprefix('Patient 2')
+    assert saved.seed_replacement.to_dict() == {key: int(key.endswith(':2')) for key in saved.index}
+    record = json.loads((tmp_path / 'patient_seed_replacements/positive_0_2.json').read_text())
+    assert error in record['replacements'][0]['replaced_because'] and record['replacements'][0]['batch_answer'] == fresh
+    assert json.loads(generation.Path(instance.seed_path(dict(space_index=0, patient_class='positive'))).read_text())['answer'] == SEEDS
+    provenance = json.loads(next(r for r in instance.assembled_event_records(spaces) if r['key'] == 'positive:0')['patient_provenance_json'])
+    assert [p.get('seed_replacement', 0) for p in provenance] == [0, 0, 1, 0, 0]
+    # Resume recognizes the replaced seed as the saved patient's seed and sends nothing.
+    sent = len(requests)
+    asyncio.run(instance.generate_patient_events(spaces))
+    assert len(requests) == sent
+
+
+def test_resume_replaces_a_seed_already_exhausted_by_validation_without_retrying_it(tmp_path, monkeypatch):
+    instance, spaces, bad = replacement_run(tmp_path)
+    error = "Generation failed for positive:0:2: ERROR: OutputValidationError('Include the seed diagnoses')"
+    (tmp_path / 'generation_failures').mkdir()
+    generation.save_json(tmp_path / 'generation_failures/positive_0_2.json',
+                         dict(key='positive:0:2', error=error, seed_text=bad, nct_id='NCT0'))
+    requests = []
+    replacement_session(monkeypatch, requests, bad, "ERROR: OutputValidationError('Include the seed diagnoses')")
+    asyncio.run(instance.generate_patient_events(spaces))
+    # The recorded positive patient gets its new seed at once; the negative one fails first.
+    assert requests.count(('seeds', 'positive:0')) == 2 and requests.count(('patient_events', 'positive:0:2')) == 1
+    assert requests.count(('patient_events', 'negative:0:2')) == 2
+    record = json.loads((tmp_path / 'patient_seed_replacements/positive_0_2.json').read_text())
+    assert record['replacements'][0]['replaced_because'] == error
+    assert not list((tmp_path / 'generation_failures').glob('*.json'))
+
+
 @pytest.mark.parametrize('next_age,valid', [
     ('60 years and 10 weeks', True),
     ('60 years and 21 weeks', True),

@@ -183,8 +183,14 @@ must match the teacher model).
   validated event chronology (demographics, diagnoses, treatments, adverse
   events, notes, imaging, pathology and NGS reports); each report event becomes a
   note written with the full history and the target event marked. Validation
-  failures are fed back and retried (up to 16 attempts). Runs against a remote
-  pool with adaptive concurrency; `--stop-after-events` stops before notes.
+  failures are fed back and retried (up to 16 attempts). A patient whose history
+  fails validation on every attempt gets a new seed, drawn with the unchanged
+  seed prompt and distinct from the cohort's other seeds, and is expanded again
+  (`--max-seed-replacements`, default 3); replacements are recorded in
+  `patient_seed_replacements/` and as `seed_replacement` in patient provenance,
+  and seed batches are never rewritten. Transport failures keep their seed. Runs
+  against a remote pool with adaptive concurrency; `--stop-after-events` stops
+  before notes.
 - **Prepare notes** (`prepare_synthetic_training.py notes`). Assigns explicitly
   fabricated calendar dates from event ages, ending at `--synthetic-date-anchor`
   (2025-01-01), and writes patient metadata. All synthetic splits are pooled for

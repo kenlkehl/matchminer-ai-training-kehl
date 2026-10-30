@@ -45,6 +45,9 @@ EVENT_TYPES = {'demographics', 'diagnosis', 'systemic', 'surgery', 'radiation',
 REPORT_TYPES = {'clinical_note', 'imaging_report', 'pathology_report', 'ngs_report'}
 PATIENTS_PER_CLASS = 5
 VALIDATION_REVISION = 'dated-seed-events-v3-ambiguous-recurrence-intervals'
+# A stopped run may resume under this generator only with a registered upgrade
+# receipt; existing seeds and patients are kept, as with a validation upgrade.
+SEED_REPLACEMENT_REVISION = 'exhausted-patient-seed-replacement-v1'
 
 
 def load_stage(filename):
@@ -339,7 +342,7 @@ def compatible_validation_upgrade(previous, current, receipt):
         **previous['source_sha256'],
         'generate_synthetic_data.py': current['source_sha256']['generate_synthetic_data.py']}}
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-    return (current == expected and receipt.get('kind') == VALIDATION_REVISION
+    return (current == expected and receipt.get('kind') in (VALIDATION_REVISION, SEED_REPLACEMENT_REVISION)
             and receipt.get('original_manifest_sha256') == digest(previous)
             and receipt.get('approved_manifest_sha256') == digest(current))
 
@@ -627,6 +630,11 @@ class Generator:
                            if (record := json.loads(path.read_text()))['key'] not in done}
         failed = {key: record['error'] for key, record in failure_records.items()}
         recovery_directory = self.out / 'event_recoveries'
+        # New seeds for patients whose histories failed validation on every
+        # attempt; the last is the patient's seed. Seed batches are not rewritten.
+        replacement_directory = self.out / 'patient_seed_replacements'
+        replacements = {record['key']: record['replacements'] for path in replacement_directory.glob('*.json')
+                        if (record := json.loads(path.read_text()))}
 
         def cached_failures():
             candidates = {}
@@ -649,7 +657,8 @@ class Generator:
                               stage_completed=completed - len(buffer), stage_expected=len(expected_keys),
                               completed_patient_histories=completed,
                               recovered_patient_histories=recovered,
-                              buffered_patient_histories=len(buffer), unresolved_items=len(failed))
+                              buffered_patient_histories=len(buffer), unresolved_items=len(failed),
+                              replaced_patient_seeds=sum(map(len, replacements.values())))
 
         def failure_path(key):
             return failure_directory / (key.replace(':', '_') + '.json')
@@ -686,9 +695,39 @@ class Generator:
                     raise RuntimeError(f'Generation failed for {item["key"]}: {result}')
                 return result
 
-            async def expand(item, seed, patient):
+            def current_seed(item, seeds, patient):
+                replaced = replacements.get(f'{item["key"]}:{patient}')
+                return replaced[-1]['seed_text'] if replaced else seeds[patient]
+
+            async def replace_seed(item, seeds, patient, seed, error):
+                """Draw a new seed batch with the unchanged seed prompt and keep its first seed, from
+                the patient's own position on, that no patient of this cohort has or this one had."""
+                key = f'{item["key"]}:{patient}'
+                history = replacements.setdefault(key, [])
+                batch = await request(item, 'seeds')
+                used = {s.casefold() for s in [*(current_seed(item, seeds, i) for i in range(len(seeds))),
+                                               seeds[patient], *(r['seed_text'] for r in history)]}
+                drawn = parse_seeds(batch['answer'])
+                new = next((s for s in drawn[patient:] + drawn[:patient] if s.casefold() not in used), None)
+                if new is None:
+                    raise RuntimeError(f'Seed replacement for {key} only repeated existing seeds')
+                history.append(dict(number=len(history) + 1, at=now(), seed_text=new,
+                                    seed_sha256=hashlib.sha256(new.encode()).hexdigest(),
+                                    replaced_seed_sha256=hashlib.sha256(seed.encode()).hexdigest(),
+                                    replaced_because=str(error), batch_answer=batch['answer'],
+                                    **{k: batch[k] for k in ('reasoning', 'model', 'endpoint', 'generated_at',
+                                                             'prompt_sha256', 'validation_revision')}))
+                replacement_directory.mkdir(exist_ok=True)
+                await asyncio.to_thread(save_json, replacement_directory / (key.replace(':', '_') + '.json'),
+                                        dict(key=key, replacements=history))
+                print(f'[generation] replaced seed {len(history)} for {key} after: {error}', flush=True)
+                progress()
+                return new
+
+            async def expand(item, seeds, patient):
                 nonlocal completed, recovered
                 key = f'{item["key"]}:{patient}'
+                seed = current_seed(item, seeds, patient)
                 seed_hash = hashlib.sha256(seed.encode()).hexdigest()
                 if key in done:
                     if done[key] != seed_hash:
@@ -697,7 +736,9 @@ class Generator:
                     return
                 child = dict(item, key=key, seed_key=item['key'], patient_number=patient,
                              seed_text=seed, seed_sha256=seed_hash)
-                candidates = cached.pop(key, [])
+                # Saved attempts made for an earlier seed of this patient are not candidates.
+                replaced_at = replacements[key][-1]['at'] if replacements.get(key) else ''
+                candidates = [(path, trace) for path, trace in cached.pop(key, []) if trace['at'] > replaced_at]
                 if candidates and failure_records[key].get('seed_text') != seed:
                     raise ValueError(f'Saved failed-patient seed changed: {key}')
                 result = (await asyncio.to_thread(recover_saved_history, candidates, seed, self.args.model)
@@ -713,17 +754,36 @@ class Generator:
                     recovered += 1
                     print(f'[generation] recovered saved attempt for {key}', flush=True)
                 else:
-                    try:
-                        result = await request(child, 'patient_events')
-                    except RuntimeError as exc:
-                        await record_failure(child, exc)
-                        return
+                    # A seed that already failed validation on every attempt is replaced
+                    # before more attempts; other failures (e.g. transport) are retried.
+                    previous = failure_records.get(key, {})
+                    error = previous['error'] if (previous.get('seed_text') == seed
+                                                  and 'OutputValidationError' in previous.get('error', '')) else None
+                    while True:
+                        if error is None:
+                            try:
+                                result = await request(child, 'patient_events')
+                                break
+                            except RuntimeError as exc:
+                                error = str(exc)
+                        if ('OutputValidationError' not in error
+                                or len(replacements.get(key, [])) >= self.args.max_seed_replacements):
+                            await record_failure(child, error)
+                            return
+                        try:
+                            seed = await replace_seed(item, seeds, patient, seed, error)
+                        except RuntimeError as exc:
+                            await record_failure(child, exc)
+                            return
+                        child = dict(child, seed_text=seed, seed_sha256=hashlib.sha256(seed.encode()).hexdigest())
+                        error = None
                 failed.pop(key, None)
                 failure_path(key).unlink(missing_ok=True)
                 # Avoid copying the full trial text into every patient checkpoint.
                 record = {key: child[key] for key in ('key', 'seed_key', 'patient_number', 'seed_text',
                           'seed_sha256', 'space_index', 'patient_class', 'nct_id')}
                 record.update({key: child[key] for key in ('cohort_trial_id', 'trial_representation') if key in child})
+                record['seed_replacement'] = len(replacements.get(key, []))
                 async with lock:
                     buffer.append({**record, **result})
                     completed += 1
@@ -761,8 +821,8 @@ class Generator:
                     # TaskGroup cancels siblings on interruption/failure before
                     # the shared pool closes; completed patients are flushed below.
                     async with asyncio.TaskGroup() as group:
-                        for patient, seed in enumerate(seeds):
-                            group.create_task(expand(item, seed, patient))
+                        for patient in range(len(seeds)):
+                            group.create_task(expand(item, seeds, patient))
 
             tasks = [asyncio.create_task(worker()) for _ in range(self.args.pending_requests)]
             try:
@@ -798,7 +858,10 @@ class Generator:
                 provenance = [{**{k: patient[k] for k in ('key', 'patient_number', 'endpoint', 'model',
                               'prompt_sha256', 'seed_sha256', 'generated_at')},
                               **{k: patient[k] for k in ('validation_revision', 'validation_warnings', 'recovered_from')
-                                 if k in patient}} for patient in patients]
+                                 if k in patient},
+                              # Shards from before seed replacement have no such column.
+                              **({'seed_replacement': int(patient['seed_replacement'])}
+                                 if patient.get('seed_replacement', 0) > 0 else {})} for patient in patients]
                 yield dict(key=key, space_index=row['space_index'], patient_class=kind,
                            answer='\n<new_patient>\n'.join(p['answer'] for p in patients),
                            raw_response='\n<new_patient>\n'.join(p['raw_response'] for p in patients),
@@ -966,11 +1029,15 @@ def parse_args():
     parser.add_argument('--note-preparation-workers', type=int, default=0,
                         help='CPU processes preparing note inputs: 0 uses up to 8 available CPUs; 1 is serial')
     parser.add_argument('--pending-requests', type=int, default=1536)
+    parser.add_argument('--max-seed-replacements', type=int, default=3,
+                        help='New seeds drawn for a patient whose history fails validation on every attempt')
     parser.add_argument('--stop-after-events', action='store_true', help='Save seeds and patient histories without starting notes')
     add_remote_cli_args(parser)
     parser.set_defaults(results_per_shard=128, max_attempts=16, request_timeout=1800,
                         scheduler_adaptive_concurrency=True)
     args = parser.parse_args()
+    if args.max_seed_replacements < 0:
+        parser.error('--max-seed-replacements must be nonnegative')
     if args.note_preparation_workers < 0 or args.spaces_per_note_chunk < 1:
         parser.error('--note-preparation-workers must be nonnegative and --spaces-per-note-chunk must be positive')
     if args.scheduler_adaptive_concurrency and not args.scheduler_metrics_file:
