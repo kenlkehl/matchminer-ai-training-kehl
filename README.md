@@ -76,14 +76,15 @@ step 7 is now generating patients from its cohorts.
    `synthetic_protocols_from_registry/batch_v11_sample5000_20261029/`.
 6. **Extract cohorts from the synthetic protocols.**
    `synthetic_protocols/extract_cohorts.py` (Nemotron, schema
-   `trial-protocol-cohorts-v1` with structured outputs) writes
-   `cohort_extraction/cohorts` and `trials` tables that keep each cohort's
-   synthetic protocol and its original registry record and eligibility
-   criteria. The protocol prompt decides again whether each trial is a cancer
-   treatment trial (`extraction_status` `not_cancer_treatment`). The run on
-   2026-10-29 (03:40–06:00 UTC) gave 7,716 cohorts from 4,850 trials; 130 were
-   judged not cancer treatment and 1 failed at the output limit. See
-   [`synthetic_protocols/README.md`](synthetic_protocols/README.md).
+   `trial-protocol-cohorts-v2` with structured outputs) writes `cohorts` and
+   `trials` tables that keep each cohort's synthetic protocol and its original
+   registry record and eligibility criteria. The protocol prompt decides again
+   whether each trial is a cancer treatment trial (`extraction_status`
+   `not_cancer_treatment`). The current run, `cohort_extraction_v2/`
+   (2026-10-29, 17:22–19:35 UTC), gave 7,721 cohorts from 4,848 trials; 132
+   were judged not cancer treatment and 1 failed. It replaces the schema-v1
+   run in `cohort_extraction/`, whose criteria lost every line break and
+   double quote. See [`synthetic_protocols/README.md`](synthetic_protocols/README.md).
 7. **Patient seeds, event histories, notes and summaries.** `generate-synthetic`
    (`generate_synthetic_data.py`) writes five positive and five near-miss
    patient seeds per cohort from the cohort's eligibility criteria alone, then
@@ -95,7 +96,9 @@ step 7 is now generating patients from its cohorts.
    For the step-6 cohorts, `synthetic_protocols/patient_cohorts.py` builds the
    generation input (contiguous `cohort_index`, source `split`, protocol
    criteria kept for single cohorts), and generation runs with Nemotron 3.5
-   Super VL in `synthetic_protocolcohorts_v11_nemotron35_20261029/`.
+   Super VL in `synthetic_protocolcohorts_v11_cohortsv2_nemotron35_20261029/`
+   (started 2026-10-29; the schema-v1 run
+   `synthetic_protocolcohorts_v11_nemotron35_20261029/` was stopped).
 8. **Retrieve, label, train.** The current round is the experimental
    EmbeddingGemma 2 track (`trialspace_comparison_namedcohorts_5000_20261026/`;
    [below](#experimental-embeddinggemma-2-comparison-track)): retrieval in both

@@ -159,10 +159,12 @@ Each row in `cohorts` and `trials` carries its provenance:
 
 ```bash
 python -I synthetic_protocols/patient_cohorts.py --batch-dir "$B" \
+  --extraction-dir "$B/cohort_extraction_v2" \
   --output ../data/no_phi/<generation-run>/sample_trial_cohort_lineitems.csv
 ```
 
-`patient_cohorts.py` turns `cohort_extraction/cohorts.parquet` into the cohort
+`patient_cohorts.py` turns an extraction's `cohorts.parquet` (`--extraction-dir`,
+default `<batch-dir>/cohort_extraction/`) into the cohort
 table that `generate_synthetic_data.py` (`run_pipeline.py --sampled-cohorts`)
 reads: accepted cohorts in seed order with a contiguous `cohort_index`, each
 trial's source `split` copied from the registry sample it was seeded from
@@ -196,4 +198,4 @@ adapter reproduces the extracted criteria exactly, and writes
 | Directory under `data/no_phi/synthetic_protocols_from_registry/` | Prompt | Status |
 | --- | --- | --- |
 | `batch_v5_sample5000_20261028/` | v5 | Stopped at 3,861 of 4,981; eligibility structure mirrored the extraction schema (superseded) |
-| `batch_v11_sample5000_20261029/` | v11 via the inference package | Current: 4,981 protocols (2026-10-29); `cohort_extraction/` has 7,716 cohorts from 4,850 trials, 130 judged not cancer treatment, 1 failed (output limit) |
+| `batch_v11_sample5000_20261029/` | v11 via the inference package | Current: 4,981 protocols (2026-10-29). `cohort_extraction_v2/` (schema `trial-protocol-cohorts-v2`, `--output-dir`) is current: 7,721 cohorts from 4,848 trials, 132 judged not cancer treatment, 1 failed (duplicate cohort criteria). `cohort_extraction/` (schema v1: 7,716 cohorts from 4,850 trials) is superseded: its `minLength` strings kept vLLM structured outputs from writing any JSON escape, so cohort-specific and single-cohort criteria have no line breaks or double quotes |
