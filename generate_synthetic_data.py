@@ -839,22 +839,24 @@ class Generator:
             raise ValueError('Seed/patient checkpoint coverage mismatch')
 
     def assembled_event_records(self, spaces):
-        """Join five independently saved histories without mixing patient order."""
-        locations = {}
-        for path in checkpoint_paths(self.out / 'patient_events'):
-            for key in pq.read_table(path, columns=['key']).column('key').to_pylist():
-                if key in locations:
-                    raise ValueError('Duplicate patient checkpoint key')
-                locations[key] = path
+        """Join five independently saved histories without mixing patient order.
 
-        @lru_cache(maxsize=16)
-        def read_shard(path):
-            return {row['key']: row for row in pd.read_parquet(path).to_dict('records')}
+        Every shard is read once. A cohort's patients finish at different times
+        and land in different shards, so a small shard cache re-read about one
+        shard per patient (hundreds of GB for a 77,000-patient run).
+        """
+        saved = {}
+        for path in checkpoint_paths(self.out / 'patient_events'):
+            for record in pd.read_parquet(path).to_dict('records'):
+                if record['key'] in saved:
+                    raise ValueError('Duplicate patient checkpoint key')
+                saved[record['key']] = record
 
         for row in spaces.to_dict('records'):
             for kind in ('positive', 'negative'):
                 key = f'{kind}:{int(row["space_index"])}'
-                patients = [read_shard(locations[f'{key}:{i}'])[f'{key}:{i}'] for i in range(PATIENTS_PER_CLASS)]
+                # Released once joined, so memory shrinks as the joined records grow.
+                patients = [saved.pop(f'{key}:{i}') for i in range(PATIENTS_PER_CLASS)]
                 provenance = [{**{k: patient[k] for k in ('key', 'patient_number', 'endpoint', 'model',
                               'prompt_sha256', 'seed_sha256', 'generated_at')},
                               **{k: patient[k] for k in ('validation_revision', 'validation_warnings', 'recovered_from')
