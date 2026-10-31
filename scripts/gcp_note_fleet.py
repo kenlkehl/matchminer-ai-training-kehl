@@ -201,6 +201,7 @@ class Fleet:
             raise ValueError('This job requires the explicit eight-RTX-VM allowlist')
         self.root.mkdir(parents=True, exist_ok=True)
         self.last_start, self.metadata_ready = {}, set()
+        self.healthy_gpus, self.published, self.misses = {}, {}, {}
         self.worker_source = Path(config['worker_source']).read_text()
         if hashlib.sha256(self.worker_source.encode()).hexdigest() != config['worker_source_sha256']:
             raise ValueError('Frozen worker source changed')
@@ -339,8 +340,14 @@ class Fleet:
     def endpoints(self):
         info = self.root / 'vm_status.json'
         reports = {v['name']: v for v in json.loads(info.read_text())['vms']} if info.exists() else {}
-        candidates = [(v, gpu) for v in self.vms
-                      for gpu in reports.get(v['name'], {}).get('bootstrap', {}).get('healthy_gpus', [])]
+        for name, report in reports.items():
+            # A failed maintenance pass omits the bootstrap report; keep the last
+            # one while the VM runs so one slow SSH check cannot drop its servers.
+            if 'bootstrap' in report:
+                self.healthy_gpus[name] = report['bootstrap'].get('healthy_gpus', [])
+            elif report.get('status') != 'RUNNING':
+                self.healthy_gpus.pop(name, None)
+        candidates = [(v, gpu) for v in self.vms for gpu in self.healthy_gpus.get(v['name'], [])]
         def check(item):
             vm, gpu = item
             url = f'http://127.0.0.1:{vm["base_port"] + gpu}/v1'
@@ -348,7 +355,8 @@ class Fleet:
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 with opener.open(url.removesuffix('/v1') + '/health', timeout=3) as response:
                     response.read()
-                with opener.open(url + '/models', timeout=3) as response:
+                # A server busy with long prompts can take several seconds here.
+                with opener.open(url + '/models', timeout=10) as response:
                     models = json.load(response)['data']
                 target = self.config['worker']
                 if not any(m['id'] == target['served_model'] and m.get('root') == target['model']
@@ -360,7 +368,25 @@ class Fleet:
             except Exception:
                 return None
         with ThreadPoolExecutor(max_workers=64) as pool:
-            return [row for row in pool.map(check, candidates) if row]
+            rows = list(pool.map(check, candidates))
+        urls = [f'http://127.0.0.1:{vm["base_port"] + gpu}/v1' for vm, gpu in candidates]
+        for url in set(self.published) - set(urls):
+            self.published.pop(url)
+            self.misses.pop(url, None)
+        result = []
+        for url, row in zip(urls, rows):
+            if row:
+                self.published[url], self.misses[url] = row, 0
+            elif url in self.published and self.misses.get(url, 0) < 2:
+                # Unregister a published server only after three straight misses.
+                self.misses[url] = self.misses.get(url, 0) + 1
+                row = self.published[url]
+            else:
+                self.published.pop(url, None)
+                self.misses.pop(url, None)
+            if row:
+                result.append(row)
+        return result
 
     def publish(self, endpoints):
         path = Path(self.config['registry'])
