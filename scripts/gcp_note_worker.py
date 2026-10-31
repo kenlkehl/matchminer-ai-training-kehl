@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VM-local per-GPU Gemma workers and an expiring controller lease."""
+"""VM-local per-GPU vLLM workers (Gemma by default) and an expiring controller lease."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import argparse
@@ -10,6 +10,9 @@ import time
 import urllib.request
 
 ROOT = Path('/opt/mmai-gemma-note-fleet')
+# Model-specific server flags; a fleet config may replace them with `vllm_args`.
+GEMMA_ARGS = ['--quantization', 'modelopt', '--gpu-memory-utilization', '0.90', '--reasoning-parser', 'gemma4']
+HUBS = ['/home/kenneth_kehl/.cache/huggingface/hub', '/root/.cache/huggingface/hub']
 
 
 def save(path, value):
@@ -83,10 +86,10 @@ def launch(gpu, config, hub):
         '-e', 'OMP_NUM_THREADS=8', '-e', 'MAX_JOBS=4', '-e', 'VLLM_ENGINE_READY_TIMEOUT_S=3600',
         config['image'], config['model'], '--revision', config['revision'],
         '--host', '127.0.0.1', '--port', str(8000 + gpu), '--served-model-name', config['served_model'],
-        '--tensor-parallel-size', '1', '--quantization', 'modelopt', '--language-model-only',
+        '--tensor-parallel-size', '1', '--language-model-only',
         '--max-model-len', str(config['context']), '--max-num-seqs', str(config['max_num_seqs']),
-        '--max-num-batched-tokens', '8192', '--gpu-memory-utilization', '0.90',
-        '--enable-prefix-caching', '--reasoning-parser', 'gemma4', '--no-enable-log-requests']
+        '--max-num-batched-tokens', '8192', '--enable-prefix-caching',
+        *config.get('vllm_args', GEMMA_ARGS), '--no-enable-log-requests']
     save(ROOT / f'command-{gpu}.json', command)
     run(command)
 
@@ -102,7 +105,7 @@ def bootstrap():
         run(['docker', 'pull', config['image']], timeout=1800)
     hub = ROOT / 'hf-hub'
     hub.mkdir(exist_ok=True)
-    for candidate in (Path('/home/kenneth_kehl/.cache/huggingface/hub'), Path('/root/.cache/huggingface/hub')):
+    for candidate in map(Path, config.get('hub_candidates', HUBS)):
         snapshot = candidate / ('models--' + config['model'].replace('/', '--')) / 'snapshots' / config['revision']
         if (snapshot / 'model.safetensors.index.json').exists():
             index = json.loads((snapshot / 'model.safetensors.index.json').read_text())
@@ -120,10 +123,10 @@ def bootstrap():
          '-v', str(hub) + ':/root/.cache/huggingface/hub', '--entrypoint', 'python3', config['image'], '-c', code], timeout=1800)
     status('starting_canary')
     launch(0, config, hub)
-    deadline = time.monotonic() + 1800
+    deadline = time.monotonic() + config.get('startup_seconds', 1800)
     while not ready(0, config):
         if time.monotonic() > deadline:
-            raise TimeoutError('Gemma canary startup timed out')
+            raise TimeoutError('Canary startup timed out')
         time.sleep(10)
     smoke(0, config)
     status('starting_remaining_workers', healthy_gpus=[0])

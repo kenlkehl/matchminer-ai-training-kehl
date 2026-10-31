@@ -175,6 +175,8 @@ def startup_script(config, worker_source):
         'subprocess.run(["systemctl","enable","mmai-gemma-note-guard.service"],check=True)\n'
         'subprocess.run(["systemctl","start","--no-block","mmai-gemma-note-guard.service"],check=True)\n')
     encoded = base64.b64encode(installer.encode()).decode()
+    # The enabled worker starts at boot before this script, possibly with the
+    # previous fleet's config, so restart it to read the config written above.
     return ('#!/bin/bash\nset -euo pipefail\n'
         f'printf %s {encoded} | base64 -d | python3\n'
         'systemctl disable --now mmai-nemotron-fleet.service mmai-beam-bootstrap.service 2>/dev/null || true\n'
@@ -184,7 +186,7 @@ def startup_script(config, worker_source):
         'docker stop --time 15 "$container" >/dev/null ;;\n'
         ' esac\ndone < <(docker ps -a --format "{{.Names}}")\n'
         'systemctl enable mmai-gemma-note-worker.service\n'
-        'systemctl start --no-block mmai-gemma-note-worker.service\n')
+        'systemctl restart --no-block mmai-gemma-note-worker.service\n')
 
 
 class Fleet:
