@@ -137,7 +137,7 @@ def workflow_terminal_reason(generation, generator_alive, workflow, workflow_ali
         # retrieval, then serve the separate live labeling registry until done.
         return None
     if workflow.get('phase') in ('stopping_cloud', 'releasing_gpus', 'preparing_corpus',
-                                  'mining', 'starting_labelers', 'labeling', 'completed'):
+                                  'mining', 'starting_label_fleet', 'starting_labelers', 'labeling', 'completed'):
         return 'patient_summarization_finished'
     if generation.get('stage') == 'failed':
         return 'note_generation_failed'

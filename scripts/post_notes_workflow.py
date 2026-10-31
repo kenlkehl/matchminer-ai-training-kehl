@@ -69,7 +69,8 @@ def teacher_blockers(target):
     allowed = {int(item['pid']): int(item['start_ticks'])
                for item in target.get('allowed_cooccupants', [])}
     blockers = []
-    for item in busy_gpus([str(target['gpu'])]):
+    # A tensor-parallel server lists its GPUs as CUDA_VISIBLE_DEVICES does, e.g. "0,1".
+    for item in busy_gpus(str(target['gpu']).split(',')):
         identity = teacher_identity(item['pid'])
         if identity is None or identity['start_ticks'] != allowed.get(item['pid']):
             blockers.append(item)
@@ -233,6 +234,32 @@ class Workflow:
             if current is not None:
                 self.adopted_teachers[gpu] = expected
 
+    def start_label_fleet(self):
+        """Restart the stopped cloud fleet for labeling, attached to this workflow."""
+        spec = self.config.get('label_fleet')
+        if not spec:
+            return
+        root = Path(spec['directory'])
+        launch = root / 'launch.json'
+        if launch.exists():
+            prior = json.loads(launch.read_text())
+            if process_identity(prior['pid']) == prior['start_ticks']:
+                return
+        self.update('starting_label_fleet')
+        # The fleet merges its servers into this registry, so it must exist first.
+        registry = Path(self.config['label_registry'])
+        if not registry.exists():
+            save(registry, dict(ready=True, servers=self.config['label_servers']))
+        config = json.loads(Path(spec['config']).read_text())
+        config.update(workflow_mode='labeling', registry=str(registry), workflow=dict(
+            status=str(self.root / 'status.json'), pid=os.getpid(), start_ticks=process_identity(os.getpid()),
+            label_status=str(self.root / 'labels/status.json'), label_stages={}))
+        save(root / 'config.json', config)
+        with (root / 'controller.log').open('ab') as log:
+            process = subprocess.Popen([sys.executable, '-u', spec['controller'], '--config', str(root / 'config.json')],
+                cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        save(launch, dict(pid=process.pid, start_ticks=process_identity(process.pid), at=now(), command=process.args))
+
     def start_labelers(self):
         self.update('starting_labelers')
         for target in self.config['local_teachers']:
@@ -267,6 +294,7 @@ class Workflow:
                 self.release_gpus()
                 self.run_stage('preparing_corpus')
                 self.run_stage('mining')
+            self.start_label_fleet()
             self.start_labelers()
             self.run_stage('labeling')
             self.update('completed', completed_at=now())
@@ -276,13 +304,18 @@ class Workflow:
             try:
                 self.update('failed', error=repr(error))
             finally:
-                config_path = Path(self.config['fleet_config'])
-                # STOP also prevents a late pending Spot start from being retried.
-                try:
-                    (config_path.parent / 'STOP').touch()
-                finally:
-                    if not (config_path.parent / 'shutdown_complete.json').exists():
-                        Fleet(json.loads(config_path.read_text()), config_path.parent).shutdown('downstream_workflow_failed')
+                paths = [Path(self.config['fleet_config'])]
+                if self.config.get('label_fleet'):
+                    paths.append(Path(self.config['label_fleet']['directory']) / 'config.json')
+                for config_path in paths:
+                    if not config_path.exists():
+                        continue
+                    # STOP also prevents a late pending Spot start from being retried.
+                    try:
+                        (config_path.parent / 'STOP').touch()
+                    finally:
+                        if not (config_path.parent / 'shutdown_complete.json').exists():
+                            Fleet(json.loads(config_path.read_text()), config_path.parent).shutdown('downstream_workflow_failed')
             raise
 
 
