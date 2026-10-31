@@ -2,9 +2,11 @@
 
 STOPPED at user request (October 28): the batch-96 training run and its full
 controller service were terminated so the user can make adjustments. Trainer,
-launcher, controller and loader workers exited; GB300 is idle. Last complete
-resumable checkpoint is 11,600 (epoch 0.39647), retained on SSD and preserved
-under comparison `recovery/user_stop_20261028_checkpoint11600/checkpoint-11600`.
+launcher, controller and loader workers exited; GB300 is idle. Its last
+checkpoint, 11,600 (epoch 0.39647), was deleted from the comparison
+`recovery/user_stop_20261028_checkpoint11600/` at the user's request on
+October 31 (record in that directory); the GB300 SSD copy may remain. Do not
+resume this run. The schema-v2 corpus retrieves with base `google/embeddinggemma-2`.
 See comparison `operator_stop.json` for shutdown/publication evidence. The unit
 has `Restart=no`; its failed result reflects the deliberate termination. Do not
 restart training or downstream retrieval/labeling without the user's revised
