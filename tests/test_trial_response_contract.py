@@ -100,3 +100,20 @@ def test_combined_space_keeps_negative_clauses_in_aggregate_and_component_prompt
         assert trial in prompt
         assert 'prohibits pembrolizumab exposure' in prompt
         assert 'excludes an EGFR mutation' in prompt
+
+
+@pytest.mark.parametrize("root", ["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4",
+                                  "RedHatAI/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-FP8"])
+def test_gated_labels_accept_either_approved_nemotron_quantization(root):
+    from colbert_experiments.labeling import validate_served_teacher
+    served = [dict(id="nemotron-3.5-super-vl-120b", root=root)]
+    assert validate_served_teacher(served, requested="nemotron-3.5-super-vl-120b",
+                                   tokenizer="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4")["root"] == root
+
+
+def test_gated_labels_reject_a_teacher_from_another_model_family():
+    from colbert_experiments.labeling import validate_served_teacher
+    served = [dict(id="nemotron-3.5-super-vl-120b", root="nvidia/Gemma-4-31B-IT-NVFP4")]
+    with pytest.raises(ValueError, match="differs from the configured model family"):
+        validate_served_teacher(served, requested="nemotron-3.5-super-vl-120b",
+                                tokenizer="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4")

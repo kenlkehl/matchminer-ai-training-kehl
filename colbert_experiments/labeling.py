@@ -21,15 +21,21 @@ from .label_preprocessing import BackgroundWork, PromptPreparer
 from .label_checkpoints import ResponseStore
 
 
+# Quantizations of one model approved to serve the same teacher (identical tokenizers and templates).
+EQUIVALENT_TEACHER_ROOTS = (
+    {'google/gemma-4-31B-it', 'nvidia/Gemma-4-31B-IT-NVFP4',
+     'RedHatAI/Gemma-4-31B-IT-FP8-Dynamic', 'RedHatAI/gemma-4-31B-it-FP8-Dynamic'},
+    {'nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4', 'RedHatAI/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-FP8'},
+)
+
+
 def validate_served_teacher(models, *, requested, tokenizer):
-    """Check the advertised root, including the approved equivalent Gemma quantizations."""
+    """Check the advertised root, including the approved equivalent quantizations."""
     matches = [model for model in models if model['id'] == requested]
     if len(matches) != 1:
         raise ValueError('Requested teacher model is not uniquely advertised: ' + requested)
     served = matches[0]
-    gemma31 = {'google/gemma-4-31B-it', 'nvidia/Gemma-4-31B-IT-NVFP4',
-               'RedHatAI/Gemma-4-31B-IT-FP8-Dynamic', 'RedHatAI/gemma-4-31B-it-FP8-Dynamic'}
-    allowed = gemma31 if tokenizer in gemma31 else {tokenizer}
+    allowed = next((roots for roots in EQUIVALENT_TEACHER_ROOTS if tokenizer in roots), {tokenizer})
     if served.get('root', served['id']) not in allowed:
         raise ValueError('Served teacher root differs from the configured model family')
     return served

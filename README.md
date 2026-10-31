@@ -153,7 +153,10 @@ The default LLM for data production and labeling is
 `nvidia/Gemma-4-31B-IT-NVFP4` (`oncoreasoning_training/teacher.py`), overridden
 with `--generation-model` / `--generation-tokenizer` (upstream) and
 `--teacher-model` / `--teacher-served-model` (training; an endpoint's model root
-must match the teacher model).
+must match the teacher model or be an approved quantization of it, listed in
+`EQUIVALENT_TEACHER_ROOTS` in `colbert_experiments/labeling.py`: the Gemma 4 31B
+builds, and Nemotron 3.5 Super VL NVFP4 and FP8, whose tokenizers and chat
+templates are identical).
 
 ## Data stages
 
