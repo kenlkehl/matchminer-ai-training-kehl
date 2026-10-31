@@ -240,9 +240,22 @@ disease burden, prior treatment and biomarker. The gated score is 0–6: a
 matched biomarker counts two points and every other yes one
 (`colbert_experiments/regression.py`, `contracts.py`).
 
-**Mining.** Each patient searches the cohorts of 500 sampled trials; candidates
-are the top 20 cohorts per patient and top 40 patients per cohort, plus TF-IDF,
-random and source-trial pairs (`trialspace_training.py mine`).
+**Mining.** Both miners, ColBERT (`trialspace_training.py mine`) and
+EmbeddingGemma 2 (`trialspace_comparison.py dense-mine`), produce the same
+candidate set by default, with no flags needed:
+
+- Each patient searches only the cohorts of 500 randomly sampled trials
+  (`--patient-trial-sample`; 0 searches all trials). Each patient gets its own
+  sample, drawn reproducibly from `--seed` (42) and the patient ID.
+- Per patient: the top 20 cohorts by the retriever, plus 5 TF-IDF and 5 random
+  cohorts, all from that patient's sampled trials.
+- Per cohort: the top 40 patients over the whole corpus, plus 5 TF-IDF and 5
+  random patients.
+- Every patient's pairs with the cohorts of its source trial.
+
+The TF-IDF and random extras (`--lexical-k`, `--random-k`, default 5 each)
+supply teacher-labeled pairs the retriever would not rank highly. Keep them
+unless an experiment says otherwise.
 
 **OncoReasoning.** Student base `google/gemma-4-E4B-it` with two independent
 LoRA adapters on one frozen base (rank 64, alpha 128, all linear layers):

@@ -447,7 +447,7 @@ def parser():
         help='Query/document pairs scored together across multiple queries')
     sub.choices['mine'].add_argument('--score-query-batches', type=int, default=4,
         help='Encoder batches grouped for lexical proposal generation and pair scoring')
-    sub.choices['mine'].add_argument('--top-k-patient-to-cohort', type=int,
+    sub.choices['mine'].add_argument('--top-k-patient-to-cohort', type=int, default=20,
         help='ColBERT cohort picks per patient; overrides --top-k for this direction')
     sub.choices['mine'].add_argument('--top-k-cohort-to-patient', type=int, default=40,
         help='ColBERT patient picks per cohort; overrides --top-k for this direction')

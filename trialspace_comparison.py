@@ -332,10 +332,13 @@ def main():
     parser.add_argument('--max-tokens', type=int, default=8192)
     parser.add_argument('--encode-batch-size', type=int, default=32)
     parser.add_argument('--score-batch-size', type=int, default=128)
-    parser.add_argument('--patient-k', type=int, default=20)
-    parser.add_argument('--cohort-k', type=int, default=40)
-    parser.add_argument('--lexical-k', type=int, default=5)
-    parser.add_argument('--random-k', type=int, default=5)
+    parser.add_argument('--patient-k', type=int, default=20,
+                        help='Top cohorts per patient, from that patient\'s sampled trials')
+    parser.add_argument('--cohort-k', type=int, default=40, help='Top patients per cohort, over all patients')
+    parser.add_argument('--lexical-k', type=int, default=5,
+                        help='TF-IDF candidates added per query by default, from the same search set')
+    parser.add_argument('--random-k', type=int, default=5,
+                        help='Random candidates added per query by default, from the same search set')
     parser.add_argument('--patient-trial-sample', type=int, default=500,
                         help='Trials randomly sampled per patient; the patient searches only their cohorts (0 = all trials)')
     parser.add_argument('--seed', type=int, default=42)
