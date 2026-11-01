@@ -13,6 +13,21 @@ LEGACY_REPRESENTATION = 'trial-treatment-cohorts-v3'
 SUPPORTED_REPRESENTATIONS = {LEGACY_REPRESENTATION, REPRESENTATION}
 COHORT_REQUIRED = {'trial_id', 'cohort_trial_id', 'cohort_number', 'cohort_count',
                    'cohort_eligibility_criteria', 'cancer_treatment_trial', 'multiple_cohorts'}
+# Model-extracted criteria whose single-cohort text is the model's own, never a
+# registry eligibility field: full protocols and (schema trial-registry-cohorts-v1)
+# registry text.
+EXTRACTED_SOURCES = ('protocol', 'registry')
+
+
+def cohort_version(frame):
+    """'protocol' or 'registry' per row: which representation of its trial a cohort belongs to.
+
+    A retrieval table can hold both versions of a trial, each a complete cohort set.
+    Historical registry sources ('llm', 'eligibility_criteria') are 'registry'.
+    """
+    if 'cohort_criteria_source' not in frame:
+        return pd.Series('registry', index=frame.index)
+    return frame.cohort_criteria_source.map(lambda s: 'protocol' if s == 'protocol' else 'registry')
 
 
 def read_clinical_csv(path, **kwargs):
@@ -73,9 +88,9 @@ stale. Missing common text represents no shared criteria, not a missing cohort.
             return (f'Cohort-specific eligibility criteria:\n{specific}\n\n'
                     f'Common eligibility criteria:\n{common}') if common else specific
         if row.multiple_cohorts == 'no':
-            if row.get('cohort_criteria_source') == 'protocol':
-                # Full-protocol extraction returns the sole cohort's own criteria;
-                # registry eligibility text must not replace them.
+            if row.get('cohort_criteria_source') in EXTRACTED_SOURCES:
+                # Protocol and current registry extraction return the sole cohort's
+                # own criteria; registry eligibility text must not replace them.
                 eligibility = row.cohort_eligibility_criteria
             elif 'eligibility_criteria' in frame:
                 eligibility = row.eligibility_criteria
@@ -91,7 +106,7 @@ stale. Missing common text represents no shared criteria, not a missing cohort.
         frame['cohort_eligibility_criteria'] = frame.apply(text, axis=1)
         single = frame.multiple_cohorts.eq('no')
         if 'cohort_criteria_source' in frame:
-            single &= frame.cohort_criteria_source.ne('protocol')
+            single &= ~frame.cohort_criteria_source.isin(EXTRACTED_SOURCES)
         if single.any():
             frame.loc[single, 'cohort_criteria_source'] = 'eligibility_criteria'
     return frame
@@ -214,6 +229,11 @@ def validate_cohort_rows(frame):
     if 'nct_id' in frame and not frame.nct_id.eq(frame.trial_id).all():
         raise ValueError('nct_id and trial_id disagree')
     for trial, group in frame.groupby('trial_id', sort=False):
+        if 'split' in group and (not group.split.isin(['train', 'val', 'validation', 'test']).all()
+                                 or group.split.nunique() != 1):
+            raise ValueError(f'Conflicting/missing split for {trial}')
+    # Each version of a trial (protocol, registry) is its own complete cohort set.
+    for (trial, _), group in frame.groupby([frame.trial_id, cohort_version(frame)], sort=False):
         count = group.cohort_count.iloc[0]
         if isinstance(count, bool) or not isinstance(count, Real) or not math.isfinite(count):
             raise ValueError(f'Invalid cohort count for {trial}')
@@ -225,9 +245,6 @@ def validate_cohort_rows(frame):
             raise ValueError(f'Incomplete or duplicated cohort set for {trial}')
         if group.multiple_cohorts.nunique() != 1 or (group.multiple_cohorts.iloc[0] == 'yes') != (count > 1):
             raise ValueError(f'Cohort count and decision disagree for {trial}')
-        if 'split' in group and (not group.split.isin(['train', 'val', 'validation', 'test']).all()
-                                 or group.split.nunique() != 1):
-            raise ValueError(f'Conflicting/missing split for {trial}')
     return frame
 
 

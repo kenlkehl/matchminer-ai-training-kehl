@@ -51,7 +51,7 @@ def arguments(tmp_path):
 def test_extraction_csv_preserves_literal_none_as_original_eligibility(tmp_path, backend):
     from trial_cohort_format import read_clinical_csv
     answers, calls = backend
-    answers['Trial 1'] = json.dumps(dict(cancer_treatment_trial='yes', multiple_cohorts='no'))
+    answers['Trial 1'] = json.dumps(dict(cancer_treatment_trial='yes', multiple_cohorts='no', eligibility_criteria='None'))
     args = arguments(tmp_path)
     row = source()
     row['eligibility_criteria'] = 'None'
@@ -84,7 +84,8 @@ def test_selection_includes_phase4_and_boundary_preserves_metadata_and_splits():
 def test_public_api_combined_decisions_complete_rows_and_resume(tmp_path, backend, monkeypatch):
     answers, calls = backend
     decisions = [dict(cancer_treatment_trial='no'),
-                 dict(cancer_treatment_trial='yes', multiple_cohorts='no'),
+                 dict(cancer_treatment_trial='yes', multiple_cohorts='no',
+                      eligibility_criteria='Inclusion criteria:\nAdults with treated cancer.'),
                  dict(cancer_treatment_trial='yes', multiple_cohorts='yes',
                       cohorts=[dict(cohort_name='Cohort A', cohort_specific_eligibility_criteria='Untreated lung cancer.'),
                                dict(cohort_name='Cohort B', cohort_specific_eligibility_criteria='Previously treated breast cancer.')],
@@ -105,7 +106,10 @@ def test_public_api_combined_decisions_complete_rows_and_resume(tmp_path, backen
     assert rows.cohort_count.tolist() == [1, 2, 2]
     assert rows.cohort_name.iloc[1:].tolist() == ['Cohort A', 'Cohort B']
     assert not rows.cohort_eligibility_criteria.str.contains('Cohort A|Cohort B').any()
-    assert rows.cohort_eligibility_criteria.iloc[0] == 'Adults with cancer.'
+    # The model's extracted single-cohort criteria, not the registry field.
+    assert rows.cohort_eligibility_criteria.iloc[0] == 'Inclusion criteria:\nAdults with treated cancer.'
+    assert rows.cohort_criteria_source.eq('registry').all()
+    assert training_rows(rows).cohort_eligibility_criteria.tolist() == rows.cohort_eligibility_criteria.tolist()
     assert rows.cohort_eligibility_criteria.iloc[1:].str.contains('Age >= 18; exclude active infection.', regex=False).all()
     assert rows.last_update_post_date.eq('2026-10').all()
     assert json.loads(args.output_json.read_text()) == dict(zip([f'NCT{i:08}' for i in range(1, 4)], decisions))
@@ -132,7 +136,7 @@ def test_failure_is_not_rejection_or_sampleable_output_and_only_failed_trial_ret
     assert args.output_cohorts.with_suffix('.partial.csv').exists()
     assert len(json.loads((tmp_path / 'errors.json').read_text())) == 1
     assert len(calls) == 4  # Valid trial once; three validation attempts for invalid.
-    answers['Trial 2'] = '{"cancer_treatment_trial":"yes","multiple_cohorts":"no"}'
+    answers['Trial 2'] = '{"cancer_treatment_trial":"yes","multiple_cohorts":"no","eligibility_criteria":"Adults."}'
     extract.run(args, config)
     assert len(calls) == 5
     assert pd.read_csv(args.output_cohorts).nct_id.tolist() == ['NCT00000002']

@@ -18,6 +18,8 @@ extraction and matching; it is **not** a set of real trial criteria.
 | Batch driver | `synthetic_protocols/generate_batch.py` (this repository) |
 | Cohort extraction API | `matchminer_ai.trials.extract_protocol_cohorts` (inference package) |
 | Cohort extraction driver | `synthetic_protocols/extract_cohorts.py` (this repository) |
+| Registry-version cohorts | `0b_extract_trial_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl` (this repository) |
+| Retrieval cohort table (both versions) | `synthetic_protocols/retrieval_cohorts.py` (this repository) |
 | Prompt history and findings | [`PROMPT_HISTORY.md`](PROMPT_HISTORY.md) |
 | Real protocol PDFs (comparison data) | `scripts/download_ctgov_protocols.py` |
 
@@ -176,6 +178,44 @@ and every provenance column. Single-cohort rows keep `cohort_criteria_source`
 adapter reproduces the extracted criteria exactly, and writes
 `<output>.provenance.json` (source stamps, counts, failures, prompt hashes).
 
+## Registry versions and the retrieval cohort table
+
+Users may be allowed to send some trials' full protocols to an LLM and only the
+ClinicalTrials.gov text of others, so TrialSpace and the downstream models are
+trained on both representations. Every sampled trial is therefore also
+extracted from the registry record its protocol was written from, with the
+registry prompt (`trial.cohorts.user.txt`, schema `trial-registry-cohorts-v1`),
+which applies the protocol prompt's rules and returns the same shapes,
+including extracted criteria for a single cohort:
+
+```bash
+python 0b_extract_trial_cohorts.py --trials-jsonl "$B/seeds.jsonl" \
+  --work-dir <run>/registry_cohorts/work --output-trials <run>/registry_cohorts/trials_with_cohorts.csv \
+  --output-cohorts <run>/registry_cohorts/trial_cohort_lineitems.csv --output-json <run>/registry_cohorts/trial_cohorts.json \
+  --model <served alias> --tokenizer-model <model or tokenizer path> --server-urls-file <servers.json> \
+  --max-attempts 5 --allow-failures
+python -I synthetic_protocols/retrieval_cohorts.py \
+  --protocol-cohorts <generation-run>/sample_trial_cohort_lineitems.csv \
+  --registry-cohorts <run>/registry_cohorts/trial_cohort_lineitems.csv \
+  --registry-trials <run>/registry_cohorts/trials_with_cohorts.csv --output <run>/retrieval_cohorts.csv
+```
+
+`--trials-jsonl` extracts every record, without `0b`'s date and phase selection
+or split assignment; `--allow-failures` exports even when a trial fails every
+attempt (that trial keeps only its protocol version). `retrieval_cohorts.py`
+keeps the protocol rows unchanged and adds the registry rows with IDs
+`<NCT>-registry-cohort-<n>`, `cohort_criteria_source` `registry`, their registry
+fields as `registry_*`, and the trial's split from `--splits-from`; a trial
+accepted in only one version keeps that one. This table, not the
+patient-generation table, is the `--cohorts` input to `trialspace_training.py
+prepare`. Patients are still generated from the protocol cohorts only.
+
+Mining then represents each trial by one version (main README, Mining): each
+patient searches one version of each of its sampled trials, chosen at random
+per patient and trial, and each trial queries for patients with one version,
+chosen at random per trial. A patient's pairs with its own source trial
+include both versions.
+
 ## Caveats
 
 - These are fabricated documents. Label any dataset built from them as
@@ -189,7 +229,8 @@ adapter reproduces the extracted criteria exactly, and writes
 - Training is planned on this synthetic corpus, not on real protocols; real
   protocol PDFs are for comparison and evaluation only. The extracted cohorts
   reach patient generation through `patient_cohorts.py` and
-  `run_pipeline.py --sampled-cohorts`; nothing selects them by default.
+  `run_pipeline.py --sampled-cohorts`, and retrieval together with the
+  registry versions through `retrieval_cohorts.py`.
 - Extracted criteria come from the synthetic protocol, not the registry; the
   `registry_*` columns are the seed, which the protocol may refine or differ from.
 

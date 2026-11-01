@@ -3,6 +3,13 @@
 
 No separate screening pass or training-owned extraction prompt. Checkpoints
 retain combined decisions, reasoning, validation attempts and endpoint provenance.
+
+Two inputs: the parsed registry export (--input), from which interventional
+early phase I-IV trials first posted since --start-year are selected, or an
+already-sampled set of registry records (--trials-jsonl, e.g. the seeds.jsonl of
+a synthetic protocol batch), every one of which is extracted. The second gives
+each sampled trial its registry-derived cohorts beside the cohorts extracted
+from its synthetic protocol (synthetic_protocols/README.md).
 """
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -78,6 +85,21 @@ def select_trials(frame, *, start_year=2020, seed=42):
     for column in ('title', 'brief_summary', 'eligibility_criteria'):
         frame[column] = frame[column].fillna('')
     return frame
+
+
+def load_sampled_trials(path):
+    """Registry records of an already-sampled trial set; no selection or split assignment."""
+    frame = pd.DataFrame([json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()])
+    required = {'nct_id', 'title', 'brief_summary', 'eligibility_criteria'}
+    if frame.empty or required - set(frame):
+        raise ValueError(f'Sampled trials need columns {sorted(required)}')
+    if not frame.nct_id.str.fullmatch(r'NCT\d{8}', na=False).all():
+        raise ValueError('Expected ClinicalTrials.gov NCT identifiers')
+    if frame.nct_id.duplicated().any():
+        raise ValueError('Duplicate NCT IDs in the sampled trials')
+    for column in ('title', 'brief_summary', 'eligibility_criteria'):
+        frame[column] = frame[column].fillna('')
+    return frame.sort_values('nct_id').reset_index(drop=True)
 
 
 def make_config(args):
@@ -171,12 +193,15 @@ def export_results(frame, args, fingerprint):
                                       'cohort_index': index, 'trial_representation': REPRESENTATION})
                 index += 1
         json_out.write('\n}\n')
+    partial = errors and not args.allow_failures
     for temporary, path in zip(temps, outputs):
-        destination = path.with_suffix('.partial' + path.suffix) if errors else path
+        destination = path.with_suffix('.partial' + path.suffix) if partial else path
         temporary.replace(destination)
     atomic_json(args.work_dir / 'errors.json', errors)
-    if errors:
+    if partial:
         raise RuntimeError(f'{len(errors)} trials failed; partial exports saved. Rerun to retry failures before sampling.')
+    if errors:
+        print(f'{len(errors)} trials failed every attempt and have no cohorts (errors.json)', flush=True)
     print(f'Exported {len(frame)} decisions and {index} cohort rows', flush=True)
 
 
@@ -184,9 +209,15 @@ def run(args, config):
     from matchminer_ai.config import config_snapshot
     from matchminer_ai.trials.cohort_schema import COHORT_SCHEMA_VERSION, load_cohort_prompt
     import matchminer_ai
-    frame = select_trials(read_clinical_csv(args.input), start_year=args.start_year, seed=args.seed)
+    if args.trials_jsonl:
+        frame = load_sampled_trials(args.trials_jsonl)
+    else:
+        frame = select_trials(read_clinical_csv(args.input), start_year=args.start_year, seed=args.seed)
     package = Path(matchminer_ai.__file__).parent
-    identity = dict(input_stamp=file_stamp(args.input), start_year=args.start_year, seed=args.seed,
+    source = args.trials_jsonl or args.input
+    identity = dict(input=str(source.resolve()), input_stamp=file_stamp(source),
+        selection='sampled_trials' if args.trials_jsonl else 'registry_export',
+        start_year=args.start_year, seed=args.seed,
         schema=COHORT_SCHEMA_VERSION, prompt_sha256=hashlib.sha256(load_cohort_prompt().encode()).hexdigest(),
         config=config_snapshot(config), source_sha256={str(p.relative_to(package)): sha_file(p)
             for p in sorted(package.rglob('*')) if p.suffix in ('.py', '.txt', '.yaml')},
@@ -243,6 +274,9 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     data = ROOT.parent / 'data/no_phi'
     p.add_argument('--input', type=Path, default=data / 'ctgov_trials.csv')
+    p.add_argument('--trials-jsonl', type=Path,
+                   help='Already-sampled registry records (nct_id, title, brief_summary, eligibility_criteria), '
+                        'such as a synthetic protocol batch seeds.jsonl; all are extracted, replacing --input selection')
     p.add_argument('--output-trials', type=Path, default=data / 'trials_with_cohorts.csv')
     p.add_argument('--output-cohorts', type=Path, default=data / 'trial_cohort_lineitems.csv')
     p.add_argument('--output-json', type=Path, default=data / 'trial_cohorts.json')
@@ -261,6 +295,9 @@ def parser():
     p.add_argument('--request_timeout', type=float, default=7200)
     p.add_argument('--recovery-timeout', type=float, default=86400)
     p.add_argument('--max-attempts', type=int, choices=range(1, 11), default=3)
+    p.add_argument('--allow-failures', action='store_true',
+                   help='Export complete files even if some trials fail every attempt (listed in errors.json); '
+                        'for registry versions of sampled trials, whose protocol versions remain')
     p.add_argument('--max-tokens', type=int, default=50000)
     p.add_argument('--api-key-env', default='OPENAI_API_KEY')
     return p
@@ -272,7 +309,7 @@ def main(argv=None):
            args.request_timeout, args.recovery_timeout) <= 0:
         raise ValueError('Concurrency, output budget and timeouts must be positive')
     destinations = [p.resolve() for p in (args.output_trials, args.output_cohorts, args.output_json)]
-    if len(set(destinations)) != 3 or args.input.resolve() in destinations:
+    if len(set(destinations)) != 3 or (args.trials_jsonl or args.input).resolve() in destinations:
         raise ValueError('Input and all output paths must be distinct')
     source = args.inference_repo.resolve() / 'src'
     if not (source / 'matchminer_ai/trials/cohorts.py').is_file():

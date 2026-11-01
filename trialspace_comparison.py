@@ -14,7 +14,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from colbert_experiments.contracts import DIRECTIONS, TASKS, contract_hash
 from colbert_experiments.data import digest, load_corpus, read_jsonl, write_json, write_jsonl
 from colbert_experiments.regression import MAX_SCORE, score_contract
-from colbert_experiments.retrieval import TrialSampler, merge_candidates, top_indices
+from colbert_experiments.retrieval import (TRIAL_VERSION_POLICY, TrialSampler, has_trial_versions, merge_candidates,
+                                           query_cohorts, top_indices)
 from colbert_experiments.score_publication import ready_scores
 from finetune_embedder import load_text_model
 from trial_cohort_format import file_stamp
@@ -85,7 +86,11 @@ def encode_corpus(args, patients, cohorts):
 
 def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128,
                patient_k=20, cohort_k=40, lexical_k=5, random_k=5, seed=42, patient_trial_sample=0):
-    """Cohort queries search every patient; patients search their sampled trials' cohorts."""
+    """Cohort queries search every patient; patients search their sampled trials' cohorts.
+
+    A trial with protocol and registry versions is searched in one version per
+    patient and queries with one version, chosen per trial (TrialSampler, query_cohorts).
+    """
     from synthetic_pool import require_full_pool
     require_full_pool(patients, cohorts)
     hits = []
@@ -94,8 +99,10 @@ def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128
                         else ('cohorts', 'patients'))
         queries, documents = (patients, cohorts) if qkind == 'patients' else (cohorts, patients)
         k = patient_k if qkind == 'patients' else cohort_k
+        querying = {c['id'] for c in query_cohorts(cohorts, seed)} if qkind == 'cohorts' else None
         for split in ('train',):
-            qi = [i for i, row in enumerate(queries) if row['split'] == split]
+            qi = [i for i, row in enumerate(queries) if row['split'] == split
+                  and (querying is None or row['id'] in querying)]
             di = [i for i, row in enumerate(documents) if row['split'] == split]
             if not qi or not di:
                 continue
@@ -103,7 +110,8 @@ def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128
             refs = torch.tensor(np.asarray(vectors[dkind][di]), device=device)
             lexical = TfidfVectorizer(ngram_range=(1, 2), lowercase=True) if lexical_k else None
             matrix = lexical.fit_transform(row['text'] for row in targets) if lexical else None
-            sampler = TrialSampler(targets, patient_trial_sample if qkind == 'patients' else 0, seed)
+            sampler = TrialSampler(targets, patient_trial_sample, seed) if qkind == 'patients' else None
+            everyone = list(range(len(targets)))
             for start in range(0, len(qi), score_batch_size):
                 chosen = qi[start:start + score_batch_size]
                 q = torch.tensor(np.asarray(vectors[qkind][chosen]), device=device)
@@ -116,7 +124,7 @@ def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128
                         p, c = (row, targets[j]) if qkind == 'patients' else (targets[j], row)
                         hits.append(dict(patient_id=p['id'], cohort_id=c['id'], direction=direction,
                                          source=source, task='gated_score', rank=rank, score=score))
-                    allowed = sampler(row['id'])
+                    allowed = sampler(row['id']) if sampler else everyone
                     for rank, j in enumerate(top_indices(values[allowed], k), 1):
                         add(allowed[j], 'embeddinggemma2', rank, float(values[allowed[j]]))
                     if lexical:
@@ -146,6 +154,8 @@ def _dense_mine(args):
         max_tokens=args.max_tokens, dimension=768, scope='exhaustive full synthetic corpus',
         patient_k=args.patient_k, cohort_k=args.cohort_k, lexical_k=args.lexical_k,
         random_k=args.random_k, seed=args.seed, patient_trial_sample=args.patient_trial_sample)
+    if has_trial_versions(cohorts):
+        signature['trial_versions'] = TRIAL_VERSION_POLICY
     model_path = Path(args.model)
     if model_path.is_dir():
         # A mutable local model path must never make old encodings look reusable.
@@ -174,7 +184,8 @@ def _dense_mine(args):
                    'cohort_to_patient.parquet', 'patients.npy', 'cohorts.npy'], pairs=len(pairs),
            candidate_scope='exhaustive cosine similarity over the full synthetic corpus'
            + (f'; each patient searches the cohorts of {args.patient_trial_sample} sampled trials'
-              if args.patient_trial_sample else ''))
+              if args.patient_trial_sample else '')
+           + (f'; {TRIAL_VERSION_POLICY}' if has_trial_versions(cohorts) else ''))
 
 
 def union_candidates(corpus, sources, output):
@@ -230,7 +241,7 @@ def project_labels(corpus, union, labels, sources, output, *, reasoning_source=N
             rows.append(dict(patient_id=p['id'], cohort_id=c['id'], cohort_trial_id=c['id'],
                 nct_id=c['trial_id'], patient_summary=p['text'], this_space=c['text'], split=p['split'],
                 patient_source_split=p.get('source_split', p['split']),
-                cohort_source_split=c.get('source_split', c['split']),
+                cohort_source_split=c.get('source_split', c['split']), cohort_source=c.get('source', 'registry'),
                 eligibility_result=score['score'], normalized_score=score['normalized_score'],
                 answers=json.dumps(score['answers']), question_keys=json.dumps(score['question_keys']),
                 question_contract=score['question_contract'], score_contract=score['contract'],

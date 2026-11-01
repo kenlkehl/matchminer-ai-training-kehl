@@ -76,7 +76,7 @@ def selected_splits(value):
 
 
 def prepare(patients_path, cohorts_path, output, *, merge_source_splits=False):
-    from trial_cohort_format import training_rows
+    from trial_cohort_format import cohort_version, training_rows
     patients, cohorts = read_table(patients_path), read_table(cohorts_path)
     if 'cohort_trial_id' not in cohorts:
         raise ValueError('Use the native complete cohort table, not historical trial spaces')
@@ -91,9 +91,11 @@ def prepare(patients_path, cohorts_path, output, *, merge_source_splits=False):
         if isinstance(origin, str) and origin.strip():
             item['source_trial_id'] = origin
         patient_rows.append(item)
-    cohort_rows = [dict(id=row['cohort_trial_id'], trial_id=row['nct_id'],
+    # source: which version of its trial a cohort is ('protocol' or 'registry');
+    # mining represents each trial by one version (retrieval.TrialSampler).
+    cohort_rows = [dict(id=row['cohort_trial_id'], trial_id=row['nct_id'], source=version,
                        text=row['cohort_eligibility_criteria'], split=split_name(row.get('split')))
-                   for row in normalized.to_dict('records')]
+                   for row, version in zip(normalized.to_dict('records'), cohort_version(normalized))]
     if 'cohort_name' in normalized:
         for row, name in zip(cohort_rows, normalized.cohort_name):
             row['cohort_name'] = name if isinstance(name, str) else None

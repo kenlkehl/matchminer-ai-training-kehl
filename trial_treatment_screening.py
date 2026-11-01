@@ -41,6 +41,10 @@ def parse_screening_output(final, finish_reason=None, *, allow_legacy=True):
                   and isinstance(result.get("cohorts"), list)
                   and all(isinstance(c, str) for c in result["cohorts"])):
                 schema_version = "trial-treatment-cohorts-v2"
+            elif (allow_legacy and result.get("multiple_cohorts") == "no"
+                  and "eligibility_criteria" not in result):
+                # v3 single populations carried no criteria of their own.
+                schema_version = "trial-treatment-cohorts-v3"
             combined = parse_cohort_response(
                 final, (finish_reason or "stop") if allow_legacy else finish_reason,
                 schema_version=schema_version,

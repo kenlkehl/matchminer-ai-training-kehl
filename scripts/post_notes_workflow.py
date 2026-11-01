@@ -127,6 +127,9 @@ class Workflow:
             if prior['command'] != stage['command'] or not all(Path(p).exists() for p in stage['outputs']):
                 raise ValueError('Completed workflow stage changed: ' + name)
             return
+        if name in self.config.get('adopt_stages', {}):
+            self.adopt_stage(name, stage, receipt)
+            return
         self.update(name, child_pid=None)
         log = self.root / 'logs' / (name + '.log')
         log.parent.mkdir(exist_ok=True)
@@ -147,6 +150,22 @@ class Workflow:
         if not all(Path(p).exists() for p in stage['outputs']):
             raise RuntimeError('Missing outputs after ' + name)
         save(receipt, dict(at=now(), command=stage['command'], outputs=stage['outputs']))
+        self.update(child_pid=None)
+
+    def adopt_stage(self, name, stage, receipt):
+        """Wait for this stage's command already running under an earlier controller."""
+        adopted = self.config['adopt_stages'][name]
+        self.update(name, child_pid=adopted['pid'], command=stage['command'], adopted=True)
+        while process_identity(adopted['pid']) == str(adopted['start_ticks']):
+            self.interrupted()
+            self.update()
+            time.sleep(10)
+        status = json.loads(Path(adopted['status_file']).read_text())
+        if any(status.get(key) != value for key, value in adopted['status'].items()):
+            raise RuntimeError(f'Adopted {name} did not complete: {status}')
+        if not all(Path(p).exists() for p in stage['outputs']):
+            raise RuntimeError('Missing outputs after adopted ' + name)
+        save(receipt, dict(at=now(), command=stage['command'], outputs=stage['outputs'], adopted=adopted))
         self.update(child_pid=None)
 
     def stop_cloud(self):
@@ -291,6 +310,10 @@ class Workflow:
                 self.wait_notes()
                 self.run_stage('summarizing')
                 self.stop_cloud()
+                # LLM stages that still need the GPUs released below for mining,
+                # e.g. registry-version cohort extraction.
+                for name in self.config.get('before_release_stages', []):
+                    self.run_stage(name)
                 self.release_gpus()
                 self.run_stage('preparing_corpus')
                 self.run_stage('mining')

@@ -85,6 +85,12 @@ step 7 is now generating patients from its cohorts.
    were judged not cancer treatment and 1 failed. It replaces the schema-v1
    run in `cohort_extraction/`, whose criteria lost every line break and
    double quote. See [`synthetic_protocols/README.md`](synthetic_protocols/README.md).
+   **Registry versions (new default, 2026-10-31).** The same trials are also
+   extracted from the registry records their protocols were written from, with
+   the registry prompt brought into line with the protocol prompt (schema
+   `trial-registry-cohorts-v1`), by `0b_extract_trial_cohorts.py --trials-jsonl`;
+   `synthetic_protocols/retrieval_cohorts.py` combines both versions into the
+   retrieval cohort table (see [`synthetic_protocols/README.md`](synthetic_protocols/README.md)).
 7. **Patient seeds, event histories, notes and summaries.** `generate-synthetic`
    (`generate_synthetic_data.py`) writes five positive and five near-miss
    patient seeds per cohort from the cohort's eligibility criteria alone, then
@@ -247,11 +253,18 @@ candidate set by default, with no flags needed:
 - Each patient searches only the cohorts of 500 randomly sampled trials
   (`--patient-trial-sample`; 0 searches all trials). Each patient gets its own
   sample, drawn reproducibly from `--seed` (42) and the patient ID.
+- A trial with both a synthetic-protocol version and a registry
+  (ClinicalTrials.gov) version of its cohorts (`synthetic_protocols/retrieval_cohorts.py`)
+  is represented by one of them: in each patient's search, a version chosen at
+  random per patient and trial; as a cohort query, a version chosen at random
+  per trial (`colbert_experiments/retrieval.py`). Trials with one version use it.
+  Each cohort's version is `source` in the prepared corpus and `cohort_source`
+  in the exported pair tables.
 - Per patient: the top 20 cohorts by the retriever, plus 5 TF-IDF and 5 random
   cohorts, all from that patient's sampled trials.
 - Per cohort: the top 40 patients over the whole corpus, plus 5 TF-IDF and 5
   random patients.
-- Every patient's pairs with the cohorts of its source trial.
+- Every patient's pairs with the cohorts of its source trial, in both versions.
 
 The TF-IDF and random extras (`--lexical-k`, `--random-k`, default 5 each)
 supply teacher-labeled pairs the retriever would not rank highly. Keep them

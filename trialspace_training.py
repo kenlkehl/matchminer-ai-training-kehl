@@ -26,7 +26,8 @@ from colbert_experiments.data import digest, load_corpus, prepare, read_jsonl, w
 from colbert_experiments.model import ColBERT
 from colbert_experiments.packed_scoring import PackedTokens, score_pairs
 from colbert_experiments.regression import regression_query, score_contract
-from colbert_experiments.retrieval import TrialSampler, merge_candidates, proposal_indices, top_indices
+from colbert_experiments.retrieval import (TRIAL_VERSION_POLICY, TrialSampler, has_trial_versions, merge_candidates,
+                                           proposal_indices, query_cohorts, top_indices)
 from trial_cohort_format import file_stamp
 from retrieval_workspace import add_retrieval_storage_args, run_retrieval, require_free_space
 
@@ -64,7 +65,12 @@ def prepare_corpus(patients, cohorts, output, *, merge_source_splits=True):
                for p in ps for c in by_trial.get(p.get('source_trial_id'), [])
                if p['split'] == c['split']]
     write_jsonl(output / 'source_trial_pairs.jsonl', lineage)
+    versions = defaultdict(set)
+    for cohort in cs:
+        versions[cohort['trial_id']].add(cohort.get('source', 'registry'))
     result = dict(version=VERSION, patients=len(ps), cohorts=len(cs), trials=len(by_trial),
+                  cohort_sources={name: sum(c.get('source', 'registry') == name for c in cs) for name in ('protocol', 'registry')},
+                  trials_with_both_versions=sum(len(v) > 1 for v in versions.values()),
                   source_trial_pairs=len(lineage), contract=score_contract(),
                   output_stamp={name: file_stamp(output / name) for name in
                                  ('patients.jsonl', 'cohorts.jsonl', 'source_trial_pairs.jsonl')})
@@ -183,6 +189,7 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
                 split=p['split'], candidate_id=digest([p['id'], c['id']]),
                 patient_source_split=p.get('source_split', p['split']),
                 cohort_source_split=c.get('source_split', c['split']),
+                cohort_source=c.get('source', 'registry'),
                 retrieval_sources=json.dumps(sources), trialspace_contract=contract))
     for direction, path in zip(DIRECTIONS, (cohort_output, patient_output), strict=True):
         path = Path(path)
@@ -205,6 +212,8 @@ def finalize_candidate_exports(corpus, output, *, pair_count, query_count, exhau
              'exact MaxSim over recorded lexical/random proposal pools')
     if patient_trial_sample:
         scope += f'; each patient searches the cohorts of {patient_trial_sample} sampled trials'
+    if has_trial_versions(load_corpus(corpus)[1]):
+        scope += f'; {TRIAL_VERSION_POLICY}'
     write_json(output / 'complete.json', dict(pairs=pair_count, queries=query_count,
         candidate_scope=scope,
         outputs={name: file_stamp(output / name) for name in
@@ -281,6 +290,8 @@ def _mine(args, model, *, rank, world, local):
         **{k: getattr(args, k) for k in ('top_k', 'lexical_k', 'random_k', 'candidate_limit',
             'proposal_strategy', 'cohort_query_limit', 'splits', 'seed', 'document_batch_size',
             'query_batch_size', 'score_batch_size', 'patient_trial_sample')})
+    if has_trial_versions(cohorts):
+        signature['trial_versions'] = TRIAL_VERSION_POLICY
     if rank == 0:
         from retrieval_cache_import import validate_encoding_import
         validate_encoding_import(output, signature)
@@ -311,6 +322,8 @@ def _mine(args, model, *, rank, world, local):
     checkpoints = QueryCheckpoints(output)
     query_paths, query_number = [], 0
     resident = None
+    # Each trial queries for patients with one version of its cohorts.
+    querying = {c['id'] for c in query_cohorts(cohorts, args.seed)}
     for direction in DIRECTIONS:
         queries, documents = (patients, cohorts) if direction == 'patient_to_cohort' else (cohorts, patients)
         kind = 'cohorts' if direction == 'patient_to_cohort' else 'patients'
@@ -322,7 +335,8 @@ def _mine(args, model, *, rank, world, local):
                 print(f'[mine rank={rank}] {kind}: resident budget unavailable; using bounded CPU cache', flush=True)
         for split in args.splits:
             targets = [r for r in documents if r['split'] == split]
-            selected = [r for r in queries if r['split'] == split]
+            selected = [r for r in queries if r['split'] == split
+                        and (direction == 'patient_to_cohort' or r['id'] in querying)]
             if not targets or not selected:
                 continue
             if direction == 'cohort_to_patient' and args.cohort_query_limit is not None:
@@ -341,9 +355,10 @@ def _mine(args, model, *, rank, world, local):
                 continue
             lexical = TfidfVectorizer(ngram_range=(1, 2), lowercase=True)
             matrix = lexical.fit_transform(t['text'] for t in targets)
-            # Patients search only their sampled trials' cohorts; cohorts search every patient.
-            sampler = TrialSampler(targets, args.patient_trial_sample if direction == 'patient_to_cohort' else 0,
-                                   args.seed)
+            # Patients search one version of each sampled trial; cohorts search every patient.
+            sampler = (TrialSampler(targets, args.patient_trial_sample, args.seed)
+                       if direction == 'patient_to_cohort' else None)
+            everyone = list(range(len(targets)))
             work_batch_size = args.query_batch_size * (args.score_query_batches if resident else 1)
             for offset in range(0, len(jobs), work_batch_size):
                 started = time.perf_counter()
@@ -359,7 +374,7 @@ def _mine(args, model, *, rank, world, local):
                 proposals_batch, random_states, allowed_batch = [], [], []
                 for (row, _), lexical_scores in zip(batch, lexical_batch, strict=True):
                     rng = random.Random(f'{args.seed}:{direction}:{row["id"]}')
-                    allowed = sampler(row['id'])
+                    allowed = sampler(row['id']) if sampler else everyone
                     proposals_batch.append([allowed[i] for i in proposal_indices(
                         lexical_scores[allowed], args.candidate_limit, rng, args.proposal_strategy)])
                     random_states.append(rng)
