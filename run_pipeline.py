@@ -20,7 +20,10 @@ import train_from_summaries as training
 from trial_cohort_format import file_stamp
 
 ROOT = Path(__file__).resolve().parent
-DATA_ROOT = ROOT.parent / 'data/no_phi'
+# Frozen run snapshots live under data/no_phi/<run>/source/...; keep their
+# outputs in that same non-PHI tree rather than beside the snapshot.
+DATA_ROOT = next((p for p in ROOT.parents if p.name == 'no_phi' and p.parent.name == 'data'),
+                 ROOT.parent / 'data/no_phi')
 STAGES = ('parse-trials', 'extract-cohorts', 'sample-trials', 'generate-synthetic',
           'prepare-notes', 'summarize-patients', 'prepare-training', 'train')
 
