@@ -29,35 +29,54 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
                      '--generation-model', 'gemma4-31b', '--generation-tokenizer', 'vendor/tokenizer')
     plan = pipeline.build_plan(args)
     assert [s.name for s in plan] == list(pipeline.STAGES)
-    assert plan[1].command[plan[1].command.index('--start-year') + 1] == '2020'
-    assert plan[2].command[plan[2].command.index('--n-trials') + 1] == '5000'
-    assert plan[1].command[1].endswith('0b_extract_trial_cohorts.py')
-    assert plan[1].outputs[0] == plan[2].inputs[0]
-    assert plan[2].outputs[0] == plan[3].inputs[0]
-    assert '--screening-input' not in plan[1].command
+    stage = {s.name: s for s in plan}
+    assert stage['extract-cohorts'].command[stage['extract-cohorts'].command.index('--start-year') + 1] == '2020'
+    assert stage['sample-trials'].command[stage['sample-trials'].command.index('--n-trials') + 1] == '5000'
+    assert stage['extract-cohorts'].command[1].endswith('0b_extract_trial_cohorts.py')
+    assert '--screening-input' not in stage['extract-cohorts'].command
+    # Registry sample -> synthetic protocols -> protocol and registry cohorts of the same seeds.
+    assert stage['extract-cohorts'].outputs[0] == stage['sample-trials'].inputs[0]
+    assert stage['sample-trials'].outputs[0] == args.registry_sample == stage['synthetic-protocols'].inputs[0]
+    seeds = stage['synthetic-protocols'].outputs[0]
+    assert seeds in stage['protocol-cohorts'].inputs and seeds == stage['registry-cohorts'].inputs[0]
+    assert set(stage['protocol-cohorts'].outputs[:2]) <= set(stage['generation-cohorts'].inputs)
+    assert args.registry_sample in stage['generation-cohorts'].inputs
+    # Patients come from the protocol cohorts; retrieval and training use both versions.
+    assert stage['generation-cohorts'].outputs[0] == args.sampled_spaces == stage['generate-synthetic'].inputs[0]
+    assert {args.sampled_spaces, *stage['registry-cohorts'].outputs[:2]} <= set(stage['retrieval-cohorts'].inputs)
+    assert stage['retrieval-cohorts'].outputs[0] == args.retrieval_cohorts
     from generate_synthetic_data import load_stage
-    extraction = load_stage('0b_extract_trial_cohorts.py').parser().parse_args(plan[1].command[2:])
+    extract = load_stage('0b_extract_trial_cohorts.py')
+    extraction = extract.parser().parse_args(stage['extract-cohorts'].command[2:])
     assert extraction.max_attempts == 3 and extraction.max_tokens == 50000
-    assert extraction.inference_repo == args.inference_repo
-    assert plan[3].outputs[0] == plan[4].inputs[0]
-    assert plan[4].outputs[0] == plan[5].inputs[0]
-    assert plan[5].outputs[0] == plan[6].inputs[0]
-    assert plan[6].outputs[0] == training.input_paths(args)['patient_summaries']
-    assert args.sampled_spaces in plan[-1].inputs
+    assert extraction.inference_repo == args.inference_repo and extraction.trials_jsonl is None
+    registry = extract.parser().parse_args(stage['registry-cohorts'].command[2:])
+    assert registry.trials_jsonl == seeds and registry.allow_failures
+    assert stage['generate-synthetic'].outputs[0] == stage['prepare-notes'].inputs[0]
+    assert stage['prepare-notes'].outputs[0] == stage['summarize-patients'].inputs[0]
+    assert stage['summarize-patients'].outputs[0] == stage['prepare-training'].inputs[0]
+    assert stage['prepare-training'].outputs[0] == training.input_paths(args)['patient_summaries']
+    assert args.retrieval_cohorts in plan[-1].inputs
     train_command = plan[-1].command
-    assert train_command[train_command.index('--trial-spaces') + 1] == str(args.sampled_spaces)
-    for stage in (plan[1], plan[3], plan[5]):
-        assert stage.command[stage.command.index('--model') + 1] == 'gemma4-31b'
-        assert stage.command[stage.command.index('--tokenizer-model') + 1] == 'vendor/tokenizer'
-        assert stage.command[stage.command.index('--server_urls_file') + 1] == str(args.server_urls_file)
-        if stage.name != 'extract-cohorts':
-            assert '--concurrency-control-file' in stage.command
+    assert train_command[train_command.index('--trial-spaces') + 1] == str(args.retrieval_cohorts)
+    for name in ('extract-cohorts', 'registry-cohorts', 'generate-synthetic', 'summarize-patients'):
+        command = stage[name].command
+        assert command[command.index('--model') + 1] == 'gemma4-31b'
+        assert command[command.index('--tokenizer-model') + 1] == 'vendor/tokenizer'
+        assert command[command.index('--server_urls_file') + 1] == str(args.server_urls_file)
+        if name not in ('extract-cohorts', 'registry-cohorts'):
+            assert '--concurrency-control-file' in command
+    for name in ('synthetic-protocols', 'protocol-cohorts'):
+        command = stage[name].command
+        assert command[command.index('--model-name') + 1] == 'vendor/tokenizer'
+        assert command[command.index('--server-urls-file') + 1] == str(args.server_urls_file)
+        assert '--allow-failures' in command
     # Extraction uses inference-owned adaptive limits and live registry caps.
-    assert '--max_concurrent_per_server' in plan[1].command
+    assert '--max_concurrent_per_server' in stage['extract-cohorts'].command
     downstream = training.stages(args)
-    for stage in downstream:
-        if stage.teacher:
-            assert str(args.server_urls_file) in stage.command
+    for item in downstream:
+        if item.teacher:
+            assert str(args.server_urls_file) in item.command
     summary_distillation = next(s for s in downstream if s.name == 'prepare-oncoreasoning')
     assert summary_distillation.command[summary_distillation.command.index('--notes') + 1] == str(args.synthetic_notes)
 
@@ -105,12 +124,12 @@ def test_training_only_retains_original_default_identity(tmp_path):
     assert len(pipeline.build_plan(args)) == 1
 
 
-def test_full_dry_run_shows_the_sampled_cohort_input(tmp_path, capsys):
+def test_full_dry_run_trains_on_both_trial_versions(tmp_path, capsys):
     pipeline.main(['--start-at', 'sample-trials', '--data-dir', str(tmp_path), '--dry-run'])
     stages = {stage['name']: stage for stage in json.loads(capsys.readouterr().out)}
-    sample = stages['sample-trials']['outputs'][0]
+    combined = stages['retrieval-cohorts']['outputs'][0]
     prepare_command = stages['prepare-trialspace']['command']
-    assert prepare_command[prepare_command.index('--cohorts') + 1] == sample
+    assert prepare_command[prepare_command.index('--cohorts') + 1] == combined
 
 
 @pytest.mark.parametrize('wrapper', ['train_all.sh', 'train_all_gcp.sh', 'temp_train_gcp.sh'])
@@ -120,7 +139,7 @@ def test_shell_dry_run_includes_generation_and_stops_at_requested_stage(tmp_path
         '--stop-after', 'prepare-training', '--data-dir', str(tmp_path / 'not-created'), '--dry-run'],
         text=True, env={**os.environ, 'PYTHON': sys.executable})
     plan = json.loads(output)
-    assert [s['name'] for s in plan] == list(pipeline.STAGES[2:7])
+    assert [s['name'] for s in plan] == list(pipeline.STAGES[2:pipeline.STAGES.index('prepare-training') + 1])
     assert not (tmp_path / 'not-created').exists()
 
 

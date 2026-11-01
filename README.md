@@ -125,12 +125,23 @@ default range is `train` only.
 | --- | --- | --- |
 | `parse-trials` | `0a_parse_ctgov_json.py` (requires `--ctgov-json`, a CT.gov API v2 export) | `ctgov_trials.csv` |
 | `extract-cohorts` | `0b_extract_trial_cohorts.py` | `trial_cohort_lineitems.csv`, `trials_with_cohorts.csv`, `trial_cohorts.json` |
-| `sample-trials` | `0c_sample_trial_spaces.py` | `synthetic_generation/sample_trial_cohort_lineitems.csv` + `.sampling.json` |
+| `sample-trials` | `0c_sample_trial_spaces.py` | `registry_sample_cohort_lineitems.csv` + `.sampling.json` (sampled registry cohorts: protocol seeds and source splits) |
+| `synthetic-protocols` | `synthetic_protocols/generate_batch.py` | `synthetic_protocols/` (`seeds.jsonl`, `protocols/<NCT>/protocol.md`, `protocols.csv`) |
+| `protocol-cohorts` | `synthetic_protocols/extract_cohorts.py` | `synthetic_protocols/cohort_extraction/` (`cohorts.parquet`, `trials.parquet`) |
+| `registry-cohorts` | `0b_extract_trial_cohorts.py --trials-jsonl` (the protocol seeds) | `registry_cohorts/` (`trial_cohort_lineitems.csv`, `trials_with_cohorts.csv`, `trial_cohorts.json`) |
+| `generation-cohorts` | `synthetic_protocols/patient_cohorts.py` | `synthetic_generation/sample_trial_cohort_lineitems.csv` (protocol cohorts for patient generation) + `.provenance.json` |
+| `retrieval-cohorts` | `synthetic_protocols/retrieval_cohorts.py` | `retrieval_cohorts.csv` (both versions of every trial) + `.provenance.json` |
 | `generate-synthetic` | `generate_synthetic_data.py` | `synthetic_generation/all_synthetic_events.parquet`, `all_synthetic_notes.parquet`, `manifest.json` |
 | `prepare-notes` | `prepare_synthetic_training.py notes` | `all_synthetic_notes.parquet`, `synthetic_patient_metadata.parquet` |
 | `summarize-patients` | `6_summarize_patients.py` | `patient_summaries.parquet`, `patient_serial_summaries.parquet` |
 | `prepare-training` | `prepare_synthetic_training.py summaries` | `patient_summaries_with_spaces.parquet` |
-| `train` | `train_from_summaries.py` | models under `../models/colbert_pipeline_v1` |
+| `train` | `train_from_summaries.py` (corpus from `retrieval_cohorts.csv`) | models under `../models/colbert_pipeline_v1` |
+
+Patients are generated only from the protocol cohorts (`generation-cohorts`);
+retrieval, labeling and training use `retrieval_cohorts.csv`, which holds each
+trial's protocol and registry versions (see Mining below). The three LLM
+extraction/generation stages after sampling share `--server-urls-file`; a trial
+that fails every attempt in one of them keeps whichever version it has.
 
 Inspect a plan, then remove `--dry-run` to execute:
 

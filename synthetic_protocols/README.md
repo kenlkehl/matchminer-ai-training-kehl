@@ -178,6 +178,20 @@ and every provenance column. Single-cohort rows keep `cohort_criteria_source`
 adapter reproduces the extracted criteria exactly, and writes
 `<output>.provenance.json` (source stamps, counts, failures, prompt hashes).
 
+## In the training pipeline
+
+`run_pipeline.py` (and the identical `train_all.sh`, `train_all_gcp.sh` and
+`temp_train_gcp.sh` wrappers) runs this track as stages after `sample-trials`:
+`synthetic-protocols` (`generate_batch.py --nct-ids-from` the registry sample),
+`protocol-cohorts` (`extract_cohorts.py`), `registry-cohorts`
+(`0b_extract_trial_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl`),
+`generation-cohorts` (`patient_cohorts.py`, the patient-generation input) and
+`retrieval-cohorts` (`retrieval_cohorts.py`, the `train` stage's cohort table).
+There `generate_batch.py` and `extract_cohorts.py` use the pipeline's
+`--server-urls-file` instead of writing their own `servers.json`, and
+`--allow-failures` lets a stage finish when a few trials fail every attempt;
+those trials keep whichever version they have.
+
 ## Registry versions and the retrieval cohort table
 
 Users may be allowed to send some trials' full protocols to an LLM and only the

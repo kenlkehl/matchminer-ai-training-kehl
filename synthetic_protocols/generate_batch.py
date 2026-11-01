@@ -65,7 +65,8 @@ def served_model(url):
 
 def main(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    registry = args.output_dir / "servers.json"
+    # An externally managed registry (run_pipeline.py --server-urls-file) is used as is.
+    registry = args.server_urls_file or args.output_dir / "servers.json"
     if not registry.exists():
         servers = []
         for spec in args.server:
@@ -75,7 +76,7 @@ def main(args):
         registry.write_text(json.dumps({"ready": True, "servers": servers}, indent=2))
     servers = json.loads(registry.read_text())["servers"]
     print(f"[{datetime.now(timezone.utc):%H:%M:%S}] servers: " + ", ".join(
-        f"{s['url']} ({s['model'].split('/')[-1]}, cap {s['upstream_concurrency']})" for s in servers), flush=True)
+        f"{s['url']} ({s.get('model', '?').split('/')[-1]}, cap {s.get('upstream_concurrency', 'adaptive')})" for s in servers), flush=True)
 
     seeds_path = args.seeds or args.output_dir / "seeds.jsonl"
     if args.seeds is None and not seeds_path.exists():
@@ -107,7 +108,7 @@ def main(args):
     result.drop(columns="protocol").to_csv(args.output_dir / "protocols.csv", index=False)
     print(f"finished: {len(result)} of {len(seeds)} protocols, {len(metadata['trial_errors'])} failed, "
           f"{metadata['skipped_completed']} already complete", flush=True)
-    return 0 if not metadata["trial_errors"] else 1
+    return 0 if not metadata["trial_errors"] or args.allow_failures else 1
 
 
 if __name__ == "__main__":
@@ -118,6 +119,9 @@ if __name__ == "__main__":
                         help="CSV with an nct_id column; records are fetched into <output-dir>/seeds.jsonl once")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--server", action="append", default=[], help="BASE_URL[=MAX_CONCURRENCY] for a new servers.json")
+    parser.add_argument("--server-urls-file", type=Path, help="Existing live server registry to use instead of --server")
+    parser.add_argument("--allow-failures", action="store_true",
+                        help="Exit 0 when some trials fail every attempt (recorded in run_metadata.json)")
     parser.add_argument("--model-name", default="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4")
     parser.add_argument("--max-tokens", type=int, default=100000)
     parser.add_argument("--chunk-size", type=int, default=500)

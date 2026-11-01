@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Resumable CT.gov → synthetic notes → summaries → model training orchestration.
+"""Resumable CT.gov → synthetic protocols → synthetic notes → summaries → model training orchestration.
+
+Sampled registry trials each get a synthetic full protocol. Patients are
+generated from the protocol cohorts; retrieval, labeling and training see every
+trial in both versions, its protocol cohorts and its registry cohorts
+(retrieval-cohorts), so the models work for users holding either source.
 
 The default starts at training for compatibility with existing train_all commands.
 Select an earlier --start-at and optional --stop-after to run data production.
@@ -24,8 +29,14 @@ ROOT = Path(__file__).resolve().parent
 # outputs in that same non-PHI tree rather than beside the snapshot.
 DATA_ROOT = next((p for p in ROOT.parents if p.name == 'no_phi' and p.parent.name == 'data'),
                  ROOT.parent / 'data/no_phi')
-STAGES = ('parse-trials', 'extract-cohorts', 'sample-trials', 'generate-synthetic',
+# Every sampled trial gets a synthetic protocol; patients are generated from the
+# protocol's cohorts, and retrieval/labeling/training see both the protocol and
+# the registry (ClinicalTrials.gov) version of each trial's cohorts.
+STAGES = ('parse-trials', 'extract-cohorts', 'sample-trials', 'synthetic-protocols', 'protocol-cohorts',
+          'registry-cohorts', 'generation-cohorts', 'retrieval-cohorts', 'generate-synthetic',
           'prepare-notes', 'summarize-patients', 'prepare-training', 'train')
+LLM_STAGES = {'extract-cohorts', 'synthetic-protocols', 'protocol-cohorts', 'registry-cohorts',
+              'generate-synthetic', 'summarize-patients'}
 
 
 @dataclass
@@ -46,7 +57,16 @@ def parser():
     p.add_argument('--ctgov-json', type=Path)
     p.add_argument('--parsed-trials', type=Path)
     p.add_argument('--start-year', type=int, default=2020)
-    p.add_argument('--sampled-spaces', '--sampled-cohorts', dest='sampled_spaces', type=Path)
+    p.add_argument('--registry-sample', type=Path,
+                   help='sample-trials output: sampled registry cohorts (protocol seeds, source splits); '
+                        'default DATA_DIR/registry_sample_cohort_lineitems.csv')
+    p.add_argument('--protocol-dir', type=Path, help='Synthetic protocol batch; default DATA_DIR/synthetic_protocols')
+    p.add_argument('--protocol-max-tokens', type=int, default=100000)
+    p.add_argument('--protocol-chunk-size', type=int, default=500)
+    p.add_argument('--sampled-spaces', '--sampled-cohorts', dest='sampled_spaces', type=Path,
+                   help='Patient-generation cohorts (the protocol cohorts); default GENERATION_DIR/sample_trial_cohort_lineitems.csv')
+    p.add_argument('--retrieval-cohorts', type=Path,
+                   help='Both versions of every trial for retrieval and training; default DATA_DIR/retrieval_cohorts.csv')
     p.add_argument('--sample-trials', type=int, default=5000)
     p.add_argument('--cohort-workers', type=int, default=1536)
     p.add_argument('--cohort-max-attempts', type=int, choices=range(1, 11), default=3)
@@ -103,6 +123,9 @@ def resolve_paths(args):
             continue
         if getattr(args, key) is None:
             setattr(args, key, value)
+    args.registry_sample = args.registry_sample or args.data_dir / 'registry_sample_cohort_lineitems.csv'
+    args.protocol_dir = args.protocol_dir or args.data_dir / 'synthetic_protocols'
+    args.retrieval_cohorts = args.retrieval_cohorts or args.data_dir / 'retrieval_cohorts.csv'
     args.sampled_spaces = args.sampled_spaces or args.generation_dir / 'sample_trial_cohort_lineitems.csv'
     args.raw_synthetic_notes = args.raw_synthetic_notes or args.generation_dir / 'all_synthetic_notes.parquet'
     args.generation_model = args.generation_model or args.teacher_served_model or args.teacher_model
@@ -117,11 +140,12 @@ def resolve_paths(args):
 
 
 def training_arguments(args):
-    # The upstream extraction contains the full denominator. Training follows
-    # the sampled trial/cohort table that actually seeded synthetic generation.
+    # The upstream extraction contains the full denominator. Training retrieves
+    # over the sampled trials in both versions: the protocol cohorts that seeded
+    # synthetic generation and the same trials' registry cohorts.
     if args.start_at == 'train':
         return args
-    return argparse.Namespace(**{**vars(args), 'trial_spaces': args.sampled_spaces})
+    return argparse.Namespace(**{**vars(args), 'trial_spaces': args.retrieval_cohorts})
 
 
 def training_command(args):
@@ -175,6 +199,20 @@ def build_plan(args):
                   '--request_timeout', str(args.generation_request_timeout), '--api-key-env', args.api_key_env,
                   *model, *(['--server_urls_file', str(registry)] if registry else [])]
     inference_sources = args.inference_repo / 'src/matchminer_ai'
+    package = sorted(p for p in inference_sources.rglob('*') if p.suffix in ('.py', '.txt', '.yaml'))
+    pool = ['--server-urls-file', str(registry)] if registry else []
+    batch, extracted = args.protocol_dir, args.protocol_dir / 'cohort_extraction'
+    registry_cohorts = d / 'registry_cohorts'
+    registry_rows = [registry_cohorts / 'trial_cohort_lineitems.csv', registry_cohorts / 'trials_with_cohorts.csv',
+                     registry_cohorts / 'trial_cohorts.json']
+    registry_extraction = [py, str(ROOT / '0b_extract_trial_cohorts.py'), '--trials-jsonl', str(batch / 'seeds.jsonl'),
+                  '--output-trials', str(registry_rows[1]), '--output-cohorts', str(registry_rows[0]),
+                  '--output-json', str(registry_rows[2]), '--work-dir', str(work / 'registry_extraction'),
+                  '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
+                  '--max-attempts', str(args.cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
+                  '--max_concurrent_per_server', str(args.generation_concurrency_per_server),
+                  '--request_timeout', str(args.generation_request_timeout), '--api-key-env', args.api_key_env,
+                  '--allow-failures', *model, *(['--server_urls_file', str(registry)] if registry else [])]
     generated = [g / name for name in ('all_synthetic_notes.parquet', 'all_synthetic_events.parquet', 'manifest.json')]
     patient_map = d / 'synthetic_patient_metadata.parquet'
     raw_summaries = d / 'patient_summaries.parquet'
@@ -184,13 +222,42 @@ def build_plan(args):
               [args.ctgov_json] if args.ctgov_json else [], [args.parsed_trials], source('0a_parse_ctgov_json.py', 'ctgov_metadata.py')),
         Stage('extract-cohorts', extraction, [args.parsed_trials],
               [args.trial_spaces, d / 'trials_with_cohorts.csv', d / 'trial_cohorts.json'],
-              source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') +
-              sorted(p for p in inference_sources.rglob('*') if p.suffix in ('.py', '.txt', '.yaml'))),
+              source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') + package),
         Stage('sample-trials', [py, str(ROOT / '0c_sample_trial_spaces.py'), '--input-csv', str(args.trial_spaces),
-              '--output-csv', str(args.sampled_spaces), '--dfci-trials-csv', str(args.dfci_trials_csv),
+              '--output-csv', str(args.registry_sample), '--dfci-trials-csv', str(args.dfci_trials_csv),
               '--n-trials', str(args.sample_trials), '--seed', str(args.data_seed)],
-              [args.trial_spaces, args.dfci_trials_csv], [args.sampled_spaces, args.sampled_spaces.with_suffix('.sampling.json')],
+              [args.trial_spaces, args.dfci_trials_csv], [args.registry_sample, args.registry_sample.with_suffix('.sampling.json')],
               source('0c_sample_trial_spaces.py', 'trial_space_format.py', 'trial_cohort_format.py')),
+        # One synthetic full protocol per sampled trial, seeded from its registry record.
+        Stage('synthetic-protocols', [py, str(ROOT / 'synthetic_protocols/generate_batch.py'),
+              '--nct-ids-from', str(args.registry_sample), '--output-dir', str(batch),
+              '--chunk-size', str(args.protocol_chunk_size), '--model-name', args.generation_tokenizer,
+              '--max-tokens', str(args.protocol_max_tokens), '--allow-failures', *pool],
+              [args.registry_sample], [batch / 'seeds.jsonl', batch / 'protocols.csv', batch / 'run_metadata.json'],
+              source('synthetic_protocols/generate_batch.py') + package),
+        Stage('protocol-cohorts', [py, str(ROOT / 'synthetic_protocols/extract_cohorts.py'), '--batch-dir', str(batch),
+              '--output-dir', str(extracted), '--model-name', args.generation_tokenizer,
+              '--max-tokens', str(args.cohort_max_tokens), '--allow-failures', *pool],
+              [batch / 'seeds.jsonl', batch / 'protocols.csv'],
+              [extracted / 'cohorts.parquet', extracted / 'trials.parquet', extracted / 'run_metadata.json'],
+              source('synthetic_protocols/extract_cohorts.py') + package),
+        # The same trials from the registry records their protocols were written
+        # from, with the registry prompt that follows the protocol prompt's rules.
+        Stage('registry-cohorts', registry_extraction, [batch / 'seeds.jsonl'], registry_rows,
+              source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') + package),
+        Stage('generation-cohorts', [py, str(ROOT / 'synthetic_protocols/patient_cohorts.py'), '--batch-dir', str(batch),
+              '--extraction-dir', str(extracted), '--output', str(args.sampled_spaces),
+              '--splits-from', str(args.registry_sample)],
+              [extracted / 'cohorts.parquet', extracted / 'trials.parquet', args.registry_sample],
+              [args.sampled_spaces, Path(f'{args.sampled_spaces}.provenance.json')],
+              source('synthetic_protocols/patient_cohorts.py', 'trial_cohort_format.py')),
+        Stage('retrieval-cohorts', [py, str(ROOT / 'synthetic_protocols/retrieval_cohorts.py'),
+              '--protocol-cohorts', str(args.sampled_spaces), '--registry-cohorts', str(registry_rows[0]),
+              '--registry-trials', str(registry_rows[1]), '--output', str(args.retrieval_cohorts),
+              '--splits-from', str(args.registry_sample)],
+              [args.sampled_spaces, registry_rows[0], registry_rows[1], args.registry_sample],
+              [args.retrieval_cohorts, Path(f'{args.retrieval_cohorts}.provenance.json')],
+              source('synthetic_protocols/retrieval_cohorts.py', 'trial_cohort_format.py')),
         Stage('generate-synthetic', [py, str(ROOT / 'generate_synthetic_data.py'), '--input-csv', str(args.sampled_spaces),
               '--output-dir', str(g), '--seed', str(args.data_seed), '--max-model-len', str(args.generation_context),
               '--seed-max-tokens', str(args.generation_seed_max_tokens),
@@ -289,7 +356,7 @@ def wait_generation(args):
 
 def execute(args, plan):
     # Upstream outputs must remain in the explicitly non-PHI workspace.
-    for path in (args.data_dir, args.generation_dir, args.pipeline_dir):
+    for path in (args.data_dir, args.generation_dir, args.pipeline_dir, args.protocol_dir):
         if not path.is_relative_to(DATA_ROOT.resolve()):
             raise ValueError('Data-production directories must be inside data/no_phi')
     if args.synthetic_notes == args.raw_synthetic_notes:
@@ -298,7 +365,7 @@ def execute(args, plan):
         raise ValueError('Generation writes raw notes inside --generation-dir; use --raw-synthetic-notes only when starting later')
     if any(stage.name == 'parse-trials' for stage in plan) and args.ctgov_json is None:
         raise ValueError('--ctgov-json is required when starting at parse-trials')
-    llm_stages = {stage.name for stage in plan} & {'extract-cohorts', 'generate-synthetic', 'summarize-patients'}
+    llm_stages = {stage.name for stage in plan} & LLM_STAGES
     if llm_stages - ({'generate-synthetic'} if args.wait_for_generation else set()) and not (args.server_urls_file or args.teacher_servers_file):
         raise ValueError('Upstream LLM stages require --server-urls-file for an existing serving pool')
     args.pipeline_dir.mkdir(parents=True, exist_ok=True)
