@@ -58,6 +58,8 @@ def parse_args():
     parser.add_argument('--save-steps', type=int, default=2500,
                         help='Checkpoint interval; a shorter interval is useful on Spot VMs.')
     parser.add_argument('--logging-steps', type=int, default=100)
+    parser.add_argument('--max-steps', type=int,
+                        help='Stop after this many optimizer steps (learning-rate schedule over them) instead of 3 epochs')
     parser.add_argument('--prompt-profile', choices=PROFILES, default='sentence_similarity')
     parser.add_argument('--max-tokens', type=int, default=MAX_TOKENS)
     parser.add_argument('--model-revision')
@@ -203,6 +205,10 @@ def train(args):
         sort_encoder_chunks_by_length=bool(args.loss_mini_batch_size or args.encoder_mini_batch_size),
         negative_mask='known_positive_pairs' if args.mask_known_positives else None, epochs=3, learning_rate=2e-5, warmup_ratio=.01,
         multi_dataset_batch_sampler='proportional', seed=42, training_pool='all_synthetic_training', diagnostics_held_out=False)
+    if args.max_steps is not None:
+        if args.max_steps < 1:
+            raise ValueError('--max-steps must be positive')
+        identity['max_steps'] = args.max_steps
     manifest = Path(args.ckpt_dir) / 'training_identity.json'
     if manifest.exists() and json.loads(manifest.read_text()) != identity:
         raise ValueError('Training data/settings changed; use a fresh checkpoint directory')
@@ -345,6 +351,7 @@ def train(args):
         save_total_limit=2,
         logging_steps=args.logging_steps,
         num_train_epochs=3,
+        max_steps=args.max_steps if args.max_steps is not None else -1,
         prompts=training_prompts(args.prompt_profile),
         batch_sampler='batch_sampler',
         multi_dataset_batch_sampler='proportional',
