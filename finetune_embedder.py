@@ -214,9 +214,10 @@ def train(args):
             raise ValueError('--max-steps must be positive')
         identity['max_steps'] = args.max_steps
     manifest = Path(args.ckpt_dir) / 'training_identity.json'
-    if manifest.exists() and json.loads(manifest.read_text()) != identity:
-        raise ValueError('Training data/settings changed; use a fresh checkpoint directory')
-    write_json(manifest, identity)
+    if int(os.environ.get('RANK', '0')) == 0:  # One writer per launch; a mismatch stops every rank.
+        if manifest.exists() and json.loads(manifest.read_text()) != identity:
+            raise ValueError('Training data/settings changed; use a fresh checkpoint directory')
+        write_json(manifest, identity)
     print(f"[INFO] Using {len(input_files)} input file(s):")
     for f in input_files:
         print(f"       - {f}")
@@ -388,9 +389,10 @@ def train(args):
     print("\n[INFO] Training complete.")
 
     # --- Save final model ---
-    os.makedirs(os.path.dirname(os.path.abspath(args.output_model)), exist_ok=True)
-    model.save(args.output_model)
-    print(f"[INFO] Saved fine-tuned model to: {args.output_model}")
+    if trainer.is_world_process_zero():
+        os.makedirs(os.path.dirname(os.path.abspath(args.output_model)), exist_ok=True)
+        model.save(args.output_model)
+        print(f"[INFO] Saved fine-tuned model to: {args.output_model}")
 
 
 if __name__ == "__main__":

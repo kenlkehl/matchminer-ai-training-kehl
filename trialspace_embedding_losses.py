@@ -85,7 +85,7 @@ class CachedEmbeddingLoss(CachedLossMixin, torch.nn.Module):
 
     def embed_minibatch(self, sentence_feature, begin, end, with_grad,
                        copy_random_state, random_state=None):
-        device_type = self.model.device.type
+        device_type = next(self.model.parameters()).device.type  # Also when DDP wraps the model.
         settings = (torch.is_autocast_enabled(device_type), torch.get_autocast_dtype(device_type))
         if random_state is not None:
             settings = random_state.trialspace_autocast

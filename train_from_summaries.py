@@ -95,9 +95,10 @@ def parser():
     p.add_argument('--trialspace-context', type=int, default=8192)
     p.add_argument('--trialspace-steps', type=int, help='Explicit optimizer updates per fit; otherwise derive from complete epochs')
     p.add_argument('--trialspace-epochs', type=float, default=1, help='Complete passes over the labeled pairs per fit')
-    p.add_argument('--trialspace-batch-size', type=int, default=96, help='EmbeddingGemma 2 pairs per optimizer step')
+    p.add_argument('--trialspace-batch-size', type=int, default=96, help='EmbeddingGemma 2 pairs per GPU (one rank per --gpus entry); each rank ranks its own pairs, '
+                        'and an optimizer step covers this times the GPU count')
     p.add_argument('--trialspace-loss-mini-batch-size', type=int, default=32,
-                   help='EmbeddingGemma 2 gradient-cache encoder chunk; the loss still spans the full batch '
+                   help='EmbeddingGemma 2 gradient-cache encoder chunk; the loss still spans each rank\'s full batch '
                         '(48 peaked at 212 GiB on the GB300 with a 2,500-token cap; the cap is now 3,000)')
     p.add_argument('--trialspace-accumulation', type=int, default=32,
                    help='Query groups per GPU per optimizer update, sampled across available scores')
@@ -191,6 +192,7 @@ def stages(args):
         common += ['--cache-dir', str(args.trialspace_cache_dir)]
     dense = args.trialspace_retriever == 'embeddinggemma'
     dense_py = str(args.embedding_python or py)
+    dense_launch = [dense_py, *launch[1:]]  # One finetune_embedder rank per GPU in --gpus.
     if dense and args.trialspace_extra_pairs:
         raise ValueError('Extra candidate pairs are supported only by ColBERT mining')
     embedding = args.embedding_model or DEFAULT_EMBEDDERS[args.trialspace_retriever]
@@ -267,8 +269,8 @@ def stages(args):
                 'project-dense-labels', '--corpus', str(corpus), '--embeddinggemma', str(mining),
                 '--labels', str(directory), '--output', str(pairs)],
                 [pairs / 'embeddinggemma2' / 'complete.json', pairs / 'embeddinggemma2' / 'pairs.parquet']))
-            command = [dense_py, 'finetune_embedder.py', '-i', str(pairs / 'embeddinggemma2' / 'pairs.parquet'),
-                '-c', str(round_dir / 'fit'), '-o', str(embedding), '-m', str(previous_embedding),
+            command = dense_launch + ['finetune_embedder.py', '-i', str(pairs / 'embeddinggemma2' / 'pairs.parquet'),
+                '-c', str(round_dir / 'fit'), '-o', str(embedding), '--base-model', str(previous_embedding),
                 '--prompt-profile', 'colbert_matching', '--model-dtype', 'bfloat16',
                 '--batch-size', str(args.trialspace_batch_size),
                 '--loss-mini-batch-size', str(args.trialspace_loss_mini_batch_size), '--mask-known-positives',

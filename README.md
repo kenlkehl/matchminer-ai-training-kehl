@@ -250,10 +250,14 @@ adapters. Its stages, in order:
 by exhaustive cosine similarity with 8,192-token inputs
 (`trialspace_comparison.py dense-mine`) and fit with `finetune_embedder.py`:
 CoSENT over every labeled pair plus MNRL over positives with known positives
-masked, 96 pairs per optimizer step (gradient-cache chunks of 32), BF16,
+masked, 96 pairs per GPU (gradient-cache chunks of 32), BF16,
 learning rate 2e-5 with 1% linear warmup and decay over 1 epoch
 (`--trialspace-epochs`), 3,000-token training cap. Round 2 starts from the
-round-1 model. Models are saved to `trialspace_round{1,2}/` under
+round-1 model. The fit runs one rank per GPU in `--gpus`
+(`torch.distributed.run`). Each rank's ranking losses see only its own 96
+pairs, and gradients are averaged, so an optimizer step covers 96 times the
+GPU count. Rank zero stages inputs to local SSD and publishes the model.
+Models are saved to `trialspace_round{1,2}/` under
 `--models-dir`. Dense stages run with `--embedding-python` (an environment
 with EmbeddingGemma 2 support).
 
