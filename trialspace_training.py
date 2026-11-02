@@ -473,6 +473,9 @@ def parser():
     sub.choices['mine'].add_argument('--trial-sample-round', type=int, default=1,
         help='Mining round; each round draws a fresh trial sample and version choice per patient (1 = original draws)')
     sub.choices['label'].set_defaults(gated_regression=True, return_records=False)
+    sub.choices['label'].add_argument('--reuse-labels', type=Path,
+        help='Completed labels of an earlier round over the same corpus; its judgments of pairs in --candidates are imported')
+    sub.choices['label'].add_argument('--reuse-candidates', type=Path, help='The candidates.jsonl --reuse-labels judged')
     sub.choices['train'].set_defaults(objective='gated_regression', loss='legacy_ranking',
                                      learning_rate=2e-5, lr_scheduler='linear', warmup_ratio=.01,
                                      eval_every=100, eval_groups_per_stratum=32,
@@ -483,6 +486,20 @@ def parser():
         help='Complete directional-pair epochs for ranking; query sampling passes for MSE; --steps overrides')
     sub.choices['train'].add_argument('--output-model', type=Path, help='Separate final model directory; checkpoints stay in --output')
     return p
+
+
+def write_reuse_plan(args):
+    """Record the earlier round to import from (colbert_experiments.full_pool_reuse verifies it)."""
+    if not (args.reuse_labels and args.reuse_candidates):
+        raise ValueError('--reuse-labels and --reuse-candidates go together')
+    plan = dict(sources=[dict(labels=str(args.reuse_labels), candidates=str(args.reuse_candidates),
+                              mode='candidate_intersection', corpus=str(args.corpus))])
+    path = Path(args.output) / 'reuse_sources.json'
+    if path.exists():
+        if json.loads(path.read_text()) != plan:
+            raise ValueError('This label directory already imports from a different source')
+        return
+    write_json(path, plan)
 
 
 def main():
@@ -498,6 +515,8 @@ def main():
         require_full_corpus(args.corpus)
         from colbert_experiments.labeling import label
         args.scheduler_metrics_file = args.scheduler_metrics_file or str(Path(args.output) / 'concurrency_status.json')
+        if args.reuse_labels or args.reuse_candidates:
+            write_reuse_plan(args)
         asyncio.run(label(args))
     elif args.command == 'train':
         from synthetic_pool import require_full_corpus, require_all_sources

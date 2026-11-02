@@ -70,6 +70,10 @@ def parser():
     p.add_argument('--sample-trials', type=int, default=5000)
     p.add_argument('--cohort-workers', type=int, default=1536)
     p.add_argument('--cohort-max-attempts', type=int, choices=range(1, 11), default=3)
+    p.add_argument('--registry-cohort-max-attempts', type=int, choices=range(1, 11), default=5,
+                   help='Attempts per record for registry-cohorts (cohorts from the protocol seeds\' registry records)')
+    p.add_argument('--registry-cohort-concurrency-per-server', type=int, choices=range(1, 1025), metavar='1..1024',
+                   default=512, help='Per-server request ceiling for registry-cohorts')
     p.add_argument('--cohort-max-tokens', type=int, default=50000)
     p.add_argument('--data-seed', type=int, default=42)
     p.add_argument('--dfci-trials-csv', type=Path, default=DATA_ROOT / 'dfci_trials_summary_10-18-26.csv')
@@ -85,8 +89,8 @@ def parser():
     p.add_argument('--generation-context', type=int, default=250000)
     p.add_argument('--generation-concurrency-per-server', type=int, default=1024)
     p.add_argument('--generation-scheduler-adaptive-concurrency', action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument('--generation-initial-concurrency-per-server', type=int, default=128)
-    p.add_argument('--generation-pending-requests', type=int, default=2560)
+    p.add_argument('--generation-initial-concurrency-per-server', type=int, default=64)
+    p.add_argument('--generation-pending-requests', type=int, default=8192)
     p.add_argument('--generation-request-timeout', type=float, default=7200)
     p.add_argument('--generation-max-attempts', type=int, default=16)
     p.add_argument('--generation-seed-max-tokens', type=int, default=16000)
@@ -211,8 +215,8 @@ def build_plan(args):
                   '--output-trials', str(registry_rows[1]), '--output-cohorts', str(registry_rows[0]),
                   '--output-json', str(registry_rows[2]), '--work-dir', str(work / 'registry_extraction'),
                   '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
-                  '--max-attempts', str(args.cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
-                  '--max_concurrent_per_server', str(args.generation_concurrency_per_server),
+                  '--max-attempts', str(args.registry_cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
+                  '--max_concurrent_per_server', str(args.registry_cohort_concurrency_per_server),
                   '--request_timeout', str(args.generation_request_timeout), '--api-key-env', args.api_key_env,
                   '--allow-failures', *model, *(['--server_urls_file', str(registry)] if registry else [])]
     generated = [g / name for name in ('all_synthetic_notes.parquet', 'all_synthetic_events.parquet', 'manifest.json')]

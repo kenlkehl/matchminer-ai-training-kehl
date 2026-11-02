@@ -96,7 +96,7 @@ step 7 is now generating patients from its cohorts.
    patient seeds per cohort from the cohort's eligibility criteria alone, then
    event histories, then notes; then `prepare-notes`, `summarize-patients`
    (serial summaries) and `prepare-training`. The default model is the teacher,
-   `nvidia/Gemma-4-31B-IT-NVFP4`. The last completed run used the registry
+   `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`. The last completed run used the registry
    cohorts from step 4: 66,800 patients, 1,661,021 events and 1,137,527 notes
    (`synthetic_namedcohorts_5000_gemma4_31b_20261026/`, 2026-10-26 to 10-27).
    For the step-6 cohorts, `synthetic_protocols/patient_cohorts.py` builds the
@@ -135,7 +135,7 @@ default range is `train` only.
 | `prepare-notes` | `prepare_synthetic_training.py notes` | `all_synthetic_notes.parquet`, `synthetic_patient_metadata.parquet` |
 | `summarize-patients` | `6_summarize_patients.py` | `patient_summaries.parquet`, `patient_serial_summaries.parquet` |
 | `prepare-training` | `prepare_synthetic_training.py summaries` | `patient_summaries_with_spaces.parquet` |
-| `train` | `train_from_summaries.py` (corpus from `retrieval_cohorts.csv`) | models under `../models/colbert_pipeline_v1` |
+| `train` | `train_from_summaries.py` (corpus from `retrieval_cohorts.csv`) | models under `../models/embeddinggemma2_pipeline_v1` |
 
 Patients are generated only from the protocol cohorts (`generation-cohorts`);
 retrieval, labeling and training use `retrieval_cohorts.csv`, which holds each
@@ -167,7 +167,7 @@ directory prevents concurrent runs, and logs go to `<pipeline-dir>/logs/`.
 `generation.lock` is held.
 
 The default LLM for data production and labeling is
-`nvidia/Gemma-4-31B-IT-NVFP4` (`oncoreasoning_training/teacher.py`), overridden
+`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` (`oncoreasoning_training/teacher.py`), overridden
 with `--generation-model` / `--generation-tokenizer` (upstream) and
 `--teacher-model` / `--teacher-served-model` (training; an endpoint's model root
 must match the teacher model or be an approved quantization of it, listed in
@@ -229,13 +229,16 @@ such as `None` or `NA`; only empty cells are missing.
 
 ## Training (`train_from_summaries.py`)
 
-The integrated runner trains a ColBERT retriever and the OncoReasoning adapters.
-Its stages, in order:
+The integrated runner trains an EmbeddingGemma 2 retriever and the OncoReasoning
+adapters. Its stages, in order:
 
 1. `prepare-trialspace`
-2. Round 1: mine with the base model, label, train.
-3. Round 2: mine with the round-1 model, label, train.
-4. `mine-3` with the round-2 model (candidates for downstream training).
+2. Round 1: mine with the base model (`mine-1`), label (`label-trialspace-1`),
+   project the labels into a pair table (`project-trialspace-1`), train.
+3. Round 2: the same with the round-1 model; labeling imports round-1
+   judgments of pairs mined again (`--reuse-labels`).
+4. Round 3: mine with the round-2 model and label (importing round-2
+   judgments). Its candidates feed the stages below; there is no third fit.
 5. `catalog`, `validate-catalog`: the patient-free GoodOption drug evidence
    catalog (`train_good_option_checker.py catalog`).
 6. `prepare-exclusions`: teacher extraction of trial exclusion rules
@@ -243,13 +246,22 @@ Its stages, in order:
 7. `prepare-oncoreasoning`, `distill-oncoreasoning`, `build-oncoreasoning`,
    `train-oncoreasoning`.
 
-**Retriever.** Base `lightonai/GTE-ModernColBERT-v1`, with the encoder,
-retrieval instruction and MaxSim scorer from the inference package. The default
-loss (`--trialspace-loss legacy_ranking`) is CoSENT over MaxSim scores in both
-directions plus a contrastive term comparing each positive only with its own
-query's known zero-score pairs (scale 20, learning rate 2e-5, 3 epochs, 1%
-warmup, 8,192-token context). Models are saved to
-`trialspace_round{1,2}/` under `--models-dir`.
+**Retriever.** Base `google/embeddinggemma-2` at revision `914f7f89`, mined
+by exhaustive cosine similarity with 8,192-token inputs
+(`trialspace_comparison.py dense-mine`) and fit with `finetune_embedder.py`:
+CoSENT over every labeled pair plus MNRL over positives with known positives
+masked, 96 pairs per optimizer step (gradient-cache chunks of 48), BF16,
+learning rate 2e-5 with 1% linear warmup and decay over 1 epoch
+(`--trialspace-epochs`), 3,000-token training cap. Round 2 starts from the
+round-1 model. Models are saved to `trialspace_round{1,2}/` under
+`--models-dir`. Dense stages run with `--embedding-python` (an environment
+with EmbeddingGemma 2 support).
+
+`--trialspace-retriever colbert` keeps the ColBERT path: base
+`lightonai/GTE-ModernColBERT-v1` with the inference package's MaxSim scorer,
+`trialspace_training.py mine`/`train`, CoSENT over MaxSim scores in both
+directions plus a contrastive term (`--trialspace-loss legacy_ranking`, scale 20),
+and two labeling rounds (`mine-3` only feeds downstream stages).
 
 **Labels.** The teacher answers five yes/no questions per pair: an eligibility
 gate (`potentially_eligible`), then, only if the gate passes, cancer type,
@@ -263,7 +275,9 @@ candidate set by default, with no flags needed:
 
 - Each patient searches only the cohorts of 500 randomly sampled trials
   (`--patient-trial-sample`; 0 searches all trials). Each patient gets its own
-  sample, drawn reproducibly from `--seed` (42) and the patient ID.
+  sample, drawn reproducibly from `--seed` (42), the patient ID and the
+  mining round: every round draws a fresh sample (`--trial-sample-round`,
+  which the runner sets to 2 and 3; round 1 keeps the original draws).
 - A trial with both a synthetic-protocol version and a registry
   (ClinicalTrials.gov) version of its cohorts (`synthetic_protocols/retrieval_cohorts.py`)
   is represented by one of them: in each patient's search, a version chosen at
@@ -294,11 +308,12 @@ are no separate TrialChecker or BoilerplateChecker classifier trainers here.
   --patient-summaries ../data/no_phi/patient_summaries_with_spaces.parquet \
   --trial-cohorts ../data/no_phi/synthetic_generation/sample_trial_cohort_lineitems.csv \
   --teacher-servers-file ../data/no_phi/live_pool/servers.json \
-  --teacher-served-model gemma4-31b --gpus 2,3
+  --teacher-served-model nemotron-3.5-super-vl-120b \
+  --embedding-python /path/to/embeddinggemma2-env/bin/python --gpus 2,3
 ```
 
-Defaults: `--run-dir ../data/no_phi/colbert_pipeline_v1`,
-`--models-dir ../models/colbert_pipeline_v1`, `--inference-repo
+Defaults: `--run-dir ../data/no_phi/embeddinggemma2_pipeline_v1`,
+`--models-dir ../models/embeddinggemma2_pipeline_v1`, `--inference-repo
 ../matchminer-ai-inference-kehl`. Teachers come from `--teacher-servers-file`,
 repeated `--teacher-url`, or one vLLM server started per GPU in `--gpus`
 (default 0–7). Completed stages are marked in `<run-dir>/completed/` against

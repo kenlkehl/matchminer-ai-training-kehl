@@ -5,7 +5,7 @@ from pathlib import Path
 
 from matchminer_ai.llm.endpoint_pool import EndpointPool, MAX_POOL_WORKERS
 
-DEFAULT_TEACHER = "nvidia/Gemma-4-31B-IT-NVFP4"
+DEFAULT_TEACHER = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"
 
 
 def server_urls(url=None, file=None):

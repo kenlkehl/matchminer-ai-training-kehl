@@ -26,6 +26,8 @@ from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_EMBEDDERS = {'embeddinggemma': 'google/embeddinggemma-2', 'colbert': 'lightonai/GTE-ModernColBERT-v1'}
+EMBEDDINGGEMMA2_REVISION = '914f7f89142e33e77833254d9c9b90c3cef7303b'
 
 TRIALSPACE_OPERATIONAL_OPTIONS = {
     'trialspace_save_steps', 'trialspace_save_total_limit', 'trialspace_stop_at', 'trialspace_pause_file',
@@ -69,8 +71,8 @@ def parser():
                    help="Summarized synthetic patients; default: DATA_DIR/patient_summaries_with_spaces.parquet")
     p.add_argument("--synthetic-notes", type=Path,
                    help="Generated synthetic notes; default: DATA_DIR/all_synthetic_notes.parquet")
-    p.add_argument("--run-dir", type=Path, default=ROOT.parent / "data/no_phi/colbert_pipeline_v1")
-    p.add_argument("--models-dir", type=Path, default=ROOT.parent / "models/colbert_pipeline_v1")
+    p.add_argument("--run-dir", type=Path, default=ROOT.parent / "data/no_phi/embeddinggemma2_pipeline_v1")
+    p.add_argument("--models-dir", type=Path, default=ROOT.parent / "models/embeddinggemma2_pipeline_v1")
     p.add_argument("--inference-repo", type=Path, default=ROOT.parent / "matchminer-ai-inference-kehl")
     p.add_argument("--teacher-model", default=DEFAULT_TEACHER)
     p.add_argument("--teacher-served-model", help="API model alias; --teacher-model remains the underlying HF model")
@@ -82,12 +84,20 @@ def parser():
                    help="Live per-server limits for TrialSpace labeling only; its short requests "
                         "need higher limits than generation or summary stages.")
     p.add_argument("--student-model", default=DEFAULT_MODEL_NAME)
-    p.add_argument("--embedding-model", default="lightonai/GTE-ModernColBERT-v1")
+    p.add_argument('--trialspace-retriever', choices=['embeddinggemma', 'colbert'], default='embeddinggemma',
+                   help='Dense EmbeddingGemma 2 (exhaustive cosine mining, finetune_embedder fits) or ColBERT MaxSim')
+    p.add_argument("--embedding-model", help="Round-1 base model; default: the selected retriever's base model")
+    p.add_argument('--embedding-revision', help='Base model revision; default: the pinned EmbeddingGemma 2 revision')
+    p.add_argument('--embedding-python', type=Path,
+                   help='Python for dense mining, projection and fits (needs EmbeddingGemma 2 support); default: this one')
     p.add_argument('--synthetic-training-splits', nargs='+', choices=['train', 'val', 'test'],
                    default=['train', 'val', 'test'], help='Synthetic source partitions used by every student fit')
     p.add_argument('--trialspace-context', type=int, default=8192)
     p.add_argument('--trialspace-steps', type=int, help='Explicit optimizer updates per fit; otherwise derive from complete epochs')
-    p.add_argument('--trialspace-epochs', type=float, default=3, help='Complete directional-pair epochs per ranking fit')
+    p.add_argument('--trialspace-epochs', type=float, default=1, help='Complete passes over the labeled pairs per fit')
+    p.add_argument('--trialspace-batch-size', type=int, default=96, help='EmbeddingGemma 2 pairs per optimizer step')
+    p.add_argument('--trialspace-loss-mini-batch-size', type=int, default=48,
+                   help='EmbeddingGemma 2 gradient-cache encoder chunk; the loss still spans the full batch')
     p.add_argument('--trialspace-accumulation', type=int, default=32,
                    help='Query groups per GPU per optimizer update, sampled across available scores')
     p.add_argument('--trialspace-documents-per-query', type=int, default=8,
@@ -104,7 +114,7 @@ def parser():
     p.add_argument('--trialspace-contrastive-weight', type=float, default=1.)
     p.add_argument('--trialspace-lr-scheduler', choices=['constant', 'linear'], default='linear')
     p.add_argument('--trialspace-warmup-ratio', type=float, default=.01)
-    p.add_argument('--trialspace-save-steps', type=int, default=100)
+    p.add_argument('--trialspace-save-steps', type=int, default=200)
     p.add_argument('--trialspace-save-total-limit', type=int, default=2)
     p.add_argument('--trialspace-stop-at', help='Pause student training at an ISO timestamp with timezone offset')
     p.add_argument('--trialspace-pause-file', type=Path, help='Pause student training when this file exists')
@@ -178,33 +188,52 @@ def stages(args):
     mining_splits = ['train', 'val', 'test'] if 'test' in training_splits else ['train', 'val']
     if args.trialspace_cache_dir:
         common += ['--cache-dir', str(args.trialspace_cache_dir)]
-    embedding = args.embedding_model
+    dense = args.trialspace_retriever == 'embeddinggemma'
+    dense_py = str(args.embedding_python or py)
+    if dense and args.trialspace_extra_pairs:
+        raise ValueError('Extra candidate pairs are supported only by ColBERT mining')
+    embedding = args.embedding_model or DEFAULT_EMBEDDERS[args.trialspace_retriever]
+    revision = args.embedding_revision or (EMBEDDINGGEMMA2_REVISION if embedding == DEFAULT_EMBEDDERS['embeddinggemma'] else None)
+    # Three mining and labeling rounds; the student is refit after rounds 1 and 2,
+    # and round 3's candidates and labels supply the checker and distillation stages.
     for iteration in (1, 2, 3):
         round_dir = run / f'trialspace_round{iteration}'
         mining = round_dir / 'mining'
         candidates = [mining / f'{direction}.parquet' for direction in ('patient_to_cohort', 'cohort_to_patient')]
-        mine = launch + ['trialspace_training.py', 'mine', *common, '--model', str(embedding),
-            '--output', str(mining), '--candidate-limit', str(args.trialspace_candidate_limit),
-            '--proposal-strategy', 'lexical_random', '--top-k', str(args.trialspace_top_k),
-            '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
-            '--patient-trial-sample', str(args.trialspace_patient_trial_sample),
-            '--document-batch-size', str(args.trialspace_encode_batch_size),
-            '--query-batch-size', str(args.trialspace_encode_batch_size),
-            '--score-batch-size', str(args.trialspace_score_batch_size),
-            '--pair-batch-size', str(args.trialspace_pair_batch_size),
-            '--score-query-batches', str(args.trialspace_score_query_batches),
-            '--device-cache-gb', str(args.trialspace_device_cache_gb)]
-        mine += ['--splits', *mining_splits]
+        if dense:
+            mine = [dense_py, 'trialspace_comparison.py', 'dense-mine', '--corpus', str(corpus),
+                '--output', str(mining), '--model', str(embedding), '--max-tokens', str(args.trialspace_context),
+                '--patient-k', str(args.trialspace_top_k_patient_to_cohort or args.trialspace_top_k),
+                '--cohort-k', str(args.trialspace_top_k_cohort_to_patient or args.trialspace_top_k),
+                '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
+                '--patient-trial-sample', str(args.trialspace_patient_trial_sample)]
+            if iteration == 1 and revision:
+                mine += ['--revision', revision]
+            if args.trialspace_cache_dir:
+                mine += ['--cache-dir', str(args.trialspace_cache_dir)]
+        else:
+            mine = launch + ['trialspace_training.py', 'mine', *common, '--model', str(embedding),
+                '--output', str(mining), '--candidate-limit', str(args.trialspace_candidate_limit),
+                '--proposal-strategy', 'lexical_random', '--top-k', str(args.trialspace_top_k),
+                '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
+                '--patient-trial-sample', str(args.trialspace_patient_trial_sample),
+                '--document-batch-size', str(args.trialspace_encode_batch_size),
+                '--query-batch-size', str(args.trialspace_encode_batch_size),
+                '--score-batch-size', str(args.trialspace_score_batch_size),
+                '--pair-batch-size', str(args.trialspace_pair_batch_size),
+                '--score-query-batches', str(args.trialspace_score_query_batches),
+                '--device-cache-gb', str(args.trialspace_device_cache_gb)]
+            mine += ['--splits', *mining_splits]
+            if args.trialspace_extra_pairs:
+                mine += ['--extra-pairs', str(args.trialspace_extra_pairs)]
+            for direction in ('patient-to-cohort', 'cohort-to-patient'):
+                value = getattr(args, 'trialspace_top_k_' + direction.replace('-', '_'), None)
+                if value is not None:
+                    mine += ['--top-k-' + direction, str(value)]
         if iteration > 1:  # A fresh trial sample per patient each round; round 1 keeps the original draws.
             mine += ['--trial-sample-round', str(iteration)]
-        if args.trialspace_extra_pairs:
-            mine += ['--extra-pairs', str(args.trialspace_extra_pairs)]
-        for direction in ('patient-to-cohort', 'cohort-to-patient'):
-            value = getattr(args, 'trialspace_top_k_' + direction.replace('-', '_'), None)
-            if value is not None:
-                mine += ['--top-k-' + direction, str(value)]
         result.append(Stage(f'mine-{iteration}', mine, [mining / 'complete.json', mining / 'candidates.jsonl', *candidates]))
-        if iteration == 3:
+        if iteration == 3 and not dense:
             break
         directory = round_dir / 'teacher'
         scores = directory / 'scores.jsonl'
@@ -215,15 +244,43 @@ def stages(args):
             '--max_concurrent_per_server', str(args.label_concurrency_per_server),
             '--initial-concurrent-per-server', str(min(args.label_initial_concurrency_per_server, args.label_concurrency_per_server)),
             '--pending-requests', str(args.trialspace_label_workers),
-            '--max-auto-pending-requests', str(args.trialspace_label_max_auto_workers), '--max_attempts', '5']
+            '--max-auto-pending-requests', str(args.trialspace_label_max_auto_workers), '--max_attempts', '16',
+            '--request_timeout', '7200', '--scheduler-adaptive-concurrency']
         if args.trialspace_cache_dir:
             label += ['--cache-dir', str(args.trialspace_cache_dir)]
         if args.teacher_concurrency_file:
             label += ['--concurrency-control-file', str(args.teacher_concurrency_file)]
+        if iteration > 1:  # Pairs judged in the previous round are imported, not judged again.
+            previous = run / f'trialspace_round{iteration - 1}'
+            label += ['--reuse-labels', str(previous / 'teacher'),
+                      '--reuse-candidates', str(previous / 'mining' / 'candidates.jsonl')]
         result.append(Stage(f'label-trialspace-{iteration}', label,
                             [scores, directory / 'labels.jsonl', directory / 'labeling_manifest.json'], True))
+        if iteration == 3:
+            break
         previous_embedding = embedding
         embedding = models / f"trialspace_round{iteration}"
+        if dense:
+            pairs = round_dir / 'pairs'
+            result.append(Stage(f'project-trialspace-{iteration}', [dense_py, 'trialspace_comparison.py',
+                'project-dense-labels', '--corpus', str(corpus), '--embeddinggemma', str(mining),
+                '--labels', str(directory), '--output', str(pairs)],
+                [pairs / 'embeddinggemma2' / 'complete.json', pairs / 'embeddinggemma2' / 'pairs.parquet']))
+            command = [dense_py, 'finetune_embedder.py', '-i', str(pairs / 'embeddinggemma2' / 'pairs.parquet'),
+                '-c', str(round_dir / 'fit'), '-o', str(embedding), '-m', str(previous_embedding),
+                '--prompt-profile', 'colbert_matching', '--model-dtype', 'bfloat16',
+                '--batch-size', str(args.trialspace_batch_size),
+                '--loss-mini-batch-size', str(args.trialspace_loss_mini_batch_size), '--mask-known-positives',
+                '--logging-steps', '25', '--save-steps', str(args.trialspace_save_steps)]
+            command += (['--max-steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
+                        else ['--epochs', str(args.trialspace_epochs)])
+            if iteration == 1 and revision:
+                command += ['--model-revision', revision]
+            if args.trialspace_cache_dir:
+                command += ['--model-cache-dir', str(args.trialspace_cache_dir)]
+            result.append(Stage(f'train-trialspace-{iteration}', command,
+                                [embedding / 'modules.json', embedding / 'model.safetensors']))
+            continue
         command = launch + ['trialspace_training.py', 'train', *common, '--model', str(previous_embedding),
             '--labels', str(scores), '--output', str(round_dir / 'fit'), '--output-model', str(embedding),
             '--objective', 'gated_regression', '--prediction-link', 'identity',
@@ -291,13 +348,21 @@ def stages(args):
     return result
 
 
+# Hybrid Mamba serving flags shared by the labeling fleet and the camus Nemotron servers.
+NEMOTRON_SERVE_FLAGS = ["--trust-remote-code", "--async-scheduling", "--mamba-backend", "flashinfer",
+    "--mamba-ssm-cache-dtype", "float16", "--enable-mamba-cache-stochastic-rounding",
+    "--mamba-cache-philox-rounds", "5", "--chat-template-content-format", "string", "--mamba-cache-mode", "align"]
+
+
 def teacher_command(args, index):
+    nemotron = "nemotron" in args.teacher_model.lower()
     command = [args.vllm, "serve", args.teacher_model, "--host", "127.0.0.1",
         "--port", str(args.teacher_port + index), "--tensor-parallel-size", "1",
-        "--quantization", "modelopt", "--reasoning-parser", resolve_parser_name(args.teacher_model),
+        *([] if nemotron else ["--quantization", "modelopt"]),
+        "--reasoning-parser", resolve_parser_name(args.teacher_model),
         "--language-model-only", "--max-model-len", str(args.teacher_max_context),
         "--max-num-seqs", str(args.teacher_max_num_seqs), "--gpu-memory-utilization", "0.90",
-        "--no-enable-log-requests"]
+        "--no-enable-log-requests", *(NEMOTRON_SERVE_FLAGS if nemotron else [])]
     tool_parser = resolve_tool_call_parser(args.teacher_model)
     if tool_parser:
         command += ["--enable-auto-tool-choice", "--tool-call-parser", tool_parser]

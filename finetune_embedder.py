@@ -58,8 +58,10 @@ def parse_args():
     parser.add_argument('--save-steps', type=int, default=2500,
                         help='Checkpoint interval; a shorter interval is useful on Spot VMs.')
     parser.add_argument('--logging-steps', type=int, default=100)
+    parser.add_argument('--epochs', type=float, default=1,
+                        help='Passes over the training pairs; the linear warmup/decay schedule spans them')
     parser.add_argument('--max-steps', type=int,
-                        help='Stop after this many optimizer steps (learning-rate schedule over them) instead of 3 epochs')
+                        help='Stop after this many optimizer steps (learning-rate schedule over them) instead of --epochs')
     parser.add_argument('--prompt-profile', choices=PROFILES, default='sentence_similarity')
     parser.add_argument('--max-tokens', type=int, default=MAX_TOKENS)
     parser.add_argument('--model-revision')
@@ -203,8 +205,10 @@ def train(args):
         loss_mini_batch_size=args.loss_mini_batch_size,
         encoder_mini_batch_size=args.encoder_mini_batch_size, encoder_token_budget=args.encoder_token_budget,
         sort_encoder_chunks_by_length=bool(args.loss_mini_batch_size or args.encoder_mini_batch_size),
-        negative_mask='known_positive_pairs' if args.mask_known_positives else None, epochs=3, learning_rate=2e-5, warmup_ratio=.01,
+        negative_mask='known_positive_pairs' if args.mask_known_positives else None, epochs=args.epochs, learning_rate=2e-5, warmup_ratio=.01,
         multi_dataset_batch_sampler='proportional', seed=42, training_pool='all_synthetic_training', diagnostics_held_out=False)
+    if args.epochs <= 0:
+        raise ValueError('--epochs must be positive')
     if args.max_steps is not None:
         if args.max_steps < 1:
             raise ValueError('--max-steps must be positive')
@@ -350,7 +354,7 @@ def train(args):
         save_steps=args.save_steps,
         save_total_limit=2,
         logging_steps=args.logging_steps,
-        num_train_epochs=3,
+        num_train_epochs=args.epochs,
         max_steps=args.max_steps if args.max_steps is not None else -1,
         prompts=training_prompts(args.prompt_profile),
         batch_sampler='batch_sampler',

@@ -98,30 +98,72 @@ def test_pipeline_passes_note_preparation_workers(tmp_path):
     assert command[command.index('--note-preparation-workers') + 1] == '3'
 
 
-@pytest.mark.parametrize('wrapper', ['train_all.sh', 'train_all_gcp.sh'])
-def test_shell_training_defaults_use_fast_shared_colbert(tmp_path, wrapper):
-    result = subprocess.run(['bash', str(pipeline.ROOT / wrapper), '--dry-run', '--gpus', '0,1,2,3'],
+def dry_run_plan(wrapper, *options):
+    result = subprocess.run(['bash', str(pipeline.ROOT / wrapper), '--dry-run', '--gpus', '0,1,2,3', *options],
         env={**os.environ, 'PYTHON': sys.executable}, text=True, capture_output=True, check=True)
-    plan = json.loads(result.stdout)
-    mines = [row['command'] for row in plan if row['name'].startswith('mine-')]
+    return json.loads(result.stdout)
+
+
+def commands(plan, prefix):
+    return [row['command'] for row in plan if row['name'].startswith(prefix)]
+
+
+@pytest.mark.parametrize('wrapper', ['train_all.sh', 'train_all_gcp.sh'])
+def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_path, wrapper):
+    plan = dry_run_plan(wrapper)
+    names = [row['name'] for row in plan]
+    assert names[:names.index('catalog')] == ['prepare-trialspace',
+        'mine-1', 'label-trialspace-1', 'project-trialspace-1', 'train-trialspace-1',
+        'mine-2', 'label-trialspace-2', 'project-trialspace-2', 'train-trialspace-2',
+        'mine-3', 'label-trialspace-3']
+    mines = commands(plan, 'mine-')
+    for command in mines:
+        assert command[1:3] == ['trialspace_comparison.py', 'dense-mine']
+        assert [command[command.index(flag) + 1] for flag in
+                ('--max-tokens', '--patient-k', '--cohort-k', '--lexical-k', '--random-k', '--patient-trial-sample')] == \
+            ['8192', '20', '40', '5', '5', '500']
+    assert mines[0][mines[0].index('--model') + 1] == 'google/embeddinggemma-2'
+    assert mines[0][mines[0].index('--revision') + 1] == '914f7f89142e33e77833254d9c9b90c3cef7303b'
+    assert mines[1][mines[1].index('--model') + 1].endswith('trialspace_round1')
+    # Each round draws a fresh trial sample per patient; round 1 keeps the original draws.
+    assert '--trial-sample-round' not in mines[0]
+    assert [command[command.index('--trial-sample-round') + 1] for command in mines[1:]] == ['2', '3']
+    labels = commands(plan, 'label-trialspace-')
+    assert '--reuse-labels' not in labels[0]
+    for round_number, command in enumerate(labels[1:], 2):
+        assert command[command.index('--reuse-labels') + 1].endswith(f'trialspace_round{round_number - 1}/teacher')
+    for command in labels:
+        assert command[command.index('--max_attempts') + 1] == '16'
+        assert '--scheduler-adaptive-concurrency' in command
+    fits = commands(plan, 'train-trialspace-')
+    assert len(fits) == 2
+    for command in fits:
+        assert command[1] == 'finetune_embedder.py' and '--mask-known-positives' in command
+        assert float(command[command.index('--epochs') + 1]) == 1
+        assert [command[command.index(flag) + 1] for flag in ('--batch-size', '--loss-mini-batch-size', '--prompt-profile')] == \
+            ['96', '48', 'colbert_matching']
+    assert fits[0][fits[0].index('-m') + 1] == 'google/embeddinggemma-2'
+    assert fits[1][fits[1].index('-m') + 1].endswith('trialspace_round1')
+    catalog = commands(plan, 'catalog')[0]
+    assert catalog[catalog.index('--candidate-files') + 1].endswith('trialspace_round3/mining/patient_to_cohort.parquet')
+
+
+def test_colbert_retriever_keeps_its_fast_shared_settings():
+    plan = dry_run_plan('train_all.sh', '--trialspace-retriever', 'colbert')
+    assert not commands(plan, 'label-trialspace-3') and not commands(plan, 'project-trialspace-')
+    mines = commands(plan, 'mine-')
     assert len(mines) == 3
     for command in mines:
         assert '--nproc_per_node=4' in command
         assert command[command.index('--pair-batch-size') + 1] == '512'
-        assert command[command.index('--score-query-batches') + 1] == '4'
-        assert command[command.index('--device-cache-gb') + 1] == '8'
         assert command[command.index('--top-k-cohort-to-patient') + 1] == '40'
-    assert '--trial-sample-round' not in mines[0]
     assert [command[command.index('--trial-sample-round') + 1] for command in mines[1:]] == ['2', '3']
     assert mines[0][mines[0].index('--model') + 1] == 'lightonai/GTE-ModernColBERT-v1'
-    fits = [row['command'] for row in plan if row['name'].startswith('train-trialspace-')]
+    fits = commands(plan, 'train-trialspace-')
     assert len(fits) == 2
     for command in fits:
         assert command[command.index('--loss') + 1] == 'legacy_ranking'
-        assert command[command.index('--learning-rate') + 1] == '2e-05'
-        assert command[command.index('--lr-scheduler') + 1] == 'linear'
-        assert command[command.index('--warmup-ratio') + 1] == '0.01'
-        assert command[command.index('--epochs') + 1] == '3'
+        assert float(command[command.index('--epochs') + 1]) == 1
 
 
 def test_training_only_retains_original_default_identity(tmp_path):
