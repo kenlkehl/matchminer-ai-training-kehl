@@ -85,11 +85,13 @@ def encode_corpus(args, patients, cohorts):
 
 
 def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128,
-               patient_k=20, cohort_k=40, lexical_k=5, random_k=5, seed=42, patient_trial_sample=0):
+               patient_k=20, cohort_k=40, lexical_k=5, random_k=5, seed=42, patient_trial_sample=0,
+               trial_sample_round=1):
     """Cohort queries search every patient; patients search their sampled trials' cohorts.
 
     A trial with protocol and registry versions is searched in one version per
     patient and queries with one version, chosen per trial (TrialSampler, query_cohorts).
+    Each mining round (trial_sample_round) draws a fresh trial sample per patient.
     """
     from synthetic_pool import require_full_pool
     require_full_pool(patients, cohorts)
@@ -110,7 +112,8 @@ def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128
             refs = torch.tensor(np.asarray(vectors[dkind][di]), device=device)
             lexical = TfidfVectorizer(ngram_range=(1, 2), lowercase=True) if lexical_k else None
             matrix = lexical.fit_transform(row['text'] for row in targets) if lexical else None
-            sampler = TrialSampler(targets, patient_trial_sample, seed) if qkind == 'patients' else None
+            sampler = (TrialSampler(targets, patient_trial_sample, seed, trial_sample_round)
+                       if qkind == 'patients' else None)
             everyone = list(range(len(targets)))
             for start in range(0, len(qi), score_batch_size):
                 chosen = qi[start:start + score_batch_size]
@@ -156,6 +159,8 @@ def _dense_mine(args):
         random_k=args.random_k, seed=args.seed, patient_trial_sample=args.patient_trial_sample)
     if has_trial_versions(cohorts):
         signature['trial_versions'] = TRIAL_VERSION_POLICY
+    if args.trial_sample_round != 1:  # Round 1 keeps its original identity and draws.
+        signature['trial_sample_round'] = args.trial_sample_round
     model_path = Path(args.model)
     if model_path.is_dir():
         # A mutable local model path must never make old encodings look reusable.
@@ -170,7 +175,7 @@ def _dense_mine(args):
     hits = rank_dense(patients, cohorts, vectors, device=args.device,
                      score_batch_size=args.score_batch_size, patient_k=args.patient_k,
                      cohort_k=args.cohort_k, lexical_k=args.lexical_k, random_k=args.random_k, seed=args.seed,
-                     patient_trial_sample=args.patient_trial_sample)
+                     patient_trial_sample=args.patient_trial_sample, trial_sample_round=args.trial_sample_round)
     lineage = Path(args.corpus) / 'source_trial_pairs.jsonl'
     if lineage.exists():
         hits.extend(dict(patient_id=p['patient_id'], cohort_id=p['cohort_id'], direction='both',
@@ -352,6 +357,8 @@ def main():
                         help='Random candidates added per query by default, from the same search set')
     parser.add_argument('--patient-trial-sample', type=int, default=500,
                         help='Trials randomly sampled per patient; the patient searches only their cohorts (0 = all trials)')
+    parser.add_argument('--trial-sample-round', type=int, default=1,
+                        help='Mining round; each round draws a fresh trial sample and version choice per patient (1 = original draws)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--embeddinggemma', type=Path)
     parser.add_argument('--colbert', type=Path)

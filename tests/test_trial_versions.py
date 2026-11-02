@@ -37,7 +37,13 @@ def test_single_version_sample_is_unchanged_and_two_versions_give_one_per_trial(
                    for c in cohorts) for t, v in versions.items())  # every cohort of the chosen version
         seen.update(next(iter(v)) for v in versions.values())
     assert seen == {'protocol', 'registry'}
-    assert sampler('P3') == TrialSampler(cohorts, 10, 7)('P3')
+    assert sampler('P3') == TrialSampler(cohorts, 10, 7)('P3') == TrialSampler(cohorts, 10, 7, 1)('P3')
+    second = TrialSampler(cohorts, 10, 7, 2)
+    assert second('P3') == TrialSampler(cohorts, 10, 7, 2)('P3')
+    # Each mining round draws a fresh trial sample per patient, still one version per trial.
+    assert sum(second(f'P{p}') != sampler(f'P{p}') for p in range(30)) >= 28
+    assert all(len({cohorts[i]['trial_id'] for i in second(f'P{p}')}) ==
+               len({(cohorts[i]['trial_id'], cohorts[i]['source']) for i in second(f'P{p}')}) == 10 for p in range(30))
     queries = query_cohorts(cohorts, 7)
     by_trial = {}
     for cohort in queries:
@@ -64,6 +70,11 @@ def test_dense_mining_searches_and_queries_one_version_per_trial():
         assert len({t for t, _ in found}) == len(found) <= 5
     querying = {(source[h['cohort_id']]) for h in hits if h['direction'] == 'cohort_to_patient'}
     assert len({t for t, _ in querying}) == len(querying) == 12
+    searched = lambda found: {p['id']: {source[h['cohort_id']][0] for h in found if h['direction'] == 'patient_to_cohort'
+                                        and h['patient_id'] == p['id'] and h['source'] == 'embeddinggemma2'} for p in patients}
+    second = rank_dense(patients, cohorts, vectors, patient_k=50, cohort_k=3, lexical_k=2, random_k=2,
+                        seed=7, patient_trial_sample=5, trial_sample_round=2)
+    assert sum(searched(second)[p] != searched(hits)[p] for p in searched(hits)) >= 10  # a fresh sample each round
 
 
 def test_cohort_rows_validate_each_version_as_its_own_complete_set():

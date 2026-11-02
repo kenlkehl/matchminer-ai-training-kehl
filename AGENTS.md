@@ -7,7 +7,9 @@ extracted from the registry record its protocol was written from
 the protocol prompt, schema `trial-registry-cohorts-v1`), combined by
 `synthetic_protocols/retrieval_cohorts.py`. Mining represents each trial by one
 version: chosen at random per patient-trial pair within each patient's 500-trial
-sample, and per trial for cohort queries; source-trial pairs include both
+sample (each mining round redraws that sample and those versions, user
+instruction November 2; round 1 keeps its original draws), and per trial for
+cohort queries; source-trial pairs include both
 versions; a trial accepted in only one version uses it. Patients are generated
 from protocol cohorts only. Do not revert to single-version retrieval without
 the user's instruction.

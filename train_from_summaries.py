@@ -115,7 +115,8 @@ def parser():
     p.add_argument('--trialspace-lexical-k', type=int, default=5)
     p.add_argument('--trialspace-random-k', type=int, default=5)
     p.add_argument('--trialspace-patient-trial-sample', type=int, default=500,
-                   help="Trials sampled per patient for patient-to-cohort mining, like one center's open trials (0 = all)")
+                   help="Trials sampled per patient for patient-to-cohort mining, like one center's open trials (0 = all); "
+                        'redrawn for each mining round')
     p.add_argument('--trialspace-encode-batch-size', type=int, default=16)
     p.add_argument('--trialspace-score-batch-size', type=int, default=16)
     p.add_argument('--trialspace-pair-batch-size', type=int, default=512)
@@ -194,6 +195,8 @@ def stages(args):
             '--score-query-batches', str(args.trialspace_score_query_batches),
             '--device-cache-gb', str(args.trialspace_device_cache_gb)]
         mine += ['--splits', *mining_splits]
+        if iteration > 1:  # A fresh trial sample per patient each round; round 1 keeps the original draws.
+            mine += ['--trial-sample-round', str(iteration)]
         if args.trialspace_extra_pairs:
             mine += ['--extra-pairs', str(args.trialspace_extra_pairs)]
         for direction in ('patient-to-cohort', 'cohort-to-patient'):

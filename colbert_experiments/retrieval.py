@@ -45,24 +45,29 @@ class TrialSampler:
     cancer center's open-trial portfolio instead of every synthetic trial; 0 or
     None keeps every trial. A trial with both a protocol and a registry version
     contributes one version's cohorts, chosen at random for each patient and
-    trial. Both choices depend only on the seed and IDs, so every mining round
-    and embedder searches the same portfolio. Single-version corpora give the
-    same samples as before versions existed.
+    trial. Both choices depend only on the seed, the mining round and IDs: each
+    round draws a fresh portfolio and version choice per patient (user
+    instruction, 2026-11-02), and embedders compared within a round search the
+    same one. Round 1 keeps the original draws, and single-version corpora give
+    the same samples as before versions existed.
     """
 
-    def __init__(self, cohorts, trials, seed):
+    def __init__(self, cohorts, trials, seed, mining_round=1):
         if trials is not None and trials < 0:
             raise ValueError('Patient trial sample must be nonnegative')
+        if mining_round < 1:
+            raise ValueError('Mining round must be positive')
         self.by_trial = _versions(cohorts)
         self.trial_ids = sorted(self.by_trial)
         self.trials, self.seed = trials, seed
+        self.prefix = f'{seed}:' if mining_round == 1 else f'{seed}:round{mining_round}:'
 
     def __call__(self, patient_id):
         chosen = self.trial_ids
         if self.trials and self.trials < len(self.trial_ids):
-            chosen = sorted(random.Random(f'{self.seed}:patient_trial_sample:{patient_id}').sample(
+            chosen = sorted(random.Random(f'{self.prefix}patient_trial_sample:{patient_id}').sample(
                 self.trial_ids, self.trials))
-        rng = random.Random(f'{self.seed}:patient_trial_version:{patient_id}')
+        rng = random.Random(f'{self.prefix}patient_trial_version:{patient_id}')
         indices = []
         for trial in chosen:
             versions = self.by_trial[trial]

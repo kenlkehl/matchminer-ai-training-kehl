@@ -292,6 +292,8 @@ def _mine(args, model, *, rank, world, local):
             'query_batch_size', 'score_batch_size', 'patient_trial_sample')})
     if has_trial_versions(cohorts):
         signature['trial_versions'] = TRIAL_VERSION_POLICY
+    if args.trial_sample_round != 1:  # Round 1 keeps its original identity and draws.
+        signature['trial_sample_round'] = args.trial_sample_round
     if rank == 0:
         from retrieval_cache_import import validate_encoding_import
         validate_encoding_import(output, signature)
@@ -356,7 +358,7 @@ def _mine(args, model, *, rank, world, local):
             lexical = TfidfVectorizer(ngram_range=(1, 2), lowercase=True)
             matrix = lexical.fit_transform(t['text'] for t in targets)
             # Patients search one version of each sampled trial; cohorts search every patient.
-            sampler = (TrialSampler(targets, args.patient_trial_sample, args.seed)
+            sampler = (TrialSampler(targets, args.patient_trial_sample, args.seed, args.trial_sample_round)
                        if direction == 'patient_to_cohort' else None)
             everyone = list(range(len(targets)))
             work_batch_size = args.query_batch_size * (args.score_query_batches if resident else 1)
@@ -468,6 +470,8 @@ def parser():
         help='ColBERT patient picks per cohort; overrides --top-k for this direction')
     sub.choices['mine'].add_argument('--patient-trial-sample', type=int, default=500,
         help='Trials randomly sampled per patient; the patient searches only their cohorts (0 = all trials)')
+    sub.choices['mine'].add_argument('--trial-sample-round', type=int, default=1,
+        help='Mining round; each round draws a fresh trial sample and version choice per patient (1 = original draws)')
     sub.choices['label'].set_defaults(gated_regression=True, return_records=False)
     sub.choices['train'].set_defaults(objective='gated_regression', loss='legacy_ranking',
                                      learning_rate=2e-5, lr_scheduler='linear', warmup_ratio=.01,

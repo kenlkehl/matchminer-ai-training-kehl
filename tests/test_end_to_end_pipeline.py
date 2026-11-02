@@ -111,6 +111,8 @@ def test_shell_training_defaults_use_fast_shared_colbert(tmp_path, wrapper):
         assert command[command.index('--score-query-batches') + 1] == '4'
         assert command[command.index('--device-cache-gb') + 1] == '8'
         assert command[command.index('--top-k-cohort-to-patient') + 1] == '40'
+    assert '--trial-sample-round' not in mines[0]
+    assert [command[command.index('--trial-sample-round') + 1] for command in mines[1:]] == ['2', '3']
     assert mines[0][mines[0].index('--model') + 1] == 'lightonai/GTE-ModernColBERT-v1'
     fits = [row['command'] for row in plan if row['name'].startswith('train-trialspace-')]
     assert len(fits) == 2
