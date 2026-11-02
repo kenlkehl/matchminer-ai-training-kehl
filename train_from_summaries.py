@@ -79,7 +79,8 @@ def parser():
     p.add_argument("--teacher-servers-file", type=Path,
                    help="Externally managed live endpoint registry. Never rewritten or shut down by this runner.")
     p.add_argument("--teacher-concurrency-file", type=Path,
-                   help="Live per-server limits for TrialSpace labeling.")
+                   help="Live per-server limits for TrialSpace labeling only; its short requests "
+                        "need higher limits than generation or summary stages.")
     p.add_argument("--student-model", default=DEFAULT_MODEL_NAME)
     p.add_argument("--embedding-model", default="lightonai/GTE-ModernColBERT-v1")
     p.add_argument('--synthetic-training-splits', nargs='+', choices=['train', 'val', 'test'],

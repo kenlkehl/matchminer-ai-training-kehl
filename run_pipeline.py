@@ -76,7 +76,9 @@ def parser():
     p.add_argument('--generation-dir', type=Path)
     p.add_argument('--raw-synthetic-notes', type=Path)
     p.add_argument('--server-urls-file', type=Path, help='Externally managed live pool for upstream LLM stages')
-    p.add_argument('--concurrency-control-file', type=Path)
+    p.add_argument('--concurrency-control-file', type=Path,
+                   help='Live per-server limits for the upstream generation and summary stages; '
+                        'labeling uses --teacher-concurrency-file')
     p.add_argument('--generation-model', help='API model ID/alias; defaults to the teacher model/alias')
     p.add_argument('--generation-tokenizer', help='HF tokenizer/model-family ID; defaults to --teacher-model')
     p.add_argument('--download-dir', type=Path)
@@ -133,9 +135,9 @@ def resolve_paths(args):
     if args.start_at != 'train' and args.server_urls_file and not args.teacher_url and not args.teacher_servers_file:
         args.teacher_servers_file = args.server_urls_file
         args.teacher_served_model = args.teacher_served_model or args.generation_model
-        args.teacher_concurrency_file = args.teacher_concurrency_file or args.concurrency_control_file
-        if args.teacher_concurrency_file:
-            args.label_concurrency_per_server = args.generation_concurrency_per_server
+        # Labeling keeps its own limits (--teacher-concurrency-file, --label-concurrency-per-server):
+        # its short gate/follow-up requests (~4k tokens) let a server run several times more of
+        # them than the long generation and summary requests --concurrency-control-file is tuned for.
     return args
 
 

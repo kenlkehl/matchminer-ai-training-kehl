@@ -77,6 +77,16 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     for item in downstream:
         if item.teacher:
             assert str(args.server_urls_file) in item.command
+    # Labeling shares the pool but never the generation limits.
+    labels = [s.command for s in downstream if s.name.startswith('label-trialspace-')]
+    assert labels and all(str(args.concurrency_control_file) not in command for command in labels)
+    assert all(command[command.index('--max_concurrent_per_server') + 1] == '768' for command in labels)
+    own = arguments(tmp_path, '--start-at', 'parse-trials', '--server-urls-file', str(tmp_path / 'servers.json'),
+                    '--concurrency-control-file', str(tmp_path / 'limits.json'),
+                    '--teacher-concurrency-file', str(tmp_path / 'label_limits.json'))
+    for item in training.stages(own):
+        if item.name.startswith('label-trialspace-'):
+            assert item.command[item.command.index('--concurrency-control-file') + 1] == str(tmp_path / 'label_limits.json')
     summary_distillation = next(s for s in downstream if s.name == 'prepare-oncoreasoning')
     assert summary_distillation.command[summary_distillation.command.index('--notes') + 1] == str(args.synthetic_notes)
 
