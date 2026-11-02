@@ -132,10 +132,12 @@ class Controller:
                 if throughput_ready else None)
         new, reason = self.cap, "hold"
         if pressure_ready:
+            # Round backoffs to multiples of 8, not 32: on a small server a 32-step
+            # turns the 25% cut into more than half (72 would fall to 32, not 48).
             if sample["cache"] < .90 and sample["preemptions"] == first["preemptions"] and 0 < sample["running"] < self.cap:
-                new = max(32, min(self.cap, (int(peak_running) + 31) // 32 * 32))
+                new = max(32, min(self.cap, (int(peak_running) + 7) // 8 * 8))
             else:
-                new = max(32, int(self.cap * .75) // 32 * 32)
+                new = max(32, int(self.cap * .75) // 8 * 8)
             self.upper = min(self.upper, new)
             reason = "scheduler queue/cache pressure or preemption"
         elif (throughput_ready and self.previous_rate is not None and rate < self.previous_rate * .90
