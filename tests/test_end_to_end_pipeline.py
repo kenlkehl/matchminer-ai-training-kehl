@@ -141,7 +141,7 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
         assert command[1] == 'finetune_embedder.py' and '--mask-known-positives' in command
         assert float(command[command.index('--epochs') + 1]) == 1
         assert [command[command.index(flag) + 1] for flag in ('--batch-size', '--loss-mini-batch-size', '--prompt-profile')] == \
-            ['96', '48', 'colbert_matching']
+            ['96', '32', 'colbert_matching']
     assert fits[0][fits[0].index('-m') + 1] == 'google/embeddinggemma-2'
     assert fits[1][fits[1].index('-m') + 1].endswith('trialspace_round1')
     catalog = commands(plan, 'catalog')[0]

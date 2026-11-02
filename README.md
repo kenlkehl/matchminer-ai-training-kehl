@@ -250,7 +250,7 @@ adapters. Its stages, in order:
 by exhaustive cosine similarity with 8,192-token inputs
 (`trialspace_comparison.py dense-mine`) and fit with `finetune_embedder.py`:
 CoSENT over every labeled pair plus MNRL over positives with known positives
-masked, 96 pairs per optimizer step (gradient-cache chunks of 48), BF16,
+masked, 96 pairs per optimizer step (gradient-cache chunks of 32), BF16,
 learning rate 2e-5 with 1% linear warmup and decay over 1 epoch
 (`--trialspace-epochs`), 3,000-token training cap. Round 2 starts from the
 round-1 model. Models are saved to `trialspace_round{1,2}/` under

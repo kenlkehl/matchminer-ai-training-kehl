@@ -96,8 +96,9 @@ def parser():
     p.add_argument('--trialspace-steps', type=int, help='Explicit optimizer updates per fit; otherwise derive from complete epochs')
     p.add_argument('--trialspace-epochs', type=float, default=1, help='Complete passes over the labeled pairs per fit')
     p.add_argument('--trialspace-batch-size', type=int, default=96, help='EmbeddingGemma 2 pairs per optimizer step')
-    p.add_argument('--trialspace-loss-mini-batch-size', type=int, default=48,
-                   help='EmbeddingGemma 2 gradient-cache encoder chunk; the loss still spans the full batch')
+    p.add_argument('--trialspace-loss-mini-batch-size', type=int, default=32,
+                   help='EmbeddingGemma 2 gradient-cache encoder chunk; the loss still spans the full batch '
+                        '(48 peaked at 212 GiB on the GB300 with a 2,500-token cap; the cap is now 3,000)')
     p.add_argument('--trialspace-accumulation', type=int, default=32,
                    help='Query groups per GPU per optimizer update, sampled across available scores')
     p.add_argument('--trialspace-documents-per-query', type=int, default=8,
