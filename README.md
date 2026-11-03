@@ -91,6 +91,15 @@ step 7 is now generating patients from its cohorts.
    `trial-registry-cohorts-v1`), by `0b_extract_trial_cohorts.py --trials-jsonl`;
    `synthetic_protocols/retrieval_cohorts.py` combines both versions into the
    retrieval cohort table (see [`synthetic_protocols/README.md`](synthetic_protocols/README.md)).
+   **Three-step extraction (default since 2026-11-03, user instruction).**
+   Protocols and registry listings now share one inference workflow and prompt
+   set (schema `trial-cohorts-stepwise-v1`): a cancer-treatment screen, the
+   cohort names, and one request per cohort for its complete criteria (a
+   listing is its title, brief summary and eligibility criteria as one
+   document). Rows use representation `trial-treatment-cohorts-v5`, without the
+   specific/common split. The runs above used the earlier single-request
+   prompts; rerunning `protocol-cohorts` and `registry-cohorts` re-extracts
+   every trial.
 7. **Patient seeds, event histories, notes and summaries.** `generate-synthetic`
    (`generate_synthetic_data.py`) writes five positive and five near-miss
    patient seeds per cohort from the cohort's eligibility criteria alone, then

@@ -13,7 +13,7 @@ from generate_synthetic_data import Generator, load_stage
 from make_top_matches import load_retrieval_tables
 from prepare_synthetic_training import load_spaces
 from tests.test_synthetic_generation import Tokenizer, args_for
-from trial_cohort_format import REPRESENTATION, read_clinical_csv
+from trial_cohort_format import NAMED_SPLIT_REPRESENTATION, read_clinical_csv
 from trialspace_training import prepare_corpus
 
 
@@ -25,12 +25,12 @@ def inputs(tmp_path, literal):
                  cohort_specific_eligibility_criteria=literal if i == 0 else 'Previously treated.',
                  common_eligibility_criteria='Age >= 18.' if i == 0 else literal,
                  cohort_eligibility_criteria='Stale combined text', eligibility_criteria='Original.',
-                 split='train', trial_representation=REPRESENTATION) for i in range(2)]
+                 split='train', trial_representation=NAMED_SPLIT_REPRESENTATION) for i in range(2)]
     rows.append(dict(nct_id='NCT00000002', trial_id='NCT00000002',
                      cohort_trial_id='NCT00000002-cohort-0', cohort_number=0, cohort_count=1,
                      cancer_treatment_trial='yes', multiple_cohorts='no',
                      cohort_eligibility_criteria='Stale single text', eligibility_criteria=literal,
-                     split='train', trial_representation=REPRESENTATION))
+                     split='train', trial_representation=NAMED_SPLIT_REPRESENTATION))
     cohorts, patients = tmp_path / 'input.csv', tmp_path / 'patients.csv'
     for i, row in enumerate(rows):
         row['cohort_index'] = i

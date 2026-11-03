@@ -22,8 +22,29 @@ def source(number=1, **changes):
         eligibility_criteria='Adults with cancer.', last_update_post_date='2026-10', **changes)
 
 
+def single(criteria, name='All participants'):
+    return dict(cancer_treatment_trial='yes', multiple_cohorts='no',
+                cohorts=[dict(cohort_name=name, eligibility_criteria=criteria)])
+
+
+def step_answer(prompt, decision, fence):
+    """One step's answer derived from a trial's stepwise decision; a string answers every step as is."""
+    if isinstance(decision, str):
+        return decision
+    if 'Decide whether this trial evaluates a cancer treatment' in prompt:
+        answer = dict(cancer_treatment_trial=decision['cancer_treatment_trial'])
+    elif 'List the cohorts it defines' in prompt:
+        answer = dict(cohorts=[c['cohort_name'] for c in decision['cohorts']])
+    else:
+        target = prompt.rsplit('this cohort only: ', 1)[1]
+        answer = dict(eligibility_criteria=next(c['eligibility_criteria'] for c in decision['cohorts']
+                                                if target.startswith(c['cohort_name'])))
+    return f'```json\n{json.dumps(answer)}\n```' if fence else json.dumps(answer)
+
+
 @pytest.fixture
 def backend(monkeypatch):
+    """Answers each prompt of a call from the decision keyed by a title it contains (``fence``: fenced JSON)."""
     monkeypatch.syspath_prepend(str(extract.ROOT.parent / 'matchminer-ai-inference-kehl/src'))
     import matchminer_ai.trials.cohorts as api
     import matchminer_ai.llm.backends as backends
@@ -32,10 +53,11 @@ def backend(monkeypatch):
     outputs, calls = {}, []
     def generate(**kwargs):
         calls.append(kwargs)
-        prompt = str(kwargs['prompt_list'])
-        answer = next(answer for title, answer in outputs.items() if title in prompt)
-        return SimpleNamespace(final_outputs=[answer], reasoning_outputs=['Reasoning trace'],
-            finish_reasons=['stop'], model_metadata={'responses': [dict(row_idx=0, endpoint='http://fake/v1', model_root='test-checkpoint')]})
+        answers = [step_answer(str(prompt), next(d for title, d in outputs.items() if title != 'fence' and title in str(prompt)),
+                               outputs.get('fence', False)) for prompt in kwargs['prompt_list']]
+        return SimpleNamespace(final_outputs=answers, reasoning_outputs=['Reasoning trace'] * len(answers),
+            finish_reasons=['stop'] * len(answers), model_metadata={'responses': [
+                dict(row_idx=i, endpoint='http://fake/v1', model_root='test-checkpoint') for i in range(len(answers))]})
     monkeypatch.setattr(api, 'get_llm_backend', lambda config: SimpleNamespace(generate_llm_outputs=generate))
     return outputs, calls
 
@@ -51,13 +73,13 @@ def arguments(tmp_path):
 def test_extraction_csv_preserves_literal_none_as_original_eligibility(tmp_path, backend):
     from trial_cohort_format import read_clinical_csv
     answers, calls = backend
-    answers['Trial 1'] = json.dumps(dict(cancer_treatment_trial='yes', multiple_cohorts='no', eligibility_criteria='None'))
+    answers['Trial 1'] = single('None')
     args = arguments(tmp_path)
     row = source()
     row['eligibility_criteria'] = 'None'
     pd.DataFrame([row]).to_csv(args.input, index=False)
     extract.run(args, extract.make_config(args))
-    assert len(calls) == 1
+    assert len(calls) == 3  # screen, cohort names, the one cohort's criteria
     assert read_clinical_csv(args.output_cohorts).cohort_eligibility_criteria.tolist() == ['None']
     assert read_clinical_csv(args.output_trials).eligibility_criteria.tolist() == ['None']
 
@@ -81,16 +103,15 @@ def test_selection_includes_phase4_and_boundary_preserves_metadata_and_splits():
         extract.select_trials(pd.concat([frame, frame.assign(title='Conflicting title')]))
 
 
-def test_public_api_combined_decisions_complete_rows_and_resume(tmp_path, backend, monkeypatch):
+def test_public_api_stepwise_decisions_complete_rows_and_resume(tmp_path, backend, monkeypatch):
     answers, calls = backend
+    shared = 'Age >= 18; exclude active infection.'
     decisions = [dict(cancer_treatment_trial='no'),
-                 dict(cancer_treatment_trial='yes', multiple_cohorts='no',
-                      eligibility_criteria='Inclusion criteria:\nAdults with treated cancer.'),
+                 single('Inclusion criteria:\nAdults with treated cancer.'),
                  dict(cancer_treatment_trial='yes', multiple_cohorts='yes',
-                      cohorts=[dict(cohort_name='Cohort A', cohort_specific_eligibility_criteria='Untreated lung cancer.'),
-                               dict(cohort_name='Cohort B', cohort_specific_eligibility_criteria='Previously treated breast cancer.')],
-                      common_eligibility_criteria='Age >= 18; exclude active infection.')]
-    answers.update({f'Trial {i}': '```json\n' + json.dumps(d) + '\n```' for i, d in enumerate(decisions, 1)})
+                      cohorts=[dict(cohort_name='Cohort A', eligibility_criteria=f'Untreated lung cancer.\n{shared}'),
+                               dict(cohort_name='Cohort B', eligibility_criteria=f'Previously treated breast cancer.\n{shared}')])]
+    answers.update({f'Trial {i}': d for i, d in enumerate(decisions, 1)}, fence=True)
     args = arguments(tmp_path)
     pd.DataFrame([source(i) for i in range(1, 4)]).to_csv(args.input, index=False)
     config = extract.make_config(args)
@@ -98,13 +119,14 @@ def test_public_api_combined_decisions_complete_rows_and_resume(tmp_path, backen
     assert config.trial['remote']['request_params']['temperature'] == 1
     assert config.trial['remote']['extra_body']['top_k'] == 64
     extract.run(args, config)
-    assert len(calls) == 3  # Combined screen/extract; no second screening pass.
+    # Screens for all three; cohort names for the two accepted; one criteria call each (both cohorts in one).
+    assert len(calls) == 7
     rows, audit = pd.read_csv(args.output_cohorts), pd.read_csv(args.output_trials)
     validate_cohort_rows(rows)
     assert len(rows) == 3 and len(audit) == 3
     assert rows.nct_id.tolist() == ['NCT00000002', 'NCT00000003', 'NCT00000003']
     assert rows.cohort_count.tolist() == [1, 2, 2]
-    assert rows.cohort_name.iloc[1:].tolist() == ['Cohort A', 'Cohort B']
+    assert rows.cohort_name.tolist() == ['All participants', 'Cohort A', 'Cohort B']
     assert not rows.cohort_eligibility_criteria.str.contains('Cohort A|Cohort B').any()
     # The model's extracted single-cohort criteria, not the registry field.
     assert rows.cohort_eligibility_criteria.iloc[0] == 'Inclusion criteria:\nAdults with treated cancer.'
@@ -115,10 +137,12 @@ def test_public_api_combined_decisions_complete_rows_and_resume(tmp_path, backen
     assert json.loads(args.output_json.read_text()) == dict(zip([f'NCT{i:08}' for i in range(1, 4)], decisions))
     with gzip.open(tmp_path / 'checkpoints/NCT00000003.json.gz', 'rt') as stream:
         record = json.load(stream)
-    assert record['metadata']['trial_attempts']['NCT00000003'][0]['reasoning'] == 'Reasoning trace'
-    assert record['metadata']['trial_attempts']['NCT00000003'][0]['response_metadata']['model_root'] == 'test-checkpoint'
+    attempts = record['metadata']['trial_attempts']['NCT00000003']
+    assert attempts['screen'][0]['reasoning'] == 'Reasoning trace'
+    assert attempts['criteria']['1'][0]['response_metadata']['model_root'] == 'test-checkpoint'
+    assert record['metadata']['trial_cohort_names']['NCT00000003'] == ['Cohort A', 'Cohort B']
     extract.run(args, config)
-    assert len(calls) == 3
+    assert len(calls) == 7
     config.trial['remote']['request_params']['temperature'] = .5
     with pytest.raises(ValueError, match='fresh --work-dir'):
         extract.run(args, config)
@@ -135,10 +159,10 @@ def test_failure_is_not_rejection_or_sampleable_output_and_only_failed_trial_ret
     assert not args.output_cohorts.exists()
     assert args.output_cohorts.with_suffix('.partial.csv').exists()
     assert len(json.loads((tmp_path / 'errors.json').read_text())) == 1
-    assert len(calls) == 4  # Valid trial once; three validation attempts for invalid.
-    answers['Trial 2'] = '{"cancer_treatment_trial":"yes","multiple_cohorts":"no","eligibility_criteria":"Adults."}'
+    assert len(calls) == 4  # Valid trial's screen once; three screening attempts for the invalid one.
+    answers['Trial 2'] = single('Adults.')
     extract.run(args, config)
-    assert len(calls) == 5
+    assert len(calls) == 7  # Only the failed trial reruns: screen, names, criteria.
     assert pd.read_csv(args.output_cohorts).nct_id.tolist() == ['NCT00000002']
 
 
@@ -437,7 +461,7 @@ def test_generation_calls_five_positive_and_five_negative_seeds_separately_per_c
 
 def test_named_production_export_preserves_names_through_sampling_and_colbert(tmp_path):
     from colbert_experiments.data import prepare, read_jsonl
-    from trial_cohort_format import REPRESENTATION, LEGACY_REPRESENTATION, load_production_cohorts
+    from trial_cohort_format import NAMED_SPLIT_REPRESENTATION, LEGACY_REPRESENTATION, load_production_cohorts
     run, dfci = production_export(tmp_path)
     historical, _ = load_production_cohorts(run)
     assert training_rows(historical).trial_representation.eq(LEGACY_REPRESENTATION).all()
@@ -452,7 +476,7 @@ def test_named_production_export_preserves_names_through_sampling_and_colbert(tm
     rows.to_json(run / 'cohorts.jsonl', orient='records', lines=True)
     output = tmp_path / 'sample.csv'
     sampled = sample.sample_trial_spaces(None, output, dfci, extraction_dir=run, n_trials=2)
-    assert sampled.trial_representation.eq(REPRESENTATION).all()
+    assert sampled.trial_representation.eq(NAMED_SPLIT_REPRESENTATION).all()
     assert sampled.loc[sampled.multiple_cohorts.eq('yes'), 'cohort_name'].tolist() == ['Arm 1', 'Arm 2']
     assert not sampled.cohort_eligibility_criteria.str.contains('Arm 1|Arm 2').any()
     patients = tmp_path / 'patients.jsonl'

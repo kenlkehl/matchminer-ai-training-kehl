@@ -15,7 +15,7 @@ import shutil
 
 import pandas as pd
 
-from trial_cohort_format import REPRESENTATION, LEGACY_REPRESENTATION, cohort_components, file_stamp
+from trial_cohort_format import NAMED_SPLIT_REPRESENTATION, LEGACY_REPRESENTATION, cohort_components, file_stamp
 
 
 def atomic_json(path, value):
@@ -112,7 +112,7 @@ def repair_locked(directory):
         raise ValueError('Incomplete cohort export; original file preserved')
     if file_stamp(target) != current_stamp:
         raise ValueError('Export changed during repair')
-    receipt = dict(representation_version=REPRESENTATION if named_rows else LEGACY_REPRESENTATION,
+    receipt = dict(representation_version=NAMED_SPLIT_REPRESENTATION if named_rows else LEGACY_REPRESENTATION,
         repaired_at=datetime.now(timezone.utc).isoformat(),
         extraction_run_identity=json.loads((directory / 'manifest.json').read_text())['run_identity'],
         inputs_stamp=source_stamp, decisions_stamp=decisions_stamp,

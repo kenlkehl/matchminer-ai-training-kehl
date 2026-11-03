@@ -197,10 +197,14 @@ those trials keep whichever version they have.
 Users may be allowed to send some trials' full protocols to an LLM and only the
 ClinicalTrials.gov text of others, so TrialSpace and the downstream models are
 trained on both representations. Every sampled trial is therefore also
-extracted from the registry record its protocol was written from, with the
-registry prompt (`trial.cohorts.user.txt`, schema `trial-registry-cohorts-v1`),
-which applies the protocol prompt's rules and returns the same shapes,
-including extracted criteria for a single cohort:
+extracted from the registry record its protocol was written from. Since
+2026-11-03 both extractions run the inference package's three-step workflow with
+the same prompts (`trial.cohorts.screen.user.txt`, `trial.cohorts.list.user.txt`,
+`trial.cohorts.criteria.user.txt`; schema `trial-cohorts-stepwise-v1`): a
+cancer-treatment screen, the cohort names, and one request per cohort for its
+complete criteria, with the listing's title, brief summary and eligibility
+criteria as one document. Earlier runs used the single-request registry prompt
+(`trial.cohorts.user.txt`, schema `trial-registry-cohorts-v1`):
 
 ```bash
 python 0b_extract_trial_cohorts.py --trials-jsonl "$B/seeds.jsonl" \

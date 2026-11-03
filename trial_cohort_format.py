@@ -8,14 +8,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPRESENTATION = 'trial-treatment-cohorts-v4'
+# v5: named cohorts whose complete criteria come from one extraction request each
+# (inference cohort_workflow: screen, cohort names, criteria per cohort). v4: named
+# cohorts with cohort-specific and common criteria. v3: unnamed historical strings.
+REPRESENTATION = 'trial-treatment-cohorts-v5'
+NAMED_SPLIT_REPRESENTATION = 'trial-treatment-cohorts-v4'
 LEGACY_REPRESENTATION = 'trial-treatment-cohorts-v3'
-SUPPORTED_REPRESENTATIONS = {LEGACY_REPRESENTATION, REPRESENTATION}
+SUPPORTED_REPRESENTATIONS = {LEGACY_REPRESENTATION, NAMED_SPLIT_REPRESENTATION, REPRESENTATION}
+NAMED_REPRESENTATIONS = {NAMED_SPLIT_REPRESENTATION, REPRESENTATION}
 COHORT_REQUIRED = {'trial_id', 'cohort_trial_id', 'cohort_number', 'cohort_count',
                    'cohort_eligibility_criteria', 'cancer_treatment_trial', 'multiple_cohorts'}
 # Model-extracted criteria whose single-cohort text is the model's own, never a
-# registry eligibility field: full protocols and (schema trial-registry-cohorts-v1)
-# registry text.
+# registry eligibility field: full protocols and registry text (schemas
+# trial-registry-cohorts-v1 and trial-cohorts-stepwise-v1).
 EXTRACTED_SOURCES = ('protocol', 'registry')
 
 
@@ -63,7 +68,9 @@ def representation_for(frame):
         if len(versions) != 1 or not versions <= SUPPORTED_REPRESENTATIONS:
             raise ValueError('Conflicting trial representation; repair/regenerate the cohort CSV before generation')
         return next(iter(versions))
-    return REPRESENTATION if 'cohort_name' in frame else LEGACY_REPRESENTATION
+    if 'cohort_name' not in frame:
+        return LEGACY_REPRESENTATION
+    return NAMED_SPLIT_REPRESENTATION if 'cohort_specific_eligibility_criteria' in frame else REPRESENTATION
 
 
 def complete_cohort_criteria(frame):
@@ -218,7 +225,7 @@ def validate_cohort_rows(frame):
         raise ValueError('Only accepted cancer-treatment trials may supply cohort rows')
     if not frame.multiple_cohorts.isin(['yes', 'no']).all():
         raise ValueError('Invalid multiple_cohorts decision')
-    if representation_for(frame) == REPRESENTATION and 'cohort_name' not in frame:
+    if representation_for(frame) in NAMED_REPRESENTATIONS and 'cohort_name' not in frame:
         raise ValueError('Named-cohort representation requires cohort_name')
     if 'cohort_name' in frame:
         names = frame.loc[frame.multiple_cohorts.eq('yes'), 'cohort_name']

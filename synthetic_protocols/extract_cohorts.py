@@ -1,5 +1,9 @@
 """Extract cohorts and eligibility criteria from a synthetic protocol batch with matchminer_ai.trials.extract_protocol_cohorts.
 
+Each protocol goes through the inference package's three-step workflow, with the
+same prompts as registry listings (0b_extract_trial_cohorts.py): a cancer-treatment
+screen, the cohort names, and one request per cohort for its criteria.
+
 Reads a generate_batch.py output directory: every protocols/<NCT>/protocol.md
 whose meta.json records a completed generation, plus the registry seeds in
 seeds.jsonl. Each trial's decision is saved under <output-dir>/trials/ and
@@ -86,17 +90,21 @@ def trial_provenance(trials, metadata, decisions_dir):
     rows = []
     for trial_id in trials.trial_id:
         decision = metadata["trial_decisions"].get(trial_id)
-        attempts = metadata["trial_attempts"].get(trial_id, [])
-        response = (attempts[-1].get("response_metadata") or {}) if attempts else {}
+        steps = metadata["trial_attempts"].get(trial_id) or {}
+        # Requests of every step, in order: screen, cohort names, then each cohort's criteria.
+        attempts = [*steps.get("screen", []), *steps.get("list", []),
+                    *(a for _, log in sorted((steps.get("criteria") or {}).items(), key=lambda kv: int(kv[0])) for a in log)]
+        responses = [a.get("response_metadata") or {} for a in attempts]
         status = ("failed" if decision is None else "cohorts" if decision["cancer_treatment_trial"] == "yes"
                   else "not_cancer_treatment")
         rows.append({
             "trial_id": trial_id, "protocol_sha256": metadata["source_documents"][trial_id]["sha256"],
             "extraction_status": status,
-            "cohort_count": (len(decision.get("cohorts", [])) or 1) if status == "cohorts" else 0,
+            "cohort_count": len(decision["cohorts"]) if status == "cohorts" else 0,
             "extraction_error": metadata["trial_errors"].get(trial_id),
-            "extraction_attempts": len(attempts), "extraction_endpoint": response.get("endpoint"),
-            "extraction_model": response.get("request_model"),
+            "extraction_attempts": len(attempts),
+            "extraction_endpoint": ";".join(sorted({r["endpoint"] for r in responses if r.get("endpoint")})) or None,
+            "extraction_model": ";".join(sorted({r["request_model"] for r in responses if r.get("request_model")})) or None,
             "extraction_prompt_sha256": metadata["prompt_sha256"],
             "extraction_schema_version": metadata["schema_version"],
             "extraction_decision_path": str(decisions_dir / trial_id / "extraction.json") if decision else None,

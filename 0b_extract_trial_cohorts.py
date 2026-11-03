@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Extract cancer-treatment cohorts through the sibling inference package API.
 
-No separate screening pass or training-owned extraction prompt. Checkpoints
-retain combined decisions, reasoning, validation attempts and endpoint provenance.
+summarize_trials runs the inference package's three-step workflow on each
+registry listing (title, brief summary and eligibility criteria as one document):
+a cancer-treatment screen, the cohort names, and one request per cohort for its
+criteria, with the same prompts as synthetic protocols. No training-owned prompt.
+Checkpoints retain each trial's decision, cohort names, reasoning, validation
+attempts per step and endpoint provenance.
 
 Two inputs: the parsed registry export (--input), from which interventional
 early phase I-IV trials first posted since --start-year are selected, or an
@@ -139,8 +143,7 @@ def extract_one(row, config):
             record['error'] = record['error'] or 'No validated decision returned by summarize_trials'
         elif record['result']['cancer_treatment_trial'] == 'yes':
             rows = pd.DataFrame(record['cohort_rows'])
-            expected = len(record['result']['cohorts']) if record['result']['multiple_cohorts'] == 'yes' else 1
-            rows['cohort_count'] = expected
+            rows['cohort_count'] = len(record['result']['cohorts'])
             validate_cohort_rows(rows)
         elif record['cohort_rows']:
             raise ValueError('Rejected trial unexpectedly returned cohort rows')
@@ -207,7 +210,7 @@ def export_results(frame, args, fingerprint):
 
 def run(args, config):
     from matchminer_ai.config import config_snapshot
-    from matchminer_ai.trials.cohort_schema import COHORT_SCHEMA_VERSION, load_cohort_prompt
+    from matchminer_ai.trials.cohort_workflow import SCHEMA_VERSION, load_prompts, prompt_sha256
     import matchminer_ai
     if args.trials_jsonl:
         frame = load_sampled_trials(args.trials_jsonl)
@@ -218,7 +221,7 @@ def run(args, config):
     identity = dict(input=str(source.resolve()), input_stamp=file_stamp(source),
         selection='sampled_trials' if args.trials_jsonl else 'registry_export',
         start_year=args.start_year, seed=args.seed,
-        schema=COHORT_SCHEMA_VERSION, prompt_sha256=hashlib.sha256(load_cohort_prompt().encode()).hexdigest(),
+        schema=SCHEMA_VERSION, prompt_sha256=prompt_sha256(load_prompts(config.trial['cohorts'].get('prompt_files'))),
         config=config_snapshot(config), source_sha256={str(p.relative_to(package)): sha_file(p)
             for p in sorted(package.rglob('*')) if p.suffix in ('.py', '.txt', '.yaml')},
         runner_sha256=sha_file(__file__), adapter_sha256=sha_file(ROOT / 'trial_cohort_format.py'),
@@ -312,7 +315,7 @@ def main(argv=None):
     if len(set(destinations)) != 3 or (args.trials_jsonl or args.input).resolve() in destinations:
         raise ValueError('Input and all output paths must be distinct')
     source = args.inference_repo.resolve() / 'src'
-    if not (source / 'matchminer_ai/trials/cohorts.py').is_file():
+    if not (source / 'matchminer_ai/trials/cohort_workflow.py').is_file():
         raise ValueError('Expected the cohort API in --inference-repo')
     sys.path.insert(0, str(source))
     if args.api_key_env != 'OPENAI_API_KEY':
