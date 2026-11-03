@@ -2,7 +2,10 @@
 
 Each protocol goes through the inference package's three-step workflow, with the
 same prompts as registry listings (0b_extract_trial_cohorts.py): a cancer-treatment
-screen, the cohort names, and one request per cohort for its criteria.
+screen, the cohort names, and one request per cohort for its criteria. For training,
+each trial's cohorts whose criteria are essentially the same are then combined
+(merge_equivalent_cohorts; cohorts_unmerged.parquet keeps the extraction;
+--no-merge-cohorts skips it).
 
 Reads a generate_batch.py output directory: every protocols/<NCT>/protocol.md
 whose meta.json records a completed generation, plus the registry seeds in
@@ -28,7 +31,7 @@ import pandas as pd
 
 import matchminer_ai
 from matchminer_ai import load_default_preset
-from matchminer_ai.trials import extract_protocol_cohorts
+from matchminer_ai.trials import extract_protocol_cohorts, merge_equivalent_cohorts
 
 
 SEED_FIELDS = ("title", "brief_summary", "detailed_description", "eligibility_criteria")
@@ -154,7 +157,15 @@ def main(args):
             flush=True),
     )
 
+    merging = None
+    if args.merge_cohorts and not cohorts.empty:
+        cohorts.to_parquet(output_dir / "cohorts_unmerged.parquet", index=False)
+        # Saved groupings under trials/<NCT>/merge.json are reused for unchanged cohorts.
+        cohorts, merging = merge_equivalent_cohorts(cohorts, config=config, section="protocol_cohort_extraction",
+                                                    output_dir=decisions_dir, return_metadata=True)
     provenance = trial_provenance(trials, metadata, decisions_dir)
+    counts = cohorts.groupby("trial_id").size()
+    provenance["cohort_count"] = provenance.trial_id.map(counts).fillna(0).astype(int)
     cohorts = cohorts.assign(protocol_origin="synthetic").merge(provenance, on="trial_id", validate="many_to_one")
     for name, frame in (("cohorts", cohorts), ("trials", provenance)):
         frame.to_parquet(output_dir / f"{name}.parquet", index=False)
@@ -174,6 +185,8 @@ def main(args):
                                           "prompt_sha256", "structured_outputs", "skipped_completed",
                                           "trial_errors", "model_metadata")},
         "trial_rejections": sorted(metadata["trial_rejections"]),
+        "merge": None if merging is None else {key: merging[key] for key in (
+            "schema_version", "prompt_sha256", "cohorts_in", "cohorts_out", "merge_errors", "skipped_completed")},
     }, indent=2, default=str))
     print(f"finished: {len(cohorts)} cohort rows from {len(provenance)} protocols; "
           f"{len(metadata['trial_errors'])} failed, {len(metadata['trial_rejections'])} not cancer treatment, "
@@ -193,4 +206,6 @@ if __name__ == "__main__":
     parser.add_argument("--max-tokens", type=int, default=50000)
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--limit", type=int, help="Only the first N protocols (smoke tests)")
+    parser.add_argument("--no-merge-cohorts", dest="merge_cohorts", action="store_false",
+                        help="Keep every extracted cohort instead of combining those with essentially the same criteria")
     sys.exit(main(parser.parse_args()))

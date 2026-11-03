@@ -27,11 +27,13 @@ def single(criteria, name='All participants'):
                 cohorts=[dict(cohort_name=name, eligibility_criteria=criteria)])
 
 
-def step_answer(prompt, decision, fence):
+def step_answer(prompt, decision, fence, groups=None):
     """One step's answer derived from a trial's stepwise decision; a string answers every step as is."""
     if isinstance(decision, str):
         return decision
-    if 'Decide whether this trial evaluates a cancer treatment' in prompt:
+    if 'Group the cohorts whose eligibility criteria are essentially the same' in prompt:
+        answer = dict(groups=groups or [[i + 1] for i in range(len(decision['cohorts']))])
+    elif 'Decide whether this trial evaluates a cancer treatment' in prompt:
         answer = dict(cancer_treatment_trial=decision['cancer_treatment_trial'])
     elif 'List the cohorts it defines' in prompt:
         answer = dict(cohorts=[c['cohort_name'] for c in decision['cohorts']])
@@ -44,7 +46,11 @@ def step_answer(prompt, decision, fence):
 
 @pytest.fixture
 def backend(monkeypatch):
-    """Answers each prompt of a call from the decision keyed by a title it contains (``fence``: fenced JSON)."""
+    """Answers each prompt of a call from the decision keyed by a title it contains (``fence``: fenced JSON).
+
+    A merge prompt holds only cohort criteria, so its trial is found by its first cohort's criteria;
+    ``outputs['merge:<title>']`` gives its groups (default: every cohort kept).
+    """
     monkeypatch.syspath_prepend(str(extract.ROOT.parent / 'matchminer-ai-inference-kehl/src'))
     import matchminer_ai.trials.cohorts as api
     import matchminer_ai.llm.backends as backends
@@ -53,12 +59,19 @@ def backend(monkeypatch):
     outputs, calls = {}, []
     def generate(**kwargs):
         calls.append(kwargs)
-        answers = [step_answer(str(prompt), next(d for title, d in outputs.items() if title != 'fence' and title in str(prompt)),
-                               outputs.get('fence', False)) for prompt in kwargs['prompt_list']]
+        def trial(prompt):
+            titles = [title for title in outputs if title != 'fence' and not title.startswith('merge:')]
+            found = next((title for title in titles if title in prompt), None)
+            return found or next(title for title in titles if isinstance(outputs[title], dict) and outputs[title].get('cohorts')
+                                 and outputs[title]['cohorts'][0]['eligibility_criteria'].split('\n')[0] in prompt)
+        answers = [step_answer(str(prompt), outputs[trial(str(prompt))], outputs.get('fence', False),
+                               outputs.get(f'merge:{trial(str(prompt))}')) for prompt in kwargs['prompt_list']]
         return SimpleNamespace(final_outputs=answers, reasoning_outputs=['Reasoning trace'] * len(answers),
             finish_reasons=['stop'] * len(answers), model_metadata={'responses': [
                 dict(row_idx=i, endpoint='http://fake/v1', model_root='test-checkpoint') for i in range(len(answers))]})
-    monkeypatch.setattr(api, 'get_llm_backend', lambda config: SimpleNamespace(generate_llm_outputs=generate))
+    import matchminer_ai.trials.cohort_merge as merge_api
+    for module in (api, merge_api):
+        monkeypatch.setattr(module, 'get_llm_backend', lambda config: SimpleNamespace(generate_llm_outputs=generate))
     return outputs, calls
 
 
@@ -119,8 +132,9 @@ def test_public_api_stepwise_decisions_complete_rows_and_resume(tmp_path, backen
     assert config.trial['remote']['request_params']['temperature'] == 1
     assert config.trial['remote']['extra_body']['top_k'] == 64
     extract.run(args, config)
-    # Screens for all three; cohort names for the two accepted; one criteria call each (both cohorts in one).
-    assert len(calls) == 7
+    # Screens for all three; cohort names for the two accepted; one criteria call each (both cohorts in one);
+    # one merge call for the two-cohort trial.
+    assert len(calls) == 8
     rows, audit = pd.read_csv(args.output_cohorts), pd.read_csv(args.output_trials)
     validate_cohort_rows(rows)
     assert len(rows) == 3 and len(audit) == 3
@@ -141,8 +155,9 @@ def test_public_api_stepwise_decisions_complete_rows_and_resume(tmp_path, backen
     assert attempts['screen'][0]['reasoning'] == 'Reasoning trace'
     assert attempts['criteria']['1'][0]['response_metadata']['model_root'] == 'test-checkpoint'
     assert record['metadata']['trial_cohort_names']['NCT00000003'] == ['Cohort A', 'Cohort B']
+    assert record['merge']['trial_groups'] == {'NCT00000003': [[0], [1]]}
     extract.run(args, config)
-    assert len(calls) == 7
+    assert len(calls) == 8
     config.trial['remote']['request_params']['temperature'] = .5
     with pytest.raises(ValueError, match='fresh --work-dir'):
         extract.run(args, config)
@@ -165,6 +180,29 @@ def test_failure_is_not_rejection_or_sampleable_output_and_only_failed_trial_ret
     assert len(calls) == 7  # Only the failed trial reruns: screen, names, criteria.
     assert pd.read_csv(args.output_cohorts).nct_id.tolist() == ['NCT00000002']
 
+
+
+def test_cohorts_with_essentially_the_same_criteria_are_combined_for_training(tmp_path, backend):
+    answers, calls = backend
+    decision = dict(cancer_treatment_trial='yes', multiple_cohorts='yes', cohorts=[
+        dict(cohort_name='Arm A', eligibility_criteria='Adults with treated lung cancer.'),
+        dict(cohort_name='Arm B', eligibility_criteria='Adults with treated lung cancer; same population.'),
+        dict(cohort_name='Arm C', eligibility_criteria='Children with untreated sarcoma.')])
+    answers.update({'Trial 1': decision, 'merge:Trial 1': [[1, 2], [3]]})
+    args = arguments(tmp_path)
+    pd.DataFrame([source(1)]).to_csv(args.input, index=False)
+    extract.run(args, extract.make_config(args))
+    rows = pd.read_csv(args.output_cohorts)
+    assert rows.cohort_name.tolist() == ['Arm A; Arm B', 'Arm C'] and rows.cohort_count.tolist() == [2, 2]
+    assert rows.cohort_eligibility_criteria.tolist() == ['Adults with treated lung cancer.', 'Children with untreated sarcoma.']
+    assert rows.merged_from.tolist() == ['[0, 1]', '[2]']
+    validate_cohort_rows(rows)
+    with gzip.open(tmp_path / 'checkpoints/NCT00000001.json.gz', 'rt') as stream:
+        record = json.load(stream)
+    assert len(record['unmerged_cohort_rows']) == 3 and record['result']['cohorts'] == decision['cohorts']
+    args.merge_cohorts = False
+    with pytest.raises(ValueError, match='fresh --work-dir'):
+        extract.run(args, extract.make_config(args))
 
 def cohort_rows(trial, count=2):
     return [dict(nct_id=trial, trial_id=trial, cohort_trial_id=f'{trial}-cohort-{i}', cohort_number=i,

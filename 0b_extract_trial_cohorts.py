@@ -5,8 +5,11 @@ summarize_trials runs the inference package's three-step workflow on each
 registry listing (title, brief summary and eligibility criteria as one document):
 a cancer-treatment screen, the cohort names, and one request per cohort for its
 criteria, with the same prompts as synthetic protocols. No training-owned prompt.
-Checkpoints retain each trial's decision, cohort names, reasoning, validation
-attempts per step and endpoint provenance.
+For training, a trial's cohorts whose criteria are essentially the same are then
+combined (merge_equivalent_cohorts, trial.cohorts.merge.user.txt; --no-merge-cohorts
+keeps every extracted cohort). Checkpoints retain each trial's decision, cohort
+names, unmerged and merged rows, reasoning, validation attempts per step and
+endpoint provenance.
 
 Two inputs: the parsed registry export (--input), from which interventional
 early phase I-IV trials first posted since --start-year are selected, or an
@@ -127,8 +130,8 @@ def make_config(args):
     return config
 
 
-def extract_one(row, config):
-    from matchminer_ai.trials import summarize_trials
+def extract_one(row, config, merge=True):
+    from matchminer_ai.trials import merge_equivalent_cohorts, summarize_trials
     from matchminer_ai.trials.cohorts import COHORT_COLUMNS
     trial = row['nct_id']
     inputs = pd.DataFrame([dict(trial_id=trial, trial_title=row['title'],
@@ -142,8 +145,15 @@ def extract_one(row, config):
         if record['result'] is None:
             record['error'] = record['error'] or 'No validated decision returned by summarize_trials'
         elif record['result']['cancer_treatment_trial'] == 'yes':
+            if merge and len(cohorts) > 1:
+                # Training keeps one row per distinct population; the extraction stays in the checkpoint.
+                merged, merging = merge_equivalent_cohorts(cohorts[COHORT_COLUMNS], config=config, return_metadata=True)
+                record.update(unmerged_cohort_rows=record['cohort_rows'],
+                              cohort_rows=json.loads(merged.to_json(orient='records')),
+                              merge={key: merging[key] for key in ('schema_version', 'prompt_sha256', 'trial_groups',
+                                                                   'merge_errors', 'trial_attempts')})
             rows = pd.DataFrame(record['cohort_rows'])
-            rows['cohort_count'] = len(record['result']['cohorts'])
+            rows['cohort_count'] = len(rows)
             validate_cohort_rows(rows)
         elif record['cohort_rows']:
             raise ValueError('Rejected trial unexpectedly returned cohort rows')
@@ -164,7 +174,8 @@ def read_checkpoint(path, fingerprint):
 def export_results(frame, args, fingerprint):
     from matchminer_ai.trials.cohorts import COHORT_COLUMNS
     # Stream exports; long reasoning traces stay once per trial in checkpoints.
-    cohort_fields = list(frame.columns) + COHORT_COLUMNS + ['cohort_count', 'cohort_index', 'trial_representation']
+    from matchminer_ai.trials.cohort_merge import MERGED_FROM
+    cohort_fields = list(frame.columns) + COHORT_COLUMNS + [MERGED_FROM, 'cohort_count', 'cohort_index', 'trial_representation']
     audit_fields = list(frame.columns) + ['cancer_treatment_trial', 'multiple_cohorts',
                                         'cohort_count', 'cohort_result_json', 'extraction_error']
     errors, index = [], 0
@@ -210,7 +221,9 @@ def export_results(frame, args, fingerprint):
 
 def run(args, config):
     from matchminer_ai.config import config_snapshot
+    from matchminer_ai.trials.cohort_merge import MERGE_PROMPT, MERGE_SCHEMA_VERSION
     from matchminer_ai.trials.cohort_workflow import SCHEMA_VERSION, load_prompts, prompt_sha256
+    from matchminer_ai.llm.prompts import load_prompt_text
     import matchminer_ai
     if args.trials_jsonl:
         frame = load_sampled_trials(args.trials_jsonl)
@@ -222,6 +235,8 @@ def run(args, config):
         selection='sampled_trials' if args.trials_jsonl else 'registry_export',
         start_year=args.start_year, seed=args.seed,
         schema=SCHEMA_VERSION, prompt_sha256=prompt_sha256(load_prompts(config.trial['cohorts'].get('prompt_files'))),
+        merge=dict(schema=MERGE_SCHEMA_VERSION, prompt_sha256=hashlib.sha256(load_prompt_text(MERGE_PROMPT).encode()).hexdigest())
+        if args.merge_cohorts else None,
         config=config_snapshot(config), source_sha256={str(p.relative_to(package)): sha_file(p)
             for p in sorted(package.rglob('*')) if p.suffix in ('.py', '.txt', '.yaml')},
         runner_sha256=sha_file(__file__), adapter_sha256=sha_file(ROOT / 'trial_cohort_format.py'),
@@ -258,7 +273,7 @@ def run(args, config):
                 row = next(iterator, None)
                 if row is None:
                     break
-                futures[executor.submit(extract_one, row, config)] = row['nct_id']
+                futures[executor.submit(extract_one, row, config, args.merge_cohorts)] = row['nct_id']
             if not futures:
                 break
             done, _ = wait(futures, return_when=FIRST_COMPLETED)
@@ -302,6 +317,8 @@ def parser():
                    help='Export complete files even if some trials fail every attempt (listed in errors.json); '
                         'for registry versions of sampled trials, whose protocol versions remain')
     p.add_argument('--max-tokens', type=int, default=50000)
+    p.add_argument('--no-merge-cohorts', dest='merge_cohorts', action='store_false',
+                   help='Keep every extracted cohort instead of combining those with essentially the same criteria')
     p.add_argument('--api-key-env', default='OPENAI_API_KEY')
     return p
 
