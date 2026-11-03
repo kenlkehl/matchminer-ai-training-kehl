@@ -4,8 +4,8 @@ Each protocol goes through the inference package's three-step workflow, with the
 same prompts as registry listings (0b_extract_trial_cohorts.py): a cancer-treatment
 screen, the cohort names, and one request per cohort for its criteria. For training,
 each trial's cohorts whose criteria are essentially the same are then combined
-(merge_equivalent_cohorts; cohorts_unmerged.parquet keeps the extraction;
---no-merge-cohorts skips it).
+(merge_equivalent_cohorts; cohorts_unmerged.parquet/.csv keeps the extracted rows, with
+the same provenance; --no-merge-cohorts skips it).
 
 Reads a generate_batch.py output directory: every protocols/<NCT>/protocol.md
 whose meta.json records a completed generation, plus the registry seeds in
@@ -157,17 +157,24 @@ def main(args):
             flush=True),
     )
 
-    merging = None
+    merging, unmerged = None, cohorts if args.merge_cohorts else None
     if args.merge_cohorts and not cohorts.empty:
-        cohorts.to_parquet(output_dir / "cohorts_unmerged.parquet", index=False)
         # Saved groupings under trials/<NCT>/merge.json are reused for unchanged cohorts.
         cohorts, merging = merge_equivalent_cohorts(cohorts, config=config, section="protocol_cohort_extraction",
                                                     output_dir=decisions_dir, return_metadata=True)
     provenance = trial_provenance(trials, metadata, decisions_dir)
-    counts = cohorts.groupby("trial_id").size()
-    provenance["cohort_count"] = provenance.trial_id.map(counts).fillna(0).astype(int)
-    cohorts = cohorts.assign(protocol_origin="synthetic").merge(provenance, on="trial_id", validate="many_to_one")
-    for name, frame in (("cohorts", cohorts), ("trials", provenance)):
+
+    def with_provenance(rows):
+        counts = rows.groupby("trial_id").size()
+        trial_rows = provenance.assign(cohort_count=provenance.trial_id.map(counts).fillna(0).astype(int))
+        return rows.assign(protocol_origin="synthetic").merge(trial_rows, on="trial_id", validate="many_to_one")
+
+    cohorts = with_provenance(cohorts)
+    provenance["cohort_count"] = provenance.trial_id.map(cohorts.groupby("trial_id").size()).fillna(0).astype(int)
+    exports = [("cohorts", cohorts), ("trials", provenance)]
+    if unmerged is not None:
+        exports.append(("cohorts_unmerged", with_provenance(unmerged)))
+    for name, frame in exports:
         frame.to_parquet(output_dir / f"{name}.parquet", index=False)
         frame.to_csv(output_dir / f"{name}.csv", index=False)
     metadata.pop("config_snapshot", None)
@@ -179,6 +186,7 @@ def main(args):
                      "limit": args.limit},
         "synthetic_prompt_sha256": provenance.synthetic_prompt_sha256.iloc[0],
         "trials": len(provenance), "cohort_rows": len(cohorts),
+        "cohort_rows_unmerged": None if unmerged is None else len(unmerged),
         "status_counts": provenance.extraction_status.value_counts().to_dict(),
         "seeds_without_protocol": not_generated,
         **{key: metadata[key] for key in ("extraction_method", "schema_version", "representation_version",

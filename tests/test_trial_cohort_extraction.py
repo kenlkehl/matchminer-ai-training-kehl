@@ -200,6 +200,10 @@ def test_cohorts_with_essentially_the_same_criteria_are_combined_for_training(tm
     with gzip.open(tmp_path / 'checkpoints/NCT00000001.json.gz', 'rt') as stream:
         record = json.load(stream)
     assert len(record['unmerged_cohort_rows']) == 3 and record['result']['cohorts'] == decision['cohorts']
+    before = pd.read_csv(tmp_path / 'cohorts_unmerged.csv')
+    assert before.cohort_name.tolist() == ['Arm A', 'Arm B', 'Arm C'] and before.cohort_count.tolist() == [3, 3, 3]
+    assert 'merged_from' not in before
+    validate_cohort_rows(before)
     args.merge_cohorts = False
     with pytest.raises(ValueError, match='fresh --work-dir'):
         extract.run(args, extract.make_config(args))

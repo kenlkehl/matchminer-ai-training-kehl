@@ -133,11 +133,11 @@ default range is `train` only.
 | Stage | Command | Main outputs (defaults under `../data/no_phi`) |
 | --- | --- | --- |
 | `parse-trials` | `0a_parse_ctgov_json.py` (requires `--ctgov-json`, a CT.gov API v2 export) | `ctgov_trials.csv` |
-| `extract-cohorts` | `0b_extract_trial_cohorts.py` | `trial_cohort_lineitems.csv`, `trials_with_cohorts.csv`, `trial_cohorts.json` |
+| `extract-cohorts` | `0b_extract_trial_cohorts.py` | `trial_cohort_lineitems.csv` (cohorts with essentially the same criteria merged), `trial_cohort_lineitems_unmerged.csv` (before merging), `trials_with_cohorts.csv`, `trial_cohorts.json` |
 | `sample-trials` | `0c_sample_trial_spaces.py` | `registry_sample_cohort_lineitems.csv` + `.sampling.json` (sampled registry cohorts: protocol seeds and source splits) |
 | `synthetic-protocols` | `synthetic_protocols/generate_batch.py` | `synthetic_protocols/` (`seeds.jsonl`, `protocols/<NCT>/protocol.md`, `protocols.csv`) |
-| `protocol-cohorts` | `synthetic_protocols/extract_cohorts.py` | `synthetic_protocols/cohort_extraction/` (`cohorts.parquet`, `trials.parquet`) |
-| `registry-cohorts` | `0b_extract_trial_cohorts.py --trials-jsonl` (the protocol seeds) | `registry_cohorts/` (`trial_cohort_lineitems.csv`, `trials_with_cohorts.csv`, `trial_cohorts.json`) |
+| `protocol-cohorts` | `synthetic_protocols/extract_cohorts.py` | `synthetic_protocols/cohort_extraction/` or `--protocol-cohort-dir` (`cohorts.parquet` merged, `cohorts_unmerged.parquet`, `trials.parquet`) |
+| `registry-cohorts` | `0b_extract_trial_cohorts.py --trials-jsonl` (the protocol seeds) | `registry_cohorts/` (`trial_cohort_lineitems.csv` merged, `trial_cohort_lineitems_unmerged.csv`, `trials_with_cohorts.csv`, `trial_cohorts.json`) |
 | `generation-cohorts` | `synthetic_protocols/patient_cohorts.py` | `synthetic_generation/sample_trial_cohort_lineitems.csv` (protocol cohorts for patient generation) + `.provenance.json` |
 | `retrieval-cohorts` | `synthetic_protocols/retrieval_cohorts.py` | `retrieval_cohorts.csv` (both versions of every trial) + `.provenance.json` |
 | `generate-synthetic` | `generate_synthetic_data.py` | `synthetic_generation/all_synthetic_events.parquet`, `all_synthetic_notes.parquet`, `manifest.json` |

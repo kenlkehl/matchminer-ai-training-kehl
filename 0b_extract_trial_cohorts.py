@@ -7,7 +7,8 @@ a cancer-treatment screen, the cohort names, and one request per cohort for its
 criteria, with the same prompts as synthetic protocols. No training-owned prompt.
 For training, a trial's cohorts whose criteria are essentially the same are then
 combined (merge_equivalent_cohorts, trial.cohorts.merge.user.txt; --no-merge-cohorts
-keeps every extracted cohort). Checkpoints retain each trial's decision, cohort
+keeps every extracted cohort); the extracted rows before merging are exported too
+(--output-unmerged-cohorts). Checkpoints retain each trial's decision, cohort
 names, unmerged and merged rows, reasoning, validation attempts per step and
 endpoint provenance.
 
@@ -20,6 +21,7 @@ from its synthetic protocol (synthetic_protocols/README.md).
 """
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import ExitStack
 import csv
 from datetime import datetime, timezone
 import fcntl
@@ -171,23 +173,39 @@ def read_checkpoint(path, fingerprint):
     return record
 
 
+def output_paths(args):
+    """Cohort rows, trial audit, decisions JSON and, when merging, the cohort rows before merging."""
+    paths = [args.output_cohorts, args.output_trials, args.output_json]
+    if args.merge_cohorts:
+        paths.append(args.output_unmerged_cohorts
+                     or args.output_cohorts.with_name(f'{args.output_cohorts.stem}_unmerged{args.output_cohorts.suffix}'))
+    return paths
+
+
 def export_results(frame, args, fingerprint):
     from matchminer_ai.trials.cohorts import COHORT_COLUMNS
     # Stream exports; long reasoning traces stay once per trial in checkpoints.
     from matchminer_ai.trials.cohort_merge import MERGED_FROM
-    cohort_fields = list(frame.columns) + COHORT_COLUMNS + [MERGED_FROM, 'cohort_count', 'cohort_index', 'trial_representation']
+    row_fields = ['cohort_count', 'cohort_index', 'trial_representation']
+    cohort_fields = list(frame.columns) + COHORT_COLUMNS + [MERGED_FROM, *row_fields]
     audit_fields = list(frame.columns) + ['cancer_treatment_trial', 'multiple_cohorts',
                                         'cohort_count', 'cohort_result_json', 'extraction_error']
-    errors, index = [], 0
-    outputs = [args.output_cohorts, args.output_trials, args.output_json]
+    errors, index, unmerged_index = [], 0, 0
+    outputs = output_paths(args)
     for path in outputs:
         path.parent.mkdir(parents=True, exist_ok=True)
     temps = [p.with_suffix(p.suffix + '.tmp') for p in outputs]
-    with temps[0].open('w', newline='') as rows_out, temps[1].open('w', newline='') as trials_out, temps[2].open('w') as json_out:
-        rows_writer = csv.DictWriter(rows_out, fieldnames=cohort_fields)
-        audit_writer = csv.DictWriter(trials_out, fieldnames=audit_fields)
-        rows_writer.writeheader()
-        audit_writer.writeheader()
+    with ExitStack() as stack:
+        streams = [stack.enter_context(p.open('w', newline='')) for p in temps]
+        rows_writer = csv.DictWriter(streams[0], fieldnames=cohort_fields)
+        audit_writer = csv.DictWriter(streams[1], fieldnames=audit_fields)
+        json_out = streams[2]
+        # Before merging: every extracted cohort (a trial with one cohort, or not merged, is unchanged).
+        unmerged_writer = csv.DictWriter(streams[3], fieldnames=list(frame.columns) + COHORT_COLUMNS + row_fields) \
+            if len(streams) > 3 else None
+        for writer in (rows_writer, audit_writer, unmerged_writer):
+            if writer:
+                writer.writeheader()
         json_out.write('{\n')
         separator = ''
         for source in frame.astype(object).where(frame.notna(), None).to_dict('records'):
@@ -206,6 +224,13 @@ def export_results(frame, args, fingerprint):
                 rows_writer.writerow({**source, **cohort, 'cohort_count': count,
                                       'cohort_index': index, 'trial_representation': REPRESENTATION})
                 index += 1
+            if unmerged_writer:
+                extracted = record.get('unmerged_cohort_rows', record['cohort_rows'])
+                for cohort in extracted:
+                    unmerged_writer.writerow({**source, **{k: v for k, v in cohort.items() if k != MERGED_FROM},
+                                              'cohort_count': len(extracted), 'cohort_index': unmerged_index,
+                                              'trial_representation': REPRESENTATION})
+                    unmerged_index += 1
         json_out.write('\n}\n')
     partial = errors and not args.allow_failures
     for temporary, path in zip(temps, outputs):
@@ -216,7 +241,8 @@ def export_results(frame, args, fingerprint):
         raise RuntimeError(f'{len(errors)} trials failed; partial exports saved. Rerun to retry failures before sampling.')
     if errors:
         print(f'{len(errors)} trials failed every attempt and have no cohorts (errors.json)', flush=True)
-    print(f'Exported {len(frame)} decisions and {index} cohort rows', flush=True)
+    print(f'Exported {len(frame)} decisions and {index} cohort rows'
+          + (f' ({unmerged_index} before merging)' if len(outputs) > 3 else ''), flush=True)
 
 
 def run(args, config):
@@ -240,12 +266,12 @@ def run(args, config):
         config=config_snapshot(config), source_sha256={str(p.relative_to(package)): sha_file(p)
             for p in sorted(package.rglob('*')) if p.suffix in ('.py', '.txt', '.yaml')},
         runner_sha256=sha_file(__file__), adapter_sha256=sha_file(ROOT / 'trial_cohort_format.py'),
-        outputs=[str(p.resolve()) for p in (args.output_trials, args.output_cohorts, args.output_json)])
+        outputs=[str(p.resolve()) for p in output_paths(args)])
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     manifest = args.work_dir / 'manifest.json'
     if manifest.exists() and json.loads(manifest.read_text())['run_identity'] != fingerprint:
         raise ValueError('Extraction inputs, prompt, code or settings changed; use a fresh --work-dir')
-    if not manifest.exists() and any(p.exists() for p in (args.output_trials, args.output_cohorts, args.output_json)):
+    if not manifest.exists() and any(p.exists() for p in output_paths(args)):
         raise ValueError('Outputs already exist without this run identity; use fresh output paths')
     atomic_json(manifest, dict(run_identity=fingerprint, identity=identity,
         selected_trials=len(frame), api='matchminer_ai.trials.summarize_trials'))
@@ -298,6 +324,8 @@ def parser():
     p.add_argument('--output-trials', type=Path, default=data / 'trials_with_cohorts.csv')
     p.add_argument('--output-cohorts', type=Path, default=data / 'trial_cohort_lineitems.csv')
     p.add_argument('--output-json', type=Path, default=data / 'trial_cohorts.json')
+    p.add_argument('--output-unmerged-cohorts', type=Path,
+                   help='Cohort rows before merging; default <output-cohorts stem>_unmerged.csv (not with --no-merge-cohorts)')
     p.add_argument('--work-dir', type=Path, default=data / 'trial_cohort_extraction')
     p.add_argument('--inference-repo', type=Path, default=ROOT.parent / 'matchminer-ai-inference-kehl')
     p.add_argument('--start-year', type=int, default=2020)
@@ -328,8 +356,8 @@ def main(argv=None):
     if min(args.workers, args.max_concurrent_per_server, args.max_tokens,
            args.request_timeout, args.recovery_timeout) <= 0:
         raise ValueError('Concurrency, output budget and timeouts must be positive')
-    destinations = [p.resolve() for p in (args.output_trials, args.output_cohorts, args.output_json)]
-    if len(set(destinations)) != 3 or (args.trials_jsonl or args.input).resolve() in destinations:
+    destinations = [p.resolve() for p in output_paths(args)]
+    if len(set(destinations)) != len(destinations) or (args.trials_jsonl or args.input).resolve() in destinations:
         raise ValueError('Input and all output paths must be distinct')
     source = args.inference_repo.resolve() / 'src'
     if not (source / 'matchminer_ai/trials/cohort_workflow.py').is_file():

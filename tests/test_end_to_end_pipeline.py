@@ -52,6 +52,15 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert extraction.inference_repo == args.inference_repo and extraction.trials_jsonl is None
     registry = extract.parser().parse_args(stage['registry-cohorts'].command[2:])
     assert registry.trials_jsonl == seeds and registry.allow_failures
+    # Cohort rows are kept both before and after merging.
+    assert extract.output_paths(registry)[3] == registry.output_unmerged_cohorts == stage['registry-cohorts'].outputs[3]
+    assert extract.output_paths(extraction)[3] == stage['extract-cohorts'].outputs[3]
+    assert stage['protocol-cohorts'].outputs[3] == args.protocol_dir / 'cohort_extraction/cohorts_unmerged.parquet'
+    moved = arguments(tmp_path, '--start-at', 'protocol-cohorts', '--protocol-dir', str(tmp_path / 'data/no_phi/batch'),
+                      '--protocol-cohort-dir', str(tmp_path / 'data/no_phi/rerun/protocol_cohorts'))
+    rerun = {s.name: s for s in pipeline.build_plan(moved)}
+    assert rerun['protocol-cohorts'].outputs[0] == tmp_path / 'data/no_phi/rerun/protocol_cohorts/cohorts.parquet'
+    assert rerun['generation-cohorts'].inputs[0] == rerun['protocol-cohorts'].outputs[0]
     assert stage['generate-synthetic'].outputs[0] == stage['prepare-notes'].inputs[0]
     assert stage['prepare-notes'].outputs[0] == stage['summarize-patients'].inputs[0]
     assert stage['summarize-patients'].outputs[0] == stage['prepare-training'].inputs[0]

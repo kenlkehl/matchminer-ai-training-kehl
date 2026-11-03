@@ -61,6 +61,9 @@ def parser():
                    help='sample-trials output: sampled registry cohorts (protocol seeds, source splits); '
                         'default DATA_DIR/registry_sample_cohort_lineitems.csv')
     p.add_argument('--protocol-dir', type=Path, help='Synthetic protocol batch; default DATA_DIR/synthetic_protocols')
+    p.add_argument('--protocol-cohort-dir', type=Path,
+                   help='protocol-cohorts output, e.g. to re-extract an existing batch into a new run; '
+                        'default PROTOCOL_DIR/cohort_extraction')
     p.add_argument('--protocol-max-tokens', type=int, default=100000)
     p.add_argument('--protocol-chunk-size', type=int, default=500)
     p.add_argument('--sampled-spaces', '--sampled-cohorts', dest='sampled_spaces', type=Path,
@@ -131,6 +134,7 @@ def resolve_paths(args):
             setattr(args, key, value)
     args.registry_sample = args.registry_sample or args.data_dir / 'registry_sample_cohort_lineitems.csv'
     args.protocol_dir = args.protocol_dir or args.data_dir / 'synthetic_protocols'
+    args.protocol_cohort_dir = args.protocol_cohort_dir or args.protocol_dir / 'cohort_extraction'
     args.retrieval_cohorts = args.retrieval_cohorts or args.data_dir / 'retrieval_cohorts.csv'
     args.sampled_spaces = args.sampled_spaces or args.generation_dir / 'sample_trial_cohort_lineitems.csv'
     args.raw_synthetic_notes = args.raw_synthetic_notes or args.generation_dir / 'all_synthetic_notes.parquet'
@@ -177,6 +181,11 @@ def training_command(args):
     return command
 
 
+def unmerged(cohorts_csv):
+    """0b_extract_trial_cohorts.py's export of the cohort rows before merging (None when training starts later)."""
+    return cohorts_csv and cohorts_csv.with_name(f'{cohorts_csv.stem}_unmerged{cohorts_csv.suffix}')
+
+
 def build_plan(args):
     if STAGES.index(args.start_at) > STAGES.index(args.stop_after):
         raise ValueError('--start-at must precede --stop-after')
@@ -199,6 +208,7 @@ def build_plan(args):
                   '--start-year', str(args.start_year), '--seed', str(args.data_seed),
                   '--output-trials', str(d / 'trials_with_cohorts.csv'), '--output-cohorts', str(args.trial_spaces),
                   '--output-json', str(d / 'trial_cohorts.json'), '--work-dir', str(work / 'extraction'),
+                  '--output-unmerged-cohorts', str(unmerged(args.trial_spaces)),
                   '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
                   '--max-attempts', str(args.cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
                   '--max_concurrent_per_server', str(args.generation_concurrency_per_server),
@@ -207,13 +217,15 @@ def build_plan(args):
     inference_sources = args.inference_repo / 'src/matchminer_ai'
     package = sorted(p for p in inference_sources.rglob('*') if p.suffix in ('.py', '.txt', '.yaml'))
     pool = ['--server-urls-file', str(registry)] if registry else []
-    batch, extracted = args.protocol_dir, args.protocol_dir / 'cohort_extraction'
+    batch, extracted = args.protocol_dir, args.protocol_cohort_dir
     registry_cohorts = d / 'registry_cohorts'
+    # Merged rows (used downstream), audit, decisions, then the rows before merging.
     registry_rows = [registry_cohorts / 'trial_cohort_lineitems.csv', registry_cohorts / 'trials_with_cohorts.csv',
-                     registry_cohorts / 'trial_cohorts.json']
+                     registry_cohorts / 'trial_cohorts.json', unmerged(registry_cohorts / 'trial_cohort_lineitems.csv')]
     registry_extraction = [py, str(ROOT / '0b_extract_trial_cohorts.py'), '--trials-jsonl', str(batch / 'seeds.jsonl'),
                   '--output-trials', str(registry_rows[1]), '--output-cohorts', str(registry_rows[0]),
-                  '--output-json', str(registry_rows[2]), '--work-dir', str(work / 'registry_extraction'),
+                  '--output-json', str(registry_rows[2]), '--output-unmerged-cohorts', str(registry_rows[3]),
+                  '--work-dir', str(work / 'registry_extraction'),
                   '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
                   '--max-attempts', str(args.registry_cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
                   '--max_concurrent_per_server', str(args.registry_cohort_concurrency_per_server),
@@ -227,7 +239,7 @@ def build_plan(args):
                               '--output', str(args.parsed_trials)],
               [args.ctgov_json] if args.ctgov_json else [], [args.parsed_trials], source('0a_parse_ctgov_json.py', 'ctgov_metadata.py')),
         Stage('extract-cohorts', extraction, [args.parsed_trials],
-              [args.trial_spaces, d / 'trials_with_cohorts.csv', d / 'trial_cohorts.json'],
+              [args.trial_spaces, d / 'trials_with_cohorts.csv', d / 'trial_cohorts.json', unmerged(args.trial_spaces)],
               source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') + package),
         Stage('sample-trials', [py, str(ROOT / '0c_sample_trial_spaces.py'), '--input-csv', str(args.trial_spaces),
               '--output-csv', str(args.registry_sample), '--dfci-trials-csv', str(args.dfci_trials_csv),
@@ -245,7 +257,8 @@ def build_plan(args):
               '--output-dir', str(extracted), '--model-name', args.generation_tokenizer,
               '--max-tokens', str(args.cohort_max_tokens), '--allow-failures', *pool],
               [batch / 'seeds.jsonl', batch / 'protocols.csv'],
-              [extracted / 'cohorts.parquet', extracted / 'trials.parquet', extracted / 'run_metadata.json'],
+              [extracted / 'cohorts.parquet', extracted / 'trials.parquet', extracted / 'run_metadata.json',
+               extracted / 'cohorts_unmerged.parquet'],
               source('synthetic_protocols/extract_cohorts.py') + package),
         # The same trials from the registry records their protocols were written
         # from, with the registry prompt that follows the protocol prompt's rules.
@@ -362,7 +375,7 @@ def wait_generation(args):
 
 def execute(args, plan):
     # Upstream outputs must remain in the explicitly non-PHI workspace.
-    for path in (args.data_dir, args.generation_dir, args.pipeline_dir, args.protocol_dir):
+    for path in (args.data_dir, args.generation_dir, args.pipeline_dir, args.protocol_dir, args.protocol_cohort_dir):
         if not path.is_relative_to(DATA_ROOT.resolve()):
             raise ValueError('Data-production directories must be inside data/no_phi')
     if args.synthetic_notes == args.raw_synthetic_notes:

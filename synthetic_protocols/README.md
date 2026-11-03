@@ -137,7 +137,13 @@ cohort_extraction/
     extraction.json      raw answer, parsed decision, attempts with endpoint and
                          model, prompt hash, schema, protocol SHA-256
     reasoning.txt        the model's reasoning trace
-  cohorts.parquet, .csv  one row per extracted cohort, with provenance
+  cohorts.parquet, .csv  one row per cohort after merging those with essentially the
+                         same criteria (merged_from: the extracted cohort numbers),
+                         with provenance
+  cohorts_unmerged.parquet, .csv
+                         one row per extracted cohort before merging, with provenance
+  trials/<NCT>/merge.json
+                         a multi-cohort trial's merge grouping (reused on rerun)
   trials.parquet, .csv   one row per protocol: provenance and extraction status
   run_metadata.json      git commits of both repositories, settings, servers,
                          status counts, failures, seeds without a protocol
@@ -210,6 +216,7 @@ criteria as one document. Earlier runs used the single-request registry prompt
 python 0b_extract_trial_cohorts.py --trials-jsonl "$B/seeds.jsonl" \
   --work-dir <run>/registry_cohorts/work --output-trials <run>/registry_cohorts/trials_with_cohorts.csv \
   --output-cohorts <run>/registry_cohorts/trial_cohort_lineitems.csv --output-json <run>/registry_cohorts/trial_cohorts.json \
+  --output-unmerged-cohorts <run>/registry_cohorts/trial_cohort_lineitems_unmerged.csv \
   --model <served alias> --tokenizer-model <model or tokenizer path> --server-urls-file <servers.json> \
   --max-attempts 5 --allow-failures
 python -I synthetic_protocols/retrieval_cohorts.py \
