@@ -166,6 +166,50 @@ def validate_resume_checkpoint(checkpoint, *, prompt_profile='sentence_similarit
         )
 
 
+def per_loss_logging(losses_map):
+    """Callback logging each dataset's loss over its own batches (loss_<dataset>, batches_<dataset>).
+
+    The proportional sampler gives each batch to one dataset's loss, so the logged loss mixes them by their
+    batch counts (about one ranking batch in nine). Each window's per-dataset sums and batch counts are summed
+    over ranks; every rank logs at the same steps, so the all-reduce is collective.
+    """
+    from transformers import TrainerCallback
+    names = list(losses_map)
+    recorded = {name: [] for name in names}
+
+    def recorder(name):
+        def hook(module, inputs, output):
+            if torch.is_grad_enabled():
+                recorded[name].append(output.detach().float())
+        return hook
+
+    for name, loss in losses_map.items():
+        loss.register_forward_hook(recorder(name))
+
+    class PerLossLogger(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if not logs or 'loss' not in logs:
+                return
+            totals = torch.zeros(len(names), 2, device=args.device)
+            for i, name in enumerate(names):
+                if recorded[name]:
+                    totals[i, 0] = torch.stack(recorded[name]).sum()
+                    totals[i, 1] = len(recorded[name])
+                recorded[name].clear()
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(totals)
+            extra = {}
+            for (total, count), name in zip(totals.tolist(), names):
+                if count:
+                    extra[f'loss_{name}'] = round(total / count, 4)
+                extra[f'batches_{name}'] = int(count)
+            logs.update(extra)  # Before the progress printer, which runs after user callbacks.
+            if state.log_history and state.log_history[-1].get('step') == state.global_step:
+                state.log_history[-1].update(extra)  # Saved with each checkpoint's trainer_state.json.
+
+    return PerLossLogger()
+
+
 def main():
     args = parse_args()
     from pathlib import Path
@@ -371,6 +415,7 @@ def train(args):
         args=args_st,
         train_dataset=train_dataset,
         loss=losses_map,
+        callbacks=[per_loss_logging(losses_map)],
     )
 
     print(f'[INFO] Data loader: {args_st.dataloader_num_workers} workers, '
