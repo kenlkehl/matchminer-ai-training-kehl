@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local review dashboard: each trial's source document beside its extracted cohorts and their criteria.
 
-    python scripts/cohort_dashboard.py --run ../data/no_phi/<run> [--port 8770]
+    python scripts/cohort_dashboard.py --run ../data/no_phi/<run> [--oncore ../data/no_phi/<oncore run>] [--port 8770]
 
 Reads a run_pipeline.py run's protocol-cohorts and registry-cohorts stages, live while they run
 (per-trial extraction.json/merge.json under the protocol output dir, and the registry
@@ -10,7 +10,9 @@ protocol; the registry view shows the listing exactly as the prompts receive it 
 summary and eligibility criteria as one document). Cohorts can be shown as extracted or as merged
 for training. Clicking a criterion line jumps to the document lines that share the most of its
 distinctive words (a navigation aid for spotting paraphrase or unsupported criteria, not a
-correctness check). Serves on 127.0.0.1 only and uses no network resources; from another
+correctness check). Each --oncore directory (a prepared real-protocol run: inputs.csv plus
+trials/<protocol_no>/ from extract_protocol_cohorts and merge_equivalent_cohorts) adds a tab
+marked confidential. Serves on 127.0.0.1 only and uses no network resources; from another
 machine, forward the port (ssh -L 8770:localhost:8770 camus).
 """
 import argparse
@@ -55,64 +57,25 @@ def mtime(path):
         return None
 
 
-class Run:
-    """Paths of one run_pipeline.py run and a cache of per-trial summaries keyed by file mtimes."""
+class Collection:
+    """One tab of the dashboard: trials with documents and per-source extraction records.
 
-    def __init__(self, run_dir, batch_dir=None, protocol_dir=None, registry_dir=None):
-        self.root = run_dir
-        requests = run_dir / "upstream" / "requests"
-        protocol = json.loads((requests / "protocol-cohorts.json").read_text())["execution_command"] \
-            if (requests / "protocol-cohorts.json").exists() else []
-        registry = json.loads((requests / "registry-cohorts.json").read_text())["execution_command"] \
-            if (requests / "registry-cohorts.json").exists() else []
-        self.batch = batch_dir or option(protocol, "--batch-dir") or (option(registry, "--trials-jsonl") or Path()).parent
-        self.protocol_dir = protocol_dir or option(protocol, "--output-dir") or self.batch / "cohort_extraction"
-        self.registry_dir = registry_dir or option(registry, "--work-dir") or run_dir / "upstream" / "registry_extraction"
-        self.seeds = {}
-        for line in (self.batch / "seeds.jsonl").read_text().splitlines():
-            if line.strip():
-                seed = json.loads(line)
-                self.seeds[seed["nct_id"]] = seed
-        self.cache, self.lock, self.documents = {}, threading.Lock(), {}
+    Subclasses provide ids, titles, the files whose mtimes identify a trial's state, normalized
+    records and document text; summaries are cached by those mtimes so Refresh rereads only changes.
+    """
 
-    def protocol_files(self, nct):
-        d = self.protocol_dir / "trials" / nct
-        return d / "extraction.json", d / "merge.json"
+    sources = ("protocol",)
+    confidential = False
+    STATES = ("cohorts", "not_cancer", "failed", "excluded", "pending")
 
-    def registry_file(self, nct):
-        return self.registry_dir / "checkpoints" / f"{nct}.json.gz"
+    def __init__(self, name, label):
+        self.name, self.label, self.cache, self.lock = name, label, {}, threading.Lock()
 
-    def failed_protocols(self):
-        path = self.protocol_dir / "trials.csv"
-        if not path.exists():
-            return {}
-        with path.open(newline="") as stream:
-            return {row["trial_id"]: row.get("extraction_error") or "failed every attempt"
-                    for row in csv.DictReader(stream) if row.get("extraction_status") == "failed"}
+    def describe(self):
+        return {"name": self.name, "label": self.label, "sources": list(self.sources), "confidential": self.confidential}
 
-    # -- normalized records -------------------------------------------------------------------
-    def protocol_record(self, nct, failed=None):
-        extraction, merge = self.protocol_files(nct)
-        if not extraction.exists():
-            error = (failed or {}).get(nct)
-            return {"status": "failed" if error else "pending", "error": error}
-        rec = json.loads(extraction.read_text())
-        groups = json.loads(merge.read_text())["groups"] if merge.exists() else None
-        return self.normalized(rec["decision"], rec.get("cohort_names"), rec.get("merged_cohorts"),
-                               rec.get("attempts") or {}, groups, None,
-                               document=rec.get("source_document", {}).get("text_path"))
-
-    def registry_record(self, nct):
-        path = self.registry_file(nct)
-        if not path.exists():
-            return {"status": "pending"}
-        with gzip.open(path, "rt") as stream:
-            rec = json.load(stream)
-        meta = rec.get("metadata") or {}
-        groups = ((rec.get("merge") or {}).get("trial_groups") or {}).get(nct)
-        return self.normalized(rec.get("result"), (meta.get("trial_cohort_names") or {}).get(nct),
-                               (meta.get("trial_merged_cohorts") or {}).get(nct),
-                               (meta.get("trial_attempts") or {}).get(nct) or {}, groups, rec.get("error"))
+    def context(self):
+        return {}
 
     @staticmethod
     def normalized(decision, names, identical, attempts, groups, error, document=None):
@@ -126,51 +89,58 @@ class Run:
         return {"status": "cohorts", "cohorts": cohorts, "names": names or [c["cohort_name"] for c in cohorts],
                 "identical": identical or [], "groups": groups, "attempts": attempts, "document": document}
 
-    # -- index --------------------------------------------------------------------------------
-    def summary(self, nct, failed):
-        key = (mtime(self.protocol_files(nct)[0]), mtime(self.protocol_files(nct)[1]), mtime(self.registry_file(nct)),
-               nct in failed)
-        cached = self.cache.get(nct)
+    @staticmethod
+    def extraction_record(directory, document=None):
+        """A protocol decision saved by extract_protocol_cohorts (+ merge_equivalent_cohorts), or None."""
+        extraction, merge = directory / "extraction.json", directory / "merge.json"
+        if not extraction.exists():
+            return None
+        rec = json.loads(extraction.read_text())
+        groups = json.loads(merge.read_text())["groups"] if merge.exists() else None
+        return Collection.normalized(rec["decision"], rec.get("cohort_names"), rec.get("merged_cohorts"),
+                                     rec.get("attempts") or {}, groups, None,
+                                     document=document or rec.get("source_document", {}).get("text_path"))
+
+    def summary(self, trial, context):
+        key = (tuple(mtime(f) for f in self.files(trial)), self.context_key(trial, context))
+        cached = self.cache.get(trial)
         if cached and cached[0] == key:
             return cached[1]
-        entry = {"id": nct, "title": self.seeds[nct].get("title") or ""}
-        for source, record in (("protocol", self.protocol_record(nct, failed)), ("registry", self.registry_record(nct))):
+        entry = {"id": trial, **self.info(trial)}
+        for source in self.sources:
+            record = self.record(trial, source, context)
             entry[source] = {"status": record["status"],
                              "extracted": len(record["cohorts"]) if record["status"] == "cohorts" else 0,
                              "merged": len(record["groups"]) if record.get("groups") is not None else None}
-        self.cache[nct] = (key, entry)
+        self.cache[trial] = (key, entry)
         return entry
+
+    def context_key(self, trial, context):
+        return None
 
     def index(self):
         with self.lock:
-            failed = self.failed_protocols()
+            context = self.context()
             with ThreadPoolExecutor(16) as pool:
-                entries = list(pool.map(lambda nct: self.summary(nct, failed), self.seeds))
+                entries = list(pool.map(lambda trial: self.summary(trial, context), self.ids()))
         stats = {}
-        for source in ("protocol", "registry"):
+        for source in self.sources:
             states = [e[source] for e in entries]
-            stats[source] = {s: sum(x["status"] == s for x in states) for s in ("cohorts", "not_cancer", "failed", "pending")}
+            stats[source] = {s: sum(x["status"] == s for x in states) for s in self.STATES}
             stats[source]["extracted"] = sum(x["extracted"] for x in states)
             stats[source]["merged"] = sum(x["merged"] or 0 for x in states)
             stats[source]["merge_pending"] = sum(x["status"] == "cohorts" and x["merged"] is None for x in states)
-        return {"run": str(self.root), "batch": str(self.batch), "trials": entries, "stats": stats}
+        return {**self.describe(), "trials": entries, "stats": stats}
 
-    # -- detail -------------------------------------------------------------------------------
-    def document(self, nct, source, record):
-        if source == "registry":
-            return registry_text(self.seeds[nct])
-        path = Path(record.get("document") or self.batch / "protocols" / nct / "protocol.md")
-        return path.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+    def outline(self, lines, source):
+        return [{"line": i, "text": re.sub(r"^#+\s*", "", line).strip(), "level": len(line) - len(line.lstrip("#"))}
+                for i, line in enumerate(lines) if re.match(r"^#{1,4}\s+\S", line)]
 
-    def detail(self, nct, source):
-        record = self.registry_record(nct) if source == "registry" else self.protocol_record(nct, self.failed_protocols())
-        text = self.document(nct, source, record)
+    def detail(self, trial, source):
+        record = self.record(trial, source, self.context())
+        text = self.document(trial, source, record)
         lines = text.split("\n")
         matcher = Matcher(lines)
-        outline = [{"line": i, "text": re.sub(r"^#+\s*", "", line).strip(), "level": len(line) - len(line.lstrip("#"))}
-                   for i, line in enumerate(lines)
-                   if re.match(r"^#{1,4}\s+\S", line) or (source == "registry" and re.match(
-                       r"^(Title:|Brief summary:|Eligibility criteria:|\s*(Inclusion|Exclusion) Criteria:?\s*$)", line, re.I))]
         steps = []
         attempts = record.get("attempts") or {}
         for step in ("screen", "list"):
@@ -189,15 +159,144 @@ class Run:
                 heading = bool(re.match(r"^\s*(inclusion|exclusion)( criteria)?\s*:?\s*$", line, re.I)) or line.rstrip().endswith(":") and len(line) < 80
                 items.append({"text": line, "heading": heading, "matches": [] if heading else matcher.find(line)})
             cohorts.append({"number": number, "name": cohort["cohort_name"], "criteria": items})
-        return {"id": nct, "source": source, "title": self.seeds[nct].get("title"), "status": record["status"],
-                "error": record.get("error"), "lines": lines, "outline": outline, "cohorts": cohorts,
-                "names": names, "identical": record.get("identical") or [], "groups": record.get("groups"),
-                "steps": steps, "characters": len(text)}
+        return {"id": trial, "source": source, **self.info(trial), "status": record["status"],
+                "error": record.get("error"), "lines": lines, "outline": self.outline(lines, source)[:600],
+                "cohorts": cohorts, "names": names, "identical": record.get("identical") or [],
+                "groups": record.get("groups"), "steps": steps, "characters": len(text)}
 
     @staticmethod
     def attempt(step, cohort, a):
         return {"step": step, "cohort": cohort, "attempt": a.get("attempt"), "finish": a.get("finish_reason"),
                 "error": a.get("validation_error"), "answer": a.get("answer"), "reasoning": a.get("reasoning") or ""}
+
+
+class PipelineRun(Collection):
+    """A run_pipeline.py run: synthetic protocols (protocol-cohorts) and their registry listings (registry-cohorts)."""
+
+    sources = ("protocol", "registry")
+
+    def __init__(self, run_dir, batch_dir=None, protocol_dir=None, registry_dir=None, name="synthetic", label=None):
+        super().__init__(name, label or f"Synthetic protocols ({run_dir.name})")
+        self.root = run_dir
+        requests = run_dir / "upstream" / "requests"
+        protocol = json.loads((requests / "protocol-cohorts.json").read_text())["execution_command"] \
+            if (requests / "protocol-cohorts.json").exists() else []
+        registry = json.loads((requests / "registry-cohorts.json").read_text())["execution_command"] \
+            if (requests / "registry-cohorts.json").exists() else []
+        self.batch = batch_dir or option(protocol, "--batch-dir") or (option(registry, "--trials-jsonl") or Path()).parent
+        self.protocol_dir = protocol_dir or option(protocol, "--output-dir") or self.batch / "cohort_extraction"
+        self.registry_dir = registry_dir or option(registry, "--work-dir") or run_dir / "upstream" / "registry_extraction"
+        self.seeds = {}
+        for line in (self.batch / "seeds.jsonl").read_text().splitlines():
+            if line.strip():
+                seed = json.loads(line)
+                self.seeds[seed["nct_id"]] = seed
+
+    def ids(self):
+        return list(self.seeds)
+
+    def info(self, nct):
+        return {"title": self.seeds[nct].get("title") or "", "sub": ""}
+
+    def files(self, nct):
+        d = self.protocol_dir / "trials" / nct
+        return d / "extraction.json", d / "merge.json", self.registry_dir / "checkpoints" / f"{nct}.json.gz"
+
+    def context(self):
+        path = self.protocol_dir / "trials.csv"
+        if not path.exists():
+            return {}
+        with path.open(newline="") as stream:
+            return {row["trial_id"]: row.get("extraction_error") or "failed every attempt"
+                    for row in csv.DictReader(stream) if row.get("extraction_status") == "failed"}
+
+    def context_key(self, nct, failed):
+        return nct in failed
+
+    def record(self, nct, source, failed):
+        if source == "protocol":
+            record = self.extraction_record(self.protocol_dir / "trials" / nct)
+            if record is None:
+                error = failed.get(nct)
+                return {"status": "failed" if error else "pending", "error": error}
+            return record
+        path = self.files(nct)[2]
+        if not path.exists():
+            return {"status": "pending"}
+        with gzip.open(path, "rt") as stream:
+            rec = json.load(stream)
+        meta = rec.get("metadata") or {}
+        groups = ((rec.get("merge") or {}).get("trial_groups") or {}).get(nct)
+        return self.normalized(rec.get("result"), (meta.get("trial_cohort_names") or {}).get(nct),
+                               (meta.get("trial_merged_cohorts") or {}).get(nct),
+                               (meta.get("trial_attempts") or {}).get(nct) or {}, groups, rec.get("error"))
+
+    def document(self, nct, source, record):
+        if source == "registry":
+            return registry_text(self.seeds[nct])
+        path = Path(record.get("document") or self.batch / "protocols" / nct / "protocol.md")
+        return path.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+
+    def outline(self, lines, source):
+        if source == "protocol":
+            return super().outline(lines, source)
+        return [{"line": i, "text": line.strip(), "level": 1} for i, line in enumerate(lines) if re.match(
+            r"^(Title:|Brief summary:|Eligibility criteria:|\s*(Inclusion|Exclusion) Criteria:?\s*$)", line, re.I)]
+
+
+class ProtocolSet(Collection):
+    """Protocol documents prepared into inputs.csv and extracted into trials/<id>/ (e.g. the DFCI OnCore runs)."""
+
+    PAGE = re.compile(r"^── page \d+ ──$")
+    SECTION = re.compile(r"^\s{0,4}(\d{1,2}(\.\d{1,2}){0,3}\.?\s+[A-Z][^.]{2,100}|APPENDIX\s+\S.{0,90}|[A-Z][A-Z0-9 ,/&()'\-]{6,90})\s*$")
+
+    def __init__(self, directory, name, label, confidential=False):
+        super().__init__(name, label)
+        self.root, self.confidential = directory, confidential
+        with (directory / "inputs.csv").open(newline="") as stream:
+            self.rows = {row["trial_id"]: row for row in csv.DictReader(stream)}
+
+    def ids(self):
+        return list(self.rows)
+
+    def info(self, trial):
+        row = self.rows[trial]
+        sub = " · ".join(x for x in (row.get("nct_id"), row.get("phase"), row.get("status")) if x)
+        return {"title": row.get("short_title") or "", "sub": sub}
+
+    def files(self, trial):
+        d = self.root / "trials" / trial
+        return d / "extraction.json", d / "merge.json", self.root / "run_metadata.json"
+
+    def context(self):
+        path = self.root / "run_metadata.json"
+        return json.loads(path.read_text()).get("trial_errors") or {} if path.exists() else {}
+
+    def context_key(self, trial, errors):
+        return trial in errors
+
+    def record(self, trial, source, errors):
+        row = self.rows[trial]
+        if row.get("excluded_reason"):
+            return {"status": "excluded", "error": row["excluded_reason"]}
+        record = self.extraction_record(self.root / "trials" / trial, document=row.get("protocol_path"))
+        if record is None:
+            error = errors.get(trial)
+            return {"status": "failed" if error else "pending", "error": error, "document": row.get("protocol_path")}
+        return record
+
+    def document(self, trial, source, record):
+        path = record.get("document") or self.rows[trial].get("protocol_path")
+        if not path:
+            return ""
+        text = Path(path).read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+        # PDF text keeps form feeds between pages; show them as page markers.
+        return "\n".join(f"── page {i} ──\n{page.strip(chr(10))}" for i, page in enumerate(text.split("\f"), 1))
+
+    def outline(self, lines, source):
+        return [{"line": i, "text": line.strip()[:100], "level": 1 if self.PAGE.match(line) is None else 2}
+                for i, line in enumerate(lines)
+                if len(line) <= 110 and self.SECTION.match(line) and not re.search(r"\.{4,}|\s\d+\s*$", line)]
 
 
 class Matcher:
@@ -270,7 +369,7 @@ PAGE = r"""<!doctype html>
  --mark:rgba(250,178,25,0.35);--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
-.viz-root{height:100vh;display:grid;grid-template-rows:auto 1fr;background:var(--page);color:var(--ink);
+.viz-root{height:100vh;display:grid;grid-template-rows:auto auto 1fr;background:var(--page);color:var(--ink);
  font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:center;gap:16px;padding:10px 16px;border-bottom:1px solid var(--grid);background:var(--surface);flex-wrap:wrap}
 header h1{font-size:15px;margin:0 8px 0 0;font-weight:600}
@@ -297,7 +396,12 @@ aside{border-right:1px solid var(--grid);display:flex;flex-direction:column;min-
 .st{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
 .d-cohorts{background:var(--good)}.d-not_cancer{background:var(--warning)}.d-failed{background:var(--critical)}
-.d-pending{background:transparent;border:1.5px solid var(--muted)}
+.d-pending{background:transparent;border:1.5px solid var(--muted)}.d-excluded{background:var(--muted)}
+.tabs{display:inline-flex;gap:0}.tabs button{border-radius:0}.tabs button:first-child{border-radius:5px 0 0 5px}
+.tabs button:last-child{border-radius:0 5px 5px 0}.tabs button+button{border-left:none}.tabs button:only-child{border-radius:5px}
+.banner{grid-column:1/-1;padding:4px 16px;font-size:12px;color:var(--ink);background:var(--page);border-bottom:1px solid var(--grid)}
+.banner .dot{background:var(--critical)}
+.item .s{color:var(--muted);font-size:11px}
 #view{display:grid;grid-template-rows:auto 1fr;min-height:0}
 .trialhead{padding:8px 14px;border-bottom:1px solid var(--grid);background:var(--surface);display:grid;gap:6px}
 .trialhead .top{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
@@ -344,20 +448,23 @@ kbd{font:11px ui-monospace,monospace;border:1px solid var(--axis);border-radius:
 <body><div class="viz-root">
 <header>
  <h1>Cohort extraction review</h1>
+ <span class="tabs" id="tabs"></span>
  <div class="tiles" id="tiles"></div>
  <span class="spacer"></span>
  <span class="help"><kbd>j</kbd>/<kbd>k</kbd> next/previous trial · <kbd>/</kbd> search trials · <kbd>p</kbd>/<kbd>r</kbd> protocol/registry</span>
  <button id="refresh" title="Re-read the run's files (new decisions appear while the run is going)">Refresh</button>
  <select id="theme" title="Theme"><option value="">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select>
 </header>
+<div class="banner" id="banner" hidden></div>
 <main>
  <aside>
   <div class="filters">
    <input type="search" id="q" placeholder="Search NCT ID or title">
    <div class="row">
-    <select id="fsource" title="Which version the status filter applies to"><option value="protocol">Protocol</option><option value="registry">Registry</option></select>
+    <select id="fsource" title="Which version the status filter applies to"></select>
     <select id="fstatus"><option value="">any status</option><option value="cohorts">cohorts</option>
-     <option value="not_cancer">not cancer treatment</option><option value="failed">failed</option><option value="pending">pending</option></select>
+     <option value="not_cancer">not cancer treatment</option><option value="failed">failed</option>
+     <option value="excluded">not extracted</option><option value="pending">pending</option></select>
    </div>
    <div class="row">
     <select id="fshape"><option value="">all trials</option><option value="multi">2+ extracted cohorts</option>
@@ -374,9 +481,10 @@ kbd{font:11px ui-monospace,monospace;border:1px solid var(--axis);border-radius:
 </main>
 </div>
 <script>
-var state = {request: 0, index: null, filtered: [], id: null, source: "protocol", mode: "extracted", detail: null,
+var state = {request: 0, collections: [], collection: null, index: null, filtered: [], id: null, source: "protocol", mode: "extracted", detail: null,
              searchHits: [], searchAt: -1, activeCrit: null, matchAt: 0};
-var STATUS = {cohorts: "cohorts", not_cancer: "not cancer treatment", failed: "failed", pending: "pending"};
+var STATUS = {cohorts: "cohorts", not_cancer: "not cancer treatment", failed: "failed", excluded: "not extracted", pending: "pending"};
+var SOURCE = {protocol: "Protocol", registry: "Registry"};
 function $(id) { return document.getElementById(id); }
 function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]; }); }
 function fmt(n) { return n == null ? "–" : n.toLocaleString(); }
@@ -387,13 +495,30 @@ $("theme").value = localStorage.getItem("cohortTheme") || "";
 applyTheme($("theme").value);
 $("theme").onchange = function () { localStorage.setItem("cohortTheme", this.value); applyTheme(this.value); };
 
-function loadIndex() {
+function collection() { return state.collections.filter(function (c) { return c.name === state.collection; })[0]; }
+function renderTabs() {
+  $("tabs").innerHTML = state.collections.map(function (c) {
+    return '<button data-c="' + c.name + '"' + (c.name === state.collection ? ' class="on"' : "") + ">" + esc(c.label) + "</button>"; }).join("");
+  Array.prototype.forEach.call($("tabs").querySelectorAll("button"), function (b) { b.onclick = function () { openCollection(b.dataset.c); }; });
+  var c = collection();
+  $("fsource").innerHTML = c.sources.map(function (s) { return '<option value="' + s + '">' + SOURCE[s] + "</option>"; }).join("");
+  $("banner").hidden = !c.confidential;
+  $("banner").innerHTML = '<span class="st"><span class="dot"></span><strong>Confidential</strong></span> DFCI OnCore protocol documents, ' +
+    "for KSG members working on MatchMiner only (oncore-protocols CLAUDE.md §10a): do not copy them outside DFCI systems. " +
+    "Extractions are research abstractions for review, not eligibility determinations; OnCore holds the current protocol.";
+}
+function openCollection(name, trial, source) {
+  state.collection = name; state.id = null; state.index = null; state.source = source || collection().sources[0];
+  renderTabs(); $("list").innerHTML = ""; $("tiles").innerHTML = "";
+  $("view").innerHTML = '<div class="notice">Loading the index…</div>';
+  return loadIndex(trial);
+}
+function loadIndex(trial) {
   $("refresh").disabled = true;
-  return getJSON("/api/index").then(function (idx) {
+  return getJSON("/api/index?c=" + encodeURIComponent(state.collection)).then(function (idx) {
+    if (idx.name !== state.collection) return;
     state.index = idx; renderTiles(); filter(); $("refresh").disabled = false;
-    var hash = location.hash.slice(1).split("/");  // #NCT01234567/registry opens that trial and version
-    if (hash[1] === "registry" || hash[1] === "protocol") state.source = hash[1];
-    if (!state.id && hash[0] && state.index.trials.some(function (t) { return t.id === hash[0]; })) select(hash[0]);
+    if (!state.id && trial && state.index.trials.some(function (t) { return t.id === trial; })) select(trial);
     else if (!state.id && state.filtered.length) select(state.filtered[0].id);
   }).catch(function (e) { $("refresh").disabled = false; $("view").innerHTML = '<div class="notice">' + esc(e) + "</div>"; });
 }
@@ -402,10 +527,10 @@ function tile(label, value, sub) {
 }
 function renderTiles() {
   var s = state.index.stats, n = state.index.trials.length, html = "";
-  ["protocol", "registry"].forEach(function (src) {
+  state.index.sources.forEach(function (src) {
     var x = s[src], decided = x.cohorts + x.not_cancer;
     html += tile(src === "protocol" ? "Protocols decided" : "Registry listings decided", fmt(decided) + " / " + fmt(n),
-      fmt(x.not_cancer) + " not cancer treatment · " + fmt(x.failed) + " failed");
+      fmt(x.not_cancer) + " not cancer treatment · " + fmt(x.failed) + " failed" + (x.excluded ? " · " + fmt(x.excluded) + " not extracted" : ""));
     html += tile(src === "protocol" ? "Protocol cohorts" : "Registry cohorts",
       fmt(x.extracted) + (x.merge_pending ? "" : " → " + fmt(x.merged)),
       x.merge_pending ? "extracted · " + fmt(x.merge_pending) + " multi-cohort trials not merged yet" : "extracted → for training");
@@ -440,8 +565,8 @@ function filter() {
   var html = "";
   rows.slice(0, 3000).forEach(function (t) {
     html += '<div class="item' + (t.id === state.id ? " sel" : "") + '" data-id="' + t.id + '"><div class="id">' + t.id +
-      '</div><div class="t">' + esc(t.title) + '</div><div class="badges">' + statusBadge("Protocol", t.protocol) +
-      statusBadge("Registry", t.registry) + "</div></div>";
+      '</div>' + (t.sub ? '<div class="s">' + esc(t.sub) + "</div>" : "") + '<div class="t">' + esc(t.title) + '</div><div class="badges">' +
+      state.index.sources.map(function (s) { return statusBadge(SOURCE[s], t[s]); }).join("") + "</div></div>";
   });
   if (rows.length > 3000) html += '<div class="notice">Showing the first 3,000; narrow the search.</div>';
   $("list").innerHTML = html;
@@ -456,18 +581,20 @@ function select(id, keepScroll) {
   var el = document.querySelector('.item[data-id="' + id + '"]');
   if (el && !keepScroll) el.scrollIntoView({block: "nearest"});
   var scroll = keepScroll && $("doc") ? $("doc").scrollTop : 0, request = ++state.request;
-  getJSON("/api/trial?id=" + encodeURIComponent(id) + "&source=" + state.source).then(function (d) {
+  getJSON("/api/trial?c=" + encodeURIComponent(state.collection) + "&id=" + encodeURIComponent(id) + "&source=" + state.source).then(function (d) {
     if (request !== state.request) return;  // a newer selection is loading
     state.detail = d; state.activeCrit = null; state.searchHits = []; state.searchAt = -1;
-    history.replaceState(null, "", "#" + d.id + "/" + d.source);
+    history.replaceState(null, "", "#" + state.collection + "/" + d.id + "/" + d.source);
     renderDetail(); if (scroll) $("doc").scrollTop = scroll;
   }).catch(function (e) { $("view").innerHTML = '<div class="notice">' + esc(e) + "</div>"; });
 }
-function setSource(src) { if (state.source !== src) { state.source = src; if (state.id) select(state.id); } }
+function setSource(src) {
+  if (state.source !== src && collection().sources.indexOf(src) >= 0) { state.source = src; if (state.id) select(state.id); }
+}
 function setMode(mode) { state.mode = mode; renderCohorts(); }
 
 function lineHTML(i, text, marks) {
-  var cls = "ln" + (/^#{1,4}\s/.test(text) ? " h" : "");
+  var cls = "ln" + (/^#{1,4}\s|^── page \d+ ──$/.test(text) ? " h" : "");
   var body = "";
   if (marks && marks.length) {
     var at = 0;
@@ -486,17 +613,21 @@ function renderDetail() {
   var outline = '<option value="">Jump to section…</option>' + d.outline.map(function (o) {
     return '<option value="' + o.line + '">' + " ".repeat(Math.max(0, (o.level || 1) - 1) * 2) + esc(o.text.slice(0, 90)) + "</option>"; }).join("");
   $("view").innerHTML =
-    '<div class="trialhead"><div class="top"><span class="nct">' + esc(d.id) + '</span><span class="title">' + esc(d.title || "") + "</span></div>" +
-    '<div class="controls"><span class="seg"><button id="srcP">Protocol</button><button id="srcR">Registry listing</button></span>' +
+    '<div class="trialhead"><div class="top"><span class="nct">' + esc(d.id) + "</span>" + (d.sub ? '<span class="help">' + esc(d.sub) + "</span>" : "") +
+    '<span class="title">' + esc(d.title || "") + "</span></div>" +
+    '<div class="controls">' + (state.index.sources.length > 1 ? '<span class="seg"><button id="srcP">Protocol</button><button id="srcR">Registry listing</button></span>' : "") +
     '<span class="seg"><button id="modeE">As extracted</button><button id="modeM">Merged for training</button></span>' +
-    (t.protocol ? statusBadge("Protocol", t.protocol) + statusBadge("Registry", t.registry) : "") + "</div></div>" +
-    '<div class="panes"><div class="pane"><div class="panebar"><strong>' + (d.source === "protocol" ? "Synthetic protocol" : "Registry listing as the prompts see it") +
+    (t.protocol ? state.index.sources.map(function (s) { return statusBadge(SOURCE[s], t[s]); }).join("") : "") + "</div></div>" +
+    '<div class="panes"><div class="pane"><div class="panebar"><strong>' + (d.source === "registry" ? "Registry listing as the prompts see it" :
+      state.index.confidential ? "Protocol text (converted from the PDF)" : "Synthetic protocol") +
     '</strong><span class="help">' + fmt(d.lines.length) + " lines · " + fmt(d.characters) + ' characters</span>' +
     '<input type="search" class="grow" id="dq" placeholder="Find in document (regex)"><button id="dprev">↑</button><button id="dnext">↓</button>' +
     '<span class="help" id="dcount"></span><select id="outline">' + outline + "</select></div><div id=\"doc\"></div></div>" +
     '<div class="pane"><div class="panebar"><strong>Cohorts</strong><span class="help" id="chelp"></span></div><div id="cohorts"></div></div></div>';
-  $("srcP").classList.toggle("on", d.source === "protocol"); $("srcR").classList.toggle("on", d.source === "registry");
-  $("srcP").onclick = function () { setSource("protocol"); }; $("srcR").onclick = function () { setSource("registry"); };
+  if ($("srcP")) {
+    $("srcP").classList.toggle("on", d.source === "protocol"); $("srcR").classList.toggle("on", d.source === "registry");
+    $("srcP").onclick = function () { setSource("protocol"); }; $("srcR").onclick = function () { setSource("registry"); };
+  }
   $("modeE").onclick = function () { setMode("extracted"); }; $("modeM").onclick = function () { setMode("merged"); };
   $("outline").onchange = function () { if (this.value !== "") jumpTo(+this.value, +this.value); this.value = ""; };
   $("dq").addEventListener("input", function () { docSearch(this.value); });
@@ -538,6 +669,7 @@ function renderCohorts() {
     html = '<div class="note"><span class="st"><span class="dot d-' + d.status + '"></span><strong>' + STATUS[d.status] + "</strong></span>" +
       (d.error ? "<br>" + esc(d.error) : d.status === "not_cancer" ? "<br>The screen answered that this trial does not evaluate a cancer treatment." :
        d.status === "pending" ? "<br>No decision yet; Refresh picks it up when the run saves it." : "") + "</div>";
+    if (!d.lines.length || (d.lines.length === 1 && !d.lines[0])) html += '<div class="note">No document text is available for this trial.</div>';
   } else {
     var groupOf = {};
     (d.groups || []).forEach(function (g, gi) { g.forEach(function (m) { groupOf[m] = gi; }); });
@@ -640,12 +772,18 @@ document.addEventListener("keydown", function (e) {
     if (next) select(next.id);
   }
 });
-loadIndex();
+getJSON("/api/collections").then(function (list) {
+  state.collections = list;
+  var hash = decodeURIComponent(location.hash.slice(1)).split("/");  // #<tab>/<trial>/<protocol|registry>
+  var start = list.some(function (c) { return c.name === hash[0]; }) ? hash[0] : list[0].name;
+  state.collection = start;
+  openCollection(start, hash[0] === start ? hash[1] : null, hash[0] === start && collection().sources.indexOf(hash[2]) >= 0 ? hash[2] : null);
+});
 </script></body></html>
 """
 
 
-def make_handler(run):
+def make_handler(collections):
     class Handler(BaseHTTPRequestHandler):
         def send(self, body, kind="application/json", status=200):
             data = body.encode("utf-8") if isinstance(body, str) else body
@@ -662,14 +800,19 @@ def make_handler(run):
             try:
                 if url.path == "/":
                     self.send(PAGE, "text/html")
-                elif url.path == "/api/index":
-                    self.send(json.dumps(run.index()))
-                elif url.path == "/api/trial":
-                    nct, source = query.get("id", ""), query.get("source", "protocol")
-                    if nct not in run.seeds or source not in ("protocol", "registry"):
+                elif url.path == "/api/collections":
+                    self.send(json.dumps([c.describe() for c in collections.values()]))
+                elif url.path in ("/api/index", "/api/trial"):
+                    collection = collections.get(query.get("c", ""))
+                    trial, source = query.get("id", ""), query.get("source", "protocol")
+                    if collection is None:
+                        self.send(json.dumps({"error": "unknown collection"}), status=404)
+                    elif url.path == "/api/index":
+                        self.send(json.dumps(collection.index()))
+                    elif trial not in collection.ids() or source not in collection.sources:
                         self.send(json.dumps({"error": "unknown trial or source"}), status=404)
                     else:
-                        self.send(json.dumps(run.detail(nct, source)))
+                        self.send(json.dumps(collection.detail(trial, source)))
                 else:
                     self.send(json.dumps({"error": "not found"}), status=404)
             except Exception as exc:  # shown in the page; the server keeps running
@@ -683,15 +826,26 @@ def make_handler(run):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--run", type=Path, required=True, help="A run_pipeline.py --run-dir (with upstream/requests/)")
+    parser.add_argument("--run", type=Path, help="A run_pipeline.py --run-dir (with upstream/requests/)")
     parser.add_argument("--batch-dir", type=Path, help="Synthetic protocol batch; default from the protocol-cohorts request")
     parser.add_argument("--protocol-cohort-dir", type=Path, help="Default from the protocol-cohorts request")
     parser.add_argument("--registry-work-dir", type=Path, help="Default from the registry-cohorts request")
+    parser.add_argument("--oncore", type=Path, action="append", default=[],
+                        help="A prepared DFCI OnCore protocol run (inputs.csv, trials/); one tab each; confidential")
     parser.add_argument("--port", type=int, default=8770)
     args = parser.parse_args()
-    run = Run(args.run.resolve(), args.batch_dir, args.protocol_cohort_dir, args.registry_work_dir)
-    print(f"{len(run.seeds)} trials; protocols {run.protocol_dir}; registry {run.registry_dir}", flush=True)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(run))
+    collections = {}
+    if args.run:
+        run = PipelineRun(args.run.resolve(), args.batch_dir, args.protocol_cohort_dir, args.registry_work_dir)
+        collections[run.name] = run
+        print(f"{run.label}: {len(run.seeds)} trials; protocols {run.protocol_dir}; registry {run.registry_dir}", flush=True)
+    for i, directory in enumerate(args.oncore):
+        name = "dfci" if i == 0 else f"dfci{i + 1}"
+        collections[name] = ProtocolSet(directory.resolve(), name, f"DFCI protocols ({directory.resolve().name})", confidential=True)
+        print(f"{collections[name].label}: {len(collections[name].rows)} protocols", flush=True)
+    if not collections:
+        parser.error("give --run and/or --oncore")
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(collections))
     print(f"Serving on http://127.0.0.1:{args.port}/ (Ctrl-C to stop)", flush=True)
     try:
         server.serve_forever()
