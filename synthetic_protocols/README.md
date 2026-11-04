@@ -148,10 +148,14 @@ cohort_extraction/
                          same criteria (merged_from: the extracted cohort numbers),
                          boilerplate included, with provenance
   cohorts_deboilerplated.parquet, .csv
-                         the merged cohorts with their boilerplate criteria removed
-                         (consent, compliance, samples/tissue/biopsy, measurable or
-                         evaluable disease, contraception/pregnancy/lactation, vaccines,
-                         staff and catch-all exclusions): the cohorts that seed patients
+                         the merged cohorts with their boilerplate criteria separated:
+                         cohort_eligibility_criteria holds the criteria that are not
+                         boilerplate (they seed patients), cohort_boilerplate_criteria the
+                         boilerplate (consent, compliance, samples/tissue/biopsy, measurable
+                         or evaluable disease, prognosis, performance status, organ
+                         function, brain metastases, toxicities of earlier treatment,
+                         non-cancer conditions, contraception/pregnancy/lactation, vaccines,
+                         staff and catch-all exclusions, each unless central to the trial)
   trials.parquet, .csv   one row per protocol: provenance and extraction status
   run_metadata.json      git commits of both repositories, settings, servers,
                          status counts, failures, seeds without a protocol

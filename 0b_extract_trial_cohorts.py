@@ -9,12 +9,12 @@ synthetic protocols. No training-owned prompt. For training, the same steps as
 protocols (synthetic_protocols/extract_cohorts.py) follow: a trial's cohorts whose
 criteria are essentially the same are combined (merge_equivalent_cohorts,
 trial.cohorts.merge.user.txt; --no-merge-cohorts keeps every extracted cohort), then a
-separate request per cohort removes its boilerplate criteria
+separate request per cohort separates its boilerplate criteria from the rest
 (remove_boilerplate_criteria, trial.cohorts.deboilerplate.user.txt;
 --no-deboilerplate-cohorts skips it). Exports: the merged rows (--output-cohorts,
 boilerplate kept), the rows before merging (--output-unmerged-cohorts) and the merged
 rows with boilerplate removed (--output-deboilerplated-cohorts, which training's
-retrieval uses). Checkpoints retain each trial's decision, cohort names, unmerged,
+retrieval uses; their boilerplate criteria are in cohort_boilerplate_criteria). Checkpoints retain each trial's decision, cohort names, unmerged,
 merged and de-boilerplated rows, reasoning and answers of every step, validation
 attempts per step and endpoint provenance.
 
@@ -205,6 +205,7 @@ def export_results(frame, args, fingerprint):
     from matchminer_ai.trials.cohorts import COHORT_COLUMNS
     # Stream exports; long reasoning traces stay once per trial in checkpoints.
     from matchminer_ai.trials.cohort_merge import MERGED_FROM
+    from matchminer_ai.trials.cohort_boilerplate import BOILERPLATE_COLUMN
     row_fields = ['cohort_count', 'cohort_index', 'trial_representation']
     cohort_fields = list(frame.columns) + COHORT_COLUMNS + [MERGED_FROM, *row_fields]
     audit_fields = list(frame.columns) + ['cancer_treatment_trial', 'multiple_cohorts',
@@ -223,8 +224,10 @@ def export_results(frame, args, fingerprint):
         # Before merging: every extracted cohort (a trial with one cohort, or not merged, is unchanged).
         unmerged_writer = csv.DictWriter(next(extra), fieldnames=list(frame.columns) + COHORT_COLUMNS + row_fields) \
             if args.merge_cohorts else None
-        # The merged rows with boilerplate removed (same columns and order as the merged rows).
-        clean_writer = csv.DictWriter(next(extra), fieldnames=cohort_fields) if args.deboilerplate_cohorts else None
+        # The merged rows with boilerplate separated: the criteria that are not boilerplate, then the
+        # boilerplate criteria in their own column (same rows and order as the merged rows).
+        clean_writer = csv.DictWriter(next(extra), fieldnames=cohort_fields + [BOILERPLATE_COLUMN]) \
+            if args.deboilerplate_cohorts else None
         for writer in (rows_writer, audit_writer, unmerged_writer, clean_writer):
             if writer:
                 writer.writeheader()

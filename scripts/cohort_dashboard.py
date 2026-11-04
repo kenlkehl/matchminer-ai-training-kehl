@@ -8,8 +8,9 @@ Reads a run_pipeline.py run's protocol-cohorts and registry-cohorts stages, live
 checkpoints), so a refresh picks up newly decided trials. The protocol view shows the synthetic
 protocol; the registry view shows the listing exactly as the prompts receive it (title, brief
 summary and eligibility criteria as one document). Cohorts can be shown as extracted, as merged
-for training, or merged with the boilerplate removed (remove_boilerplate_criteria, the cohorts that
-seed synthetic patients; deboilerplate.json, with the removed lines listed). Clicking a criterion line jumps to the document lines that share the most of its
+for training, or merged with the boilerplate separated (remove_boilerplate_criteria;
+deboilerplate.json): each cohort's criteria that are not boilerplate (they seed synthetic patients),
+then its boilerplate criteria. Clicking a criterion line jumps to the document lines that share the most of its
 distinctive words (a navigation aid for spotting paraphrase or unsupported criteria, not a
 correctness check). Each --oncore directory (a prepared real-protocol run: inputs.csv plus
 trials/<protocol_no>/ from extract_protocol_cohorts, merge_equivalent_cohorts and
@@ -182,7 +183,10 @@ class Collection:
         """The merged cohorts with boilerplate removed (deboilerplate.json), or None when that step has not run.
 
         A saved result counts only when it was made from the current merged cohort's name and
-        criteria (its input_sha256); each cohort lists the lines of its criteria that were removed.
+        criteria (its input_sha256). Each cohort has its criteria that are not boilerplate and its
+        boilerplate criteria, both matched to the document, plus the lines of its merged criteria
+        found in neither ("unplaced"); results saved before the step returned its boilerplate
+        (schema v1) list the removed or changed lines instead.
         """
         if record.get("clean") is None or record["status"] != "cohorts" or record.get("groups") is None:
             return None
@@ -195,10 +199,13 @@ class Collection:
             entry = saved.get(number) or {}
             current = entry.get("input_sha256") == hashlib.sha256(json.dumps([name, original]).encode()).hexdigest()
             text = entry.get("eligibility_criteria") if current else None
-            kept = {norm(line) for line in (text or "").split("\n")}
+            boilerplate = entry.get("boilerplate_criteria") if current else None
+            placed = {norm(line) for line in (text or "").split("\n") + (boilerplate or "").split("\n")}
+            left = [line for line in original.split("\n") if line.strip() and norm(line) not in placed] if text else []
             clean.append({"number": number, "name": name, "group": group,
                           "criteria": self.items(text, found) if text else [],
-                          "removed": [line for line in original.split("\n") if line.strip() and norm(line) not in kept] if text else [],
+                          "boilerplate": self.items(boilerplate, found) if boilerplate is not None and text else None,
+                          "removed": left if boilerplate is None else None, "unplaced": left if boilerplate is not None else None,
                           "error": None if text else entry.get("error") or ("made from other criteria" if entry else "not run yet")})
             for a in entry.get("attempts", []):
                 steps.append(self.attempt("boilerplate", name, a))
@@ -510,6 +517,9 @@ mark.cur{outline:2px solid var(--s1)}
 .cov{font-size:11px;color:var(--ink2);margin-bottom:4px}
 details.removed{margin-top:6px;font-size:12px;color:var(--ink2)}details.removed summary{cursor:pointer}
 details.removed li{padding:1px 4px}
+.boiler{margin-top:8px;padding-top:6px;border-top:1px dashed var(--ring)}
+.boiler h4{margin:0 0 2px;font-size:12px;color:var(--ink2)}.boiler ul.crit{color:var(--ink2)}
+.unplaced{margin-top:6px;font-size:12px;border-left:3px solid var(--warning);padding:2px 8px}
 ul.crit{list-style:none;margin:0;padding:0}
 ul.crit li{display:grid;grid-template-columns:62px 1fr;gap:6px;padding:2px 4px;border-radius:4px;cursor:pointer}
 ul.crit li:hover{background:var(--hl)}ul.crit li.active{background:var(--hl);box-shadow:inset 3px 0 var(--s1)}
@@ -704,7 +714,7 @@ function renderDetail() {
     '<span class="title">' + esc(d.title || "") + "</span></div>" +
     '<div class="controls">' + (state.index.sources.length > 1 ? '<span class="seg"><button id="srcP">Protocol</button><button id="srcR">Registry listing</button></span>' : "") +
     '<span class="seg"><button id="modeE">As extracted</button><button id="modeM">Merged</button>' +
-    '<button id="modeC" title="Merged, then the boilerplate step: the cohorts that seed synthetic patients">Boilerplate removed</button></span>' +
+    '<button id="modeC" title="Merged, then the boilerplate step: criteria that are not boilerplate (these seed synthetic patients) and, separately, the boilerplate">Boilerplate separated</button></span>' +
     (t.protocol ? state.index.sources.map(function (s) { return statusBadge(SOURCE[s], t[s]); }).join("") : "") + "</div></div>" +
     '<div class="panes"><div class="pane"><div class="panebar"><strong>' + (d.source === "registry" ? "Registry listing as the prompts see it" :
       state.index.confidential ? "Protocol text (converted from the PDF)" : "Synthetic protocol") +
@@ -773,7 +783,7 @@ function renderCohorts() {
       if (!d.clean) html += '<div class="note">The boilerplate step has not run for this trial yet (it follows the merge); showing cohorts ' +
         (d.groups ? "as merged" : "as extracted") + ".</div>";
       else html += '<div class="note">' + d.clean.length + " merged cohort" + (d.clean.length === 1 ? "" : "s") +
-        " with the boilerplate removed by a separate request per cohort; these seed synthetic patients. Each card lists the lines of its merged criteria that were removed or changed.</div>";
+        " after the boilerplate step (a separate request per cohort): each card lists the criteria that are not boilerplate (these seed synthetic patients), then the boilerplate criteria, and flags any merged-criteria line found in neither.</div>";
     }
     if (state.mode === "merged") {
       if (!d.groups) html += '<div class="note">The merge step has not run for this trial yet (protocols are merged after all are extracted); showing cohorts as extracted.</div>';
@@ -782,7 +792,7 @@ function renderCohorts() {
     }
     cards = (state.mode === "clean" && d.clean) ? d.clean.map(function (c, i) {
       return {title: c.name, ci: i, kind: "clean", items: c.criteria, num: i + 1, removed: c.removed, error: c.error,
-              chip: c.group.length > 1 ? groupChip(i, c.group) : ""};
+              boilerplate: c.boilerplate, unplaced: c.unplaced, chip: c.group.length > 1 ? groupChip(i, c.group) : ""};
     }) : (state.mode !== "extracted" && d.groups) ? d.groups.map(function (g, gi) {
       var first = d.cohorts[g[0]];
       return {title: g.map(function (m) { return d.cohorts[m].name; }).join("; "), ci: g[0], items: first.criteria, num: gi + 1,
@@ -795,6 +805,11 @@ function renderCohorts() {
       html += '<div class="card" id="card' + i + '"><h3><span class="num">' + c.num + "</span><span>" + esc(c.title) + "</span>" + c.chip + "</h3>" +
         (c.error ? '<div class="note">Boilerplate step: ' + esc(c.error) + "</div>" :
          '<div class="cov">' + coverage(c.items) + "</div>" + critList(c.items, c.ci, c.kind)) +
+        (c.boilerplate && !c.error ? '<div class="boiler"><h4>Boilerplate criteria</h4>' + (c.boilerplate.length ?
+           '<div class="cov">' + coverage(c.boilerplate) + "</div>" + critList(c.boilerplate, c.ci, "boiler") : '<div class="cov">None.</div>') + "</div>" : "") +
+        (c.unplaced && c.unplaced.length ? '<div class="unplaced"><strong>' + c.unplaced.length + " line" + (c.unplaced.length === 1 ? "" : "s") +
+           " of the merged criteria in neither list</strong> (dropped or reworded by the boilerplate step):<ul class=\"crit\">" +
+           c.unplaced.map(function (line) { return "<li>" + esc(line) + "</li>"; }).join("") + "</ul></div>" : "") +
         (!c.removed || c.error ? "" : !c.removed.length ? '<div class="cov">No line removed or changed by the boilerplate step.</div>' :
          '<details class="removed"><summary>Removed or changed by the boilerplate step (' + c.removed.length + " line" + (c.removed.length === 1 ? "" : "s") +
           ")</summary><ul class=\"crit\">" + c.removed.map(function (line) { return "<li>" + esc(line) + "</li>"; }).join("") + "</ul></details>") + "</div>";
@@ -849,7 +864,8 @@ function jumpTo(line, end, marks) {
   if (target) target.scrollIntoView({block: "center"});
 }
 function showMatch(ci, k, li) {
-  var kind = li.dataset.kind || "", it = (kind === "clean" ? state.detail.clean : state.detail.cohorts)[ci].criteria[k];
+  var d = state.detail, kind = li.dataset.kind || "";
+  var it = (kind === "clean" ? d.clean[ci].criteria : kind === "boiler" ? d.clean[ci].boilerplate : d.cohorts[ci].criteria)[k];
   var same = state.activeCrit && state.activeCrit[0] === kind && state.activeCrit[1] === ci && state.activeCrit[2] === k;
   state.matchAt = same ? (state.matchAt + 1) % Math.max(1, it.matches.length) : 0;
   state.activeCrit = [kind, ci, k];

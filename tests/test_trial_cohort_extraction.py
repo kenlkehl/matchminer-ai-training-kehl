@@ -38,9 +38,10 @@ def step_answer(prompt, decision, fence, groups=None):
         return decision
     if 'Group the cohorts whose eligibility criteria are essentially the same' in prompt:
         answer = dict(groups=groups or [[i + 1] for i in range(len(decision['cohorts']))])
-    elif 'Remove the boilerplate criteria from this cohort' in prompt:
-        criteria = next(c['eligibility_criteria'] for c in decision['cohorts'] if quoted(c['eligibility_criteria'], prompt))
-        answer = dict(eligibility_criteria='\n'.join(line for line in criteria.split('\n') if 'consent' not in line.lower()))
+    elif 'Separate this cohort' in prompt:
+        lines = next(c['eligibility_criteria'] for c in decision['cohorts'] if quoted(c['eligibility_criteria'], prompt)).split('\n')
+        answer = dict(eligibility_criteria='\n'.join(line for line in lines if 'consent' not in line.lower()),
+                      boilerplate_criteria='\n'.join(line for line in lines if 'consent' in line.lower()))
     elif 'Decide whether this trial evaluates a cancer treatment' in prompt:
         answer = dict(cancer_treatment_trial=decision['cancer_treatment_trial'])
     elif 'List the cohorts it defines' in prompt:
@@ -58,7 +59,7 @@ def backend(monkeypatch):
 
     Merge and boilerplate prompts hold only cohort criteria, so their trial is found by a cohort's
     criteria; ``outputs['merge:<title>']`` gives its groups (default: every cohort kept). The boilerplate
-    step drops the criteria lines that mention consent.
+    step separates the criteria lines that mention consent.
     """
     monkeypatch.syspath_prepend(str(extract.ROOT.parent / 'matchminer-ai-inference-kehl/src'))
     import matchminer_ai.trials.cohorts as api
@@ -209,9 +210,11 @@ def test_cohorts_are_combined_then_cleared_of_boilerplate_for_training(tmp_path,
     assert rows.merged_from.tolist() == ['[0, 1]', '[2]']
     validate_cohort_rows(rows)
     # The merged rows again with boilerplate removed: what training's retrieval reads.
-    clean = pd.read_csv(tmp_path / 'cohorts_deboilerplated.csv')
-    assert clean.drop(columns='cohort_eligibility_criteria').equals(rows.drop(columns='cohort_eligibility_criteria'))
+    clean = pd.read_csv(tmp_path / 'cohorts_deboilerplated.csv', keep_default_na=False)
+    separated = ['cohort_eligibility_criteria', 'cohort_boilerplate_criteria']
+    assert clean.drop(columns=separated).equals(pd.read_csv(args.output_cohorts, keep_default_na=False).drop(columns=separated[0]))
     assert clean.cohort_eligibility_criteria.tolist() == ['Adults with treated lung cancer.', 'Children with untreated sarcoma.']
+    assert clean.cohort_boilerplate_criteria.tolist() == ['Signed informed consent.', '']
     validate_cohort_rows(clean)
     with gzip.open(tmp_path / 'checkpoints/NCT00000001.json.gz', 'rt') as stream:
         record = json.load(stream)
