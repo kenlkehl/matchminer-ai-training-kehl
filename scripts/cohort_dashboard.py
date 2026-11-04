@@ -79,7 +79,7 @@ class Collection:
         return {}
 
     @staticmethod
-    def normalized(decision, names, identical, attempts, groups, error, document=None):
+    def normalized(decision, names, identical, attempts, groups, error, document=None, merge_attempts=None):
         if decision is None:
             return {"status": "failed", "error": error or "no validated decision", "attempts": attempts}
         if decision["cancer_treatment_trial"] != "yes":
@@ -88,7 +88,8 @@ class Collection:
         if groups is None and len(cohorts) == 1:
             groups = [[0]]
         return {"status": "cohorts", "cohorts": cohorts, "names": names or [c["cohort_name"] for c in cohorts],
-                "identical": identical or [], "groups": groups, "attempts": attempts, "document": document}
+                "identical": identical or [], "groups": groups, "attempts": attempts, "document": document,
+                "merge_attempts": merge_attempts or []}
 
     @staticmethod
     def extraction_record(directory, document=None):
@@ -97,10 +98,11 @@ class Collection:
         if not extraction.exists():
             return None
         rec = json.loads(extraction.read_text())
-        groups = json.loads(merge.read_text())["groups"] if merge.exists() else None
+        merging = json.loads(merge.read_text()) if merge.exists() else {}
         return Collection.normalized(rec["decision"], rec.get("cohort_names"), rec.get("merged_cohorts"),
-                                     rec.get("attempts") or {}, groups, None,
-                                     document=document or rec.get("source_document", {}).get("text_path"))
+                                     rec.get("attempts") or {}, merging.get("groups"), None,
+                                     document=document or rec.get("source_document", {}).get("text_path"),
+                                     merge_attempts=merging.get("attempts"))
 
     def summary(self, trial, context):
         key = (tuple(mtime(f) for f in self.files(trial)), self.context_key(trial, context))
@@ -151,6 +153,9 @@ class Collection:
         for key, log in sorted((attempts.get("criteria") or {}).items(), key=lambda kv: int(kv[0])):
             for a in log:
                 steps.append(self.attempt("criteria", names[int(key)] if int(key) < len(names) else key, a))
+        for a in record.get("merge_attempts") or []:
+            if "answer" in a:  # merges saved before 2026-11-04 kept only the grouping
+                steps.append(self.attempt("merge", None, a))
         cohorts = []
         for number, cohort in enumerate(record.get("cohorts") or []):
             items = []
@@ -231,10 +236,12 @@ class PipelineRun(Collection):
         with gzip.open(path, "rt") as stream:
             rec = json.load(stream)
         meta = rec.get("metadata") or {}
-        groups = ((rec.get("merge") or {}).get("trial_groups") or {}).get(nct)
+        merging = rec.get("merge") or {}
         return self.normalized(rec.get("result"), (meta.get("trial_cohort_names") or {}).get(nct),
                                (meta.get("trial_merged_cohorts") or {}).get(nct),
-                               (meta.get("trial_attempts") or {}).get(nct) or {}, groups, rec.get("error"))
+                               (meta.get("trial_attempts") or {}).get(nct) or {},
+                               (merging.get("trial_groups") or {}).get(nct), rec.get("error"),
+                               merge_attempts=(merging.get("trial_attempts") or {}).get(nct))
 
     def document(self, nct, source, record):
         if source == "registry":
@@ -459,6 +466,9 @@ mark.cur{outline:2px solid var(--s1)}
 .card{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:8px 10px}
 .card h3{margin:0 0 4px;font-size:13px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
 .card h3 .num{color:var(--muted);font-variant-numeric:tabular-nums}
+.card.picked{animation:picked 1.5s ease-out}
+@keyframes picked{from{box-shadow:0 0 0 3px var(--s1)}to{box-shadow:0 0 0 3px transparent}}
+#cjump{max-width:260px}
 .chip{font-size:11px;font-weight:600;border-radius:10px;padding:0 8px;color:#fff;white-space:nowrap}
 .chip.g4{color:#0b0b0b}.chip.gx{background:var(--muted)}
 .cov{font-size:11px;color:var(--ink2);margin-bottom:4px}
@@ -662,13 +672,15 @@ function renderDetail() {
     '</strong><span class="help">' + fmt(d.lines.length) + " lines · " + fmt(d.characters) + ' characters</span>' +
     '<input type="search" class="grow" id="dq" placeholder="Find in document (regex)"><button id="dprev">↑</button><button id="dnext">↓</button>' +
     '<span class="help" id="dcount"></span><select id="outline">' + outline + "</select></div><div id=\"doc\"></div></div>" +
-    '<div class="pane"><div class="panebar"><strong>Cohorts</strong><span class="help" id="chelp"></span></div><div id="cohorts"></div></div></div>';
+    '<div class="pane"><div class="panebar"><strong>Cohorts</strong><select id="cjump" hidden title="Jump to a cohort\'s criteria"></select>' +
+    '<span class="help" id="chelp"></span></div><div id="cohorts"></div></div></div>';
   if ($("srcP")) {
     $("srcP").classList.toggle("on", d.source === "protocol"); $("srcR").classList.toggle("on", d.source === "registry");
     $("srcP").onclick = function () { setSource("protocol"); }; $("srcR").onclick = function () { setSource("registry"); };
   }
   $("modeE").onclick = function () { setMode("extracted"); }; $("modeM").onclick = function () { setMode("merged"); };
   $("outline").onchange = function () { if (this.value !== "") jumpTo(+this.value, +this.value); this.value = ""; };
+  $("cjump").onchange = function () { if (this.value !== "") showCard(+this.value); this.value = ""; };
   var typing = null;
   $("dq").addEventListener("input", function () { var q = this.value; clearTimeout(typing); typing = setTimeout(function () { docSearch(q); }, 250); });
   $("dq").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); stepSearch(e.shiftKey ? -1 : 1); } });
@@ -704,7 +716,7 @@ function renderCohorts() {
   var d = state.detail, box = $("cohorts");
   if (!box) return;
   $("modeE").classList.toggle("on", state.mode === "extracted"); $("modeM").classList.toggle("on", state.mode === "merged");
-  var html = "";
+  var html = "", cards = [];
   if (d.status !== "cohorts") {
     html = '<div class="note"><span class="st"><span class="dot d-' + d.status + '"></span><strong>' + STATUS[d.status] + "</strong></span>" +
       (d.error ? "<br>" + esc(d.error) : d.status === "not_cancer" ? "<br>The screen answered that this trial does not evaluate a cancer treatment." :
@@ -721,7 +733,7 @@ function renderCohorts() {
       else html += '<div class="note">' + d.groups.length + " cohort" + (d.groups.length === 1 ? "" : "s") + " for training from " + d.cohorts.length +
         " extracted. A merged cohort keeps its first member's criteria; its name joins the members' names.</div>";
     }
-    var cards = (state.mode === "merged" && d.groups) ? d.groups.map(function (g, gi) {
+    cards = (state.mode === "merged" && d.groups) ? d.groups.map(function (g, gi) {
       var first = d.cohorts[g[0]];
       return {title: g.map(function (m) { return d.cohorts[m].name; }).join("; "), ci: g[0], items: first.criteria, num: gi + 1,
               chip: g.length > 1 ? groupChip(gi, g) : ""};
@@ -729,18 +741,27 @@ function renderCohorts() {
       var gi = groupOf[ci], g = gi == null ? null : d.groups[gi];
       return {title: c.name, ci: ci, items: c.criteria, num: ci + 1, chip: g && g.length > 1 ? groupChip(gi, g) : ""};
     });
-    cards.forEach(function (c) {
-      html += '<div class="card"><h3><span class="num">' + c.num + "</span><span>" + esc(c.title) + "</span>" + c.chip +
+    cards.forEach(function (c, i) {
+      html += '<div class="card" id="card' + i + '"><h3><span class="num">' + c.num + "</span><span>" + esc(c.title) + "</span>" + c.chip +
         '</h3><div class="cov">' + coverage(c.items) + "</div>" + critList(c.items, c.ci) + "</div>";
     });
   }
   html += stepsHTML(d);
   box.innerHTML = html;
+  $("cjump").hidden = cards.length < 2;
+  $("cjump").innerHTML = '<option value="">Jump to cohort (' + cards.length + ")…</option>" + cards.map(function (c, i) {
+    return '<option value="' + i + '">' + c.num + " · " + esc(c.title.length > 120 ? c.title.slice(0, 119) + "…" : c.title) + "</option>"; }).join("");
   if (!box.dataset.lazy) { box.dataset.lazy = "1"; box.addEventListener("toggle", function (e) { fillStep(e.target); }, true); }
   $("chelp").textContent = d.status === "cohorts" ? "click a criterion to find it in the document" : "";
   Array.prototype.forEach.call(box.querySelectorAll("ul.crit li[data-k]"), function (li) {
     li.onclick = function () { showMatch(+li.dataset.c, +li.dataset.k, li); };
   });
+}
+function showCard(i) {
+  var box = $("cohorts"), card = $("card" + i);
+  if (!card) return;
+  box.scrollTop += card.getBoundingClientRect().top - box.getBoundingClientRect().top - 10;
+  card.classList.remove("picked"); void card.offsetWidth; card.classList.add("picked");  // restart the highlight
 }
 function stepsHTML(d) {
   if (!d.steps.length) return "";
