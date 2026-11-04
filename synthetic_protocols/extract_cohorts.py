@@ -5,8 +5,9 @@ same prompts as registry listings (0b_extract_trial_cohorts.py): a cancer-treatm
 screen, the cohort names, and one request per cohort for its criteria, copied verbatim
 with boilerplate included. For training, each trial's cohorts whose criteria are
 essentially the same are then combined (merge_equivalent_cohorts; --no-merge-cohorts skips
-it), and a separate request per merged cohort removes its boilerplate criteria
-(remove_boilerplate_criteria; --no-deboilerplate skips it). Exports, with the same
+it), and each merged cohort's boilerplate criteria are removed: each criteria line is
+classified in its own request and code sorts the unchanged lines (remove_boilerplate_criteria;
+--no-deboilerplate skips it). Exports, with the same
 provenance: cohorts_unmerged (as extracted), cohorts (merged, boilerplate kept) and
 cohorts_deboilerplated (merged, boilerplate removed: the cohorts that seed synthetic
 patients, read by patient_cohorts.py), each as .parquet and .csv.
@@ -210,7 +211,8 @@ def main(args):
         "merge": None if merging is None else {key: merging[key] for key in (
             "schema_version", "prompt_sha256", "cohorts_in", "cohorts_out", "merge_errors", "skipped_completed")},
         "deboilerplate": None if cleaning is None else {key: cleaning[key] for key in (
-            "schema_version", "prompt_sha256", "cohorts", "deboilerplate_errors", "skipped_completed")},
+            "schema_version", "prompt_sha256", "cohorts", "items", "items_reused", "deboilerplate_errors",
+            "unclassified_items", "skipped_completed")},
     }, indent=2, default=str))
     print(f"finished: {len(cohorts)} cohort rows from {len(provenance)} protocols; "
           f"{len(metadata['trial_errors'])} failed, {len(metadata['trial_rejections'])} not cancer treatment, "

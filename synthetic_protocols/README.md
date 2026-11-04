@@ -139,8 +139,10 @@ cohort_extraction/
     reasoning.json       each step's reasoning
     merge.json           a multi-cohort trial's merge grouping, with the answer and
                          reasoning (reused on rerun)
-    deboilerplate.json   each merged cohort's criteria with the boilerplate removed,
-                         with the answers and reasoning (reused per unchanged cohort)
+    deboilerplate.json   each merged cohort's criteria lines, each classified as
+                         boilerplate or not in its own request (answer and reasoning
+                         kept; reused per unchanged cohort), and the two lists code
+                         sorted them into
   cohorts_unmerged.parquet, .csv
                          one row per extracted cohort (criteria verbatim, boilerplate
                          included), with provenance
@@ -154,7 +156,8 @@ cohort_extraction/
                          boilerplate (consent, compliance, samples/tissue/biopsy, measurable
                          or evaluable disease, prognosis, performance status, organ
                          function, brain metastases, toxicities of earlier treatment,
-                         non-cancer conditions, contraception/pregnancy/lactation, vaccines,
+                         non-cancer conditions, unrelated other cancers, participation in
+                         another trial at the same time, contraception/pregnancy/lactation, vaccines,
                          staff and catch-all exclusions, each unless central to the trial)
   trials.parquet, .csv   one row per protocol: provenance and extraction status
   run_metadata.json      git commits of both repositories, settings, servers,
@@ -223,8 +226,10 @@ cancer-treatment screen, the cohort names, and one request per cohort for its
 complete criteria, with the listing's title, brief summary and eligibility
 criteria as one document. Since 2026-11-04 (user instruction) the criteria are
 copied verbatim with boilerplate included, and training gives registry listings the
-same two follow-on steps as protocols: the merge, then a separate request per merged
-cohort that removes its boilerplate criteria. Retrieval and labeling read both
+same two follow-on steps as protocols: the merge, then the boilerplate step, which
+classifies each line of a merged cohort's criteria in its own request and sorts the
+unchanged lines in code (since 2026-11-04, user instruction; the model never copies
+the criteria). Retrieval and labeling read both
 versions with boilerplate removed (`--output-deboilerplated-cohorts` beside the
 generation table, which comes from `cohorts_deboilerplated.parquet`). Earlier runs used
 the single-request registry prompt (`trial.cohorts.user.txt`, schema

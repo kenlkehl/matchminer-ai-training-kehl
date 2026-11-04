@@ -38,10 +38,6 @@ def step_answer(prompt, decision, fence, groups=None):
         return decision
     if 'Group the cohorts whose eligibility criteria are essentially the same' in prompt:
         answer = dict(groups=groups or [[i + 1] for i in range(len(decision['cohorts']))])
-    elif 'Separate this cohort' in prompt:
-        lines = next(c['eligibility_criteria'] for c in decision['cohorts'] if quoted(c['eligibility_criteria'], prompt)).split('\n')
-        answer = dict(eligibility_criteria='\n'.join(line for line in lines if 'consent' not in line.lower()),
-                      boilerplate_criteria='\n'.join(line for line in lines if 'consent' in line.lower()))
     elif 'Decide whether this trial evaluates a cancer treatment' in prompt:
         answer = dict(cancer_treatment_trial=decision['cancer_treatment_trial'])
     elif 'List the cohorts it defines' in prompt:
@@ -57,9 +53,9 @@ def step_answer(prompt, decision, fence, groups=None):
 def backend(monkeypatch):
     """Answers each prompt of a call from the decision keyed by a title it contains (``fence``: fenced JSON).
 
-    Merge and boilerplate prompts hold only cohort criteria, so their trial is found by a cohort's
-    criteria; ``outputs['merge:<title>']`` gives its groups (default: every cohort kept). The boilerplate
-    step separates the criteria lines that mention consent.
+    Merge prompts hold only cohort criteria, so their trial is found by a cohort's criteria;
+    ``outputs['merge:<title>']`` gives its groups (default: every cohort kept). The boilerplate step
+    classifies one criteria line per request: a line that mentions consent is boilerplate.
     """
     monkeypatch.syspath_prepend(str(extract.ROOT.parent / 'matchminer-ai-inference-kehl/src'))
     import matchminer_ai.trials.cohorts as api
@@ -74,8 +70,11 @@ def backend(monkeypatch):
             found = next((title for title in titles if title in prompt), None)
             return found or next(title for title in titles if isinstance(outputs[title], dict) and any(
                 quoted(c['eligibility_criteria'], prompt) for c in outputs[title].get('cohorts', [])))
-        answers = [step_answer(str(prompt), outputs[trial(str(prompt))], outputs.get('fence', False),
-                               outputs.get(f'merge:{trial(str(prompt))}')) for prompt in kwargs['prompt_list']]
+        def answer(prompt):
+            if 'ITEM TO CLASSIFY' in prompt:
+                return json.dumps(dict(boilerplate='consent' in prompt.rsplit('ITEM TO CLASSIFY', 1)[1].lower()))
+            return step_answer(prompt, outputs[trial(prompt)], outputs.get('fence', False), outputs.get(f'merge:{trial(prompt)}'))
+        answers = [answer(str(prompt)) for prompt in kwargs['prompt_list']]
         return SimpleNamespace(final_outputs=answers, reasoning_outputs=['Reasoning trace'] * len(answers),
             finish_reasons=['stop'] * len(answers), model_metadata={'responses': [
                 dict(row_idx=i, endpoint='http://fake/v1', model_root='test-checkpoint') for i in range(len(answers))]})
@@ -220,7 +219,8 @@ def test_cohorts_are_combined_then_cleared_of_boilerplate_for_training(tmp_path,
         record = json.load(stream)
     assert len(record['unmerged_cohort_rows']) == 3 and record['result']['cohorts'] == decision['cohorts']
     saved = record['deboilerplate']['cohorts']
-    assert [c['cohort_number'] for c in saved] == [0, 1] and saved[0]['attempts'][0]['reasoning'] == 'Reasoning trace'
+    assert [c['cohort_number'] for c in saved] == [0, 1] and saved[0]['items'][1]['boilerplate'] is True
+    assert saved[0]['items'][1]['attempts'][0]['reasoning'] == 'Reasoning trace'
     before = pd.read_csv(tmp_path / 'cohorts_unmerged.csv')
     assert before.cohort_name.tolist() == ['Arm A', 'Arm B', 'Arm C'] and before.cohort_count.tolist() == [3, 3, 3]
     assert 'merged_from' not in before

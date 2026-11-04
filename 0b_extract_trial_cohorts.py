@@ -8,9 +8,10 @@ criteria, copied verbatim with boilerplate included, with the same prompts as
 synthetic protocols. No training-owned prompt. For training, the same steps as
 protocols (synthetic_protocols/extract_cohorts.py) follow: a trial's cohorts whose
 criteria are essentially the same are combined (merge_equivalent_cohorts,
-trial.cohorts.merge.user.txt; --no-merge-cohorts keeps every extracted cohort), then a
-separate request per cohort separates its boilerplate criteria from the rest
-(remove_boilerplate_criteria, trial.cohorts.deboilerplate.user.txt;
+trial.cohorts.merge.user.txt; --no-merge-cohorts keeps every extracted cohort), then each
+cohort's boilerplate criteria are separated from the rest: each criteria line is classified
+in its own request and code sorts the unchanged lines (remove_boilerplate_criteria,
+trial.cohorts.deboilerplate.user.txt;
 --no-deboilerplate-cohorts skips it). Exports: the merged rows (--output-cohorts,
 boilerplate kept), the rows before merging (--output-unmerged-cohorts) and the merged
 rows with boilerplate removed (--output-deboilerplated-cohorts, which training's
@@ -167,7 +168,8 @@ def extract_one(row, config, merge=True, deboilerplate=True):
                               deboilerplate={'schema_version': cleaning['schema_version'],
                                              'prompt_sha256': cleaning['prompt_sha256'],
                                              'cohorts': cleaning['trial_cohorts'][trial],
-                                             'errors': cleaning['deboilerplate_errors']})
+                                             'errors': cleaning['deboilerplate_errors'],
+                                             'unclassified_items': cleaning['unclassified_items']})
             for key in ('cohort_rows', 'deboilerplated_cohort_rows') if deboilerplate else ('cohort_rows',):
                 rows = pd.DataFrame(record[key])
                 rows['cohort_count'] = len(rows)
