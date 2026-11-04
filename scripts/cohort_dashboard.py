@@ -109,6 +109,27 @@ class Collection:
                                      merge_attempts=merging.get("attempts"),
                                      clean=json.loads(clean.read_text())["cohorts"] if clean.exists() else None)
 
+    @staticmethod
+    def registry_record(path, nct):
+        """A registry listing's decision from its 0b_extract_trial_cohorts.py checkpoint (with merge and boilerplate)."""
+        if not path.exists():
+            return {"status": "pending"}
+        with gzip.open(path, "rt") as stream:
+            rec = json.load(stream)
+        meta = rec.get("metadata") or {}
+        merging = rec.get("merge") or {}
+        return Collection.normalized(rec.get("result"), (meta.get("trial_cohort_names") or {}).get(nct),
+                                     (meta.get("trial_merged_cohorts") or {}).get(nct),
+                                     (meta.get("trial_attempts") or {}).get(nct) or {},
+                                     (merging.get("trial_groups") or {}).get(nct), rec.get("error"),
+                                     merge_attempts=(merging.get("trial_attempts") or {}).get(nct),
+                                     clean=(rec.get("deboilerplate") or {}).get("cohorts"))
+
+    @staticmethod
+    def registry_outline(lines):
+        return [{"line": i, "text": line.strip(), "level": 1} for i, line in enumerate(lines) if re.match(
+            r"^(Title:|Brief summary:|Eligibility criteria:|\s*(Inclusion|Exclusion) Criteria:?\s*$)", line, re.I)]
+
     def summary(self, trial, context):
         key = (tuple(mtime(f) for f in self.files(trial)), self.context_key(trial, context))
         cached = self.cache.get(trial)
@@ -272,19 +293,7 @@ class PipelineRun(Collection):
                 error = failed.get(nct)
                 return {"status": "failed" if error else "pending", "error": error}
             return record
-        path = self.files(nct)[3]
-        if not path.exists():
-            return {"status": "pending"}
-        with gzip.open(path, "rt") as stream:
-            rec = json.load(stream)
-        meta = rec.get("metadata") or {}
-        merging = rec.get("merge") or {}
-        return self.normalized(rec.get("result"), (meta.get("trial_cohort_names") or {}).get(nct),
-                               (meta.get("trial_merged_cohorts") or {}).get(nct),
-                               (meta.get("trial_attempts") or {}).get(nct) or {},
-                               (merging.get("trial_groups") or {}).get(nct), rec.get("error"),
-                               merge_attempts=(merging.get("trial_attempts") or {}).get(nct),
-                               clean=(rec.get("deboilerplate") or {}).get("cohorts"))
+        return self.registry_record(self.files(nct)[3], nct)
 
     def document(self, nct, source, record):
         if source == "registry":
@@ -293,14 +302,15 @@ class PipelineRun(Collection):
         return path.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
 
     def outline(self, lines, source):
-        if source == "protocol":
-            return super().outline(lines, source)
-        return [{"line": i, "text": line.strip(), "level": 1} for i, line in enumerate(lines) if re.match(
-            r"^(Title:|Brief summary:|Eligibility criteria:|\s*(Inclusion|Exclusion) Criteria:?\s*$)", line, re.I)]
+        return super().outline(lines, source) if source == "protocol" else self.registry_outline(lines)
 
 
 class ProtocolSet(Collection):
-    """Protocol documents prepared into inputs.csv and extracted into trials/<id>/ (e.g. the DFCI OnCore runs)."""
+    """Protocol documents prepared into inputs.csv and extracted into trials/<id>/ (e.g. the DFCI OnCore runs).
+
+    A registry_cohorts/ folder beside them (trials.jsonl of the trials' ClinicalTrials.gov listings and a
+    0b_extract_trial_cohorts.py --trials-jsonl work dir, work/) adds the Registry listing version, matched by nct_id.
+    """
 
     PAGE = re.compile(r"^── page \d+ ──$")
     SECTION = re.compile(r"^\s{0,4}(\d{1,2}(\.\d{1,2}){0,3}\.?\s+[A-Z][^.]{2,100}|APPENDIX\s+\S.{0,90}|[A-Z][A-Z0-9 ,/&()'\-]{6,90})\s*$")
@@ -310,6 +320,14 @@ class ProtocolSet(Collection):
         self.root, self.confidential = directory, confidential
         with (directory / "inputs.csv").open(newline="") as stream:
             self.rows = {row["trial_id"]: row for row in csv.DictReader(stream)}
+        registry = directory / "registry_cohorts"
+        self.listings = {}
+        if (registry / "trials.jsonl").exists():
+            for line in (registry / "trials.jsonl").read_text().splitlines():
+                if line.strip():
+                    listing = json.loads(line)
+                    self.listings[listing["nct_id"]] = listing
+            self.registry_dir, self.sources = registry / "work", ("protocol", "registry")
 
     def ids(self):
         return list(self.rows)
@@ -321,7 +339,9 @@ class ProtocolSet(Collection):
 
     def files(self, trial):
         d = self.root / "trials" / trial
-        return d / "extraction.json", d / "merge.json", d / "deboilerplate.json", self.root / "run_metadata.json"
+        files = (d / "extraction.json", d / "merge.json", d / "deboilerplate.json", self.root / "run_metadata.json")
+        nct = self.rows[trial].get("nct_id")
+        return files + ((self.registry_dir / "checkpoints" / f"{nct}.json.gz",) if self.listings and nct else ())
 
     def context(self):
         path = self.root / "run_metadata.json"
@@ -332,6 +352,10 @@ class ProtocolSet(Collection):
 
     def record(self, trial, source, errors):
         row = self.rows[trial]
+        if source == "registry":
+            if row.get("nct_id") not in self.listings:
+                return {"status": "excluded", "error": "no ClinicalTrials.gov listing for this protocol"}
+            return self.registry_record(self.files(trial)[4], row["nct_id"])
         if row.get("excluded_reason"):
             return {"status": "excluded", "error": row["excluded_reason"]}
         record = self.extraction_record(self.root / "trials" / trial, document=row.get("protocol_path"))
@@ -341,6 +365,9 @@ class ProtocolSet(Collection):
         return record
 
     def document(self, trial, source, record):
+        if source == "registry":
+            listing = self.listings.get(self.rows[trial].get("nct_id"))
+            return registry_text(listing) if listing else ""
         path = record.get("document") or self.rows[trial].get("protocol_path")
         if not path:
             return ""
@@ -349,6 +376,8 @@ class ProtocolSet(Collection):
         return "\n".join(f"── page {i} ──\n{page.strip(chr(10))}" for i, page in enumerate(text.split("\f"), 1))
 
     def outline(self, lines, source):
+        if source == "registry":
+            return self.registry_outline(lines)
         return [{"line": i, "text": line.strip()[:100], "level": 1 if self.PAGE.match(line) is None else 2}
                 for i, line in enumerate(lines)
                 if len(line) <= 110 and self.SECTION.match(line) and not re.search(r"\.{4,}|\s\d+\s*$", line)]
