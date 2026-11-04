@@ -7,11 +7,13 @@ Reads a run_pipeline.py run's protocol-cohorts and registry-cohorts stages, live
 (per-trial extraction.json/merge.json under the protocol output dir, and the registry
 checkpoints), so a refresh picks up newly decided trials. The protocol view shows the synthetic
 protocol; the registry view shows the listing exactly as the prompts receive it (title, brief
-summary and eligibility criteria as one document). Cohorts can be shown as extracted or as merged
-for training. Clicking a criterion line jumps to the document lines that share the most of its
+summary and eligibility criteria as one document). Cohorts can be shown as extracted, as merged
+for training, or merged with the boilerplate removed (remove_boilerplate_criteria, the cohorts that
+seed synthetic patients; deboilerplate.json, with the removed lines listed). Clicking a criterion line jumps to the document lines that share the most of its
 distinctive words (a navigation aid for spotting paraphrase or unsupported criteria, not a
 correctness check). Each --oncore directory (a prepared real-protocol run: inputs.csv plus
-trials/<protocol_no>/ from extract_protocol_cohorts and merge_equivalent_cohorts) adds a tab
+trials/<protocol_no>/ from extract_protocol_cohorts, merge_equivalent_cohorts and
+remove_boilerplate_criteria) adds a tab
 marked confidential. Serves on 127.0.0.1 only and uses no network resources; from another
 machine, forward the port (ssh -L 8770:localhost:8770 camus).
 """
@@ -20,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 import csv
 from functools import lru_cache
 import gzip
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -79,7 +82,7 @@ class Collection:
         return {}
 
     @staticmethod
-    def normalized(decision, names, identical, attempts, groups, error, document=None, merge_attempts=None):
+    def normalized(decision, names, identical, attempts, groups, error, document=None, merge_attempts=None, clean=None):
         if decision is None:
             return {"status": "failed", "error": error or "no validated decision", "attempts": attempts}
         if decision["cancer_treatment_trial"] != "yes":
@@ -89,12 +92,12 @@ class Collection:
             groups = [[0]]
         return {"status": "cohorts", "cohorts": cohorts, "names": names or [c["cohort_name"] for c in cohorts],
                 "identical": identical or [], "groups": groups, "attempts": attempts, "document": document,
-                "merge_attempts": merge_attempts or []}
+                "merge_attempts": merge_attempts or [], "clean": clean}
 
     @staticmethod
     def extraction_record(directory, document=None):
         """A protocol decision saved by extract_protocol_cohorts (+ merge_equivalent_cohorts), or None."""
-        extraction, merge = directory / "extraction.json", directory / "merge.json"
+        extraction, merge, clean = (directory / name for name in ("extraction.json", "merge.json", "deboilerplate.json"))
         if not extraction.exists():
             return None
         rec = json.loads(extraction.read_text())
@@ -102,7 +105,8 @@ class Collection:
         return Collection.normalized(rec["decision"], rec.get("cohort_names"), rec.get("merged_cohorts"),
                                      rec.get("attempts") or {}, merging.get("groups"), None,
                                      document=document or rec.get("source_document", {}).get("text_path"),
-                                     merge_attempts=merging.get("attempts"))
+                                     merge_attempts=merging.get("attempts"),
+                                     clean=json.loads(clean.read_text())["cohorts"] if clean.exists() else None)
 
     def summary(self, trial, context):
         key = (tuple(mtime(f) for f in self.files(trial)), self.context_key(trial, context))
@@ -156,19 +160,49 @@ class Collection:
         for a in record.get("merge_attempts") or []:
             if "answer" in a:  # merges saved before 2026-11-04 kept only the grouping
                 steps.append(self.attempt("merge", None, a))
-        cohorts = []
-        for number, cohort in enumerate(record.get("cohorts") or []):
-            items = []
-            for line in cohort["eligibility_criteria"].split("\n"):
-                if not line.strip():
-                    continue
-                heading = bool(re.match(r"^\s*(inclusion|exclusion)( criteria)?\s*:?\s*$", line, re.I)) or line.rstrip().endswith(":") and len(line) < 80
-                items.append({"text": line, "heading": heading, "matches": [] if heading else found.find(line)})
-            cohorts.append({"number": number, "name": cohort["cohort_name"], "criteria": items})
+        cohorts = [{"number": number, "name": cohort["cohort_name"], "criteria": self.items(cohort["eligibility_criteria"], found)}
+                   for number, cohort in enumerate(record.get("cohorts") or [])]
+        clean = self.clean(record, found, steps)
         return {"id": trial, "source": source, **self.info(trial), "status": record["status"],
                 "error": record.get("error"), "lines": lines, "outline": self.outline(lines, source)[:600],
                 "cohorts": cohorts, "names": names, "identical": record.get("identical") or [],
-                "groups": record.get("groups"), "steps": steps, "characters": len(text)}
+                "groups": record.get("groups"), "clean": clean, "steps": steps, "characters": len(text)}
+
+    @staticmethod
+    def items(criteria, found):
+        items = []
+        for line in criteria.split("\n"):
+            if not line.strip():
+                continue
+            heading = bool(re.match(r"^\s*(inclusion|exclusion)( criteria)?\s*:?\s*$", line, re.I)) or line.rstrip().endswith(":") and len(line) < 80
+            items.append({"text": line, "heading": heading, "matches": [] if heading else found.find(line)})
+        return items
+
+    def clean(self, record, found, steps):
+        """The merged cohorts with boilerplate removed (deboilerplate.json), or None when that step has not run.
+
+        A saved result counts only when it was made from the current merged cohort's name and
+        criteria (its input_sha256); each cohort lists the lines of its criteria that were removed.
+        """
+        if record.get("clean") is None or record["status"] != "cohorts" or record.get("groups") is None:
+            return None
+        saved = {e["cohort_number"]: e for e in record["clean"]}
+        norm = lambda line: re.sub(r"\s+", " ", line).strip().casefold()
+        clean = []
+        for number, group in enumerate(record["groups"]):
+            name = "; ".join(record["cohorts"][m]["cohort_name"] for m in group)
+            original = record["cohorts"][group[0]]["eligibility_criteria"]
+            entry = saved.get(number) or {}
+            current = entry.get("input_sha256") == hashlib.sha256(json.dumps([name, original]).encode()).hexdigest()
+            text = entry.get("eligibility_criteria") if current else None
+            kept = {norm(line) for line in (text or "").split("\n")}
+            clean.append({"number": number, "name": name, "group": group,
+                          "criteria": self.items(text, found) if text else [],
+                          "removed": [line for line in original.split("\n") if line.strip() and norm(line) not in kept] if text else [],
+                          "error": None if text else entry.get("error") or ("made from other criteria" if entry else "not run yet")})
+            for a in entry.get("attempts", []):
+                steps.append(self.attempt("boilerplate", name, a))
+        return clean
 
     @staticmethod
     def attempt(step, cohort, a):
@@ -206,7 +240,8 @@ class PipelineRun(Collection):
 
     def files(self, nct):
         d = self.protocol_dir / "trials" / nct
-        return d / "extraction.json", d / "merge.json", self.registry_dir / "checkpoints" / f"{nct}.json.gz"
+        return (d / "extraction.json", d / "merge.json", d / "deboilerplate.json",
+                self.registry_dir / "checkpoints" / f"{nct}.json.gz")
 
     def context(self):
         """Failed protocols from the export's trials.csv, read again only when the file changes."""
@@ -230,7 +265,7 @@ class PipelineRun(Collection):
                 error = failed.get(nct)
                 return {"status": "failed" if error else "pending", "error": error}
             return record
-        path = self.files(nct)[2]
+        path = self.files(nct)[3]
         if not path.exists():
             return {"status": "pending"}
         with gzip.open(path, "rt") as stream:
@@ -241,7 +276,8 @@ class PipelineRun(Collection):
                                (meta.get("trial_merged_cohorts") or {}).get(nct),
                                (meta.get("trial_attempts") or {}).get(nct) or {},
                                (merging.get("trial_groups") or {}).get(nct), rec.get("error"),
-                               merge_attempts=(merging.get("trial_attempts") or {}).get(nct))
+                               merge_attempts=(merging.get("trial_attempts") or {}).get(nct),
+                               clean=(rec.get("deboilerplate") or {}).get("cohorts"))
 
     def document(self, nct, source, record):
         if source == "registry":
@@ -278,7 +314,7 @@ class ProtocolSet(Collection):
 
     def files(self, trial):
         d = self.root / "trials" / trial
-        return d / "extraction.json", d / "merge.json", self.root / "run_metadata.json"
+        return d / "extraction.json", d / "merge.json", d / "deboilerplate.json", self.root / "run_metadata.json"
 
     def context(self):
         path = self.root / "run_metadata.json"
@@ -472,6 +508,8 @@ mark.cur{outline:2px solid var(--s1)}
 .chip{font-size:11px;font-weight:600;border-radius:10px;padding:0 8px;color:#fff;white-space:nowrap}
 .chip.g4{color:#0b0b0b}.chip.gx{background:var(--muted)}
 .cov{font-size:11px;color:var(--ink2);margin-bottom:4px}
+details.removed{margin-top:6px;font-size:12px;color:var(--ink2)}details.removed summary{cursor:pointer}
+details.removed li{padding:1px 4px}
 ul.crit{list-style:none;margin:0;padding:0}
 ul.crit li{display:grid;grid-template-columns:62px 1fr;gap:6px;padding:2px 4px;border-radius:4px;cursor:pointer}
 ul.crit li:hover{background:var(--hl)}ul.crit li.active{background:var(--hl);box-shadow:inset 3px 0 var(--s1)}
@@ -665,7 +703,8 @@ function renderDetail() {
     '<div class="trialhead"><div class="top"><span class="nct">' + esc(d.id) + "</span>" + (d.sub ? '<span class="help">' + esc(d.sub) + "</span>" : "") +
     '<span class="title">' + esc(d.title || "") + "</span></div>" +
     '<div class="controls">' + (state.index.sources.length > 1 ? '<span class="seg"><button id="srcP">Protocol</button><button id="srcR">Registry listing</button></span>' : "") +
-    '<span class="seg"><button id="modeE">As extracted</button><button id="modeM">Merged for training</button></span>' +
+    '<span class="seg"><button id="modeE">As extracted</button><button id="modeM">Merged</button>' +
+    '<button id="modeC" title="Merged, then the boilerplate step: the cohorts that seed synthetic patients">Boilerplate removed</button></span>' +
     (t.protocol ? state.index.sources.map(function (s) { return statusBadge(SOURCE[s], t[s]); }).join("") : "") + "</div></div>" +
     '<div class="panes"><div class="pane"><div class="panebar"><strong>' + (d.source === "registry" ? "Registry listing as the prompts see it" :
       state.index.confidential ? "Protocol text (converted from the PDF)" : "Synthetic protocol") +
@@ -679,6 +718,7 @@ function renderDetail() {
     $("srcP").onclick = function () { setSource("protocol"); }; $("srcR").onclick = function () { setSource("registry"); };
   }
   $("modeE").onclick = function () { setMode("extracted"); }; $("modeM").onclick = function () { setMode("merged"); };
+  $("modeC").onclick = function () { setMode("clean"); };
   $("outline").onchange = function () { if (this.value !== "") jumpTo(+this.value, +this.value); this.value = ""; };
   $("cjump").onchange = function () { if (this.value !== "") showCard(+this.value); this.value = ""; };
   var typing = null;
@@ -692,7 +732,7 @@ function groupChip(g, members) {
   return '<span class="chip' + cls + (g === 3 ? " g4" : "") + '"' + style + ">G" + (g + 1) + " · extracted " +
          members.map(function (m) { return m + 1; }).join(" + ") + "</span>";
 }
-function critList(items, ci) {
+function critList(items, ci, kind) {
   var html = '<ul class="crit">';
   items.forEach(function (it, k) {
     if (it.heading) { html += '<li class="head">' + esc(it.text) + "</li>"; return; }
@@ -700,7 +740,7 @@ function critList(items, ci) {
     var label = best >= 0.8 ? "found" : best >= 0.5 ? "partial" : "weak";
     var color = best >= 0.8 ? "good" : best >= 0.5 ? "warning" : "serious";
     var icon = best >= 0.8 ? "✓" : best >= 0.5 ? "≈" : "?";
-    html += '<li data-c="' + ci + '" data-k="' + k + '" title="Best document match covers ' + Math.round(best * 100) +
+    html += '<li data-c="' + ci + '" data-k="' + k + '" data-kind="' + (kind || "") + '" title="Best document match covers ' + Math.round(best * 100) +
       '% of this line\'s distinctive words; click to jump, click again for the next match"><span class="sc"><span class="dot" style="background:var(--' +
       color + ')"></span> ' + icon + " " + label + "</span><span>" + esc(it.text) + "</span></li>";
   });
@@ -716,6 +756,7 @@ function renderCohorts() {
   var d = state.detail, box = $("cohorts");
   if (!box) return;
   $("modeE").classList.toggle("on", state.mode === "extracted"); $("modeM").classList.toggle("on", state.mode === "merged");
+  $("modeC").classList.toggle("on", state.mode === "clean");
   var html = "", cards = [];
   if (d.status !== "cohorts") {
     html = '<div class="note"><span class="st"><span class="dot d-' + d.status + '"></span><strong>' + STATUS[d.status] + "</strong></span>" +
@@ -728,12 +769,21 @@ function renderCohorts() {
     if (d.identical.length) html += '<div class="note">The list step named ' + d.names.length + " cohorts; " + d.identical.map(function (g) {
       return g.map(function (i) { return "“" + esc(d.names[i]) + "”"; }).join(" and "); }).join("; ") +
       " had identical criteria and were combined in code.</div>";
+    if (state.mode === "clean") {
+      if (!d.clean) html += '<div class="note">The boilerplate step has not run for this trial yet (it follows the merge); showing cohorts ' +
+        (d.groups ? "as merged" : "as extracted") + ".</div>";
+      else html += '<div class="note">' + d.clean.length + " merged cohort" + (d.clean.length === 1 ? "" : "s") +
+        " with the boilerplate removed by a separate request per cohort; these seed synthetic patients. Each card lists the lines of its merged criteria that were removed or changed.</div>";
+    }
     if (state.mode === "merged") {
       if (!d.groups) html += '<div class="note">The merge step has not run for this trial yet (protocols are merged after all are extracted); showing cohorts as extracted.</div>';
       else html += '<div class="note">' + d.groups.length + " cohort" + (d.groups.length === 1 ? "" : "s") + " for training from " + d.cohorts.length +
         " extracted. A merged cohort keeps its first member's criteria; its name joins the members' names.</div>";
     }
-    cards = (state.mode === "merged" && d.groups) ? d.groups.map(function (g, gi) {
+    cards = (state.mode === "clean" && d.clean) ? d.clean.map(function (c, i) {
+      return {title: c.name, ci: i, kind: "clean", items: c.criteria, num: i + 1, removed: c.removed, error: c.error,
+              chip: c.group.length > 1 ? groupChip(i, c.group) : ""};
+    }) : (state.mode !== "extracted" && d.groups) ? d.groups.map(function (g, gi) {
       var first = d.cohorts[g[0]];
       return {title: g.map(function (m) { return d.cohorts[m].name; }).join("; "), ci: g[0], items: first.criteria, num: gi + 1,
               chip: g.length > 1 ? groupChip(gi, g) : ""};
@@ -742,8 +792,12 @@ function renderCohorts() {
       return {title: c.name, ci: ci, items: c.criteria, num: ci + 1, chip: g && g.length > 1 ? groupChip(gi, g) : ""};
     });
     cards.forEach(function (c, i) {
-      html += '<div class="card" id="card' + i + '"><h3><span class="num">' + c.num + "</span><span>" + esc(c.title) + "</span>" + c.chip +
-        '</h3><div class="cov">' + coverage(c.items) + "</div>" + critList(c.items, c.ci) + "</div>";
+      html += '<div class="card" id="card' + i + '"><h3><span class="num">' + c.num + "</span><span>" + esc(c.title) + "</span>" + c.chip + "</h3>" +
+        (c.error ? '<div class="note">Boilerplate step: ' + esc(c.error) + "</div>" :
+         '<div class="cov">' + coverage(c.items) + "</div>" + critList(c.items, c.ci, c.kind)) +
+        (!c.removed || c.error ? "" : !c.removed.length ? '<div class="cov">No line removed or changed by the boilerplate step.</div>' :
+         '<details class="removed"><summary>Removed or changed by the boilerplate step (' + c.removed.length + " line" + (c.removed.length === 1 ? "" : "s") +
+          ")</summary><ul class=\"crit\">" + c.removed.map(function (line) { return "<li>" + esc(line) + "</li>"; }).join("") + "</ul></details>") + "</div>";
     });
   }
   html += stepsHTML(d);
@@ -795,10 +849,10 @@ function jumpTo(line, end, marks) {
   if (target) target.scrollIntoView({block: "center"});
 }
 function showMatch(ci, k, li) {
-  var it = state.detail.cohorts[ci].criteria[k];
-  var same = state.activeCrit && state.activeCrit[0] === ci && state.activeCrit[1] === k;
+  var kind = li.dataset.kind || "", it = (kind === "clean" ? state.detail.clean : state.detail.cohorts)[ci].criteria[k];
+  var same = state.activeCrit && state.activeCrit[0] === kind && state.activeCrit[1] === ci && state.activeCrit[2] === k;
   state.matchAt = same ? (state.matchAt + 1) % Math.max(1, it.matches.length) : 0;
-  state.activeCrit = [ci, k];
+  state.activeCrit = [kind, ci, k];
   Array.prototype.forEach.call(document.querySelectorAll("ul.crit li.active"), function (el) { el.classList.remove("active"); });
   li.classList.add("active");
   if (!it.matches.length) { clearHits(); $("dcount").textContent = "no shared words in the document"; return; }

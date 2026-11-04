@@ -136,14 +136,22 @@ cohort_extraction/
   trials/<NCT>/
     extraction.json      raw answer, parsed decision, attempts with endpoint and
                          model, prompt hash, schema, protocol SHA-256
-    reasoning.txt        the model's reasoning trace
+    reasoning.json       each step's reasoning
+    merge.json           a multi-cohort trial's merge grouping, with the answer and
+                         reasoning (reused on rerun)
+    deboilerplate.json   each merged cohort's criteria with the boilerplate removed,
+                         with the answers and reasoning (reused per unchanged cohort)
+  cohorts_unmerged.parquet, .csv
+                         one row per extracted cohort (criteria verbatim, boilerplate
+                         included), with provenance
   cohorts.parquet, .csv  one row per cohort after merging those with essentially the
                          same criteria (merged_from: the extracted cohort numbers),
-                         with provenance
-  cohorts_unmerged.parquet, .csv
-                         one row per extracted cohort before merging, with provenance
-  trials/<NCT>/merge.json
-                         a multi-cohort trial's merge grouping (reused on rerun)
+                         boilerplate included, with provenance
+  cohorts_deboilerplated.parquet, .csv
+                         the merged cohorts with their boilerplate criteria removed
+                         (consent, compliance, samples/tissue/biopsy, measurable or
+                         evaluable disease, contraception/pregnancy/lactation, vaccines,
+                         staff and catch-all exclusions): the cohorts that seed patients
   trials.parquet, .csv   one row per protocol: provenance and extraction status
   run_metadata.json      git commits of both repositories, settings, servers,
                          status counts, failures, seeds without a protocol
@@ -171,8 +179,8 @@ python -I synthetic_protocols/patient_cohorts.py --batch-dir "$B" \
   --output ../data/no_phi/<generation-run>/sample_trial_cohort_lineitems.csv
 ```
 
-`patient_cohorts.py` turns an extraction's `cohorts.parquet` (`--extraction-dir`,
-default `<batch-dir>/cohort_extraction/`) into the cohort
+`patient_cohorts.py` turns an extraction's `cohorts_deboilerplated.parquet` (`--cohorts-file`;
+`--extraction-dir`, default `<batch-dir>/cohort_extraction/`) into the cohort
 table that `generate_synthetic_data.py` (`run_pipeline.py --sampled-cohorts`)
 reads: accepted cohorts in seed order with a contiguous `cohort_index`, each
 trial's source `split` copied from the registry sample it was seeded from
@@ -209,19 +217,26 @@ the same prompts (`trial.cohorts.screen.user.txt`, `trial.cohorts.list.user.txt`
 `trial.cohorts.criteria.user.txt`; schema `trial-cohorts-stepwise-v1`): a
 cancer-treatment screen, the cohort names, and one request per cohort for its
 complete criteria, with the listing's title, brief summary and eligibility
-criteria as one document. Earlier runs used the single-request registry prompt
-(`trial.cohorts.user.txt`, schema `trial-registry-cohorts-v1`):
+criteria as one document. Since 2026-11-04 (user instruction) the criteria are
+copied verbatim with boilerplate included, and training gives registry listings the
+same two follow-on steps as protocols: the merge, then a separate request per merged
+cohort that removes its boilerplate criteria. Retrieval and labeling read both
+versions with boilerplate removed (`--output-deboilerplated-cohorts` beside the
+generation table, which comes from `cohorts_deboilerplated.parquet`). Earlier runs used
+the single-request registry prompt (`trial.cohorts.user.txt`, schema
+`trial-registry-cohorts-v1`):
 
 ```bash
 python 0b_extract_trial_cohorts.py --trials-jsonl "$B/seeds.jsonl" \
   --work-dir <run>/registry_cohorts/work --output-trials <run>/registry_cohorts/trials_with_cohorts.csv \
   --output-cohorts <run>/registry_cohorts/trial_cohort_lineitems.csv --output-json <run>/registry_cohorts/trial_cohorts.json \
   --output-unmerged-cohorts <run>/registry_cohorts/trial_cohort_lineitems_unmerged.csv \
+  --output-deboilerplated-cohorts <run>/registry_cohorts/trial_cohort_lineitems_deboilerplated.csv \
   --model <served alias> --tokenizer-model <model or tokenizer path> --server-urls-file <servers.json> \
   --max-attempts 5 --allow-failures
 python -I synthetic_protocols/retrieval_cohorts.py \
   --protocol-cohorts <generation-run>/sample_trial_cohort_lineitems.csv \
-  --registry-cohorts <run>/registry_cohorts/trial_cohort_lineitems.csv \
+  --registry-cohorts <run>/registry_cohorts/trial_cohort_lineitems_deboilerplated.csv \
   --registry-trials <run>/registry_cohorts/trials_with_cohorts.csv --output <run>/retrieval_cohorts.csv
 ```
 

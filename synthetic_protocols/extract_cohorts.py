@@ -2,15 +2,20 @@
 
 Each protocol goes through the inference package's three-step workflow, with the
 same prompts as registry listings (0b_extract_trial_cohorts.py): a cancer-treatment
-screen, the cohort names, and one request per cohort for its criteria. For training,
-each trial's cohorts whose criteria are essentially the same are then combined
-(merge_equivalent_cohorts; cohorts_unmerged.parquet/.csv keeps the extracted rows, with
-the same provenance; --no-merge-cohorts skips it).
+screen, the cohort names, and one request per cohort for its criteria, copied verbatim
+with boilerplate included. For training, each trial's cohorts whose criteria are
+essentially the same are then combined (merge_equivalent_cohorts; --no-merge-cohorts skips
+it), and a separate request per merged cohort removes its boilerplate criteria
+(remove_boilerplate_criteria; --no-deboilerplate skips it). Exports, with the same
+provenance: cohorts_unmerged (as extracted), cohorts (merged, boilerplate kept) and
+cohorts_deboilerplated (merged, boilerplate removed: the cohorts that seed synthetic
+patients, read by patient_cohorts.py), each as .parquet and .csv.
 
 Reads a generate_batch.py output directory: every protocols/<NCT>/protocol.md
 whose meta.json records a completed generation, plus the registry seeds in
 seeds.jsonl. Each trial's decision is saved under <output-dir>/trials/ and
-reused on rerun. The exports carry each cohort's provenance: the synthetic
+reused on rerun, with merge.json and deboilerplate.json beside it (every step keeps its
+answers and reasoning). The exports carry each cohort's provenance: the synthetic
 protocol (path, SHA-256, generation prompt hash, layout, generating model and
 endpoint), the ClinicalTrials.gov record it was seeded from (including the
 original registry eligibility criteria and when they were retrieved), and the
@@ -31,7 +36,7 @@ import pandas as pd
 
 import matchminer_ai
 from matchminer_ai import load_default_preset
-from matchminer_ai.trials import extract_protocol_cohorts, merge_equivalent_cohorts
+from matchminer_ai.trials import extract_protocol_cohorts, merge_equivalent_cohorts, remove_boilerplate_criteria
 
 
 SEED_FIELDS = ("title", "brief_summary", "detailed_description", "eligibility_criteria")
@@ -162,6 +167,12 @@ def main(args):
         # Saved groupings under trials/<NCT>/merge.json are reused for unchanged cohorts.
         cohorts, merging = merge_equivalent_cohorts(cohorts, config=config, section="protocol_cohort_extraction",
                                                     output_dir=decisions_dir, return_metadata=True)
+    cleaning, clean = None, None
+    if args.deboilerplate:
+        # Saved results under trials/<NCT>/deboilerplate.json are reused for unchanged cohorts.
+        clean, cleaning = (remove_boilerplate_criteria(cohorts, config=config, section="protocol_cohort_extraction",
+                                                       output_dir=decisions_dir, return_metadata=True)
+                           if not cohorts.empty else (cohorts, None))
     provenance = trial_provenance(trials, metadata, decisions_dir)
 
     def with_provenance(rows):
@@ -174,6 +185,8 @@ def main(args):
     exports = [("cohorts", cohorts), ("trials", provenance)]
     if unmerged is not None:
         exports.append(("cohorts_unmerged", with_provenance(unmerged)))
+    if clean is not None:
+        exports.append(("cohorts_deboilerplated", with_provenance(clean)))
     for name, frame in exports:
         frame.to_parquet(output_dir / f"{name}.parquet", index=False)
         frame.to_csv(output_dir / f"{name}.csv", index=False)
@@ -187,6 +200,7 @@ def main(args):
         "synthetic_prompt_sha256": provenance.synthetic_prompt_sha256.iloc[0],
         "trials": len(provenance), "cohort_rows": len(cohorts),
         "cohort_rows_unmerged": None if unmerged is None else len(unmerged),
+        "cohort_rows_deboilerplated": None if clean is None else len(clean),
         "status_counts": provenance.extraction_status.value_counts().to_dict(),
         "seeds_without_protocol": not_generated,
         **{key: metadata[key] for key in ("extraction_method", "schema_version", "representation_version",
@@ -195,10 +209,14 @@ def main(args):
         "trial_rejections": sorted(metadata["trial_rejections"]),
         "merge": None if merging is None else {key: merging[key] for key in (
             "schema_version", "prompt_sha256", "cohorts_in", "cohorts_out", "merge_errors", "skipped_completed")},
+        "deboilerplate": None if cleaning is None else {key: cleaning[key] for key in (
+            "schema_version", "prompt_sha256", "cohorts", "deboilerplate_errors", "skipped_completed")},
     }, indent=2, default=str))
     print(f"finished: {len(cohorts)} cohort rows from {len(provenance)} protocols; "
           f"{len(metadata['trial_errors'])} failed, {len(metadata['trial_rejections'])} not cancer treatment, "
-          f"{metadata['skipped_completed']} reused", flush=True)
+          f"{metadata['skipped_completed']} reused"
+          + ("" if cleaning is None else f"; boilerplate not removed from {len(cleaning['deboilerplate_errors'])} "
+             "cohorts (criteria kept as extracted)"), flush=True)
     return 0 if not metadata["trial_errors"] or args.allow_failures else 1
 
 
@@ -216,4 +234,6 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, help="Only the first N protocols (smoke tests)")
     parser.add_argument("--no-merge-cohorts", dest="merge_cohorts", action="store_false",
                         help="Keep every extracted cohort instead of combining those with essentially the same criteria")
+    parser.add_argument("--no-deboilerplate", dest="deboilerplate", action="store_false",
+                        help="Do not write cohorts_deboilerplated (the cohorts with their boilerplate criteria removed)")
     sys.exit(main(parser.parse_args()))

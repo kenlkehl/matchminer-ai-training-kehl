@@ -4,13 +4,19 @@
 summarize_trials runs the inference package's three-step workflow on each
 registry listing (title, brief summary and eligibility criteria as one document):
 a cancer-treatment screen, the cohort names, and one request per cohort for its
-criteria, with the same prompts as synthetic protocols. No training-owned prompt.
-For training, a trial's cohorts whose criteria are essentially the same are then
-combined (merge_equivalent_cohorts, trial.cohorts.merge.user.txt; --no-merge-cohorts
-keeps every extracted cohort); the extracted rows before merging are exported too
-(--output-unmerged-cohorts). Checkpoints retain each trial's decision, cohort
-names, unmerged and merged rows, reasoning, validation attempts per step and
-endpoint provenance.
+criteria, copied verbatim with boilerplate included, with the same prompts as
+synthetic protocols. No training-owned prompt. For training, the same steps as
+protocols (synthetic_protocols/extract_cohorts.py) follow: a trial's cohorts whose
+criteria are essentially the same are combined (merge_equivalent_cohorts,
+trial.cohorts.merge.user.txt; --no-merge-cohorts keeps every extracted cohort), then a
+separate request per cohort removes its boilerplate criteria
+(remove_boilerplate_criteria, trial.cohorts.deboilerplate.user.txt;
+--no-deboilerplate-cohorts skips it). Exports: the merged rows (--output-cohorts,
+boilerplate kept), the rows before merging (--output-unmerged-cohorts) and the merged
+rows with boilerplate removed (--output-deboilerplated-cohorts, which training's
+retrieval uses). Checkpoints retain each trial's decision, cohort names, unmerged,
+merged and de-boilerplated rows, reasoning and answers of every step, validation
+attempts per step and endpoint provenance.
 
 Two inputs: the parsed registry export (--input), from which interventional
 early phase I-IV trials first posted since --start-year are selected, or an
@@ -132,8 +138,8 @@ def make_config(args):
     return config
 
 
-def extract_one(row, config, merge=True):
-    from matchminer_ai.trials import merge_equivalent_cohorts, summarize_trials
+def extract_one(row, config, merge=True, deboilerplate=True):
+    from matchminer_ai.trials import merge_equivalent_cohorts, remove_boilerplate_criteria, summarize_trials
     from matchminer_ai.trials.cohorts import COHORT_COLUMNS
     trial = row['nct_id']
     inputs = pd.DataFrame([dict(trial_id=trial, trial_title=row['title'],
@@ -154,9 +160,18 @@ def extract_one(row, config, merge=True):
                               cohort_rows=json.loads(merged.to_json(orient='records')),
                               merge={key: merging[key] for key in ('schema_version', 'prompt_sha256', 'trial_groups',
                                                                    'merge_errors', 'trial_attempts')})
-            rows = pd.DataFrame(record['cohort_rows'])
-            rows['cohort_count'] = len(rows)
-            validate_cohort_rows(rows)
+            if deboilerplate:
+                rows = pd.DataFrame(record['cohort_rows'])
+                clean, cleaning = remove_boilerplate_criteria(rows, config=config, return_metadata=True)
+                record.update(deboilerplated_cohort_rows=json.loads(clean.to_json(orient='records')),
+                              deboilerplate={'schema_version': cleaning['schema_version'],
+                                             'prompt_sha256': cleaning['prompt_sha256'],
+                                             'cohorts': cleaning['trial_cohorts'][trial],
+                                             'errors': cleaning['deboilerplate_errors']})
+            for key in ('cohort_rows', 'deboilerplated_cohort_rows') if deboilerplate else ('cohort_rows',):
+                rows = pd.DataFrame(record[key])
+                rows['cohort_count'] = len(rows)
+                validate_cohort_rows(rows)
         elif record['cohort_rows']:
             raise ValueError('Rejected trial unexpectedly returned cohort rows')
     except Exception as exc:
@@ -174,11 +189,15 @@ def read_checkpoint(path, fingerprint):
 
 
 def output_paths(args):
-    """Cohort rows, trial audit, decisions JSON and, when merging, the cohort rows before merging."""
+    """Cohort rows, trial audit, decisions JSON, then (when those steps run) the rows before merging
+    and the rows with boilerplate removed."""
     paths = [args.output_cohorts, args.output_trials, args.output_json]
     if args.merge_cohorts:
         paths.append(args.output_unmerged_cohorts
                      or args.output_cohorts.with_name(f'{args.output_cohorts.stem}_unmerged{args.output_cohorts.suffix}'))
+    if args.deboilerplate_cohorts:
+        paths.append(args.output_deboilerplated_cohorts
+                     or args.output_cohorts.with_name(f'{args.output_cohorts.stem}_deboilerplated{args.output_cohorts.suffix}'))
     return paths
 
 
@@ -190,7 +209,7 @@ def export_results(frame, args, fingerprint):
     cohort_fields = list(frame.columns) + COHORT_COLUMNS + [MERGED_FROM, *row_fields]
     audit_fields = list(frame.columns) + ['cancer_treatment_trial', 'multiple_cohorts',
                                         'cohort_count', 'cohort_result_json', 'extraction_error']
-    errors, index, unmerged_index = [], 0, 0
+    errors, index, unmerged_index, clean_index, unremoved = [], 0, 0, 0, 0
     outputs = output_paths(args)
     for path in outputs:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -200,10 +219,13 @@ def export_results(frame, args, fingerprint):
         rows_writer = csv.DictWriter(streams[0], fieldnames=cohort_fields)
         audit_writer = csv.DictWriter(streams[1], fieldnames=audit_fields)
         json_out = streams[2]
+        extra = iter(streams[3:])
         # Before merging: every extracted cohort (a trial with one cohort, or not merged, is unchanged).
-        unmerged_writer = csv.DictWriter(streams[3], fieldnames=list(frame.columns) + COHORT_COLUMNS + row_fields) \
-            if len(streams) > 3 else None
-        for writer in (rows_writer, audit_writer, unmerged_writer):
+        unmerged_writer = csv.DictWriter(next(extra), fieldnames=list(frame.columns) + COHORT_COLUMNS + row_fields) \
+            if args.merge_cohorts else None
+        # The merged rows with boilerplate removed (same columns and order as the merged rows).
+        clean_writer = csv.DictWriter(next(extra), fieldnames=cohort_fields) if args.deboilerplate_cohorts else None
+        for writer in (rows_writer, audit_writer, unmerged_writer, clean_writer):
             if writer:
                 writer.writeheader()
         json_out.write('{\n')
@@ -231,6 +253,12 @@ def export_results(frame, args, fingerprint):
                                               'cohort_count': len(extracted), 'cohort_index': unmerged_index,
                                               'trial_representation': REPRESENTATION})
                     unmerged_index += 1
+            if clean_writer:
+                unremoved += len((record.get('deboilerplate') or {}).get('errors') or {})
+                for cohort in record.get('deboilerplated_cohort_rows', []):  # none for rejected trials
+                    clean_writer.writerow({**source, **cohort, 'cohort_count': count,
+                                           'cohort_index': clean_index, 'trial_representation': REPRESENTATION})
+                    clean_index += 1
         json_out.write('\n}\n')
     partial = errors and not args.allow_failures
     for temporary, path in zip(temps, outputs):
@@ -242,11 +270,15 @@ def export_results(frame, args, fingerprint):
     if errors:
         print(f'{len(errors)} trials failed every attempt and have no cohorts (errors.json)', flush=True)
     print(f'Exported {len(frame)} decisions and {index} cohort rows'
-          + (f' ({unmerged_index} before merging)' if len(outputs) > 3 else ''), flush=True)
+          + (f' ({unmerged_index} before merging)' if args.merge_cohorts else '')
+          + (f'; {clean_index} with boilerplate removed' if args.deboilerplate_cohorts else ''), flush=True)
+    if unremoved:
+        print(f'{unremoved} cohorts kept their boilerplate: the boilerplate step failed every attempt', flush=True)
 
 
 def run(args, config):
     from matchminer_ai.config import config_snapshot
+    from matchminer_ai.trials.cohort_boilerplate import DEBOILERPLATE_PROMPT, DEBOILERPLATE_SCHEMA_VERSION
     from matchminer_ai.trials.cohort_merge import MERGE_PROMPT, MERGE_SCHEMA_VERSION
     from matchminer_ai.trials.cohort_workflow import SCHEMA_VERSION, load_prompts, prompt_sha256
     from matchminer_ai.llm.prompts import load_prompt_text
@@ -263,6 +295,9 @@ def run(args, config):
         schema=SCHEMA_VERSION, prompt_sha256=prompt_sha256(load_prompts(config.trial['cohorts'].get('prompt_files'))),
         merge=dict(schema=MERGE_SCHEMA_VERSION, prompt_sha256=hashlib.sha256(load_prompt_text(MERGE_PROMPT).encode()).hexdigest())
         if args.merge_cohorts else None,
+        deboilerplate=dict(schema=DEBOILERPLATE_SCHEMA_VERSION,
+                           prompt_sha256=hashlib.sha256(load_prompt_text(DEBOILERPLATE_PROMPT).encode()).hexdigest())
+        if args.deboilerplate_cohorts else None,
         config=config_snapshot(config), source_sha256={str(p.relative_to(package)): sha_file(p)
             for p in sorted(package.rglob('*')) if p.suffix in ('.py', '.txt', '.yaml')},
         runner_sha256=sha_file(__file__), adapter_sha256=sha_file(ROOT / 'trial_cohort_format.py'),
@@ -299,7 +334,7 @@ def run(args, config):
                 row = next(iterator, None)
                 if row is None:
                     break
-                futures[executor.submit(extract_one, row, config, args.merge_cohorts)] = row['nct_id']
+                futures[executor.submit(extract_one, row, config, args.merge_cohorts, args.deboilerplate_cohorts)] = row['nct_id']
             if not futures:
                 break
             done, _ = wait(futures, return_when=FIRST_COMPLETED)
@@ -326,6 +361,9 @@ def parser():
     p.add_argument('--output-json', type=Path, default=data / 'trial_cohorts.json')
     p.add_argument('--output-unmerged-cohorts', type=Path,
                    help='Cohort rows before merging; default <output-cohorts stem>_unmerged.csv (not with --no-merge-cohorts)')
+    p.add_argument('--output-deboilerplated-cohorts', type=Path,
+                   help='Merged cohort rows with boilerplate removed; default <output-cohorts stem>_deboilerplated.csv '
+                        '(not with --no-deboilerplate-cohorts)')
     p.add_argument('--work-dir', type=Path, default=data / 'trial_cohort_extraction')
     p.add_argument('--inference-repo', type=Path, default=ROOT.parent / 'matchminer-ai-inference-kehl')
     p.add_argument('--start-year', type=int, default=2020)
@@ -347,6 +385,8 @@ def parser():
     p.add_argument('--max-tokens', type=int, default=50000)
     p.add_argument('--no-merge-cohorts', dest='merge_cohorts', action='store_false',
                    help='Keep every extracted cohort instead of combining those with essentially the same criteria')
+    p.add_argument('--no-deboilerplate-cohorts', dest='deboilerplate_cohorts', action='store_false',
+                   help='Do not remove boilerplate criteria (no --output-deboilerplated-cohorts export)')
     p.add_argument('--api-key-env', default='OPENAI_API_KEY')
     return p
 

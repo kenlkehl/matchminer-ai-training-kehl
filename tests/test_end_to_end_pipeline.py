@@ -39,11 +39,11 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert stage['sample-trials'].outputs[0] == args.registry_sample == stage['synthetic-protocols'].inputs[0]
     seeds = stage['synthetic-protocols'].outputs[0]
     assert seeds in stage['protocol-cohorts'].inputs and seeds == stage['registry-cohorts'].inputs[0]
-    assert set(stage['protocol-cohorts'].outputs[:2]) <= set(stage['generation-cohorts'].inputs)
+    assert {stage['protocol-cohorts'].outputs[i] for i in (1, 4)} <= set(stage['generation-cohorts'].inputs)
     assert args.registry_sample in stage['generation-cohorts'].inputs
     # Patients come from the protocol cohorts; retrieval and training use both versions.
     assert stage['generation-cohorts'].outputs[0] == args.sampled_spaces == stage['generate-synthetic'].inputs[0]
-    assert {args.sampled_spaces, *stage['registry-cohorts'].outputs[:2]} <= set(stage['retrieval-cohorts'].inputs)
+    assert {args.sampled_spaces, *(stage['registry-cohorts'].outputs[i] for i in (1, 4))} <= set(stage['retrieval-cohorts'].inputs)
     assert stage['retrieval-cohorts'].outputs[0] == args.retrieval_cohorts
     from generate_synthetic_data import load_stage
     extract = load_stage('0b_extract_trial_cohorts.py')
@@ -56,11 +56,19 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert extract.output_paths(registry)[3] == registry.output_unmerged_cohorts == stage['registry-cohorts'].outputs[3]
     assert extract.output_paths(extraction)[3] == stage['extract-cohorts'].outputs[3]
     assert stage['protocol-cohorts'].outputs[3] == args.protocol_dir / 'cohort_extraction/cohorts_unmerged.parquet'
+    # Registry rows are de-boilerplated too, and retrieval reads them beside the de-boilerplated protocol cohorts.
+    assert extract.output_paths(registry)[4] == registry.output_deboilerplated_cohorts == stage['registry-cohorts'].outputs[4]
+    assert extract.output_paths(extraction)[4] == stage['extract-cohorts'].outputs[4]
+    retrieval = stage['retrieval-cohorts'].command
+    assert retrieval[retrieval.index('--registry-cohorts') + 1] == str(stage['registry-cohorts'].outputs[4])
+    assert retrieval[retrieval.index('--protocol-cohorts') + 1] == str(stage['generation-cohorts'].outputs[0])
     moved = arguments(tmp_path, '--start-at', 'protocol-cohorts', '--protocol-dir', str(tmp_path / 'data/no_phi/batch'),
                       '--protocol-cohort-dir', str(tmp_path / 'data/no_phi/rerun/protocol_cohorts'))
     rerun = {s.name: s for s in pipeline.build_plan(moved)}
     assert rerun['protocol-cohorts'].outputs[0] == tmp_path / 'data/no_phi/rerun/protocol_cohorts/cohorts.parquet'
-    assert rerun['generation-cohorts'].inputs[0] == rerun['protocol-cohorts'].outputs[0]
+    # Patients are seeded from the merged cohorts with their boilerplate criteria removed.
+    assert rerun['protocol-cohorts'].outputs[4] == tmp_path / 'data/no_phi/rerun/protocol_cohorts/cohorts_deboilerplated.parquet'
+    assert rerun['generation-cohorts'].inputs[0] == rerun['protocol-cohorts'].outputs[4]
     assert stage['generate-synthetic'].outputs[0] == stage['prepare-notes'].inputs[0]
     assert stage['prepare-notes'].outputs[0] == stage['summarize-patients'].inputs[0]
     assert stage['summarize-patients'].outputs[0] == stage['prepare-training'].inputs[0]

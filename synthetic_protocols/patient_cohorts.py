@@ -1,6 +1,7 @@
 """Turn a synthetic protocol batch's extracted cohorts into the patient-generation cohort table.
 
-Reads {cohorts,trials}.parquet from an extract_cohorts.py output directory
+Reads cohorts_deboilerplated.parquet (the merged cohorts with their boilerplate criteria
+removed; --cohorts-file) and trials.parquet from an extract_cohorts.py output directory
 (--extraction-dir, default <batch-dir>/cohort_extraction)
 and writes a CSV that generate_synthetic_data.py (run_pipeline.py --sampled-cohorts)
 accepts: the accepted cancer-treatment cohorts in seed order with a contiguous
@@ -61,7 +62,7 @@ def main(args):
     metadata = json.loads((extraction / "run_metadata.json").read_text())
     if metadata["trial_errors"]:
         print(f"note: {len(metadata['trial_errors'])} trials failed extraction and have no cohorts", flush=True)
-    cohorts = pd.read_parquet(extraction / "cohorts.parquet")
+    cohorts = pd.read_parquet(extraction / args.cohorts_file)
     trials = pd.read_parquet(extraction / "trials.parquet")
     splits = read_clinical_csv(args.splits_from, usecols=["nct_id", "split"])
     frame = build(cohorts, trials, splits)
@@ -76,7 +77,7 @@ def main(args):
         "output": str(args.output.resolve()), "output_stamp": file_stamp(args.output),
         "batch_dir": str(args.batch_dir.resolve()),
         "sources": {name: {"path": str((extraction / name).resolve()), "stamp": file_stamp(extraction / name)}
-                    for name in ("cohorts.parquet", "trials.parquet", "run_metadata.json")},
+                    for name in (args.cohorts_file, "trials.parquet", "run_metadata.json")},
         "splits_from": {"path": str(args.splits_from.resolve()), "stamp": file_stamp(args.splits_from)},
         "training_commit": commit, "trial_representation": REPRESENTATION,
         "cohort_criteria_source": "protocol",
@@ -97,6 +98,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--batch-dir", type=Path, required=True, help="A generate_batch.py output directory")
     parser.add_argument("--extraction-dir", type=Path, help="extract_cohorts.py output; default <batch-dir>/cohort_extraction")
+    parser.add_argument("--cohorts-file", default="cohorts_deboilerplated.parquet",
+                        help="Cohort table in the extraction dir; default the merged cohorts with boilerplate removed")
     parser.add_argument("--output", type=Path, required=True, help="Generation input CSV to write")
     parser.add_argument("--splits-from", type=Path, default=DATA / "sample_trial_cohort_lineitems.csv",
                         help="Registry cohort sample whose nct_id/split columns give each trial's source split")

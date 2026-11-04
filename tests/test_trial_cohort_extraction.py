@@ -27,12 +27,20 @@ def single(criteria, name='All participants'):
                 cohorts=[dict(cohort_name=name, eligibility_criteria=criteria)])
 
 
+def quoted(text, prompt):
+    """Whether a rendered prompt holds the text (its string form escapes line breaks)."""
+    return text in prompt or json.dumps(text)[1:-1] in prompt
+
+
 def step_answer(prompt, decision, fence, groups=None):
     """One step's answer derived from a trial's stepwise decision; a string answers every step as is."""
     if isinstance(decision, str):
         return decision
     if 'Group the cohorts whose eligibility criteria are essentially the same' in prompt:
         answer = dict(groups=groups or [[i + 1] for i in range(len(decision['cohorts']))])
+    elif 'Remove the boilerplate criteria from this cohort' in prompt:
+        criteria = next(c['eligibility_criteria'] for c in decision['cohorts'] if quoted(c['eligibility_criteria'], prompt))
+        answer = dict(eligibility_criteria='\n'.join(line for line in criteria.split('\n') if 'consent' not in line.lower()))
     elif 'Decide whether this trial evaluates a cancer treatment' in prompt:
         answer = dict(cancer_treatment_trial=decision['cancer_treatment_trial'])
     elif 'List the cohorts it defines' in prompt:
@@ -48,8 +56,9 @@ def step_answer(prompt, decision, fence, groups=None):
 def backend(monkeypatch):
     """Answers each prompt of a call from the decision keyed by a title it contains (``fence``: fenced JSON).
 
-    A merge prompt holds only cohort criteria, so its trial is found by its first cohort's criteria;
-    ``outputs['merge:<title>']`` gives its groups (default: every cohort kept).
+    Merge and boilerplate prompts hold only cohort criteria, so their trial is found by a cohort's
+    criteria; ``outputs['merge:<title>']`` gives its groups (default: every cohort kept). The boilerplate
+    step drops the criteria lines that mention consent.
     """
     monkeypatch.syspath_prepend(str(extract.ROOT.parent / 'matchminer-ai-inference-kehl/src'))
     import matchminer_ai.trials.cohorts as api
@@ -62,15 +71,16 @@ def backend(monkeypatch):
         def trial(prompt):
             titles = [title for title in outputs if title != 'fence' and not title.startswith('merge:')]
             found = next((title for title in titles if title in prompt), None)
-            return found or next(title for title in titles if isinstance(outputs[title], dict) and outputs[title].get('cohorts')
-                                 and outputs[title]['cohorts'][0]['eligibility_criteria'].split('\n')[0] in prompt)
+            return found or next(title for title in titles if isinstance(outputs[title], dict) and any(
+                quoted(c['eligibility_criteria'], prompt) for c in outputs[title].get('cohorts', [])))
         answers = [step_answer(str(prompt), outputs[trial(str(prompt))], outputs.get('fence', False),
                                outputs.get(f'merge:{trial(str(prompt))}')) for prompt in kwargs['prompt_list']]
         return SimpleNamespace(final_outputs=answers, reasoning_outputs=['Reasoning trace'] * len(answers),
             finish_reasons=['stop'] * len(answers), model_metadata={'responses': [
                 dict(row_idx=i, endpoint='http://fake/v1', model_root='test-checkpoint') for i in range(len(answers))]})
     import matchminer_ai.trials.cohort_merge as merge_api
-    for module in (api, merge_api):
+    import matchminer_ai.trials.cohort_boilerplate as boilerplate_api
+    for module in (api, merge_api, boilerplate_api):
         monkeypatch.setattr(module, 'get_llm_backend', lambda config: SimpleNamespace(generate_llm_outputs=generate))
     return outputs, calls
 
@@ -92,7 +102,7 @@ def test_extraction_csv_preserves_literal_none_as_original_eligibility(tmp_path,
     row['eligibility_criteria'] = 'None'
     pd.DataFrame([row]).to_csv(args.input, index=False)
     extract.run(args, extract.make_config(args))
-    assert len(calls) == 3  # screen, cohort names, the one cohort's criteria
+    assert len(calls) == 4  # screen, cohort names, the one cohort's criteria, its boilerplate removal
     assert read_clinical_csv(args.output_cohorts).cohort_eligibility_criteria.tolist() == ['None']
     assert read_clinical_csv(args.output_trials).eligibility_criteria.tolist() == ['None']
 
@@ -133,8 +143,8 @@ def test_public_api_stepwise_decisions_complete_rows_and_resume(tmp_path, backen
     assert config.trial['remote']['extra_body']['top_k'] == 64
     extract.run(args, config)
     # Screens for all three; cohort names for the two accepted; one criteria call each (both cohorts in one);
-    # one merge call for the two-cohort trial.
-    assert len(calls) == 8
+    # one merge call for the two-cohort trial; one boilerplate call for each accepted trial.
+    assert len(calls) == 10
     rows, audit = pd.read_csv(args.output_cohorts), pd.read_csv(args.output_trials)
     validate_cohort_rows(rows)
     assert len(rows) == 3 and len(audit) == 3
@@ -157,7 +167,7 @@ def test_public_api_stepwise_decisions_complete_rows_and_resume(tmp_path, backen
     assert record['metadata']['trial_cohort_names']['NCT00000003'] == ['Cohort A', 'Cohort B']
     assert record['merge']['trial_groups'] == {'NCT00000003': [[0], [1]]}
     extract.run(args, config)
-    assert len(calls) == 8
+    assert len(calls) == 10
     config.trial['remote']['request_params']['temperature'] = .5
     with pytest.raises(ValueError, match='fresh --work-dir'):
         extract.run(args, config)
@@ -177,15 +187,15 @@ def test_failure_is_not_rejection_or_sampleable_output_and_only_failed_trial_ret
     assert len(calls) == 4  # Valid trial's screen once; three screening attempts for the invalid one.
     answers['Trial 2'] = single('Adults.')
     extract.run(args, config)
-    assert len(calls) == 7  # Only the failed trial reruns: screen, names, criteria.
+    assert len(calls) == 8  # Only the failed trial reruns: screen, names, criteria, boilerplate removal.
     assert pd.read_csv(args.output_cohorts).nct_id.tolist() == ['NCT00000002']
 
 
 
-def test_cohorts_with_essentially_the_same_criteria_are_combined_for_training(tmp_path, backend):
+def test_cohorts_are_combined_then_cleared_of_boilerplate_for_training(tmp_path, backend):
     answers, calls = backend
     decision = dict(cancer_treatment_trial='yes', multiple_cohorts='yes', cohorts=[
-        dict(cohort_name='Arm A', eligibility_criteria='Adults with treated lung cancer.'),
+        dict(cohort_name='Arm A', eligibility_criteria='Adults with treated lung cancer.\nSigned informed consent.'),
         dict(cohort_name='Arm B', eligibility_criteria='Adults with treated lung cancer; same population.'),
         dict(cohort_name='Arm C', eligibility_criteria='Children with untreated sarcoma.')])
     answers.update({'Trial 1': decision, 'merge:Trial 1': [[1, 2], [3]]})
@@ -194,12 +204,20 @@ def test_cohorts_with_essentially_the_same_criteria_are_combined_for_training(tm
     extract.run(args, extract.make_config(args))
     rows = pd.read_csv(args.output_cohorts)
     assert rows.cohort_name.tolist() == ['Arm A; Arm B', 'Arm C'] and rows.cohort_count.tolist() == [2, 2]
-    assert rows.cohort_eligibility_criteria.tolist() == ['Adults with treated lung cancer.', 'Children with untreated sarcoma.']
+    assert rows.cohort_eligibility_criteria.tolist() == ['Adults with treated lung cancer.\nSigned informed consent.',
+                                                         'Children with untreated sarcoma.']
     assert rows.merged_from.tolist() == ['[0, 1]', '[2]']
     validate_cohort_rows(rows)
+    # The merged rows again with boilerplate removed: what training's retrieval reads.
+    clean = pd.read_csv(tmp_path / 'cohorts_deboilerplated.csv')
+    assert clean.drop(columns='cohort_eligibility_criteria').equals(rows.drop(columns='cohort_eligibility_criteria'))
+    assert clean.cohort_eligibility_criteria.tolist() == ['Adults with treated lung cancer.', 'Children with untreated sarcoma.']
+    validate_cohort_rows(clean)
     with gzip.open(tmp_path / 'checkpoints/NCT00000001.json.gz', 'rt') as stream:
         record = json.load(stream)
     assert len(record['unmerged_cohort_rows']) == 3 and record['result']['cohorts'] == decision['cohorts']
+    saved = record['deboilerplate']['cohorts']
+    assert [c['cohort_number'] for c in saved] == [0, 1] and saved[0]['attempts'][0]['reasoning'] == 'Reasoning trace'
     before = pd.read_csv(tmp_path / 'cohorts_unmerged.csv')
     assert before.cohort_name.tolist() == ['Arm A', 'Arm B', 'Arm C'] and before.cohort_count.tolist() == [3, 3, 3]
     assert 'merged_from' not in before

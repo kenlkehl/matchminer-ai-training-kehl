@@ -9,7 +9,7 @@ both versions go through the inference package's three-step workflow with the
 same prompts: a cancer-treatment screen, the cohort names, and one request per
 cohort for its complete criteria (schema `trial-cohorts-stepwise-v1`, rows
 `trial-treatment-cohorts-v5`); a listing is its title, brief summary and
-eligibility criteria as one document. Mining represents each trial by one
+eligibility criteria as one document. Since November 4 (user instruction) the criteria step copies every criterion verbatim, boilerplate included; training then merges each trial's equivalent cohorts (the merge ignores differences of extraction) and removes the boilerplate from each merged cohort with a separate prompt (`remove_boilerplate_criteria`). Registry listings get the same steps as protocols, and everything training consumes (patient seeds, retrieval, labeling) uses the boilerplate-removed cohorts of both versions (option 2, user, November 4); both steps are optional at inference and keep their reasoning. Mining represents each trial by one
 version: chosen at random per patient-trial pair within each patient's 500-trial
 sample (each mining round redraws that sample and those versions, user
 instruction November 2; round 1 keeps its original draws), and per trial for

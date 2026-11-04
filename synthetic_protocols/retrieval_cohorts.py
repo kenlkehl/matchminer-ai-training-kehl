@@ -5,7 +5,9 @@ of others, so retrieval and labeling see both representations of a trial: the
 cohorts extracted from its synthetic protocol (extract_cohorts.py, via
 patient_cohorts.py) and the cohorts extracted from the registry record that
 protocol was written from (0b_extract_trial_cohorts.py --trials-jsonl on the
-batch's seeds.jsonl). Both use the same prompt rules and response contract.
+batch's seeds.jsonl). Both use the same prompt rules and response contract, and
+the same training steps after extraction: merged, then boilerplate removed (the
+generation table and 0b's --output-deboilerplated-cohorts).
 Patients are generated from the protocol cohorts only.
 
 The output keeps every protocol row unchanged (cohort_criteria_source

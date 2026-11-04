@@ -186,6 +186,11 @@ def unmerged(cohorts_csv):
     return cohorts_csv and cohorts_csv.with_name(f'{cohorts_csv.stem}_unmerged{cohorts_csv.suffix}')
 
 
+def deboilerplated(cohorts_csv):
+    """0b_extract_trial_cohorts.py's export of the merged cohort rows with boilerplate removed."""
+    return cohorts_csv and cohorts_csv.with_name(f'{cohorts_csv.stem}_deboilerplated{cohorts_csv.suffix}')
+
+
 def build_plan(args):
     if STAGES.index(args.start_at) > STAGES.index(args.stop_after):
         raise ValueError('--start-at must precede --stop-after')
@@ -209,6 +214,7 @@ def build_plan(args):
                   '--output-trials', str(d / 'trials_with_cohorts.csv'), '--output-cohorts', str(args.trial_spaces),
                   '--output-json', str(d / 'trial_cohorts.json'), '--work-dir', str(work / 'extraction'),
                   '--output-unmerged-cohorts', str(unmerged(args.trial_spaces)),
+                  '--output-deboilerplated-cohorts', str(deboilerplated(args.trial_spaces)),
                   '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
                   '--max-attempts', str(args.cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
                   '--max_concurrent_per_server', str(args.generation_concurrency_per_server),
@@ -221,10 +227,12 @@ def build_plan(args):
     registry_cohorts = d / 'registry_cohorts'
     # Merged rows (used downstream), audit, decisions, then the rows before merging.
     registry_rows = [registry_cohorts / 'trial_cohort_lineitems.csv', registry_cohorts / 'trials_with_cohorts.csv',
-                     registry_cohorts / 'trial_cohorts.json', unmerged(registry_cohorts / 'trial_cohort_lineitems.csv')]
+                     registry_cohorts / 'trial_cohorts.json', unmerged(registry_cohorts / 'trial_cohort_lineitems.csv'),
+                     deboilerplated(registry_cohorts / 'trial_cohort_lineitems.csv')]
     registry_extraction = [py, str(ROOT / '0b_extract_trial_cohorts.py'), '--trials-jsonl', str(batch / 'seeds.jsonl'),
                   '--output-trials', str(registry_rows[1]), '--output-cohorts', str(registry_rows[0]),
                   '--output-json', str(registry_rows[2]), '--output-unmerged-cohorts', str(registry_rows[3]),
+                  '--output-deboilerplated-cohorts', str(registry_rows[4]),
                   '--work-dir', str(work / 'registry_extraction'),
                   '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
                   '--max-attempts', str(args.registry_cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
@@ -239,7 +247,8 @@ def build_plan(args):
                               '--output', str(args.parsed_trials)],
               [args.ctgov_json] if args.ctgov_json else [], [args.parsed_trials], source('0a_parse_ctgov_json.py', 'ctgov_metadata.py')),
         Stage('extract-cohorts', extraction, [args.parsed_trials],
-              [args.trial_spaces, d / 'trials_with_cohorts.csv', d / 'trial_cohorts.json', unmerged(args.trial_spaces)],
+              [args.trial_spaces, d / 'trials_with_cohorts.csv', d / 'trial_cohorts.json', unmerged(args.trial_spaces),
+               deboilerplated(args.trial_spaces)],
               source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') + package),
         Stage('sample-trials', [py, str(ROOT / '0c_sample_trial_spaces.py'), '--input-csv', str(args.trial_spaces),
               '--output-csv', str(args.registry_sample), '--dfci-trials-csv', str(args.dfci_trials_csv),
@@ -258,7 +267,7 @@ def build_plan(args):
               '--max-tokens', str(args.cohort_max_tokens), '--allow-failures', *pool],
               [batch / 'seeds.jsonl', batch / 'protocols.csv'],
               [extracted / 'cohorts.parquet', extracted / 'trials.parquet', extracted / 'run_metadata.json',
-               extracted / 'cohorts_unmerged.parquet'],
+               extracted / 'cohorts_unmerged.parquet', extracted / 'cohorts_deboilerplated.parquet'],
               source('synthetic_protocols/extract_cohorts.py') + package),
         # The same trials from the registry records their protocols were written
         # from, with the registry prompt that follows the protocol prompt's rules.
@@ -267,14 +276,14 @@ def build_plan(args):
         Stage('generation-cohorts', [py, str(ROOT / 'synthetic_protocols/patient_cohorts.py'), '--batch-dir', str(batch),
               '--extraction-dir', str(extracted), '--output', str(args.sampled_spaces),
               '--splits-from', str(args.registry_sample)],
-              [extracted / 'cohorts.parquet', extracted / 'trials.parquet', args.registry_sample],
+              [extracted / 'cohorts_deboilerplated.parquet', extracted / 'trials.parquet', args.registry_sample],
               [args.sampled_spaces, Path(f'{args.sampled_spaces}.provenance.json')],
               source('synthetic_protocols/patient_cohorts.py', 'trial_cohort_format.py')),
         Stage('retrieval-cohorts', [py, str(ROOT / 'synthetic_protocols/retrieval_cohorts.py'),
-              '--protocol-cohorts', str(args.sampled_spaces), '--registry-cohorts', str(registry_rows[0]),
+              '--protocol-cohorts', str(args.sampled_spaces), '--registry-cohorts', str(registry_rows[4]),
               '--registry-trials', str(registry_rows[1]), '--output', str(args.retrieval_cohorts),
               '--splits-from', str(args.registry_sample)],
-              [args.sampled_spaces, registry_rows[0], registry_rows[1], args.registry_sample],
+              [args.sampled_spaces, registry_rows[4], registry_rows[1], args.registry_sample],
               [args.retrieval_cohorts, Path(f'{args.retrieval_cohorts}.provenance.json')],
               source('synthetic_protocols/retrieval_cohorts.py', 'trial_cohort_format.py')),
         Stage('generate-synthetic', [py, str(ROOT / 'generate_synthetic_data.py'), '--input-csv', str(args.sampled_spaces),
