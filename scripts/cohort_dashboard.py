@@ -200,6 +200,25 @@ class Collection:
             items.append({"text": line, "heading": heading, "matches": [] if heading else found.find(line)})
         return items
 
+    FOLD = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2212": "-", "\u2013": "-",
+                          "\u2014": "-", "\u00a0": " "})
+
+    @classmethod
+    def placed(cls, output):
+        """Whether a line of the merged criteria survives in the step's output: the same line apart from quotes,
+        dashes and spacing, or at least 90% of its words in output lines that are pieces of it (a split criterion)."""
+        fold = lambda line: re.sub(r"\s+", " ", line.translate(cls.FOLD)).strip().casefold()
+        lines = [line for line in output.split("\n") if line.strip()]
+        same, words = {fold(line) for line in lines}, [set(tokens(line)) for line in lines]
+
+        def check(line):
+            want = set(tokens(line))
+            if fold(line) in same or not want or re.match(r"^\s*(inclusion|exclusion)( criteria)?\s*:?\s*$", line, re.I):
+                return True  # a label may be left out when nothing remains under it
+            pieces = set().union(*(w for w in words if w and len(w & want) >= 0.6 * len(w)))
+            return len(want & pieces) >= 0.9 * len(want)
+        return check
+
     def clean(self, record, found, steps):
         """The merged cohorts with boilerplate removed (deboilerplate.json), or None when that step has not run.
 
@@ -221,8 +240,12 @@ class Collection:
             current = entry.get("input_sha256") == hashlib.sha256(json.dumps([name, original]).encode()).hexdigest()
             text = entry.get("eligibility_criteria") if current else None
             boilerplate = entry.get("boilerplate_criteria") if current else None
-            placed = {norm(line) for line in (text or "").split("\n") + (boilerplate or "").split("\n")}
-            left = [line for line in original.split("\n") if line.strip() and norm(line) not in placed] if text else []
+            if boilerplate is None:  # schema v1: the lines removed or changed
+                kept = {norm(line) for line in (text or "").split("\n")}
+                left = [line for line in original.split("\n") if line.strip() and norm(line) not in kept] if text else []
+            else:
+                placed = self.placed(text + "\n" + boilerplate)
+                left = [line for line in original.split("\n") if line.strip() and not placed(line)]
             clean.append({"number": number, "name": name, "group": group,
                           "criteria": self.items(text, found) if text else [],
                           "boilerplate": self.items(boilerplate, found) if boilerplate is not None and text else None,
@@ -837,7 +860,7 @@ function renderCohorts() {
         (c.boilerplate && !c.error ? '<div class="boiler"><h4>Boilerplate criteria</h4>' + (c.boilerplate.length ?
            '<div class="cov">' + coverage(c.boilerplate) + "</div>" + critList(c.boilerplate, c.ci, "boiler") : '<div class="cov">None.</div>') + "</div>" : "") +
         (c.unplaced && c.unplaced.length ? '<div class="unplaced"><strong>' + c.unplaced.length + " line" + (c.unplaced.length === 1 ? "" : "s") +
-           " of the merged criteria in neither list</strong> (dropped or reworded by the boilerplate step):<ul class=\"crit\">" +
+           " of the merged criteria not found in either list</strong> (dropped or substantially reworded by the boilerplate step):<ul class=\"crit\">" +
            c.unplaced.map(function (line) { return "<li>" + esc(line) + "</li>"; }).join("") + "</ul></div>" : "") +
         (!c.removed || c.error ? "" : !c.removed.length ? '<div class="cov">No line removed or changed by the boilerplate step.</div>' :
          '<details class="removed"><summary>Removed or changed by the boilerplate step (' + c.removed.length + " line" + (c.removed.length === 1 ? "" : "s") +
