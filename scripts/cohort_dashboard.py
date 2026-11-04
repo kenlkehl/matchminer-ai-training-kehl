@@ -18,6 +18,7 @@ machine, forward the port (ssh -L 8770:localhost:8770 camus).
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import csv
+from functools import lru_cache
 import gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -139,8 +140,8 @@ class Collection:
     def detail(self, trial, source):
         record = self.record(trial, source, self.context())
         text = self.document(trial, source, record)
-        lines = text.split("\n")
-        matcher = Matcher(lines)
+        found = matcher(text)
+        lines = found.lines
         steps = []
         attempts = record.get("attempts") or {}
         for step in ("screen", "list"):
@@ -157,7 +158,7 @@ class Collection:
                 if not line.strip():
                     continue
                 heading = bool(re.match(r"^\s*(inclusion|exclusion)( criteria)?\s*:?\s*$", line, re.I)) or line.rstrip().endswith(":") and len(line) < 80
-                items.append({"text": line, "heading": heading, "matches": [] if heading else matcher.find(line)})
+                items.append({"text": line, "heading": heading, "matches": [] if heading else found.find(line)})
             cohorts.append({"number": number, "name": cohort["cohort_name"], "criteria": items})
         return {"id": trial, "source": source, **self.info(trial), "status": record["status"],
                 "error": record.get("error"), "lines": lines, "outline": self.outline(lines, source)[:600],
@@ -186,7 +187,7 @@ class PipelineRun(Collection):
         self.batch = batch_dir or option(protocol, "--batch-dir") or (option(registry, "--trials-jsonl") or Path()).parent
         self.protocol_dir = protocol_dir or option(protocol, "--output-dir") or self.batch / "cohort_extraction"
         self.registry_dir = registry_dir or option(registry, "--work-dir") or run_dir / "upstream" / "registry_extraction"
-        self.seeds = {}
+        self.seeds, self.failed = {}, (None, {})
         for line in (self.batch / "seeds.jsonl").read_text().splitlines():
             if line.strip():
                 seed = json.loads(line)
@@ -203,12 +204,16 @@ class PipelineRun(Collection):
         return d / "extraction.json", d / "merge.json", self.registry_dir / "checkpoints" / f"{nct}.json.gz"
 
     def context(self):
+        """Failed protocols from the export's trials.csv, read again only when the file changes."""
         path = self.protocol_dir / "trials.csv"
-        if not path.exists():
+        stamp = mtime(path)
+        if stamp is None:
             return {}
-        with path.open(newline="") as stream:
-            return {row["trial_id"]: row.get("extraction_error") or "failed every attempt"
-                    for row in csv.DictReader(stream) if row.get("extraction_status") == "failed"}
+        if self.failed[0] != stamp:
+            with path.open(newline="") as stream:
+                self.failed = (stamp, {row["trial_id"]: row.get("extraction_error") or "failed every attempt"
+                                       for row in csv.DictReader(stream) if row.get("extraction_status") == "failed"})
+        return self.failed[1]
 
     def context_key(self, nct, failed):
         return nct in failed
@@ -304,6 +309,7 @@ class Matcher:
 
     Score: the share of the criterion's word weight found in the run. Ties prefer shorter runs, then runs with
     fewer other words, so a verbatim line beats a longer passage that merely contains the same words.
+    Results are cached per word set: cohorts of one protocol repeat most of their criteria.
     """
 
     def __init__(self, lines):
@@ -320,36 +326,64 @@ class Matcher:
         for k, s in enumerate(self.sets):
             for t in s:
                 self.postings.setdefault(t, []).append(k)
+        self.cache = {}
 
     def find(self, criterion, top=3):
-        words = set(tokens(criterion))
-        if not words:
-            return []
-        weight = {t: self.idf.get(t, math.log(len(self.rows) + 1) + 1) for t in words}
-        total = sum(weight.values())
-        candidates = {k for t in words for k in self.postings.get(t, ())}
-        scored = []
-        for k in candidates:
-            for span in (1, 2, 3):
-                window = set().union(*self.sets[k:k + span])
-                found = window & words
-                score = sum(weight[t] for t in found) / total
-                precision = sum(weight[t] for t in found) / max(1e-9, sum(self.idf[t] for t in window))
-                scored.append((-round(score, 2), span, -round(precision, 3), k, score, found))
-        scored.sort(key=lambda x: x[:4])
-        results, used = [], set()
-        for _, span, _, k, score, found in scored:
-            rows = range(k, min(k + span, len(self.rows)))
-            if any(r in used for r in rows):
+        words = frozenset(tokens(criterion))
+        if (words, top) not in self.cache:
+            self.cache[words, top] = self.search(words, top) if words else []
+        return self.cache[words, top]
+
+    def pick(self, scored, top):
+        """The best runs in score order that share no row."""
+        picked, used = [], set()
+        for entry in sorted(scored, key=lambda x: x[:4]):
+            rows = range(entry[3], min(entry[3] + entry[1], len(self.rows)))
+            if not used.isdisjoint(rows):
                 continue
             used.update(rows)
-            first, last = self.rows[rows[0]], self.rows[rows[-1]]
+            picked.append(entry)
+            if len(picked) == top:
+                break
+        return picked
+
+    def search(self, words, top):
+        weight = {t: self.idf.get(t, math.log(len(self.rows) + 1) + 1) for t in words}
+        total = sum(weight.values())
+        # A run scores at most the sum of its rows' shares, so runs are scored in order of that bound
+        # until no unscored run can round to the third pick's score; the picks equal scoring every run.
+        share = {}
+        for t in words:
+            for k in self.postings.get(t, ()):
+                share[k] = share.get(k, 0.0) + weight[t] / total
+        bounds = sorted(((min(1.0, sum(share.get(j, 0.0) for j in range(k, k + span))), span, k)
+                         for k in share for span in (1, 2, 3)), reverse=True)
+        scored, picked = [], []
+        for at, (bound, span, k) in enumerate(bounds):
+            if at % 64 == 0 and at:
+                picked = self.pick(scored, top)
+                if len(picked) == top and round(bound, 2) < -picked[-1][0]:
+                    break
+            window = set().union(*self.sets[k:k + span])
+            found = window & words
+            score = sum(weight[t] for t in found) / total
+            precision = sum(weight[t] for t in found) / max(1e-9, sum(self.idf[t] for t in window))
+            scored.append((-round(score, 2), span, -round(precision, 3), k, score, found))
+        else:
+            picked = self.pick(scored, top)
+        results = []
+        for _, span, _, k, score, found in picked:
+            first, last = self.rows[k], self.rows[min(k + span, len(self.rows)) - 1]
             marks = {j: [[m.start(), m.end()] for m in TOKEN.finditer(self.lines[j].lower()) if m.group() in found]
                      for j in range(first, last + 1)}
             results.append({"line": first, "end": last, "score": round(score, 3), "marks": marks})
-            if len(results) == top:
-                break
         return results
+
+
+@lru_cache(maxsize=16)
+def matcher(text):
+    """One Matcher per document text, kept across requests so reopening a trial reuses its matches."""
+    return Matcher(text.split("\n"))
 
 
 PAGE = r"""<!doctype html>
@@ -442,6 +476,8 @@ details.steps summary{cursor:pointer;font-weight:600}
 .step .meta{font-size:11px;color:var(--ink2)}
 .step pre{white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;background:var(--page);
  border:1px solid var(--ring);border-radius:5px;padding:6px;font-size:11.5px;margin:4px 0 0}
+#view.loading .panes,#view.loading .trialhead{opacity:.45;transition:opacity .15s}
+#busy{color:var(--ink2);font-size:12px}
 kbd{font:11px ui-monospace,monospace;border:1px solid var(--axis);border-radius:3px;padding:0 4px;color:var(--ink2)}
 .help{color:var(--muted);font-size:11px}
 </style></head>
@@ -452,6 +488,7 @@ kbd{font:11px ui-monospace,monospace;border:1px solid var(--axis);border-radius:
  <div class="tiles" id="tiles"></div>
  <span class="spacer"></span>
  <span class="help"><kbd>j</kbd>/<kbd>k</kbd> next/previous trial · <kbd>/</kbd> search trials · <kbd>p</kbd>/<kbd>r</kbd> protocol/registry</span>
+ <span id="busy" hidden></span>
  <button id="refresh" title="Re-read the run's files (new decisions appear while the run is going)">Refresh</button>
  <select id="theme" title="Theme"><option value="">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select>
 </header>
@@ -581,12 +618,14 @@ function select(id, keepScroll) {
   var el = document.querySelector('.item[data-id="' + id + '"]');
   if (el && !keepScroll) el.scrollIntoView({block: "nearest"});
   var scroll = keepScroll && $("doc") ? $("doc").scrollTop : 0, request = ++state.request;
+  $("view").classList.add("loading"); $("busy").hidden = false; $("busy").textContent = "Loading " + id + "…";
+  function done() { $("view").classList.remove("loading"); $("busy").hidden = true; }
   getJSON("/api/trial?c=" + encodeURIComponent(state.collection) + "&id=" + encodeURIComponent(id) + "&source=" + state.source).then(function (d) {
     if (request !== state.request) return;  // a newer selection is loading
     state.detail = d; state.activeCrit = null; state.searchHits = []; state.searchAt = -1;
     history.replaceState(null, "", "#" + state.collection + "/" + d.id + "/" + d.source);
-    renderDetail(); if (scroll) $("doc").scrollTop = scroll;
-  }).catch(function (e) { $("view").innerHTML = '<div class="notice">' + esc(e) + "</div>"; });
+    renderDetail(); done(); if (scroll) $("doc").scrollTop = scroll;
+  }).catch(function (e) { if (request !== state.request) return; done(); $("view").innerHTML = '<div class="notice">' + esc(e) + "</div>"; });
 }
 function setSource(src) {
   if (state.source !== src && collection().sources.indexOf(src) >= 0) { state.source = src; if (state.id) select(state.id); }
@@ -630,7 +669,8 @@ function renderDetail() {
   }
   $("modeE").onclick = function () { setMode("extracted"); }; $("modeM").onclick = function () { setMode("merged"); };
   $("outline").onchange = function () { if (this.value !== "") jumpTo(+this.value, +this.value); this.value = ""; };
-  $("dq").addEventListener("input", function () { docSearch(this.value); });
+  var typing = null;
+  $("dq").addEventListener("input", function () { var q = this.value; clearTimeout(typing); typing = setTimeout(function () { docSearch(q); }, 250); });
   $("dq").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); stepSearch(e.shiftKey ? -1 : 1); } });
   $("dnext").onclick = function () { stepSearch(1); }; $("dprev").onclick = function () { stepSearch(-1); };
   renderDoc(); renderCohorts();
@@ -696,6 +736,7 @@ function renderCohorts() {
   }
   html += stepsHTML(d);
   box.innerHTML = html;
+  if (!box.dataset.lazy) { box.dataset.lazy = "1"; box.addEventListener("toggle", function (e) { fillStep(e.target); }, true); }
   $("chelp").textContent = d.status === "cohorts" ? "click a criterion to find it in the document" : "";
   Array.prototype.forEach.call(box.querySelectorAll("ul.crit li[data-k]"), function (li) {
     li.onclick = function () { showMatch(+li.dataset.c, +li.dataset.k, li); };
@@ -704,13 +745,18 @@ function renderCohorts() {
 function stepsHTML(d) {
   if (!d.steps.length) return "";
   var html = '<details class="steps"><summary>Model requests (' + d.steps.length + ")</summary>";
-  d.steps.forEach(function (s) {
+  d.steps.forEach(function (s, i) {
     html += '<div class="step"><div class="meta"><strong>' + esc(s.step) + "</strong>" + (s.cohort ? " · " + esc(s.cohort) : "") +
       " · attempt " + esc(s.attempt) + " · finish " + esc(s.finish) + (s.error ? " · validation error: " + esc(s.error) : "") +
-      "</div><details><summary class=\"meta\">answer</summary><pre>" + esc(s.answer || "") + "</pre></details>" +
-      "<details><summary class=\"meta\">reasoning (" + fmt(s.reasoning.length) + " characters)</summary><pre>" + esc(s.reasoning) + "</pre></details></div>";
+      '</div><details data-s="' + i + '" data-f="answer"><summary class="meta">answer</summary><pre></pre></details>' +
+      '<details data-s="' + i + '" data-f="reasoning"><summary class="meta">reasoning (' + fmt(s.reasoning.length) + " characters)</summary><pre></pre></details></div>";
   });
   return html + "</details>";
+}
+function fillStep(el) {  // toggle events do not bubble; capture them on the cohorts pane
+  if (el.dataset && el.dataset.s != null && el.open && !el.dataset.filled) {
+    el.dataset.filled = "1"; el.querySelector("pre").textContent = state.detail.steps[+el.dataset.s][el.dataset.f] || "";
+  }
 }
 function clearHits() {
   Array.prototype.forEach.call(document.querySelectorAll(".ln.hit"), function (el) {
@@ -739,25 +785,35 @@ function showMatch(ci, k, li) {
   jumpTo(m.line, m.end, m.marks);
   $("dcount").textContent = "match " + (state.matchAt + 1) + "/" + it.matches.length + " · covers " + Math.round(m.score * 100) + "% of the line's distinctive words";
 }
+var EAGER_LINES = 1500;
 function docSearch(q) {
-  var d = state.detail; state.searchHits = []; state.searchAt = -1;
+  var d = state.detail; state.searchHits = []; state.searchAt = -1; state.searchMarks = {};
   clearHits();
-  Array.prototype.forEach.call(document.querySelectorAll("#doc mark"), function (m) { var el = m.closest(".ln"); var i = +el.id.slice(1); el.outerHTML = lineHTML(i, d.lines[i]); });
+  Array.prototype.forEach.call(document.querySelectorAll("#doc .ln.found"), function (el) { var i = +el.id.slice(1); el.outerHTML = lineHTML(i, d.lines[i]); });
   if (!q) { $("dcount").textContent = ""; return; }
   var re; try { re = new RegExp(q, "gi"); } catch (e) { $("dcount").textContent = "invalid pattern"; return; }
+  var lines = 0;
   for (var i = 0; i < d.lines.length; i++) {
     var marks = [], m; re.lastIndex = 0;
     while ((m = re.exec(d.lines[i])) && marks.length < 200) { if (!m[0].length) { re.lastIndex++; continue; } marks.push([m.index, m.index + m[0].length]); }
-    if (marks.length) { $("L" + i).outerHTML = lineHTML(i, d.lines[i], marks); marks.forEach(function (_, k) { state.searchHits.push([i, k]); }); }
+    if (marks.length) {
+      state.searchMarks[i] = marks; marks.forEach(function (_, k) { state.searchHits.push([i, k]); });
+      if (++lines <= EAGER_LINES) markLine(i);
+    }
   }
   $("dcount").textContent = state.searchHits.length ? state.searchHits.length + " matches" : "no matches";
   if (state.searchHits.length) stepSearch(1);
+}
+function markLine(i) {
+  var el = $("L" + i);
+  if (el && !el.classList.contains("found")) { el.outerHTML = lineHTML(i, state.detail.lines[i], state.searchMarks[i]); $("L" + i).classList.add("found"); }
 }
 function stepSearch(dir) {
   if (!state.searchHits.length) return;
   var cur = document.querySelector("#doc mark.cur"); if (cur) cur.classList.remove("cur");
   state.searchAt = (state.searchAt + dir + state.searchHits.length) % state.searchHits.length;
-  var hit = state.searchHits[state.searchAt], mark = $("L" + hit[0]).querySelectorAll("mark")[hit[1]];
+  var hit = state.searchHits[state.searchAt]; markLine(hit[0]);
+  var mark = $("L" + hit[0]).querySelectorAll("mark")[hit[1]];
   if (mark) { mark.classList.add("cur"); mark.scrollIntoView({block: "center"}); }
   $("dcount").textContent = (state.searchAt + 1) + "/" + state.searchHits.length;
 }
