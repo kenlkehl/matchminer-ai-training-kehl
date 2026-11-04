@@ -102,7 +102,8 @@ step 7 is now generating patients from its cohorts.
    every trial.
 7. **Patient seeds, event histories, notes and summaries.** `generate-synthetic`
    (`generate_synthetic_data.py`) writes five positive and five near-miss
-   patient seeds per cohort from the cohort's eligibility criteria alone, then
+   patient seeds per cohort from the cohort's eligibility criteria alone (the
+   merged protocol cohort's criteria, boilerplate included), then
    event histories, then notes; then `prepare-notes`, `summarize-patients`
    (serial summaries) and `prepare-training`. The default model is the teacher,
    `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`. The last completed run used the registry
@@ -138,7 +139,7 @@ default range is `train` only.
 | `synthetic-protocols` | `synthetic_protocols/generate_batch.py` | `synthetic_protocols/` (`seeds.jsonl`, `protocols/<NCT>/protocol.md`, `protocols.csv`) |
 | `protocol-cohorts` | `synthetic_protocols/extract_cohorts.py` | `synthetic_protocols/cohort_extraction/` or `--protocol-cohort-dir` (`cohorts.parquet` merged, `cohorts_unmerged.parquet`, `trials.parquet`) |
 | `registry-cohorts` | `0b_extract_trial_cohorts.py --trials-jsonl` (the protocol seeds) | `registry_cohorts/` (`trial_cohort_lineitems.csv` merged, `trial_cohort_lineitems_unmerged.csv`, `trials_with_cohorts.csv`, `trial_cohorts.json`) |
-| `generation-cohorts` | `synthetic_protocols/patient_cohorts.py` | `synthetic_generation/sample_trial_cohort_lineitems.csv` (protocol cohorts for patient generation) + `.provenance.json` |
+| `generation-cohorts` | `synthetic_protocols/patient_cohorts.py` | `synthetic_generation/sample_trial_cohort_lineitems.csv` (merged protocol cohorts, boilerplate included, for patient generation) and `sample_trial_cohort_lineitems_deboilerplated.csv` (the same cohorts with boilerplate removed, for retrieval), each + `.provenance.json` |
 | `retrieval-cohorts` | `synthetic_protocols/retrieval_cohorts.py` | `retrieval_cohorts.csv` (both versions of every trial) + `.provenance.json` |
 | `generate-synthetic` | `generate_synthetic_data.py` | `synthetic_generation/all_synthetic_events.parquet`, `all_synthetic_notes.parquet`, `manifest.json` |
 | `prepare-notes` | `prepare_synthetic_training.py notes` | `all_synthetic_notes.parquet`, `synthetic_patient_metadata.parquet` |

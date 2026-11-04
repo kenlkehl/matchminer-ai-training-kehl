@@ -148,11 +148,11 @@ cohort_extraction/
                          included), with provenance
   cohorts.parquet, .csv  one row per cohort after merging those with essentially the
                          same criteria (merged_from: the extracted cohort numbers),
-                         boilerplate included, with provenance
+                         boilerplate included (they seed patients), with provenance
   cohorts_deboilerplated.parquet, .csv
                          the merged cohorts with their boilerplate criteria separated:
                          cohort_eligibility_criteria holds the criteria that are not
-                         boilerplate (they seed patients), cohort_boilerplate_criteria the
+                         boilerplate (retrieval's protocol version), cohort_boilerplate_criteria the
                          boilerplate (consent, compliance, samples/tissue/biopsy, measurable
                          or evaluable disease, prognosis, performance status, organ
                          function, brain metastases, toxicities of earlier treatment,
@@ -185,10 +185,12 @@ Each row in `cohorts` and `trials` carries its provenance:
 ```bash
 python -I synthetic_protocols/patient_cohorts.py --batch-dir "$B" \
   --extraction-dir "$B/cohort_extraction_v2" \
-  --output ../data/no_phi/<generation-run>/sample_trial_cohort_lineitems.csv
+  --output ../data/no_phi/<generation-run>/sample_trial_cohort_lineitems.csv \
+  --retrieval-output ../data/no_phi/<generation-run>/sample_trial_cohort_lineitems_deboilerplated.csv
 ```
 
-`patient_cohorts.py` turns an extraction's `cohorts_deboilerplated.parquet` (`--cohorts-file`;
+`patient_cohorts.py` turns an extraction's `cohorts.parquet` (the merged cohorts with all
+their criteria, boilerplate included, since 2026-11-04 by user instruction; `--cohorts-file`;
 `--extraction-dir`, default `<batch-dir>/cohort_extraction/`) into the cohort
 table that `generate_synthetic_data.py` (`run_pipeline.py --sampled-cohorts`)
 reads: accepted cohorts in seed order with a contiguous `cohort_index`, each
@@ -200,6 +202,9 @@ and every provenance column. Single-cohort rows keep `cohort_criteria_source`
 `registry_eligibility_criteria`. The script checks that the generator's own
 adapter reproduces the extracted criteria exactly, and writes
 `<output>.provenance.json` (source stamps, counts, failures, prompt hashes).
+`--retrieval-output` also writes the same rows, in the same order with the same
+`cohort_index`, from `cohorts_deboilerplated.parquet` (`--deboilerplated-file`), with its
+own receipt: the protocol version that `retrieval_cohorts.py` reads.
 
 ## In the training pipeline
 
@@ -232,8 +237,10 @@ same two follow-on steps as protocols: the merge, then the boilerplate step, whi
 classifies each line of a merged cohort's criteria in its own request and sorts the
 unchanged lines in code (since 2026-11-04, user instruction; the model never copies
 the criteria). Retrieval and labeling read both
-versions with boilerplate removed (`--output-deboilerplated-cohorts` beside the
-generation table, which comes from `cohorts_deboilerplated.parquet`). Earlier runs used
+versions with boilerplate removed (`--output-deboilerplated-cohorts`, and
+`patient_cohorts.py --retrieval-output` beside the generation table, from
+`cohorts_deboilerplated.parquet`), while patients are seeded from the merged cohorts with all
+their criteria (user, 2026-11-04). Earlier runs used
 the single-request registry prompt (`trial.cohorts.user.txt`, schema
 `trial-registry-cohorts-v1`):
 
@@ -246,7 +253,7 @@ python 0b_extract_trial_cohorts.py --trials-jsonl "$B/seeds.jsonl" \
   --model <served alias> --tokenizer-model <model or tokenizer path> --server-urls-file <servers.json> \
   --max-attempts 5 --allow-failures
 python -I synthetic_protocols/retrieval_cohorts.py \
-  --protocol-cohorts <generation-run>/sample_trial_cohort_lineitems.csv \
+  --protocol-cohorts <generation-run>/sample_trial_cohort_lineitems_deboilerplated.csv \
   --registry-cohorts <run>/registry_cohorts/trial_cohort_lineitems_deboilerplated.csv \
   --registry-trials <run>/registry_cohorts/trials_with_cohorts.csv --output <run>/retrieval_cohorts.csv
 ```

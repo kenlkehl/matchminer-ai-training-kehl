@@ -1,15 +1,18 @@
 """Turn a synthetic protocol batch's extracted cohorts into the patient-generation cohort table.
 
-Reads cohorts_deboilerplated.parquet (the merged cohorts with their boilerplate criteria
-removed; --cohorts-file) and trials.parquet from an extract_cohorts.py output directory
-(--extraction-dir, default <batch-dir>/cohort_extraction)
+Reads cohorts.parquet (the merged cohorts with all their criteria, boilerplate included;
+--cohorts-file; user, 2026-11-04) and trials.parquet from an extract_cohorts.py output
+directory (--extraction-dir, default <batch-dir>/cohort_extraction)
 and writes a CSV that generate_synthetic_data.py (run_pipeline.py --sampled-cohorts)
 accepts: the accepted cancer-treatment cohorts in seed order with a contiguous
 cohort_index, each trial's source split copied from the registry sample it was
 seeded from, and every provenance column kept. Cohort criteria come from the
 synthetic protocol; the original registry criteria stay in
-registry_eligibility_criteria and are never used as cohort criteria. A
-<output>.provenance.json receipt records the sources. See synthetic_protocols/README.md.
+registry_eligibility_criteria and are never used as cohort criteria. --retrieval-output
+also writes the same rows from cohorts_deboilerplated.parquet (--deboilerplated-file: the
+merged cohorts with their boilerplate criteria removed), the protocol version that
+retrieval_cohorts.py reads. A <output>.provenance.json receipt beside each output records
+its sources. See synthetic_protocols/README.md.
 """
 import argparse
 from datetime import datetime, timezone
@@ -62,22 +65,32 @@ def main(args):
     metadata = json.loads((extraction / "run_metadata.json").read_text())
     if metadata["trial_errors"]:
         print(f"note: {len(metadata['trial_errors'])} trials failed extraction and have no cohorts", flush=True)
-    cohorts = pd.read_parquet(extraction / args.cohorts_file)
     trials = pd.read_parquet(extraction / "trials.parquet")
     splits = read_clinical_csv(args.splits_from, usecols=["nct_id", "split"])
-    frame = build(cohorts, trials, splits)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = args.output.with_name(f".{args.output.name}.{os.getpid()}.tmp")
-    frame.to_csv(temporary, index=False)
-    temporary.replace(args.output)
+    frame = build(pd.read_parquet(extraction / args.cohorts_file), trials, splits)
+    outputs = [(args.output, args.cohorts_file, frame)]
+    if args.retrieval_output:
+        clean = build(pd.read_parquet(extraction / args.deboilerplated_file), trials, splits)
+        if not clean.cohort_trial_id.equals(frame.cohort_trial_id):
+            raise ValueError("The de-boilerplated cohorts are not the generation cohorts")
+        outputs.append((args.retrieval_output, args.deboilerplated_file, clean))
     commit = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[1]), "rev-parse", "HEAD"],
                             capture_output=True, text=True).stdout.strip() or None
+    for output, cohorts_file, table in outputs:
+        write(output, cohorts_file, table, extraction, metadata, commit, args)
+
+
+def write(output, cohorts_file, frame, extraction, metadata, commit, args):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
+    frame.to_csv(temporary, index=False)
+    temporary.replace(output)
     receipt = {
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "output": str(args.output.resolve()), "output_stamp": file_stamp(args.output),
-        "batch_dir": str(args.batch_dir.resolve()),
+        "output": str(output.resolve()), "output_stamp": file_stamp(output),
+        "batch_dir": str(args.batch_dir.resolve()), "cohorts_file": cohorts_file,
         "sources": {name: {"path": str((extraction / name).resolve()), "stamp": file_stamp(extraction / name)}
-                    for name in (args.cohorts_file, "trials.parquet", "run_metadata.json")},
+                    for name in (cohorts_file, "trials.parquet", "run_metadata.json")},
         "splits_from": {"path": str(args.splits_from.resolve()), "stamp": file_stamp(args.splits_from)},
         "training_commit": commit, "trial_representation": REPRESENTATION,
         "cohort_criteria_source": "protocol",
@@ -90,17 +103,21 @@ def main(args):
         "synthetic_prompt_sha256": metadata["synthetic_prompt_sha256"],
         "extraction_prompt_sha256": metadata["prompt_sha256"], "extraction_schema_version": metadata["schema_version"],
     }
-    Path(f"{args.output}.provenance.json").write_text(json.dumps(receipt, indent=2, default=str))
-    print(f"wrote {len(frame)} cohorts from {receipt['trials']} trials to {args.output}", flush=True)
+    Path(f"{output}.provenance.json").write_text(json.dumps(receipt, indent=2, default=str))
+    print(f"wrote {len(frame)} cohorts from {receipt['trials']} trials ({cohorts_file}) to {output}", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--batch-dir", type=Path, required=True, help="A generate_batch.py output directory")
     parser.add_argument("--extraction-dir", type=Path, help="extract_cohorts.py output; default <batch-dir>/cohort_extraction")
-    parser.add_argument("--cohorts-file", default="cohorts_deboilerplated.parquet",
-                        help="Cohort table in the extraction dir; default the merged cohorts with boilerplate removed")
+    parser.add_argument("--cohorts-file", default="cohorts.parquet",
+                        help="Cohort table that seeds patients; default the merged cohorts, boilerplate included")
+    parser.add_argument("--deboilerplated-file", default="cohorts_deboilerplated.parquet",
+                        help="Cohort table for --retrieval-output; default the merged cohorts with boilerplate removed")
     parser.add_argument("--output", type=Path, required=True, help="Generation input CSV to write")
+    parser.add_argument("--retrieval-output", type=Path,
+                        help="Also write the same cohorts from --deboilerplated-file (retrieval's protocol version)")
     parser.add_argument("--splits-from", type=Path, default=DATA / "sample_trial_cohort_lineitems.csv",
                         help="Registry cohort sample whose nct_id/split columns give each trial's source split")
     main(parser.parse_args())

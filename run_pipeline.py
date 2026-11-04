@@ -187,7 +187,7 @@ def unmerged(cohorts_csv):
 
 
 def deboilerplated(cohorts_csv):
-    """0b_extract_trial_cohorts.py's export of the merged cohort rows with boilerplate removed."""
+    """The merged cohort rows with boilerplate removed, beside a cohort table (0b's export, or patient_cohorts.py's)."""
     return cohorts_csv and cohorts_csv.with_name(f'{cohorts_csv.stem}_deboilerplated{cohorts_csv.suffix}')
 
 
@@ -273,17 +273,22 @@ def build_plan(args):
         # from, with the registry prompt that follows the protocol prompt's rules.
         Stage('registry-cohorts', registry_extraction, [batch / 'seeds.jsonl'], registry_rows,
               source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') + package),
+        # Patients are seeded from the merged cohorts with all their criteria, boilerplate included
+        # (user, 2026-11-04); retrieval reads the same cohorts with the boilerplate removed.
         Stage('generation-cohorts', [py, str(ROOT / 'synthetic_protocols/patient_cohorts.py'), '--batch-dir', str(batch),
               '--extraction-dir', str(extracted), '--output', str(args.sampled_spaces),
+              '--retrieval-output', str(deboilerplated(args.sampled_spaces)),
               '--splits-from', str(args.registry_sample)],
-              [extracted / 'cohorts_deboilerplated.parquet', extracted / 'trials.parquet', args.registry_sample],
-              [args.sampled_spaces, Path(f'{args.sampled_spaces}.provenance.json')],
+              [extracted / 'cohorts.parquet', extracted / 'cohorts_deboilerplated.parquet', extracted / 'trials.parquet',
+               args.registry_sample],
+              [args.sampled_spaces, Path(f'{args.sampled_spaces}.provenance.json'), deboilerplated(args.sampled_spaces),
+               Path(f'{deboilerplated(args.sampled_spaces)}.provenance.json')],
               source('synthetic_protocols/patient_cohorts.py', 'trial_cohort_format.py')),
         Stage('retrieval-cohorts', [py, str(ROOT / 'synthetic_protocols/retrieval_cohorts.py'),
-              '--protocol-cohorts', str(args.sampled_spaces), '--registry-cohorts', str(registry_rows[4]),
+              '--protocol-cohorts', str(deboilerplated(args.sampled_spaces)), '--registry-cohorts', str(registry_rows[4]),
               '--registry-trials', str(registry_rows[1]), '--output', str(args.retrieval_cohorts),
               '--splits-from', str(args.registry_sample)],
-              [args.sampled_spaces, registry_rows[4], registry_rows[1], args.registry_sample],
+              [deboilerplated(args.sampled_spaces), registry_rows[4], registry_rows[1], args.registry_sample],
               [args.retrieval_cohorts, Path(f'{args.retrieval_cohorts}.provenance.json')],
               source('synthetic_protocols/retrieval_cohorts.py', 'trial_cohort_format.py')),
         Stage('generate-synthetic', [py, str(ROOT / 'generate_synthetic_data.py'), '--input-csv', str(args.sampled_spaces),
