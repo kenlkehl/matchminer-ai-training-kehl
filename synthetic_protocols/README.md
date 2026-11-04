@@ -157,7 +157,8 @@ cohort_extraction/
                          or evaluable disease, prognosis, performance status, organ
                          function, brain metastases, toxicities of earlier treatment,
                          washout periods of 30 days or less from radiation, systemic or trial
-                         therapy, non-cancer conditions, unrelated other cancers, participation in
+                         therapy, recovery from recent major surgery, non-cancer conditions,
+                         unrelated other cancers, participation in
                          another trial at the same time, contraception/pregnancy/lactation, vaccines,
                          staff and catch-all exclusions, each unless central to the trial)
   trials.parquet, .csv   one row per protocol: provenance and extraction status
