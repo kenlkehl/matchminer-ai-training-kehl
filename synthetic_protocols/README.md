@@ -156,9 +156,9 @@ cohort_extraction/
                          the merged cohorts with their criteria separated (retrieval's
                          protocol version): cohort_eligibility_criteria keeps all the
                          criteria, cohort_key_criteria holds the key criteria (those that
-                         are not boilerplate; retrieval, match labels and TrialChecker
+                         are not boilerplate; retrieval, match labels and the decision model's match questions
                          read them) and cohort_boilerplate_criteria the boilerplate
-                         (BoilerplateChecker reads it: consent, compliance, samples/tissue/biopsy, measurable
+                         (the boilerplate labels read it: consent, compliance, samples/tissue/biopsy, measurable
                          or evaluable disease, prognosis, performance status, organ
                          function, brain metastases, toxicities of earlier treatment,
                          washout periods of 30 days or less from radiation, systemic or trial
@@ -242,8 +242,8 @@ copied verbatim with boilerplate included, and training gives ctgov listings the
 same two follow-on steps as protocols: the merge, then the boilerplate step, which
 classifies each line of a merged cohort's criteria in its own request and sorts the
 unchanged lines in code (since 2026-11-04, user instruction; the model never copies
-the criteria). Retrieval, match labels and TrialChecker read both versions' key
-criteria (the criteria that are not boilerplate) and BoilerplateChecker their
+the criteria). Retrieval, match labels and the decision model read both versions' key
+criteria (the criteria that are not boilerplate) and its boilerplate question their
 boilerplate criteria (`--output-deboilerplated-cohorts`, and
 `patient_cohorts.py --retrieval-output` beside the generation table, from
 `cohorts_deboilerplated.parquet`: `cohort_key_criteria`, `cohort_boilerplate_criteria`),

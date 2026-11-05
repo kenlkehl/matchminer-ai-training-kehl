@@ -10,8 +10,8 @@
 > patient's boilerplate section, following the BoilerplateChecker prompt
 > (`llm_exclusion_criteria.user.txt`). The separate teacher extraction of exclusions
 > (`prepare_boilerplate.py`, stage `prepare-exclusions`) is gone. These are question
-> families of the `clinical_qa` adapter, distinct from the ModernBERT TrialChecker (five
-> heads) and BoilerplateChecker (two classes) that `../train_checkers.py` trains. ColBERT
+> families of the `clinical_qa` adapter, distinct from the decision model (d1-2B) that
+> `../train_decision_model.py` trains. ColBERT
 > is removed; TrialSpace is dense EmbeddingGemma 2 only. The code is authoritative where
 > this file disagrees.
 
@@ -22,7 +22,7 @@ The two training categories are patient summarization and clinical question
 answering. Each has its own LoRA adapter on the same frozen base. The integrated
 runner, `train_from_summaries.py` (the `train` stage of `run_pipeline.py`, which
 `train_all*.sh` runs), trains them sequentially after the three TrialSpace
-(EmbeddingGemma 2) rounds, the ModernBERT TrialChecker and BoilerplateChecker,
+(EmbeddingGemma 2) rounds, the decision model and
 the GoodOption catalog, through the stages `prepare-oncoreasoning`, `distill-oncoreasoning`,
 `build-oncoreasoning` and `train-oncoreasoning`. QA includes all three checker
 families.

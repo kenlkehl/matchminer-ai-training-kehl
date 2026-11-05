@@ -1,9 +1,11 @@
 """Lossless adapters and provenance-preserving TrialSpace corpus files.
 
 A corpus entity's ``text`` is what retrieval and the match teacher read: a patient's key summary
-section (the cancer history) and a cohort's key criteria. ``boilerplate`` is what the
-BoilerplateChecker teacher reads: a patient's boilerplate section (other relevant history) and a
-cohort's boilerplate criteria.
+section (the cancer history) and a cohort's key criteria. ``boilerplate`` is what the boilerplate
+teacher reads: a patient's boilerplate section (other relevant history) and a cohort's boilerplate
+criteria. A cohort's ``items`` are its criteria lines with their inclusion/exclusion and boilerplate
+tags (``cohort_criteria_items``), which the per-criterion teacher and the decision model read with
+the patient's complete summary (``text``, ``Other relevant history:``, ``boilerplate``).
 """
 from pathlib import Path
 import hashlib
@@ -107,8 +109,10 @@ def prepare(patients_path, cohorts_path, output, *, merge_source_splits=False):
     # source: which version of its trial a cohort is ('protocol' or 'ctgov');
     # mining represents each trial by one version (retrieval.TrialSampler).
     key_column = 'cohort_key_criteria' if 'cohort_key_criteria' in normalized else 'cohort_eligibility_criteria'
+    from matchminer_ai.trials.cohort_boilerplate import ITEMS_COLUMN, load_criteria_items
     cohort_rows = [dict(id=row['cohort_trial_id'], trial_id=row['nct_id'], source=version,
                        text=row[key_column], boilerplate=text(row.get('cohort_boilerplate_criteria')),
+                       items=load_criteria_items(row[ITEMS_COLUMN]) if text(row.get(ITEMS_COLUMN)) else [],
                        split=split_name(row.get('split')))
                    for row, version in zip(normalized.to_dict('records'), cohort_version(normalized))]
     if 'cohort_name' in normalized:
@@ -154,3 +158,10 @@ def load_corpus(directory):
             cohort['source'] = 'ctgov'
     validate_corpus(patients, cohorts)
     return patients, cohorts
+
+
+def full_summary(patient):
+    """A corpus patient's complete summary: the key section, then ``Other relevant history:`` and the
+    boilerplate section, as the inference package joins them."""
+    from matchminer_ai.patients.postprocess import normalize_patient_summary
+    return normalize_patient_summary(patient['text'], patient.get('boilerplate') or None)

@@ -73,7 +73,8 @@ def backend(monkeypatch):
                 quoted(c['eligibility_criteria'], prompt) for c in outputs[title].get('cohorts', [])))
         def answer(prompt):
             if 'ITEM TO CLASSIFY' in prompt:
-                return json.dumps(dict(boilerplate='consent' in prompt.rsplit('ITEM TO CLASSIFY', 1)[1].lower()))
+                return json.dumps(dict(criterion_type='inclusion',
+                                       boilerplate='consent' in prompt.rsplit('ITEM TO CLASSIFY', 1)[1].lower()))
             return step_answer(prompt, outputs[trial(prompt)], outputs.get('fence', False), outputs.get(f'merge:{trial(prompt)}'))
         answers = [answer(str(prompt)) for prompt in kwargs['prompt_list']]
         return SimpleNamespace(final_outputs=answers, reasoning_outputs=['Reasoning trace'] * len(answers),
@@ -216,11 +217,13 @@ def test_cohorts_are_combined_then_cleared_of_boilerplate_for_training(tmp_path,
     validate_cohort_rows(rows)
     # The merged rows again with boilerplate removed: what training's retrieval reads.
     clean = pd.read_csv(tmp_path / 'cohorts_deboilerplated.csv', keep_default_na=False)
-    separated = ['cohort_key_criteria', 'cohort_boilerplate_criteria']
+    separated = ['cohort_key_criteria', 'cohort_boilerplate_criteria', 'cohort_criteria_items']
     # The merged rows unchanged (all their criteria), plus the key and boilerplate criteria.
     assert clean.drop(columns=separated).equals(pd.read_csv(args.output_cohorts, keep_default_na=False))
     assert clean.cohort_key_criteria.tolist() == ['Adults with treated lung cancer.', 'Children with untreated sarcoma.']
     assert clean.cohort_boilerplate_criteria.tolist() == ['Signed informed consent.', '']
+    items = json.loads(clean.cohort_criteria_items[0])  # every line, with both tags, survives the CSV
+    assert [(i['criterion_type'], i['boilerplate']) for i in items][-1] == ('inclusion', True)
     validate_cohort_rows(clean)
     with gzip.open(tmp_path / 'checkpoints/NCT00000001.json.gz', 'rt') as stream:
         record = json.load(stream)

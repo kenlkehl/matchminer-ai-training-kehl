@@ -145,9 +145,10 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
     plan = dry_run_plan(wrapper)
     names = [row['name'] for row in plan]
     assert names[:names.index('catalog')] == ['prepare-trialspace',
-        'mine-1', 'label-trialspace-1', 'project-trialspace-1', 'train-trialspace-1',
-        'mine-2', 'label-trialspace-2', 'project-trialspace-2', 'train-trialspace-2',
-        'mine-3', 'label-trialspace-3', 'label-boilerplate', 'train-trial-checker', 'train-boilerplate-checker']
+        'mine-1', 'label-trialspace-1', 'label-boilerplate-1', 'label-criteria-1', 'project-trialspace-1', 'train-trialspace-1',
+        'mine-2', 'label-trialspace-2', 'label-boilerplate-2', 'label-criteria-2', 'project-trialspace-2', 'train-trialspace-2',
+        'mine-3', 'label-trialspace-3', 'label-boilerplate-3', 'label-criteria-3',
+        'prepare-decision-data', 'train-decision-model']
     mines = commands(plan, 'mine-')
     for command in mines:
         assert command[1:3] == ['trialspace_comparison.py', 'dense-mine']
@@ -168,22 +169,26 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
         assert command[command.index('--max_attempts') + 1] == '16'
         assert '--scheduler-adaptive-concurrency' in command
         assert command[command.index('--task') + 1] == 'match'
-    # BoilerplateChecker labels: the separate prompt on every unique boilerplate combination of rounds 1-3.
-    boilerplate = commands(plan, 'label-boilerplate')[0]
-    assert boilerplate[boilerplate.index('--task') + 1] == 'boilerplate'
-    assert boilerplate[boilerplate.index('--candidates') + 1].endswith('trialspace_round3/mining/candidates.jsonl')
-    combined = boilerplate[boilerplate.index('--combine-candidates') + 1:][:2]
-    assert [path.split('/')[-3] for path in combined] == ['trialspace_round1', 'trialspace_round2']
-    # One multi-head TrialChecker on every round's match labels; a separate BoilerplateChecker.
-    trial, separate = commands(plan, 'train-trial-checker')[0], commands(plan, 'train-boilerplate-checker')[0]
-    assert trial[trial.index('train_checkers.py') + 1] == 'trial'
-    assert [path.split('/')[-2] for path in trial[trial.index('--labels') + 1:][:3]] == [
-        f'trialspace_round{n}' for n in (1, 2, 3)]
-    assert separate[separate.index('train_checkers.py') + 1] == 'boilerplate'
-    assert separate[separate.index('--labels') + 1].endswith('boilerplate_teacher')
-    for command in (trial, separate):
-        assert [command[command.index(flag) + 1] for flag in ('--base-model', '--max-length')] == [
-            'answerdotai/ModernBERT-large', '8192']
+    # Every round labels its new boilerplate combinations and the criteria lines of a seeded share of its pairs.
+    for task in ('boilerplate', 'criteria'):
+        rounds = commands(plan, f'label-{task}-')
+        for number, command in enumerate(rounds, 1):
+            assert command[command.index('--task') + 1] == task
+            assert command[command.index('--candidates') + 1].endswith(f'trialspace_round{number}/mining/candidates.jsonl')
+            skipped = command[command.index('--skip-labeled') + 1:][:number - 1] if number > 1 else []
+            assert '--skip-labeled' in command or number == 1
+            assert [path.split('/')[-2] for path in skipped] == [f'trialspace_round{n}' for n in range(1, number)]
+    assert commands(plan, 'label-criteria-')[0][commands(plan, 'label-criteria-')[0].index('--criteria-pair-fraction') + 1] == '0.01'
+    # One decision model on every round's labels of all seven families.
+    prepare, train = commands(plan, 'prepare-decision-data')[0], commands(plan, 'train-decision-model')[0]
+    for flag, folder in (('--match-labels', 'teacher'), ('--boilerplate-labels', 'boilerplate_teacher'),
+                         ('--criteria-labels', 'criteria_teacher')):
+        paths = prepare[prepare.index(flag) + 1:][:3]
+        assert [path.split('/')[-2:] for path in paths] == [[f'trialspace_round{n}', folder] for n in (1, 2, 3)]
+    assert train[train.index('train_decision_model.py') + 1] == 'train'
+    for command in (prepare, train):
+        assert [command[command.index(flag) + 1] for flag in ('--base-model', '--base-revision', '--max-length')] == [
+            'LiquidAI/d1-2B', '652f920e544ea37f81e4b0ce89b81d4ed0da90b1', '10000']
     fits = commands(plan, 'train-trialspace-')
     assert len(fits) == 2
     for command in fits:

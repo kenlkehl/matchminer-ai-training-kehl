@@ -8,7 +8,7 @@ protocol was written from (0d_extract_ctgov_cohorts.py --trials-jsonl on the
 batch's seeds.jsonl). Both use the same prompt rules and response contract, and
 the same training steps after extraction: merged, then key and boilerplate criteria separated
 (patient_cohorts.py --retrieval-output and 0d's --output-deboilerplated-cohorts); retrieval and
-match labels read the key criteria, BoilerplateChecker labels the boilerplate criteria.
+match labels read the key criteria, boilerplate labels the boilerplate criteria, per-criterion labels the tagged lines.
 Patients are generated from the protocol cohorts only, with all their criteria.
 
 The output keeps every protocol row unchanged (cohort_criteria_source

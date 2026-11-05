@@ -292,8 +292,8 @@ def _prepare_notes_local(source, spaces_path, destination, patients_path, *, anc
 
 def prepare_summaries(source, patients_path, destination):
     """Final summaries with their two sections kept apart: patient_summary is the key section
-    (the cancer history, which TrialSpace and TrialChecker read) and patient_boilerplate_text the
-    boilerplate section (other relevant history, which BoilerplateChecker reads)."""
+    (the cancer history, which TrialSpace and the decision model's match questions read) and
+    patient_boilerplate_text the boilerplate section (other relevant history, which its boilerplate question reads)."""
     from matchminer_ai.patients.postprocess import normalize_patient_summary, split_patient_summary
     frame, patients = pd.read_parquet(source), pd.read_parquet(patients_path)
     for table in (frame, patients):

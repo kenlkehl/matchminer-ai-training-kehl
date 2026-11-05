@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Resumable TrialSpace → TrialChecker / BoilerplateChecker → catalog → OncoReasoning pipeline.
+"""Resumable TrialSpace → decision model → catalog → OncoReasoning pipeline.
 
 Existing non-PHI summaries seed mining; the NVIDIA teacher provides all fresh labels,
 catalog evidence and distillation. TrialSpace (EmbeddingGemma 2) is mined and refit over
-three rounds on the patients' key summary sections and the cohorts' key criteria; every
-round's five-answer match labels train the multi-head TrialChecker, and boilerplate labels
-of round-3 pairs train the separate BoilerplateChecker. OncoReasoning is distilled last.
+three rounds on the patients' key summary sections and the cohorts' key criteria. Every round
+the teacher labels all seven decision-model question families: the five match labels of each
+candidate pair (also TrialSpace's labels), the boilerplate label of each new unique boilerplate
+combination, and each criteria line of a seeded fraction of the pairs (yes = the patient does
+not clearly fail the line). Every round's labels fine-tune the decision model (LiquidAI d1-2B,
+train_decision_model.py), which replaces TrialChecker and BoilerplateChecker. OncoReasoning is
+distilled last.
 """
 from __future__ import annotations
 import argparse
@@ -30,7 +34,8 @@ from trialspace.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAU
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_EMBEDDER = 'google/embeddinggemma-2'
-DEFAULT_CHECKER = 'answerdotai/ModernBERT-large'
+DEFAULT_DECISION_MODEL = 'LiquidAI/d1-2B'
+DECISION_MODEL_REVISION = '652f920e544ea37f81e4b0ce89b81d4ed0da90b1'
 EMBEDDINGGEMMA2_REVISION = '914f7f89142e33e77833254d9c9b90c3cef7303b'
 
 TRIALSPACE_OPERATIONAL_OPTIONS = {
@@ -117,12 +122,17 @@ def parser():
     p.add_argument('--trialspace-label-workers', type=int, default=0,
                    help='Concurrent pair chains; 0 scales automatically with the live teacher pool')
     p.add_argument('--trialspace-label-max-auto-workers', type=int, default=DEFAULT_AUTO_WORKERS_MAX)
-    p.add_argument('--checker-model', default=DEFAULT_CHECKER, help='Base model of TrialChecker and BoilerplateChecker')
-    p.add_argument('--checker-max-length', type=int, default=8192,
-                   help='Checker context: key or boilerplate criteria plus the patient section (ModernBERT maximum)')
-    p.add_argument('--checker-epochs', type=float, default=2)
-    p.add_argument('--checker-batch-size', type=int, default=8, help='Pairs per GPU per step')
-    p.add_argument('--checker-learning-rate', type=float, default=2e-5)
+    p.add_argument('--decision-model', default=DEFAULT_DECISION_MODEL, help='Base decision model (System One)')
+    p.add_argument('--decision-revision', help='Base decision-model revision; default: the pinned d1-2B commit')
+    p.add_argument('--decision-max-length', type=int, default=10000,
+                   help='Decision-model training length: a state with its packed questions')
+    p.add_argument('--decision-epochs', type=float, default=1)
+    p.add_argument('--decision-batch-size', type=int, default=8, help='States per GPU per micro-batch')
+    p.add_argument('--decision-gradient-accumulation-steps', type=int, default=4)
+    p.add_argument('--decision-learning-rate', type=float, default=1e-5)
+    p.add_argument('--criteria-pair-fraction', type=float, default=0.01,
+                   help='Share of each round\'s candidate pairs whose every criteria line gets a teacher label')
+    p.add_argument('--criteria-seed', type=int, default=42)
     p.add_argument('--trialspace-cache-dir', type=Path, help='Local Hugging Face model cache')
     p.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     p.add_argument("--vllm", default=str(Path(sys.executable).parent / "vllm"))
@@ -192,9 +202,10 @@ def stages(args):
     dense_launch = [dense_py, *launch[1:]]  # One finetune_embedder rank per GPU in --gpus.
     embedding = args.embedding_model
     revision = args.embedding_revision or (EMBEDDINGGEMMA2_REVISION if embedding == DEFAULT_EMBEDDER else None)
-    # Three mining and labeling rounds; TrialSpace is refit after rounds 1 and 2, every
-    # round's labels train TrialChecker, and round 3's candidates supply the other stages.
-    teacher_dirs = []
+    # Three mining and labeling rounds; TrialSpace is refit after rounds 1 and 2, every round's
+    # labels of all seven question families train the decision model, and round 3's candidates
+    # supply the catalog and OncoReasoning.
+    teacher_dirs, boilerplate_dirs, criteria_dirs = [], [], []
     for iteration in (1, 2, 3):
         round_dir = run / f'trialspace_round{iteration}'
         mining = round_dir / 'mining'
@@ -223,6 +234,20 @@ def stages(args):
                       '--reuse-candidates', str(previous / 'mining' / 'candidates.jsonl')]
         result.append(Stage(f'label-trialspace-{iteration}', label,
                             [scores, directory / 'labels.jsonl', directory / 'labeling_manifest.json'], True))
+        # The boilerplate label of each unique (patient boilerplate, cohort boilerplate) combination
+        # among this round's candidates, and every criteria line of a seeded fraction of its pairs,
+        # each skipping what earlier rounds labeled.
+        for task, dirs, extra in (
+                ('boilerplate', boilerplate_dirs, []),
+                ('criteria', criteria_dirs, ['--criteria-pair-fraction', str(args.criteria_pair_fraction),
+                                             '--criteria-seed', str(args.criteria_seed)])):
+            out = round_dir / f'{task}_teacher'
+            command = [py, 'trialspace_training.py', 'label', '--task', task, '--corpus', str(corpus),
+                       '--candidates', str(mining / 'candidates.jsonl'), '--output', str(out), *extra,
+                       *(['--skip-labeled', *map(str, dirs)] if dirs else []), *teacher_args(args, servers)]
+            result.append(Stage(f'label-{task}-{iteration}', command,
+                                [out / 'labels.jsonl', out / 'labeling_manifest.json'], True))
+            dirs.append(out)
         if iteration == 3:
             break
         previous_embedding = embedding
@@ -246,24 +271,22 @@ def stages(args):
             command += ['--model-cache-dir', str(args.trialspace_cache_dir)]
         result.append(Stage(f'train-trialspace-{iteration}', command,
                             [embedding / 'modules.json', embedding / 'model.safetensors']))
-    # BoilerplateChecker labels: the separate boilerplate prompt on every unique combination of patient
-    # boilerplate section and cohort boilerplate criteria among the rounds 1-3 candidate pairs.
-    boilerplate = run / 'boilerplate_teacher'
-    result.append(Stage('label-boilerplate', [py, 'trialspace_training.py', 'label', '--task', 'boilerplate',
-        '--corpus', str(corpus), '--candidates', str(mining / 'candidates.jsonl'), '--output', str(boilerplate),
-        '--combine-candidates', *(str(run / f'trialspace_round{n}' / 'mining' / 'candidates.jsonl') for n in (1, 2)),
-        *teacher_args(args, servers)],
-        [boilerplate / 'labels.jsonl', boilerplate / 'labeling_manifest.json'], True))
-    checker = [*launch, 'train_checkers.py']
-    settings = ['--corpus', str(corpus), '--base-model', args.checker_model, '--max-length', str(args.checker_max_length),
-                '--epochs', str(args.checker_epochs), '--batch-size', str(args.checker_batch_size),
-                '--learning-rate', str(args.checker_learning_rate)]
-    trial_checker, boilerplate_checker = models / 'trial_checker', models / 'boilerplate_checker'
-    result.append(Stage('train-trial-checker', checker + ['trial', *settings, '--output-model', str(trial_checker),
-        '--labels', *map(str, teacher_dirs)], [trial_checker / 'checker_contract.json', trial_checker / 'model.safetensors']))
-    result.append(Stage('train-boilerplate-checker', checker + ['boilerplate', *settings,
-        '--output-model', str(boilerplate_checker), '--labels', str(boilerplate)],
-        [boilerplate_checker / 'checker_contract.json', boilerplate_checker / 'model.safetensors']))
+    # The decision model: every round's labels of the seven families, one example per state.
+    decision_data, decision_model = run / 'decision_data', models / 'decision_model'
+    decision_revision = args.decision_revision or (DECISION_MODEL_REVISION if args.decision_model == DEFAULT_DECISION_MODEL
+                                                   else None)
+    base = ['--base-model', args.decision_model, *(['--base-revision', decision_revision] if decision_revision else []),
+            '--max-length', str(args.decision_max_length)]
+    result.append(Stage('prepare-decision-data', [py, 'train_decision_model.py', 'prepare', '--corpus', str(corpus),
+        '--match-labels', *map(str, teacher_dirs), '--boilerplate-labels', *map(str, boilerplate_dirs),
+        '--criteria-labels', *map(str, criteria_dirs), '--output-dir', str(decision_data), *base],
+        [decision_data / 'prepared.json', decision_data / 'examples.jsonl']))
+    result.append(Stage('train-decision-model', [*launch, 'train_decision_model.py', 'train',
+        '--data-dir', str(decision_data), '--output-model', str(decision_model), *base,
+        '--epochs', str(args.decision_epochs), '--batch-size', str(args.decision_batch_size),
+        '--gradient-accumulation-steps', str(args.decision_gradient_accumulation_steps),
+        '--learning-rate', str(args.decision_learning_rate)],
+        [decision_model / 'decision_contract.json', decision_model / 'model.safetensors']))
     catalog = run / "good_option_catalog"
     result.append(Stage("catalog", [py, "train_good_option_checker.py", "catalog",
         "--catalog", str(catalog), "--catalog-checkpoint-dir", str(run / "catalog_checkpoints"),
@@ -509,7 +532,7 @@ def main():
                     ROOT / 'retrieval_workspace.py', ROOT / 'label_workspace.py', ROOT / 'synthetic_pool.py', ROOT / 'retrieval_cache_import.py',
                     ROOT / 'trial_cohort_format.py',
                     ROOT / 'remote_vllm_pool.py', ROOT / 'adaptive_controller.py',
-                    ROOT / 'train_good_option_checker.py', ROOT / 'train_checkers.py',
+                    ROOT / 'train_good_option_checker.py', ROOT / 'train_decision_model.py',
                     *sorted((ROOT / 'trialspace').glob('*.py')),
                     ROOT / 'oncoreasoning_training/create_all_training_data.py',
                     ROOT / 'oncoreasoning_training/teacher.py',
@@ -520,9 +543,14 @@ def main():
                     args.inference_repo / 'src/matchminer_ai/llm/dispatch.py',
                     *sorted((args.inference_repo / 'src/matchminer_ai/embedding').glob('*.py')),
                     args.inference_repo / 'src/matchminer_ai/matching/match_labels.py',
+                    args.inference_repo / 'src/matchminer_ai/matching/decision_model.py',
+                    args.inference_repo / 'src/matchminer_ai/trials/cohort_boilerplate.py',
                     *(args.inference_repo / 'src/matchminer_ai/prompts' / name for name in (
                         'match_quality.labels.system.txt', 'llm_exclusion_criteria.user.txt',
-                        'match_quality_checker_template.txt', 'exclusion_criteria_checker_template.txt'))]
+                        'criterion_check.labels.user.txt', 'decision.match.state.txt',
+                        'decision.match.reasonableness.txt', 'decision.boilerplate.state.txt',
+                        'decision.boilerplate.question.txt', 'decision.criterion.state.txt',
+                        'decision.criterion.question.txt'))]
     identity['production_sources'] = [source_record(path) for path in source_paths]
     if manifest_path.exists():
         from oncoreasoning_training.pipeline_upgrade import compatible_identity
@@ -534,7 +562,8 @@ def main():
         policy='Preserve returned reasoning and complete responses; answer-only targets remain separate.',
         pooled_teacher_traces=str(args.run_dir / 'llm_traces'),
         match_label_traces=[str(args.run_dir / f'trialspace_round{i}/teacher/responses') for i in (1, 2, 3)],
-        boilerplate_label_traces=str(args.run_dir / 'boilerplate_teacher/responses'),
+        boilerplate_label_traces=[str(args.run_dir / f'trialspace_round{i}/boilerplate_teacher/responses') for i in (1, 2, 3)],
+        criteria_label_traces=[str(args.run_dir / f'trialspace_round{i}/criteria_teacher/responses') for i in (1, 2, 3)],
         distillation_traces=str(args.run_dir / 'oncoreasoning/teacher_attempts'),
         distillation_validated_responses=str(args.run_dir / 'oncoreasoning/responses')))
     fingerprint = digest(identity)

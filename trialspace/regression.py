@@ -3,7 +3,7 @@
 One teacher response per pair answers all five match labels (``contracts``, task ``match``).
 The score is the inference package's ``match_score``: 0 unless the patient is a reasonable
 candidate, else 1 plus 1 each for cancer type, burden and treatment history and 2 for biomarker.
-Every label is answered for every pair, so each multi-head TrialChecker head trains on every pair.
+Every label is answered for every pair, so each of the decision model's match questions trains on every pair.
 """
 from collections import Counter
 

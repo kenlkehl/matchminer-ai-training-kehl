@@ -19,9 +19,10 @@ def parser():
     label.add_argument('--corpus', required=True)
     label.add_argument('--candidates', required=True)
     label.add_argument('--output', required=True)
-    label.add_argument('--task', choices=['match', 'boilerplate'], default='match',
+    label.add_argument('--task', choices=['match', 'boilerplate', 'criteria'], default='match',
                        help='match: the five match labels in one request per pair, scored 0-6 into scores.jsonl; '
-                            'boilerplate: whether the patient clearly fails the cohort\'s boilerplate criteria')
+                            'boilerplate: whether the patient clearly fails the cohort\'s boilerplate criteria; '
+                            'criteria: one request per criteria line of sampled pairs (yes = does not clearly fail it)')
     label.add_argument('--teacher-model', required=True, help='Served model ID')
     label.add_argument('--teacher-served-model', help='Endpoint model name when different from the recorded teacher identity; advertised root is verified')
     label.add_argument('--teacher-tokenizer', required=True, help='Underlying model for tokenizer and vendor sampling')

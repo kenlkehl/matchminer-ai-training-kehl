@@ -3,8 +3,11 @@
 Task ``match`` (the default): one request per pair answers the five match labels on the patient's
 key section and the cohort's key criteria, and each pair's 0-6 score is committed to the score
 journal. Task ``boilerplate``: one request per pair whose cohort has boilerplate criteria decides
-whether the patient clearly fails them, from the patient's boilerplate section. Every response is
-kept with its reasoning and complete prompt.
+whether the patient clearly fails them, from the patient's boilerplate section. Task ``criteria``:
+one request per candidate line (``trialspace_training.criteria_line_candidates``) answers whether
+the patient clearly fails that criteria line, from the complete summary and the cohort's numbered
+criteria (yes = does not clearly fail it). Every response is kept with its reasoning and complete
+prompt.
 """
 import asyncio
 from contextlib import AsyncExitStack
@@ -49,6 +52,8 @@ def validate_served_teacher(models, *, requested, tokenizer):
 
 
 def label_key(row):
+    if row['task'] == 'criteria':  # one line of one patient's criteria, whichever sibling cohort holds it
+        return digest([row['patient_id'], row['criteria_digest'], row['number'], row['task']])
     return digest([row['patient_id'], row['cohort_id'], row['task']])
 
 
@@ -57,6 +62,9 @@ def questions(pairs, patients, cohorts, *, task='match', sources=None):
     pairs without cohort boilerplate criteria have nothing to judge and are skipped."""
     patients = patients if isinstance(patients, dict) else {r['id']: r for r in patients}
     cohorts = cohorts if isinstance(cohorts, dict) else {r['id']: r for r in cohorts}
+    if task == 'criteria':
+        yield from _criteria_questions(pairs, patients, cohorts, sources)
+        return
     field = 'text' if task == 'match' else 'boilerplate'
     seen = set()
     for pair in pairs:
@@ -73,10 +81,31 @@ def questions(pairs, patients, cohorts, *, task='match', sources=None):
         yield {**item, 'key': key, 'messages': judge_messages(task, p.get(field) or '', c[field], sources=sources)}
 
 
+def _criteria_questions(pairs, patients, cohorts, sources):
+    """One item per candidate line: the complete patient summary, the cohort's tagged items, the line."""
+    from .data import full_summary
+    seen = set()
+    for pair in pairs:
+        p, c = patients[pair['patient_id']], cohorts[pair['cohort_id']]
+        if p['split'] != c['split'] or pair['split'] != p['split']:
+            raise ValueError('Teacher pairs must stay within their corpus split')
+        item = {**pair, 'task': 'criteria'}
+        if c['items'][pair['number'] - 1]['criterion_type'] != pair['criterion_type']:
+            raise ValueError('Candidate line type differs from the corpus')
+        key = label_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield {**item, 'key': key, 'messages': judge_messages('criteria', full_summary(p), c['items'], sources=sources,
+                                                              number=pair['number'])}
+
+
 def validate_row(task, row):
     """A saved response still satisfies its task's answer contract."""
     if task == 'match':
         parse_judgment('match', json.dumps(row['labels']))
+    elif task == 'criteria':
+        parse_judgment('criteria', json.dumps(row['criterion']), row['criterion_type'])
     elif type(row.get('excluded')) is not bool:
         raise ValueError('A boilerplate label needs a boolean excluded answer')
 
@@ -149,7 +178,7 @@ async def _label(args, output):
         try:
             if metadata['finish_reason'] != 'stop':
                 raise ValueError('Incomplete teacher output: ' + metadata['finish_reason'])
-            result = parse_judgment(task, answer)
+            result = parse_judgment(task, answer, payload.get('criterion_type'))
         except (ValueError, TypeError, IndexError) as error:
             await storage.run(write_json, output / 'invalid_responses' / (str(uuid.uuid4()) + '.json'),
                               dict(key=payload['key'], error=str(error), **trace))
@@ -256,7 +285,8 @@ async def _label(args, output):
             prepared = await preparer.prepare(item['messages'])
             prompt = prepared['prompt']
             result = await session.submit(dict(prompt=prompt, key=item['key'], max_tokens=args.max_tokens,
-                enable_thinking=True, include_completion_metadata=True, include_raw_text=True))
+                enable_thinking=True, include_completion_metadata=True, include_raw_text=True,
+                criterion_type=item.get('criterion_type')))
             if not isinstance(result, dict):
                 failures[item['key']] = str(result)
                 return None

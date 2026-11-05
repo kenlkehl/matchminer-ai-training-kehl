@@ -3,9 +3,13 @@
 
 ``prepare`` builds the corpus every round shares: patients with their key summary section as
 ``text`` and boilerplate section as ``boilerplate``, cohorts with their key criteria and
-boilerplate criteria (trialspace.data). ``label`` asks the teacher for the candidate pairs' labels:
-``--task match`` (the default), the five match labels in one request per pair, scored 0-6 for
-TrialSpace and the multi-head TrialChecker; ``--task boilerplate``, the BoilerplateChecker label.
+boilerplate criteria and tagged criteria lines (trialspace.data). ``label`` asks the teacher for the
+candidate pairs' labels: ``--task match`` (the default), the five match labels in one request per
+pair, scored 0-6 for TrialSpace and the decision model's match questions; ``--task boilerplate``,
+the boilerplate label of each unique boilerplate combination; ``--task criteria``, one label per
+criteria line of a seeded fraction of the pairs (the decision model's per-criterion question: yes =
+the patient does not clearly fail the line). Each round labels only boilerplate combinations and
+lines that earlier rounds' label directories (``--skip-labeled``) did not.
 Mining is trialspace_comparison.py dense-mine; fitting is finetune_embedder.py.
 """
 import argparse
@@ -22,7 +26,7 @@ from trialspace.data import digest, load_corpus, prepare, read_jsonl, write_json
 from trialspace.regression import score_contract
 from trial_cohort_format import file_stamp
 
-VERSION = 'trialspace-corpus-v2'
+VERSION = 'trialspace-corpus-v3'
 
 
 def identity_file(path, identity):
@@ -116,17 +120,86 @@ def parser():
         help='Completed labels of an earlier round over the same corpus; its judgments of pairs in --candidates are imported')
     sub.choices['label'].add_argument('--reuse-candidates', type=Path, help='The candidates.jsonl --reuse-labels judged')
     sub.choices['label'].add_argument('--combine-candidates', type=Path, nargs='+', default=[],
-        help='--task boilerplate: further candidate files (earlier rounds); each unique combination of patient '
+        help='--task boilerplate: further candidate files; each unique combination of patient '
              'boilerplate section and cohort boilerplate criteria across all of them is labeled once')
+    sub.choices['label'].add_argument('--skip-labeled', type=Path, nargs='+', default=[],
+        help='--task boilerplate or criteria: earlier rounds\' label directories; their boilerplate combinations or '
+             'criteria lines (their candidates.jsonl) are not labeled again')
+    sub.choices['label'].add_argument('--criteria-pair-fraction', type=float, default=0.01,
+        help='--task criteria: the share of candidate pairs whose every tagged criteria line is labeled, chosen by a '
+             'seeded hash of the pair so a pair is chosen in every round or none')
+    sub.choices['label'].add_argument('--criteria-seed', type=int, default=42)
     return p
 
 
-def unique_boilerplate_pairs(corpus, candidate_files, output):
+def skipped(directories, field):
+    """The values of ``field`` in earlier label directories' candidates.jsonl."""
+    return {row[field] for directory in directories for row in read_jsonl(Path(directory) / 'candidates.jsonl')}
+
+
+def selected(seed, patient_id, cohort_id, fraction):
+    """Whether a pair is among the seeded ``fraction`` whose criteria lines are labeled."""
+    return int(digest([seed, patient_id, cohort_id])[:15], 16) / 16 ** 15 < fraction
+
+
+def criteria_digest(items):
+    """A cohort's tagged lines (heading, text, type): sibling cohorts with the same lines share labels."""
+    return digest([[i.get('heading') or '', i['text'], i['criterion_type']] for i in items])
+
+
+def criteria_line_candidates(corpus, candidate_files, output, *, fraction, seed, skip=()):
+    """One candidate row per tagged criteria line of each selected pair (``selected``), skipping
+    lines already labeled for the patient (the same patient and criteria in an earlier round's
+    directory, or a sibling cohort here). Saved to <output>/candidates.jsonl with a receipt."""
+    from matchminer_ai.matching.decision_model import checkable_items
+    if not 0 < fraction <= 1:
+        raise ValueError('--criteria-pair-fraction must be in (0, 1]')
+    patients, cohorts = load_corpus(corpus)
+    cmap = {c['id']: c for c in cohorts}
+    done = skipped(skip, 'line_key')
+    rows, pairs, seen_pairs = [], 0, set()
+    for path in candidate_files:
+        for pair in read_jsonl(path):
+            key = (pair['patient_id'], pair['cohort_id'])
+            if key in seen_pairs or not selected(seed, *key, fraction):
+                continue
+            seen_pairs.add(key)
+            cohort = cmap[pair['cohort_id']]
+            items = checkable_items(cohort.get('items') or [])
+            if not items:
+                continue
+            pairs += 1
+            digest_ = criteria_digest(cohort['items'])
+            for item in items:
+                line = digest([pair['patient_id'], digest_, item['number']])
+                if line in done:
+                    continue
+                done.add(line)
+                rows.append(dict(patient_id=pair['patient_id'], cohort_id=pair['cohort_id'], trial_id=cohort['trial_id'],
+                                 split=pair['split'], criteria_digest=digest_, number=int(item['number']),
+                                 criterion_type=item['criterion_type'], boilerplate=bool(item.get('boilerplate')),
+                                 line_key=line))
+    path = Path(output) / 'candidates.jsonl'
+    if path.exists():
+        if read_jsonl(path) != rows:
+            raise ValueError('This label directory was built from different candidates; use a new directory')
+    else:
+        write_jsonl(path, rows)
+    write_json(Path(output) / 'criteria_sample.json', dict(
+        sources=[dict(path=str(Path(f).resolve()), stamp=file_stamp(f)) for f in candidate_files],
+        skipped_directories=[str(Path(d).resolve()) for d in skip], fraction=fraction, seed=seed,
+        selected_pairs_with_lines=pairs, lines=len(rows),
+        exclusion_lines=sum(r['criterion_type'] == 'exclusion' for r in rows),
+        boilerplate_lines=sum(r['boilerplate'] for r in rows)))
+    return path
+
+
+def unique_boilerplate_pairs(corpus, candidate_files, output, skip=()):
     """One pair per unique (patient boilerplate section, cohort boilerplate criteria) combination.
 
-    Reads every candidate file (TrialSpace rounds 1-3), keeps pairs whose cohort has boilerplate
+    Reads every candidate file (one TrialSpace round's), keeps pairs whose cohort has boilerplate
     criteria, and takes the first pair in (patient_id, cohort_id) order for each combination of
-    the two texts, as BoilerplateChecker training always deduplicated them. Saved to
+    the two texts not already in an earlier round's label directory (``skip``). Saved to
     <output>/candidates.jsonl with a receipt; a rerun must find the same pairs.
     """
     patients, cohorts = load_corpus(corpus)
@@ -139,9 +212,11 @@ def unique_boilerplate_pairs(corpus, candidate_files, output):
                 seen_pairs.add(key)
                 pairs.append(dict(patient_id=pair['patient_id'], cohort_id=pair['cohort_id'],
                                   trial_id=pair.get('trial_id', cmap[pair['cohort_id']]['trial_id']), split=pair['split']))
-    chosen, combinations = [], {}
+    chosen, combinations, done = [], {}, skipped(skip, 'boilerplate_combination')
     for pair in sorted(pairs, key=lambda pair: (pair['patient_id'], pair['cohort_id'])):
         combination = digest([pmap[pair['patient_id']].get('boilerplate') or '', cmap[pair['cohort_id']]['boilerplate']])
+        if combination in done:
+            continue
         if combination not in combinations:
             combinations[combination] = 0
             chosen.append(dict(pair, boilerplate_combination=combination))
@@ -154,6 +229,7 @@ def unique_boilerplate_pairs(corpus, candidate_files, output):
         write_jsonl(path, chosen)
     write_json(Path(output) / 'combinations.json', dict(
         sources=[dict(path=str(Path(f).resolve()), stamp=file_stamp(f)) for f in candidate_files],
+        skipped_directories=[str(Path(d).resolve()) for d in skip], skipped_combinations=len(done),
         candidate_pairs_with_boilerplate=len(pairs), unique_combinations=len(chosen),
         pairs_per_combination_max=max(combinations.values(), default=0)))
     return path
@@ -186,9 +262,13 @@ def main():
             write_reuse_plan(args)
         if args.task == 'boilerplate':
             args.candidates = str(unique_boilerplate_pairs(args.corpus, [Path(args.candidates), *args.combine_candidates],
-                                                           args.output))
-        elif args.combine_candidates:
-            raise ValueError('--combine-candidates is for boilerplate labels; match labels cover --candidates')
+                                                           args.output, skip=args.skip_labeled))
+        elif args.task == 'criteria':
+            args.candidates = str(criteria_line_candidates(args.corpus, [Path(args.candidates), *args.combine_candidates],
+                                                           args.output, fraction=args.criteria_pair_fraction,
+                                                           seed=args.criteria_seed, skip=args.skip_labeled))
+        elif args.combine_candidates or args.skip_labeled:
+            raise ValueError('--combine-candidates and --skip-labeled are for boilerplate and criteria labels')
         asyncio.run(label(args))
 
 

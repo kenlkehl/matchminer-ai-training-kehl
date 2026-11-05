@@ -19,7 +19,7 @@ both versions go through the inference package's three-step workflow with the
 same prompts: a cancer-treatment screen, the cohort names, and one request per
 cohort for its complete criteria (schema `trial-cohorts-stepwise-v1`, rows
 `trial-treatment-cohorts-v5`); a listing is its title, brief summary and
-eligibility criteria as one document. Since November 4 (user instruction) the criteria step copies every criterion verbatim, boilerplate included; training then merges each trial's equivalent cohorts (the merge ignores differences of extraction) and removes the boilerplate from each merged cohort (`remove_boilerplate_criteria`, which returns the boilerplate separately in `cohort_boilerplate_criteria`; since late November 4 (user instruction) it splits the criteria into lines, classifies each line as boilerplate or not in its own request, and sorts the unchanged lines in code, so the model never re-transcribes criteria; broadened November 4 to prognosis, performance status, organ function, brain metastases, prior-treatment toxicities and non-cancer conditions unless central to the trial, then (user, November 4) unrelated other cancers, simultaneous participation in another trial, washout periods of 30 days or less from radiation, systemic or trial therapy, and recovery from recent major surgery; whether a treatment was ever received is not boilerplate). ctgov listings get the same steps as protocols. A cohort's key criteria are its criteria that are not boilerplate: the de-boilerplated tables keep `cohort_eligibility_criteria` (all criteria) and add `cohort_key_criteria` and `cohort_boilerplate_criteria`. Retrieval, match labels and TrialChecker read the key criteria of both versions (option 2, user, November 4) and BoilerplateChecker reads the boilerplate criteria; since late November 4 (user instruction) patients are seeded from the merged protocol cohorts with all their criteria, boilerplate included (`cohorts.parquet` via `patient_cohorts.py`, which also writes the same rows with the key and boilerplate columns for retrieval); both steps are optional at inference and keep their reasoning. Mining represents each trial by one
+eligibility criteria as one document. Since November 4 (user instruction) the criteria step copies every criterion verbatim, boilerplate included; training then merges each trial's equivalent cohorts (the merge ignores differences of extraction) and removes the boilerplate from each merged cohort (`remove_boilerplate_criteria`, which returns the boilerplate separately in `cohort_boilerplate_criteria`; since late November 4 (user instruction) it splits the criteria into lines, classifies each line as boilerplate or not in its own request, and sorts the unchanged lines in code, so the model never re-transcribes criteria; broadened November 4 to prognosis, performance status, organ function, brain metastases, prior-treatment toxicities and non-cancer conditions unless central to the trial, then (user, November 4) unrelated other cancers, simultaneous participation in another trial, washout periods of 30 days or less from radiation, systemic or trial therapy, and recovery from recent major surgery; whether a treatment was ever received is not boilerplate). ctgov listings get the same steps as protocols. A cohort's key criteria are its criteria that are not boilerplate: the de-boilerplated tables keep `cohort_eligibility_criteria` (all criteria) and add `cohort_key_criteria` and `cohort_boilerplate_criteria`. Since November 5 (user instruction) the same per-line request also tags each line `inclusion` or `exclusion` (schema `trial-cohorts-deboilerplate-v4`), and every line's tags are kept in `cohort_criteria_items` (a JSON string), which the corpus keeps as each cohort's `items`. Retrieval, match labels and the decision model's match questions read the key criteria of both versions (option 2, user, November 4) and its boilerplate question reads the boilerplate criteria; since late November 4 (user instruction) patients are seeded from the merged protocol cohorts with all their criteria, boilerplate included (`cohorts.parquet` via `patient_cohorts.py`, which also writes the same rows with the key and boilerplate columns for retrieval); both steps are optional at inference and keep their reasoning. Mining represents each trial by one
 version: chosen at random per patient-trial pair within each patient's 500-trial
 sample (each mining round redraws that sample and those versions, user
 instruction November 2; round 1 keeps its original draws), and per trial for
@@ -39,15 +39,32 @@ match labels (reasonableness, cancer_type, burden, treatment_history, biomarker;
 evidence_status and reason) in ONE request per pair with the inference prompt
 `match_quality.labels.system.txt`, on the key texts; score 0-6 = 0 unless reasonable, else 1 +
 cancer type + burden + treatment history + 2 x biomarker. The gated one-question-per-request design
-(`potentially_eligible` first) is gone. TrialChecker is one ModernBERT-large with five sigmoid heads
-trained on every round's match labels (`match_quality_checker_template.txt`: cohort key criteria,
-then patient key section; 8,192 tokens). BoilerplateChecker is a separate two-class ModernBERT-large
-trained on `llm_exclusion_criteria.user.txt` labels (Yes!/No!: does the patient clearly fail any
-boilerplate criterion) of every unique combination of patient boilerplate section and cohort
-boilerplate criteria among the rounds 1-3 candidate pairs (user, November 4; as BoilerplateChecker
-training always deduplicated them), with `exclusion_criteria_checker_template.txt` (patient
-boilerplate section, cohort boilerplate criteria). It stays a two-class model whose output keeps
-its earlier meaning (the predicted label's score; pass = NEGATIVE). Do not restore ColBERT or the gated labels without the user's instruction.
+(`potentially_eligible` first) is gone.
+
+Decision model (user instruction, November 5): TrialChecker and BoilerplateChecker (ModernBERT) are
+replaced in both repositories by one "System One" decision model, `LiquidAI/d1-2B` (revision
+`652f920e`, LFM Open License v1.0), usable zero-shot and fine-tuned by `train_decision_model.py`
+(full fine-tune with transformers' Trainer; no LoRA, Unsloth or TRL). Every question is yes/no
+(`noul`), in seven families: (1-5) the five match labels on the key texts (one state, five
+questions; `reasonableness` yes = potentially eligible); (6) boilerplate on the boilerplate sections
+(yes = potentially eligible; the boilerplate teacher's `excluded` inverted); (7) one question per
+criteria line on the complete summary and the cohort's complete numbered criteria, the question
+restating the line's number, type and text. **Question 7 polarity: yes = the patient does not
+clearly fail the line; no = the patient clearly fails it (an inclusion line clearly not met, or an
+exclusion line clearly met).** Every round the teacher labels all seven families: match labels per
+pair, boilerplate labels per new unique boilerplate combination (`label-boilerplate-N`,
+`--skip-labeled` earlier rounds), and each tagged criteria line of a seeded
+`--criteria-pair-fraction` (default 0.01) of the pairs (`label-criteria-N`,
+`criterion_check.labels.user.txt`). d1-2B records `d1_attention: "set"` (the state read both ways
+with its questions on full-attention layers), so training never appends the answer: **the loss is
+the cross-entropy of the yes/no token at each answer slot only, never on prompt tokens**; questions
+are packed after their state by the checkpoint's own serving code (16 per sequence, 10,000 tokens).
+The states and question texts live in the inference package (`matching/decision_model.py`); the
+reasonableness, boilerplate and per-criterion questions open "Is this patient potentially eligible
+... If potentially eligible, answer yes; if clearly ineligible, answer no." vLLM 0.33 cannot serve
+d1-2B (no LFM3 architecture; its d1 reader is causal and d1-3B only), so inference uses
+Transformers. Do not restore ColBERT, the gated labels or the ModernBERT checkers without the
+user's instruction.
 
 HISTORICAL (October 26-31 comparison run state, kept as recorded): ColBERT was removed on
 November 4, so mentions below of ModernColBERT files, ColBERT scoring or deferred ColBERT-only

@@ -5,8 +5,10 @@ ClinicalTrials.gov records into trial cohorts, generates synthetic patients
 (event histories and clinical notes) for those cohorts, summarizes the patients,
 labels patient–cohort pairs with an LLM teacher, and trains the models that the
 inference package (`matchminer-ai-inference-kehl`, Python package `matchminer_ai`)
-uses at runtime: the TrialSpace retriever (dense EmbeddingGemma 2), TrialChecker,
-BoilerplateChecker and the OncoReasoning adapters. TrialSpace is the only
+uses at runtime: the TrialSpace retriever (dense EmbeddingGemma 2), the decision
+model (LiquidAI d1-2B fine-tuned on seven yes/no question families; it replaced
+TrialChecker and BoilerplateChecker on 2026-11-05, user instruction) and the
+OncoReasoning adapters. TrialSpace is the only
 retriever: every ColBERT retrieval path was removed from both repositories on
 2026-11-04 (user instruction; see [History](#history-the-october-2026-retriever-comparison)).
 
@@ -18,14 +20,18 @@ cohort extraction prompts and parser, the merge and boilerplate steps, patient
 summarization prompts and the split of a summary into its key and boilerplate
 sections, the TrialSpace prompts (`matchminer_ai.embedding.trialspace_contract`),
 the match-label prompt and 0–6 score (`matchminer_ai.matching.match_labels`), the
-boilerplate teacher prompt, both checker input templates, sampling profiles, the
+boilerplate and per-criterion teacher prompts, the decision model's states and
+questions (`matchminer_ai.matching.decision_model`), sampling profiles, the
 endpoint pool, synthetic protocol generation, and full-protocol cohort extraction.
 
 **Key criteria** (2026-11-04, user instruction) are a cohort's criteria that are
-not boilerplate. Retrieval, match labels and TrialChecker read the cohort's key
-criteria and the patient summary's key section (its cancer history);
-BoilerplateChecker reads the cohort's boilerplate criteria and the summary's
-boilerplate section (`Other relevant history:`).
+not boilerplate. Retrieval, match labels and the decision model's five match
+questions read the cohort's key criteria and the patient summary's key section
+(its cancer history); its boilerplate question reads the cohort's boilerplate
+criteria and the summary's boilerplate section (`Other relevant history:`); its
+per-criterion question reads the complete summary and every criteria line, each
+tagged inclusion or exclusion and boilerplate or not in the boilerplate step's
+request (`cohort_criteria_items`).
 
 ## Setup
 
@@ -160,8 +166,8 @@ generating. The steps below describe the October runs.
    then-current gated 0–6 labels from the Gemma 4 31B NVFP4 teacher (2,403,278
    pairs; that label design was replaced on 2026-11-04), and EmbeddingGemma 2
    training, stopped by the user at checkpoint 11,600 on 2026-10-28. The
-   integrated runner, `train_from_summaries.py` (TrialSpace, TrialChecker,
-   BoilerplateChecker and OncoReasoning), is described under
+   integrated runner, `train_from_summaries.py` (TrialSpace, the decision model
+   and OncoReasoning), is described under
    [Training](#training-train_from_summariespy).
 
 ## Pipeline
@@ -185,7 +191,7 @@ default range is `train` only.
 | `prepare-notes` | `prepare_synthetic_training.py notes` | `all_synthetic_notes.parquet`, `synthetic_patient_metadata.parquet` |
 | `summarize-patients` | `summarize_patients.py` | `patient_summaries.parquet`, `patient_serial_summaries.parquet` |
 | `prepare-training` | `prepare_synthetic_training.py summaries` | `patient_summaries_with_spaces.parquet` (key section in `patient_summary`, boilerplate section in `patient_boilerplate_text`) |
-| `train` | `train_from_summaries.py` (corpus from `retrieval_cohorts.csv`) | TrialSpace rounds, TrialChecker, BoilerplateChecker and OncoReasoning under `../models/embeddinggemma2_pipeline_v1` |
+| `train` | `train_from_summaries.py` (corpus from `retrieval_cohorts.csv`) | TrialSpace rounds, the decision model and OncoReasoning under `../models/embeddinggemma2_pipeline_v1` |
 
 Patients are generated only from the protocol cohorts (`generation-cohorts`),
 with all their criteria; retrieval, labeling and training use
@@ -296,25 +302,24 @@ such as `None` or `NA`; only empty cells are missing.
 
 ## Training (`train_from_summaries.py`)
 
-The integrated runner trains the TrialSpace retriever (EmbeddingGemma 2),
-TrialChecker, BoilerplateChecker and the OncoReasoning adapters. Its stages, in
-order:
+The integrated runner trains the TrialSpace retriever (EmbeddingGemma 2), the
+decision model and the OncoReasoning adapters. Its stages, in order:
 
 1. `prepare-trialspace` (`trialspace_training.py prepare`): the corpus every
    round shares (below).
 2. Round 1: mine with the base model (`mine-1`), label (`label-trialspace-1`,
-   `--task match`), project the labels into a pair table
-   (`project-trialspace-1`), fit (`train-trialspace-1`).
+   `--task match`; `label-boilerplate-1`; `label-criteria-1`), project the
+   match labels into a pair table (`project-trialspace-1`), fit
+   (`train-trialspace-1`).
 3. Round 2: the same with the round-1 model; labeling imports round-1
-   judgments of pairs mined again (`--reuse-labels`).
+   judgments of pairs mined again (`--reuse-labels`); the boilerplate and
+   criteria labels skip what round 1 labeled (`--skip-labeled`).
 4. Round 3: mine with the round-2 model and label (`mine-3`,
    `label-trialspace-3`, importing round-2 judgments). Its candidates feed the
    stages below; there is no third fit.
-5. `label-boilerplate`: BoilerplateChecker labels for every unique combination
-   of patient boilerplate section and cohort boilerplate criteria among the
-   rounds 1-3 candidate pairs.
-6. `train-trial-checker`, `train-boilerplate-checker` (`train_checkers.py
-   trial` / `boilerplate`).
+5. `prepare-decision-data`, `train-decision-model` (`train_decision_model.py
+   prepare` / `train`): the decision model on every round's labels of all seven
+   question families.
 7. `catalog`, `validate-catalog`: the patient-free GoodOption drug evidence
    catalog (`train_good_option_checker.py catalog`).
 8. `prepare-oncoreasoning`, `distill-oncoreasoning`, `build-oncoreasoning`,
@@ -363,10 +368,11 @@ specificity questions only after a yes, one question per request, prompts in
 `colbert_experiments/prompts/`) is gone; its label directories do not match the
 current contract.
 
-**Boilerplate labels** (`label-boilerplate`: `trialspace_training.py label
---task boilerplate --combine-candidates <round 1 and 2 candidates>`; user,
-2026-11-04). Every unique combination of patient boilerplate section and cohort
-boilerplate criteria among the rounds 1-3 candidate pairs (pairs whose cohort
+**Boilerplate labels** (`label-boilerplate-N`: `trialspace_training.py label
+--task boilerplate --skip-labeled <earlier rounds' boilerplate_teacher>`; user,
+2026-11-04, per round since 2026-11-05). Every unique combination of patient
+boilerplate section and cohort boilerplate criteria among the round's candidate
+pairs not labeled in an earlier round (pairs whose cohort
 has boilerplate criteria; one representative pair each, counts in
 `combinations.json`) is asked the inference
 package's `llm_exclusion_criteria.user.txt` (Yes!/No!: does the patient clearly
@@ -374,24 +380,57 @@ fail any boilerplate criterion) on the patient's boilerplate section and the
 cohort's boilerplate criteria. Pairs whose cohort has no boilerplate are
 skipped. Answers go to `labels.jsonl` as `excluded`, with their reasoning.
 
-**Checkers** (`train_checkers.py`, one rank per GPU in `--gpus`). Base
-`answerdotai/ModernBERT-large` (`--checker-model`), inputs truncated at 8,192
-tokens (`--checker-max-length`), 2 epochs (`--checker-epochs`), 8 pairs per GPU
-(`--checker-batch-size`), learning rate 2e-5 (`--checker-learning-rate`) with 1%
-warmup and linear decay, BF16, every synthetic pair (no holdout). Each model
-writes `checker_contract.json` (task, labels, template and its SHA-256, length,
-label sources, counts, truncated examples).
+**Per-criterion labels** (`label-criteria-N`: `trialspace_training.py label
+--task criteria --criteria-pair-fraction 0.01 --skip-labeled <earlier rounds'
+criteria_teacher>`; user, 2026-11-05). A seeded hash of each candidate pair
+selects `--criteria-pair-fraction` of the round's pairs (the same pairs in every
+round), and every criteria line of a selected pair that has an inclusion or
+exclusion tag gets one teacher request: the inference package's
+`criterion_check.labels.user.txt` around the decision model's own state (the
+complete patient summary and the cohort's complete numbered criteria) and
+question (the line restated with its number and type). Lines already labeled
+for the patient (an identical sibling cohort, or an earlier round) are skipped.
+The answer is `{"answer", "criterion_status", "reason"}`: **`answer` yes means
+the patient does not clearly fail the line, no means the patient clearly fails
+it (an inclusion line clearly not met, or an exclusion line clearly met)**;
+`criterion_status` (`met`, `not_met`, `insufficient_information`,
+`not_applicable`) records the line as written, and a no must name the failing
+status. At 0.01, about 29,000 pairs × about 30 lines is roughly 0.9 million
+requests per round (match labels: about 2.9 million).
 
-- **TrialChecker** (`trial`, `trial_checker/` under `--models-dir`): one model
-  with five sigmoid heads (`multi_label_classification`, mean BCE; `id2label` =
-  the five match labels), trained on every pair in all three rounds'
-  `scores.jsonl` (each pair once; a later round wins a conflict). Input: the
-  inference package's `match_quality_checker_template.txt` with the cohort's key
-  criteria, then the patient's key section.
-- **BoilerplateChecker** (`boilerplate`, `boilerplate_checker/`): a separate
-  two-class model (`NEGATIVE`/`POSITIVE` = excluded) on the boilerplate labels.
-  Input: `exclusion_criteria_checker_template.txt` with the patient's
-  boilerplate section and the cohort's boilerplate criteria.
+**Decision model** (`train_decision_model.py`; 2026-11-05, user instruction).
+Base [`LiquidAI/d1-2B`](https://huggingface.co/LiquidAI/d1-2B) at revision
+`652f920e` (`--decision-model`, `--decision-revision`; LFM Open License v1.0),
+a System One model that answers yes/no (`noul`) questions about a state in one
+forward pass. Seven question families, every one asked as yes/no:
+
+| Family | State | Questions (yes means) |
+| --- | --- | --- |
+| `match` (1-5) | the patient's key section and the cohort's key criteria | `reasonableness` (potentially eligible; no = clearly ineligible), `cancer_type`, `burden`, `treatment_history`, `biomarker` (the cohort specifically requires that dimension and the patient documentedly satisfies it), from each pair's match labels |
+| `boilerplate` (6) | the patient's boilerplate section and the cohort's boilerplate criteria | potentially eligible: the boilerplate teacher's `excluded`, inverted |
+| `criterion` (7) | the complete summary and the cohort's complete numbered criteria | one per labeled line: **yes = does not clearly fail the line, no = clearly fails it** |
+
+`prepare` writes one row per state (`examples.jsonl`: family, ids, each
+question's answer; a later round wins a conflict), `prepared.json` (counts,
+answer balance, question digest) and `preview.jsonl` (rendered prompts with
+their answers, for inspection). States and questions are rendered from the
+corpus by the inference package, so training reads exactly what inference
+reads. `train` fully fine-tunes the model with transformers' `Trainer` (no
+LoRA): each state's questions are shuffled (reseeded per epoch) and packed after
+the state by the checkpoint's own serving code, at most 16 per sequence and
+10,000 tokens (`--decision-max-length`). d1-2B reads its prompt with `set`
+attention (the state both ways with its questions on full-attention layers), so
+the answer is never appended to the input: **the loss is the cross-entropy of the
+`yes`/`no` token at each question's answer slot only**, never on prompt tokens.
+Defaults: 1 epoch, 8 states per GPU × 4 accumulation steps, learning rate 1e-5
+with cosine decay and 3% warmup, BF16, gradient checkpointing, the vision tower
+frozen, every synthetic pair (no holdout). The output (`decision_model/` under
+`--models-dir`) holds the weights, the d1 code, tokenizer, LICENSE, a
+modification notice, `calibration.json` (temperature 1.0) and
+`decision_contract.json`; point the inference package's
+`decision_model.model_name` at it. vLLM 0.33 cannot serve it (no LFM3
+architecture, causal d1-3B reader only); the inference package serves it with
+Transformers.
 
 **Mining.** EmbeddingGemma 2 (`trialspace_comparison.py dense-mine`) produces
 this candidate set by default, with no flags needed:
@@ -428,8 +467,7 @@ LoRA adapters on one frozen base (rank 64, alpha 128, all linear layers):
 `summarization` and `clinical_qa`. The QA adapter covers trial checking,
 exclusion (boilerplate) checking and GoodOption checking. Outputs go to
 `oncoreasoning/` under `--models-dir` with `oncoreasoning_contract.json`. These
-QA families are separate from the ModernBERT TrialChecker and BoilerplateChecker
-above.
+QA families are separate from the decision model above.
 
 ```bash
 ~/thisenv/bin/python train_from_summaries.py --dry-run
@@ -522,8 +560,8 @@ and `scripts/benchmark_embeddinggemma_batches.py`.
 | `0a_*`, `0b_*`, `0c_*`, `ctgov_metadata.py`, `trial_cohort_format.py`, `trial_space_format.py`, `repair_single_cohort_criteria.py` | Trial parsing, cohort extraction, sampling | Current |
 | `generate_synthetic_data.py`, `synthetic_event_prompts.py`, `synthetic_note_prompts.py`, `prepare_synthetic_training.py`, `synthetic_pool.py` | Synthetic patients and notes | Current |
 | `summarize_patients.py`, `summary_pool.py`, `summary_workspace.py` | Serial summarization | Current |
-| `train_from_summaries.py`, `trialspace_training.py`, `trialspace/`, `trialspace_comparison.py`, `finetune_embedder.py`, `trialspace_embedding_losses.py`, `trialspace_prompt_profiles.py`, `retrieval_workspace.py`, `label_workspace.py`, `retrieval_cache_import.py`, `training_workspace.py` | TrialSpace corpus, mining, match and boilerplate labeling, fitting | Current |
-| `train_checkers.py` | TrialChecker (five heads) and BoilerplateChecker (two classes) | Current |
+| `train_from_summaries.py`, `trialspace_training.py`, `trialspace/`, `trialspace_comparison.py`, `finetune_embedder.py`, `trialspace_embedding_losses.py`, `trialspace_prompt_profiles.py`, `retrieval_workspace.py`, `label_workspace.py`, `retrieval_cache_import.py`, `training_workspace.py` | TrialSpace corpus, mining, match, boilerplate and per-criterion labeling, fitting | Current |
+| `train_decision_model.py` | The decision model (d1-2B) on all seven question families | Current |
 | `oncoreasoning_training/` | Exclusion extraction, distillation, OncoReasoning adapters | Current (its README is provisional) |
 | `train_good_option_checker.py` | GoodOption catalog (`catalog`, `validate-catalog`) | Current; its `label`/`train` checker modes are deprecated |
 | `remote_vllm_pool.py`, `adaptive_controller.py`, `vllm_reasoning_utils.py` | Server pool, adaptive concurrency, reasoning parsers | Current |
