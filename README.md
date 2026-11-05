@@ -183,7 +183,7 @@ default range is `train` only.
 | `retrieval-cohorts` | `synthetic_protocols/retrieval_cohorts.py` | `retrieval_cohorts.csv` (both versions of every trial) + `.provenance.json` |
 | `generate-synthetic` | `generate_synthetic_data.py` | `synthetic_generation/all_synthetic_events.parquet`, `all_synthetic_notes.parquet`, `manifest.json` |
 | `prepare-notes` | `prepare_synthetic_training.py notes` | `all_synthetic_notes.parquet`, `synthetic_patient_metadata.parquet` |
-| `summarize-patients` | `6_summarize_patients.py` | `patient_summaries.parquet`, `patient_serial_summaries.parquet` |
+| `summarize-patients` | `summarize_patients.py` | `patient_summaries.parquet`, `patient_serial_summaries.parquet` |
 | `prepare-training` | `prepare_synthetic_training.py summaries` | `patient_summaries_with_spaces.parquet` (key section in `patient_summary`, boilerplate section in `patient_boilerplate_text`) |
 | `train` | `train_from_summaries.py` (corpus from `retrieval_cohorts.csv`) | TrialSpace rounds, TrialChecker, BoilerplateChecker and OncoReasoning under `../models/embeddinggemma2_pipeline_v1` |
 
@@ -262,7 +262,7 @@ templates are identical).
   it resumable, and failed trials leave `.partial` outputs and an error.
 - **Synthetic patients** (`generate_synthetic_data.py`, prompts in
   `synthetic_event_prompts.py`, note prompt and masking in
-  `2_make_synthetic_notes_sharded.py`). For every cohort: five positive seeds
+  `synthetic_note_prompts.py`). For every cohort: five positive seeds
   (meet all criteria) and five near-miss negative seeds; each seed becomes a
   validated event chronology (demographics, diagnoses, treatments, adverse
   events, notes, imaging, pathology and NGS reports); each report event becomes a
@@ -279,7 +279,7 @@ templates are identical).
   fabricated calendar dates from event ages, ending at `--synthetic-date-anchor`
   (2025-01-01), and writes patient metadata. All synthetic splits are pooled for
   training (`synthetic_pool.py`); the original split is kept as `source_split`.
-- **Summarize** (`6_summarize_patients.py`, with `summary_pool.py` and
+- **Summarize** (`summarize_patients.py`, with `summary_pool.py` and
   `summary_workspace.py`). Serial, chronological summarization with the inference
   package's prompts: each patient's dated notes are concatenated, split into
   overlapping token chunks (the pipeline uses 50,000 tokens with 500 overlap), and
@@ -520,8 +520,8 @@ and `scripts/benchmark_embeddinggemma_batches.py`.
 | --- | --- | --- |
 | `run_pipeline.py`, `train_all*.sh` | Stage orchestrator and wrappers | Current |
 | `0a_*`, `0b_*`, `0c_*`, `ctgov_metadata.py`, `trial_cohort_format.py`, `trial_space_format.py`, `repair_single_cohort_criteria.py` | Trial parsing, cohort extraction, sampling | Current |
-| `generate_synthetic_data.py`, `synthetic_event_prompts.py`, `2_make_synthetic_notes_sharded.py`, `prepare_synthetic_training.py`, `synthetic_pool.py` | Synthetic patients and notes | Current (the note script's standalone modes are legacy) |
-| `6_summarize_patients.py`, `summary_pool.py`, `summary_workspace.py` | Serial summarization | Current |
+| `generate_synthetic_data.py`, `synthetic_event_prompts.py`, `synthetic_note_prompts.py`, `prepare_synthetic_training.py`, `synthetic_pool.py` | Synthetic patients and notes | Current |
+| `summarize_patients.py`, `summary_pool.py`, `summary_workspace.py` | Serial summarization | Current |
 | `train_from_summaries.py`, `trialspace_training.py`, `trialspace/`, `trialspace_comparison.py`, `finetune_embedder.py`, `trialspace_embedding_losses.py`, `trialspace_prompt_profiles.py`, `retrieval_workspace.py`, `label_workspace.py`, `retrieval_cache_import.py`, `training_workspace.py` | TrialSpace corpus, mining, match and boilerplate labeling, fitting | Current |
 | `train_checkers.py` | TrialChecker (five heads) and BoilerplateChecker (two classes) | Current |
 | `oncoreasoning_training/` | Exclusion extraction, distillation, OncoReasoning adapters | Current (its README is provisional) |

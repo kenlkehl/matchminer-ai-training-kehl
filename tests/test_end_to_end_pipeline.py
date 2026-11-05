@@ -322,7 +322,7 @@ def test_age_parsing_supports_weeks_and_legacy_formats(text, expected):
 
 def test_summarization_loads_only_note_text_ids_and_dates(tmp_path, monkeypatch):
     from generate_synthetic_data import load_stage
-    summary = load_stage('6_summarize_patients.py')
+    summary = load_stage('summarize_patients.py')
     source = tmp_path / 'notes.parquet'
     pd.DataFrame([dict(pseudo_mrn=1, date='2025-01-01', synthetic_note='A fabricated note.',
                        masked_text='Full event history', reasoning='Full reasoning trace')]).to_parquet(source)

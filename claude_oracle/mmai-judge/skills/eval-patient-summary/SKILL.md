@@ -1,6 +1,6 @@
 ---
 name: eval-patient-summary
-description: Judge MM-AI patient summaries against the underlying clinical notes. Classifies each summary as AGREE (no clinically material differences), OMISSION (missed information that would affect treatment/trial eligibility), INCORRECT (fabricated or wrong information), or OMISSION_AND_INCORRECT. Use when the user asks to evaluate MM-AI patient summaries with Claude as judge, or mentions 6_summarize_patients / patient_summary eval.
+description: Judge MM-AI patient summaries against the underlying clinical notes. Classifies each summary as AGREE (no clinically material differences), OMISSION (missed information that would affect treatment/trial eligibility), INCORRECT (fabricated or wrong information), or OMISSION_AND_INCORRECT. Use when the user asks to evaluate MM-AI patient summaries with Claude as judge, or mentions summarize_patients / patient_summary eval.
 disable-model-invocation: true
 argument-hint: [summaries_parquet_or_csv] [notes_parquet_or_csv]
 allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *) Bash(wc *)
@@ -126,7 +126,7 @@ Read that file in full. It contains two clearly marked blocks:
 
 Your job is to judge whether the summary faithfully represents the notes, scored ONLY against what MMAI was actually instructed to capture.
 
-MMAI's directive (from 6_summarize_patients.py) tells it to produce exactly these eight sections, and ONLY these sections:
+MMAI's directive (from summarize_patients.py) tells it to produce exactly these eight sections, and ONLY these sections:
 - Age — patient's most recent age
 - Sex — patient's sex
 - Cancer type — primary site (e.g. breast cancer, lung cancer). Localized basal-cell or squamous-cell skin cancers and colon polyps do NOT count as cancers for this purpose. When the patient has multiple ACTIVE cancers, the most active cancer is listed first, followed by any other active cancers. Inactive prior cancers belong in the Boilerplate section (with a note that they are inactive and a date of last known activity if available), NOT in the cancer-history sections.

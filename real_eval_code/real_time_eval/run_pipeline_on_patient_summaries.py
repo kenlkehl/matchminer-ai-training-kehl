@@ -3,7 +3,7 @@
 
 Unlike simulated_oa_run.py, this script does NOT touch the database and does
 NOT re-summarize patients. It starts from a pre-existing
-patient_summaries.parquet (the schema produced by 6_summarize_patients.py)
+patient_summaries.parquet (the schema produced by summarize_patients.py)
 and runs: patient embedding -> top-K trial-space retrieval -> TrialChecker ->
 BoilerplateChecker -> (optional) LLM trial check -> (optional) LLM
 boilerplate check.
@@ -115,7 +115,7 @@ def parse_args():
 
     parser.add_argument("--input-summaries", required=True,
                         help="Path to a patient-summary parquet (same schema "
-                             "as 6_summarize_patients.py output).")
+                             "as summarize_patients.py output).")
     parser.add_argument("--embedding-model", required=True,
                         help="Folder containing the saved SentenceTransformer "
                              "embedding model (the 'TrialSpace' model).")

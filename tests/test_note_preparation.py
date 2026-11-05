@@ -40,14 +40,14 @@ def test_masking_preserves_duplicate_events_interleaving_indexes_and_text():
     ], columns=['patient_id', 'event_type', 'event_text'], index=[3, 1, 3, 8, 1, 9, 2, 7])
     frame['extra_provenance'] = range(len(frame))
     original = frame.copy(deep=True)
-    module = generation.load_stage('2_make_synthetic_notes_sharded.py')
+    module = generation.load_stage('synthetic_note_prompts.py')
     pd.testing.assert_frame_equal(module.create_masked_dataset(frame), reference_masking(frame))
     pd.testing.assert_frame_equal(frame, original)
 
 
 def test_masking_empty_report_selection_retains_columns():
     frame = pd.DataFrame([dict(patient_id='p', event_type='diagnosis', event_text='Cancer')])
-    result = generation.load_stage('2_make_synthetic_notes_sharded.py').create_masked_dataset(frame)
+    result = generation.load_stage('synthetic_note_prompts.py').create_masked_dataset(frame)
     assert result.empty and list(result.columns) == [*frame.columns, 'masked_text']
 
 

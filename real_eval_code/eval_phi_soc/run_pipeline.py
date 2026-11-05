@@ -7,7 +7,7 @@ and allowing for resumability.
 
 Pipeline stages:
 0. prepare: Prepare data (uses prepare_data.py)
-1. summarize: Summarize patient EHR (uses 6_summarize_patients.py)
+1. summarize: Summarize patient EHR (uses summarize_patients.py)
 2. spacify: Create/copy trial spaces
 3. retrieval: Patient-centric + trial-centric retrieval (trialspace embedding)
 4. llm_checks: Eligibility + boilerplate LLM checks via API (GPT) - self-aggregating
@@ -91,7 +91,7 @@ Examples:
                         choices=STAGES,
                         help="Start from this stage (runs this and all subsequent)")
     parser.add_argument("--summarize-script", type=str,
-                        default=str(REPO_ROOT / "6_summarize_patients.py"),
+                        default=str(REPO_ROOT / "summarize_patients.py"),
                         help="Path to patient summarization script")
     parser.add_argument("--input-notes", type=str,
                         default=str(DATA_DIR / "note_level_dataset.parquet"),

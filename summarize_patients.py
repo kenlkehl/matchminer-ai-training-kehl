@@ -17,7 +17,7 @@ Within each round, prompts are distributed across servers round-robin.
 Examples
 --------
 # Single server on 2 GPUs (tensor_parallel_size=2)
-python 6_summarize_patients.py \
+python summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
@@ -32,7 +32,7 @@ python 6_summarize_patients.py \
 
 
 # shorter chunks
-python 6_summarize_patients.py \
+python summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries_20K_chunks.parquet \
   --shard_dir ../data/no_phi/summary_shards_20K_chunks \
@@ -46,7 +46,7 @@ python 6_summarize_patients.py \
 
 
 # Two servers, 2 GPUs each (4 GPUs total, tensor_parallel_size=2 per server)
-python 6_summarize_patients.py \
+python summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \
@@ -62,7 +62,7 @@ python 6_summarize_patients.py \
 
 
 # Pass extra flags through to the vLLM server (quoted, shell-style; split with shlex)
-python 6_summarize_patients.py \
+python summarize_patients.py \
   --input_parquet ../data/no_phi/all_synthetic_notes.parquet \
   --output_parquet ../data/no_phi/patient_serial_summaries.parquet \
   --shard_dir ../data/no_phi/summary_shards \

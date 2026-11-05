@@ -1057,7 +1057,7 @@ async def run_pool(
     # We exit when every item has been processed (success or poison-pill
     # placeholder) — i.e. len(completed_ids) >= total. This works regardless
     # of whether shards have been flushed yet, which matters for callers
-    # like 6_summarize_patients.py that use a giant results_per_shard and
+    # like summarize_patients.py that use a giant results_per_shard and
     # rely on the final flush() in `finally` to write the whole round.
     last_progress = time.monotonic()
     last_warned_at = last_progress

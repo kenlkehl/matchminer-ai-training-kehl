@@ -7,7 +7,7 @@ Run the real-time trial-matching pipeline on freshly regenerated summaries for
 patients who generated outbound email drafts.
 
 The script first identifies the MRNs associated with drafted outbound emails,
-pulls their raw notes from the database, runs ../../6_summarize_patients.py to
+pulls their raw notes from the database, runs ../../summarize_patients.py to
 rebuild patient summaries from scratch, then retrieves the top --top-k-retrieve
 trial spaces by cosine similarity, optionally re-ranks with a TrialChecker
 model, optionally scores with a BoilerplateChecker model, and keeps the top
@@ -72,7 +72,7 @@ DEFAULT_EMBEDDINGS = (
     / "data" / "phi" / "real_time" / "trial_space_embeddings.parquet"
 )
 
-DEFAULT_SUMMARIZE_SCRIPT = Path(__file__).resolve().parents[2] / "6_summarize_patients.py"
+DEFAULT_SUMMARIZE_SCRIPT = Path(__file__).resolve().parents[2] / "summarize_patients.py"
 
 DEFAULT_SUMMARIZATION_ARTIFACT_ROOT = (
     Path(__file__).resolve().parents[3]
@@ -234,15 +234,15 @@ def parse_args():
                         help="Output parquet file path")
     parser.add_argument(
         "--summarize-script", type=str, default=str(DEFAULT_SUMMARIZE_SCRIPT),
-        help="Path to ../../6_summarize_patients.py",
+        help="Path to ../../summarize_patients.py",
     )
     parser.add_argument(
         "--summarization-model", type=str, default="google/gemma-4-31b-it",
-        help="Model passed to 6_summarize_patients.py",
+        help="Model passed to summarize_patients.py",
     )
     parser.add_argument(
         "--summarization-download-dir", type=str, default="/data1/ken/models",
-        help="Download/cache directory passed to 6_summarize_patients.py",
+        help="Download/cache directory passed to summarize_patients.py",
     )
     parser.add_argument(
         "--summarization-gpu-ids", type=str, default=None,
@@ -258,11 +258,11 @@ def parse_args():
     )
     parser.add_argument(
         "--summarization-chunk-size", type=int, default=10000,
-        help="Chunk size passed to 6_summarize_patients.py (default: 10000)",
+        help="Chunk size passed to summarize_patients.py (default: 10000)",
     )
     parser.add_argument(
         "--summarization-chunk-overlap", type=int, default=50,
-        help="Chunk overlap passed to 6_summarize_patients.py (default: 500)",
+        help="Chunk overlap passed to summarize_patients.py (default: 500)",
     )
     parser.add_argument(
         "--summarization-base-port", type=int, default=8000,
@@ -286,7 +286,7 @@ def parse_args():
         dest="summarization_gpu_memory_utilization",
         type=float,
         default=0.90,
-        help="GPU memory utilization passed to 6_summarize_patients.py "
+        help="GPU memory utilization passed to summarize_patients.py "
              "(default: 0.90)",
     )
     parser.add_argument(
@@ -295,20 +295,20 @@ def parse_args():
     )
     parser.add_argument(
         "--summarization-run-deterministic", action="store_true",
-        help="Pass --run_deterministic to 6_summarize_patients.py",
+        help="Pass --run_deterministic to summarize_patients.py",
     )
     parser.add_argument(
         "--summarization-max-model-len", type=int, default=30000,
-        help="max_model_len passed to 6_summarize_patients.py (default: 30000)",
+        help="max_model_len passed to summarize_patients.py (default: 30000)",
     )
     parser.add_argument(
         "--summarization-enforce-eager", action="store_true",
-        help="Pass --enforce_eager to 6_summarize_patients.py "
+        help="Pass --enforce_eager to summarize_patients.py "
              "(disables CUDA graphs; helps surface engine crash tracebacks)",
     )
     parser.add_argument(
         "--summarization-additional-vllm-args", type=str, default="",
-        help="Extra arguments forwarded to 6_summarize_patients.py "
+        help="Extra arguments forwarded to summarize_patients.py "
              "via --additional_vllm_args (a single shell-quoted string), e.g. "
              "--summarization-additional-vllm-args "
              "\"--quantization nvfp4 --kv-cache-dtype fp8\"",
@@ -605,7 +605,7 @@ def load_summarization_output(patient_output: Path):
 
 
 def run_or_resume_summarization(notes_df, args):
-    """Stage, reuse, or resume ../../6_summarize_patients.py artifacts."""
+    """Stage, reuse, or resume ../../summarize_patients.py artifacts."""
     summarize_script = Path(args.summarize_script).resolve()
     if not summarize_script.exists():
         raise FileNotFoundError(f"Summarization script not found: {summarize_script}")

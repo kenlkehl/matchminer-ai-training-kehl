@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resumable event lists and notes using the synthetic_event_prompts and step-2 note prompts.
+"""Resumable event lists and notes using the synthetic_event_prompts and synthetic_note_prompts prompts.
 
 One shared live endpoint pool serves both classes of histories and all notes.
 Bounded preparation and atomic shards avoid materializing millions of prompts.
@@ -402,14 +402,15 @@ def initialize_note_preparation_worker():
 
 
 @lru_cache(maxsize=1)
-def note_preparation_stage():
-    return load_stage('2_make_synthetic_notes_sharded.py')
+def note_prompts():
+    """synthetic_note_prompts, loaded on first use (it imports the inference package)."""
+    return load_stage('synthetic_note_prompts.py')
 
 
 def prepare_note_chunk(job):
     """Write one independent chunk with IDs assigned in input order by the parent."""
     patients = event_rows(job['records'], job['identity'])
-    promptframe = note_preparation_stage().create_masked_dataset(patients).reset_index(drop=True)
+    promptframe = note_prompts().create_masked_dataset(patients).reset_index(drop=True)
     chunk = job['chunk']
     if len(promptframe) != chunk['notes']:
         raise ValueError('Prepared note count differs from event-tag count')
@@ -424,7 +425,7 @@ class Generator:
     def __init__(self, args, tokenizer):
         self.args, self.tokenizer = args, tokenizer
         self.out = Path(args.output_dir)
-        self.notes = load_stage('2_make_synthetic_notes_sharded.py')
+        self.notes = note_prompts()
         self.sampling = CompletionSampling(
             model=args.model, request_timeout=args.request_timeout,
             **resolve_sampling_defaults(args.tokenizer_model or args.model,
@@ -438,7 +439,7 @@ class Generator:
         save_json(self.out / 'status.json', self.status)
 
     def manifest(self):
-        sources = ['generate_synthetic_data.py', '2_make_synthetic_notes_sharded.py',
+        sources = ['generate_synthetic_data.py', 'synthetic_note_prompts.py',
                    'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py',
                    'trial_cohort_format.py', 'adaptive_controller.py']
         value = dict(version='synthetic-cohort-seeds-patient-events-notes-v5', input_stamp=file_stamp(self.args.input_csv),
@@ -475,7 +476,7 @@ class Generator:
             messages = prompts.patient_messages(item['seed_text'])
             max_tokens = self.args.event_max_tokens
         else:
-            # Preserve the exact step-2 prompt. The larger limit prevents its
+            # Preserve the exact note prompt. The larger limit prevents its
             # legacy head/tail truncation; reject an overlong context below.
             messages = self.notes.build_messages([item['masked_text']], self.tokenizer,
                                              max_ctx_tokens=self.args.max_model_len,

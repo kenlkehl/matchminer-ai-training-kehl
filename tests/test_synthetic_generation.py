@@ -112,7 +112,7 @@ def test_invalid_event_outputs_are_not_accepted(answer, finish):
     'Value <0.01; reference range 0 <= value < 1.',
 ])
 @pytest.mark.parametrize('separator', ['\n', ''])
-def test_event_inequalities_survive_both_parsers_and_note_inputs(finding, separator):
+def test_event_inequalities_survive_the_parser_and_note_inputs(finding, separator):
     histories = '\n<new_patient>\n'.join(
         separator.join([f'<demographics> Synthetic patient {i}, aged 60.',
                         '<diagnosis> Metastatic cancer.',
@@ -121,20 +121,16 @@ def test_event_inequalities_survive_both_parsers_and_note_inputs(finding, separa
         for i in range(5)
     )
     record = dict(space_index=0, patient_class='positive', nct_id='NCT1', answer=histories)
-    notes = generation.load_stage('2_make_synthetic_notes_sharded.py')
-    current = generation.event_rows([record], 'run')
-    legacy = notes.process_clinical_notes_from_df(pd.DataFrame([
-        dict(space_index=0, synthetic_patient_prompts=histories)]))
-    for events in (current, legacy):
-        assert events.patient_id.nunique() == 5
-        assert len(events) == 20
-        assert events.loc[events.event_type.eq('pathology_report'), 'event_text'].tolist() == [finding] * 5
-        prompts = notes.create_masked_dataset(events)
-        assert len(prompts) == 10
-        assert prompts.masked_text.map(lambda text: finding in text).all()
-        for text in prompts.loc[prompts.event_type.eq('pathology_report'), 'masked_text']:
-            assert f'<pathology_report>{finding} <END EVENT CORRESPONDING TO SYNTHETIC NOTE>' in text
-    assert current.event_text.tolist() == legacy.event_text.tolist()
+    notes = generation.load_stage('synthetic_note_prompts.py')
+    events = generation.event_rows([record], 'run')
+    assert events.patient_id.nunique() == 5
+    assert len(events) == 20
+    assert events.loc[events.event_type.eq('pathology_report'), 'event_text'].tolist() == [finding] * 5
+    prompts = notes.create_masked_dataset(events)
+    assert len(prompts) == 10
+    assert prompts.masked_text.map(lambda text: finding in text).all()
+    for text in prompts.loc[prompts.event_type.eq('pathology_report'), 'masked_text']:
+        assert f'<pathology_report>{finding} <END EVENT CORRESPONDING TO SYNTHETIC NOTE>' in text
 
 
 @pytest.mark.parametrize('bad_event', ['<unknown_tag> Invalid event.', '<pathology_report>'])

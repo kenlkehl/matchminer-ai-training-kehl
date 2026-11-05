@@ -49,7 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]  # matchminer-ai-training
 sys.path.insert(0, str(REPO_ROOT))
 
 from importlib import import_module
-_summarize = import_module("6_summarize_patients")
+_summarize = import_module("summarize_patients")
 
 concatenate_and_chunk_notes = _summarize.concatenate_and_chunk_notes
 deduplicate_patient_notes = _summarize.deduplicate_patient_notes
