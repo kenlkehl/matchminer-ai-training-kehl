@@ -15,6 +15,11 @@ import train_from_summaries as training
 from tests.test_synthetic_generation import SPACE
 
 
+def pipeline_stage(filename):
+    from generate_synthetic_data import load_stage
+    return load_stage(filename)
+
+
 def arguments(tmp_path, *extra):
     root = tmp_path / 'data/no_phi'
     return pipeline.resolve_paths(pipeline.parser().parse_args([
@@ -30,12 +35,16 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     plan = pipeline.build_plan(args)
     assert [s.name for s in plan] == list(pipeline.STAGES)
     stage = {s.name: s for s in plan}
-    assert stage['extract-cohorts'].command[stage['extract-cohorts'].command.index('--start-year') + 1] == '2020'
+    screen = stage['screen-trials'].command
+    assert screen[1].endswith('0b_screen_trials.py') and screen[screen.index('--start-year') + 1] == '2020'
+    assert [screen[screen.index(flag) + 1] for flag in ('--dfci-first-year', '--dfci-last-year')] == ['2025', '2026']
+    assert screen[screen.index('--dfci-trials-csv') + 1] == str(args.dfci_trials_csv)
     assert stage['sample-trials'].command[stage['sample-trials'].command.index('--n-trials') + 1] == '5000'
-    assert stage['extract-cohorts'].command[1].endswith('0b_extract_trial_cohorts.py')
-    assert '--screening-input' not in stage['extract-cohorts'].command
-    # Registry sample -> synthetic protocols -> protocol and registry cohorts of the same seeds.
-    assert stage['extract-cohorts'].outputs[0] == stage['sample-trials'].inputs[0]
+    # Registry rule, DFCI holdout and screen -> seeded draw -> synthetic protocols -> both versions' cohorts.
+    assert stage['screen-trials'].outputs[0] == args.screened_trials == stage['sample-trials'].inputs[0]
+    sample = stage['sample-trials'].command
+    assert sample[sample.index('--screened-trials') + 1] == str(args.screened_trials)
+    assert [sample[sample.index(flag) + 1] for flag in ('--n-trials', '--seed')] == ['5000', '42']
     assert stage['sample-trials'].outputs[0] == args.registry_sample == stage['synthetic-protocols'].inputs[0]
     seeds = stage['synthetic-protocols'].outputs[0]
     assert seeds in stage['protocol-cohorts'].inputs and seeds == stage['registry-cohorts'].inputs[0]
@@ -53,18 +62,16 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert stage['retrieval-cohorts'].outputs[0] == args.retrieval_cohorts
     from generate_synthetic_data import load_stage
     extract = load_stage('0b_extract_trial_cohorts.py')
-    extraction = extract.parser().parse_args(stage['extract-cohorts'].command[2:])
-    assert extraction.max_attempts == 3 and extraction.max_tokens == 50000
-    assert extraction.inference_repo == args.inference_repo and extraction.trials_jsonl is None
+    screening = pipeline_stage('0b_screen_trials.py').parser().parse_args(screen[2:])
+    assert screening.max_attempts == 3 and screening.max_tokens == 50000
+    assert screening.inference_repo == args.inference_repo and screening.output == args.screened_trials
     registry = extract.parser().parse_args(stage['registry-cohorts'].command[2:])
     assert registry.trials_jsonl == seeds and registry.allow_failures
     # Cohort rows are kept both before and after merging.
     assert extract.output_paths(registry)[3] == registry.output_unmerged_cohorts == stage['registry-cohorts'].outputs[3]
-    assert extract.output_paths(extraction)[3] == stage['extract-cohorts'].outputs[3]
     assert stage['protocol-cohorts'].outputs[3] == args.protocol_dir / 'cohort_extraction/cohorts_unmerged.parquet'
     # Registry rows are de-boilerplated too, and retrieval reads them beside the de-boilerplated protocol cohorts.
     assert extract.output_paths(registry)[4] == registry.output_deboilerplated_cohorts == stage['registry-cohorts'].outputs[4]
-    assert extract.output_paths(extraction)[4] == stage['extract-cohorts'].outputs[4]
     retrieval = stage['retrieval-cohorts'].command
     assert retrieval[retrieval.index('--registry-cohorts') + 1] == str(stage['registry-cohorts'].outputs[4])
     assert retrieval[retrieval.index('--protocol-cohorts') + 1] == str(clean)
@@ -82,12 +89,12 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert args.retrieval_cohorts in plan[-1].inputs
     train_command = plan[-1].command
     assert train_command[train_command.index('--trial-spaces') + 1] == str(args.retrieval_cohorts)
-    for name in ('extract-cohorts', 'registry-cohorts', 'generate-synthetic', 'summarize-patients'):
+    for name in ('screen-trials', 'registry-cohorts', 'generate-synthetic', 'summarize-patients'):
         command = stage[name].command
         assert command[command.index('--model') + 1] == 'gemma4-31b'
         assert command[command.index('--tokenizer-model') + 1] == 'vendor/tokenizer'
         assert command[command.index('--server_urls_file') + 1] == str(args.server_urls_file)
-        if name not in ('extract-cohorts', 'registry-cohorts'):
+        if name not in ('screen-trials', 'registry-cohorts'):
             assert '--concurrency-control-file' in command
     for name in ('synthetic-protocols', 'protocol-cohorts'):
         command = stage[name].command
@@ -95,7 +102,7 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
         assert command[command.index('--server-urls-file') + 1] == str(args.server_urls_file)
         assert '--allow-failures' in command
     # Extraction uses inference-owned adaptive limits and live registry caps.
-    assert '--max_concurrent_per_server' in stage['extract-cohorts'].command
+    assert '--max_concurrent_per_server' in stage['screen-trials'].command
     downstream = training.stages(args)
     for item in downstream:
         if item.teacher:

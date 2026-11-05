@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Resumable CT.gov → synthetic protocols → synthetic notes → summaries → model training orchestration.
 
-Sampled registry trials each get a synthetic full protocol. Patients are
+The trial sample is drawn from the CT.gov export in this order (user instruction,
+2026-11-04): the registry rule (first posted since --start-year, interventional,
+early phase I-IV), the DFCI holdout (trials open at DFCI in --dfci-first-year to
+--dfci-last-year), the cohort workflow's cancer-treatment screen (screen-trials,
+every answer and its reasoning saved), then a seeded draw of --sample-trials
+(sample-trials). Each sampled trial gets a synthetic full protocol. Patients are
 generated from the protocol cohorts; retrieval, labeling and training see every
 trial in both versions, its protocol cohorts and its registry cohorts
 (retrieval-cohorts), so the models work for users holding either source.
@@ -32,10 +37,10 @@ DATA_ROOT = next((p for p in ROOT.parents if p.name == 'no_phi' and p.parent.nam
 # Every sampled trial gets a synthetic protocol; patients are generated from the
 # protocol's cohorts, and retrieval/labeling/training see both the protocol and
 # the registry (ClinicalTrials.gov) version of each trial's cohorts.
-STAGES = ('parse-trials', 'extract-cohorts', 'sample-trials', 'synthetic-protocols', 'protocol-cohorts',
+STAGES = ('parse-trials', 'screen-trials', 'sample-trials', 'synthetic-protocols', 'protocol-cohorts',
           'registry-cohorts', 'generation-cohorts', 'retrieval-cohorts', 'generate-synthetic',
           'prepare-notes', 'summarize-patients', 'prepare-training', 'train')
-LLM_STAGES = {'extract-cohorts', 'synthetic-protocols', 'protocol-cohorts', 'registry-cohorts',
+LLM_STAGES = {'screen-trials', 'synthetic-protocols', 'protocol-cohorts', 'registry-cohorts',
               'generate-synthetic', 'summarize-patients'}
 
 
@@ -58,8 +63,11 @@ def parser():
     p.add_argument('--parsed-trials', type=Path)
     p.add_argument('--start-year', type=int, default=2020)
     p.add_argument('--registry-sample', type=Path,
-                   help='sample-trials output: sampled registry cohorts (protocol seeds, source splits); '
-                        'default DATA_DIR/registry_sample_cohort_lineitems.csv')
+                   help='sample-trials output: the sampled trials (protocol seeds, source splits); '
+                        'default DATA_DIR/registry_sample_trials.csv')
+    p.add_argument('--screened-trials', type=Path,
+                   help='screen-trials output: every trial meeting the registry rule, with its DFCI holdout '
+                        'flag and screen decision; default DATA_DIR/screened_trials.csv')
     p.add_argument('--protocol-dir', type=Path, help='Synthetic protocol batch; default DATA_DIR/synthetic_protocols')
     p.add_argument('--protocol-cohort-dir', type=Path,
                    help='protocol-cohorts output, e.g. to re-extract an existing batch into a new run; '
@@ -80,6 +88,8 @@ def parser():
     p.add_argument('--cohort-max-tokens', type=int, default=50000)
     p.add_argument('--data-seed', type=int, default=42)
     p.add_argument('--dfci-trials-csv', type=Path, default=DATA_ROOT / 'dfci_trials_summary_10-18-26.csv')
+    p.add_argument('--dfci-first-year', type=int, default=2025)
+    p.add_argument('--dfci-last-year', type=int, default=2026)
     p.add_argument('--generation-dir', type=Path)
     p.add_argument('--raw-synthetic-notes', type=Path)
     p.add_argument('--server-urls-file', type=Path, help='Externally managed live pool for upstream LLM stages')
@@ -132,7 +142,8 @@ def resolve_paths(args):
             continue
         if getattr(args, key) is None:
             setattr(args, key, value)
-    args.registry_sample = args.registry_sample or args.data_dir / 'registry_sample_cohort_lineitems.csv'
+    args.registry_sample = args.registry_sample or args.data_dir / 'registry_sample_trials.csv'
+    args.screened_trials = args.screened_trials or args.data_dir / 'screened_trials.csv'
     args.protocol_dir = args.protocol_dir or args.data_dir / 'synthetic_protocols'
     args.protocol_cohort_dir = args.protocol_cohort_dir or args.protocol_dir / 'cohort_extraction'
     args.retrieval_cohorts = args.retrieval_cohorts or args.data_dir / 'retrieval_cohorts.csv'
@@ -209,17 +220,16 @@ def build_plan(args):
     model = ['--model', args.generation_model, '--tokenizer-model', args.generation_tokenizer]
     cache = ['--download-dir', str(args.download_dir)] if args.download_dir else []
     source = lambda *names: [ROOT / name for name in names]
-    extraction = [py, str(ROOT / '0b_extract_trial_cohorts.py'), '--input', str(args.parsed_trials),
-                  '--start-year', str(args.start_year), '--seed', str(args.data_seed),
-                  '--output-trials', str(d / 'trials_with_cohorts.csv'), '--output-cohorts', str(args.trial_spaces),
-                  '--output-json', str(d / 'trial_cohorts.json'), '--work-dir', str(work / 'extraction'),
-                  '--output-unmerged-cohorts', str(unmerged(args.trial_spaces)),
-                  '--output-deboilerplated-cohorts', str(deboilerplated(args.trial_spaces)),
-                  '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
-                  '--max-attempts', str(args.cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
-                  '--max_concurrent_per_server', str(args.generation_concurrency_per_server),
-                  '--request_timeout', str(args.generation_request_timeout), '--api-key-env', args.api_key_env,
-                  *model, *(['--server_urls_file', str(registry)] if registry else [])]
+    screening = [py, str(ROOT / '0b_screen_trials.py'), '--input', str(args.parsed_trials),
+                 '--start-year', str(args.start_year), '--seed', str(args.data_seed),
+                 '--dfci-trials-csv', str(args.dfci_trials_csv), '--dfci-first-year', str(args.dfci_first_year),
+                 '--dfci-last-year', str(args.dfci_last_year), '--output', str(args.screened_trials),
+                 '--work-dir', str(work / 'screen'),
+                 '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
+                 '--max-attempts', str(args.cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
+                 '--max_concurrent_per_server', str(args.generation_concurrency_per_server),
+                 '--request_timeout', str(args.generation_request_timeout), '--api-key-env', args.api_key_env,
+                 *model, *(['--server_urls_file', str(registry)] if registry else [])]
     inference_sources = args.inference_repo / 'src/matchminer_ai'
     package = sorted(p for p in inference_sources.rglob('*') if p.suffix in ('.py', '.txt', '.yaml'))
     pool = ['--server-urls-file', str(registry)] if registry else []
@@ -246,15 +256,16 @@ def build_plan(args):
         Stage('parse-trials', [py, str(ROOT / '0a_parse_ctgov_json.py'), '--input', str(args.ctgov_json),
                               '--output', str(args.parsed_trials)],
               [args.ctgov_json] if args.ctgov_json else [], [args.parsed_trials], source('0a_parse_ctgov_json.py', 'ctgov_metadata.py')),
-        Stage('extract-cohorts', extraction, [args.parsed_trials],
-              [args.trial_spaces, d / 'trials_with_cohorts.csv', d / 'trial_cohorts.json', unmerged(args.trial_spaces),
-               deboilerplated(args.trial_spaces)],
-              source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') + package),
-        Stage('sample-trials', [py, str(ROOT / '0c_sample_trial_spaces.py'), '--input-csv', str(args.trial_spaces),
-              '--output-csv', str(args.registry_sample), '--dfci-trials-csv', str(args.dfci_trials_csv),
-              '--n-trials', str(args.sample_trials), '--seed', str(args.data_seed)],
-              [args.trial_spaces, args.dfci_trials_csv], [args.registry_sample, args.registry_sample.with_suffix('.sampling.json')],
-              source('0c_sample_trial_spaces.py', 'trial_space_format.py', 'trial_cohort_format.py')),
+        # Registry rule, DFCI holdout and the cancer-treatment screen; every screen answer is saved.
+        Stage('screen-trials', screening, [args.parsed_trials, args.dfci_trials_csv],
+              [args.screened_trials, Path(f'{args.screened_trials}.screening.json')],
+              source('0b_screen_trials.py', '0b_extract_trial_cohorts.py', '0c_sample_trial_spaces.py',
+                     'trial_cohort_format.py') + package),
+        Stage('sample-trials', [py, str(ROOT / '0c_sample_trial_spaces.py'), '--screened-trials', str(args.screened_trials),
+              '--output-csv', str(args.registry_sample), '--n-trials', str(args.sample_trials), '--seed', str(args.data_seed)],
+              [args.screened_trials, Path(f'{args.screened_trials}.screening.json')],
+              [args.registry_sample, args.registry_sample.with_suffix('.sampling.json')],
+              source('0c_sample_trial_spaces.py', 'trial_cohort_format.py')),
         # One synthetic full protocol per sampled trial, seeded from its registry record.
         Stage('synthetic-protocols', [py, str(ROOT / 'synthetic_protocols/generate_batch.py'),
               '--nct-ids-from', str(args.registry_sample), '--output-dir', str(batch),

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Sample 5,000 complete trials, retaining all cohorts, with the DFCI holdout.
+"""Sample 5,000 trials for training.
 
-The historical filename and space-input adapter remain for older datasets.
+Production (--screened-trials, user instruction 2026-11-04): a seeded draw of whole trials from
+those 0b_screen_trials.py accepted (registry rule, DFCI holdout, then the cancer-treatment screen),
+before any cohort extraction; the receipt carries the counts of every step. The older modes sample
+already-extracted cohort tables; the historical filename and space-input adapter remain for older
+datasets.
 """
 import argparse
 import json
@@ -33,6 +37,40 @@ def dfci_nct_ids_open_during(dfci_trials, first_year, last_year):
     outside_window = (close_year < first_year) | (open_year > last_year)
     open_during = ~outside_window | (dfci_trials.status == 'OPEN TO ACCRUAL')
     return set(dfci_trials.nct_id[open_during])
+
+
+def sample_screened_trials(screened_csv, output_csv, *, n_trials=5000, seed=42):
+    """Draw n_trials of the trials 0b_screen_trials.py accepted; write one row per trial.
+
+    The output keeps each sampled trial's screening row (nct_id, split, dates) in sample order; its
+    nct_id seeds the synthetic protocols and its split is every later stage's source split. The
+    receipt records the screening receipt's counts and the sampled IDs.
+    """
+    screened = read_clinical_csv(screened_csv)
+    screening = json.loads(Path(f'{screened_csv}.screening.json').read_text())
+    if screened.nct_id.duplicated().any():
+        raise ValueError('Duplicate NCT IDs in the screened trials')
+    held_out = screened.dfci_holdout.astype(str).str.lower().eq('true')  # CSV text, not booleans
+    eligible = sorted(screened.nct_id[~held_out & screened.cancer_treatment_trial.eq('yes')])
+    if len(eligible) < n_trials:
+        raise ValueError(f'Only {len(eligible)} screened cancer treatment trials; need {n_trials}')
+    sampled = pd.Series(eligible).sample(n=n_trials, random_state=seed).tolist()
+    output = screened.set_index('nct_id').loc[sampled].reset_index()
+    path = Path(output_csv)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    output.to_csv(temporary, index=False)
+    temporary.replace(path)
+    manifest = dict(input=str(Path(screened_csv).resolve()), output=str(path.resolve()), seed=seed,
+                    exported_trials=screening['exported_trials'], registry_rule=screening['registry_rule'],
+                    dfci_holdout={k: v for k, v in screening['dfci_holdout'].items() if k != 'nct_ids'},
+                    screen={k: v for k, v in screening['screen'].items() if k != 'rejected_nct_ids'},
+                    eligible_trials=len(eligible), sampled_trials=n_trials, sampled_nct_ids=sampled,
+                    split_counts=output.split.value_counts().to_dict(),
+                    sampling_source_sha256={p.name: file_sha256(p) for p in (Path(__file__),)})
+    path.with_suffix('.sampling.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print(f'sampled {n_trials} of {len(eligible)} screened cancer treatment trials (seed {seed}) to {path}', flush=True)
+    return output
 
 
 def sample_trial_spaces(input_csv, output_csv, dfci_csv, *, n_trials=5000, seed=42,
@@ -158,6 +196,8 @@ def sample_trial_spaces(input_csv, output_csv, dfci_csv, *, n_trials=5000, seed=
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument('--screened-trials', help='0b_screen_trials.py output: draw whole trials from those it accepted '
+                                                  '(production)')
     inputs.add_argument('--input-csv', help='0b cohort CSV; default ../data/no_phi/trial_cohort_lineitems.csv')
     inputs.add_argument('--extraction-dir', help='Completed production run containing inputs.parquet, combined_outputs.json and cohorts.jsonl')
     parser.add_argument('--output-csv', default='../data/no_phi/sample_trial_cohort_lineitems.csv')
@@ -168,6 +208,9 @@ def main():
     parser.add_argument('--last-year', type=int, default=2026)
     parser.add_argument('--chunksize', type=int, default=2000)
     args = parser.parse_args()
+    if args.screened_trials:
+        sample_screened_trials(args.screened_trials, args.output_csv, n_trials=args.n_trials, seed=args.seed)
+        return
     if args.input_csv is None and args.extraction_dir is None:
         args.input_csv = '../data/no_phi/trial_cohort_lineitems.csv'
     sample_trial_spaces(args.input_csv, args.output_csv, args.dfci_trials_csv,

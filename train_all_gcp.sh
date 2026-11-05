@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared resumable data-production and training pipeline (run_pipeline.py). Stages:
-#   parse-trials, extract-cohorts (0b), sample-trials (0c),
+#   parse-trials, screen-trials (0b_screen_trials.py: registry rule, DFCI holdout, cancer-treatment screen),
+#   sample-trials (0c: seeded draw of screened trials),
 #   synthetic-protocols (synthetic_protocols/generate_batch.py),
 #   protocol-cohorts (synthetic_protocols/extract_cohorts.py),
 #   registry-cohorts (0b --trials-jsonl on the protocol seeds),

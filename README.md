@@ -48,6 +48,28 @@ step 7 is now generating patients from its cohorts.
    (the search query is the file name; downloaded 2026-10-15) is parsed without
    filtering by `parse-trials` (`0a_parse_ctgov_json.py`) into
    `ctgov_trials.csv`: 148,056 trials.
+**Sampling from 2026-11-04 (user instruction; production `run_pipeline.py`).**
+The 4,981-trial sample below came out of an older screen and a later
+re-extraction that dropped 19 trials without replacement. Training now draws
+its sample in this order, so the denominator is exactly 5,000:
+
+- the export above (148,056 trials) →
+- the registry rule: first posted in 2020 or later, interventional, every
+  phase early phase 1 to phase 4 (30,167) →
+- the DFCI holdout: trials open at DFCI in 2025–2026
+  (`dfci_trials_summary_10-18-26.csv`; 1,162 of them) →
+- the cohort workflow's cancer-treatment screen (`trial.cohorts.screen.user.txt`)
+  on each listing (title, brief summary, eligibility criteria). This is
+  `screen-trials` (`0b_screen_trials.py`): every answer and its reasoning goes
+  to `<run>/upstream/screen/screen.jsonl`, and the counts and removed IDs of
+  every step go to `screened_trials.csv.screening.json` →
+- `sample-trials` (`0c_sample_trial_spaces.py --screened-trials`): a draw of
+  5,000 accepted trials with `random_state=42`
+  (`registry_sample_trials.csv` + `.sampling.json`).
+
+Each sampled trial then gets a synthetic protocol from its registry record.
+The steps below describe the October runs.
+
 2. **Treatment screening and registry cohorts, before sampling.** Trials first
    posted in 2020 or later, interventional, with every phase in early phase 1
    to phase 4 (30,167 trials) go to the inference package's combined cohort
@@ -57,8 +79,8 @@ step 7 is now generating patients from its cohorts.
    on 2026-10-24, 01:37–03:03 UTC, with Gemma 4 31B (NVFP4 on
    `sn4622130540:8000`, FP8 on `172.24.216.113:8001`; thinking on, 50,000
    completion tokens): 23,818 treatment trials and 6,349 others, with no errors
-   (`AR/ctgov_treatment_cohorts_since2020_gemma4_31b_20261023/`). `extract-cohorts`
-   (`0b_extract_trial_cohorts.py`) is the pipeline form of this step.
+   (`AR/ctgov_treatment_cohorts_since2020_gemma4_31b_20261023/`). The pipeline
+   now runs `screen-trials` instead (above).
 3. **Sample 5,000 trials.** `sample-trials` (`0c_sample_trial_spaces.py`) keeps
    screened treatment trials with complete cohort sets, excludes DFCI trials
    open in 2025–2026 (`dfci_trials_summary_10-18-26.csv`), leaving 22,734, and
@@ -134,8 +156,8 @@ default range is `train` only.
 | Stage | Command | Main outputs (defaults under `../data/no_phi`) |
 | --- | --- | --- |
 | `parse-trials` | `0a_parse_ctgov_json.py` (requires `--ctgov-json`, a CT.gov API v2 export) | `ctgov_trials.csv` |
-| `extract-cohorts` | `0b_extract_trial_cohorts.py` | `trial_cohort_lineitems.csv` (cohorts with essentially the same criteria merged), `trial_cohort_lineitems_unmerged.csv` (before merging), `trials_with_cohorts.csv`, `trial_cohorts.json` |
-| `sample-trials` | `0c_sample_trial_spaces.py` | `registry_sample_cohort_lineitems.csv` + `.sampling.json` (sampled registry cohorts: protocol seeds and source splits) |
+| `screen-trials` | `0b_screen_trials.py` | `screened_trials.csv` + `.screening.json`: every trial meeting the registry rule, with its DFCI holdout flag and screen decision; the counts and removed IDs of each step. Every screen answer and its reasoning goes to `upstream/screen/screen.jsonl`. |
+| `sample-trials` | `0c_sample_trial_spaces.py --screened-trials` | `registry_sample_trials.csv` + `.sampling.json`: the seeded draw of `--sample-trials` (5,000) accepted trials, which seed the protocols and give the source splits |
 | `synthetic-protocols` | `synthetic_protocols/generate_batch.py` | `synthetic_protocols/` (`seeds.jsonl`, `protocols/<NCT>/protocol.md`, `protocols.csv`) |
 | `protocol-cohorts` | `synthetic_protocols/extract_cohorts.py` | `synthetic_protocols/cohort_extraction/` or `--protocol-cohort-dir` (`cohorts.parquet` merged, `cohorts_unmerged.parquet`, `trials.parquet`) |
 | `registry-cohorts` | `0b_extract_trial_cohorts.py --trials-jsonl` (the protocol seeds) | `registry_cohorts/` (`trial_cohort_lineitems.csv` merged, `trial_cohort_lineitems_unmerged.csv`, `trials_with_cohorts.csv`, `trial_cohorts.json`) |

@@ -1,5 +1,13 @@
 # Synthetic training policy (user instruction, 2026-10-27)
 
+Trial sample (user instruction, November 4): the production path is the CT.gov export, then the
+registry rule (first posted since 2020, interventional, early phase I-IV), then the DFCI holdout
+(trials open at DFCI 2025-2026), then the cohort workflow's cancer-treatment screen on every remaining
+listing (`screen-trials`, `0b_screen_trials.py`; every answer and its reasoning saved), then a seed-42
+draw of exactly 5,000 accepted trials (`sample-trials`). A synthetic protocol is generated for each of
+the 5,000. Later attrition is reported from these counts; never sample from an already-filtered
+older table or drop sampled trials without replacement silently.
+
 Two trial versions (user instruction, October 31; the new default path): every
 sampled trial is represented by its synthetic-protocol cohorts and by cohorts
 extracted from the registry record its protocol was written from
