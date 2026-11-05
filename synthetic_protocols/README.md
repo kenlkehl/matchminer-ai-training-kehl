@@ -123,8 +123,10 @@ The driver takes every protocol in the batch whose `meta.json` records a
 completed generation, checks that its seed matches `seeds.jsonl`, and sends the
 whole Markdown document to `extract_protocol_cohorts` with the full-protocol
 prompt and JSON-schema structured outputs (default model Nemotron 3.5 Super VL
-NVFP4, 50,000 completion tokens, chunks of 500 with two in flight). It refuses a
-batch that mixes generation prompt versions. Servers, adaptive concurrency,
+NVFP4, 50,000 completion tokens, chunks of 500 with two in flight). The merge and
+boilerplate steps send the same chunks, so at most 1,000 requests are in flight; with a
+large server pool raise `--chunks-in-flight` (up to 16; `run_pipeline.py
+--protocol-cohort-chunks-in-flight`). It refuses a batch that mixes generation prompt versions. Servers, adaptive concurrency,
 stopping and resuming work as for generation: each accepted decision is saved
 when its chunk returns and reused on rerun when the extraction prompt, schema and
 protocol bytes are unchanged. Output goes to `<batch-dir>/cohort_extraction/`

@@ -101,6 +101,8 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
         assert command[command.index('--model-name') + 1] == 'vendor/tokenizer'
         assert command[command.index('--server-urls-file') + 1] == str(args.server_urls_file)
         assert '--allow-failures' in command
+    protocol = stage['protocol-cohorts'].command
+    assert protocol[protocol.index('--chunks-in-flight') + 1] == '2'
     # Extraction uses inference-owned adaptive limits and live registry caps.
     assert '--max_concurrent_per_server' in stage['screen-trials'].command
     downstream = training.stages(args)

@@ -85,6 +85,9 @@ def parser():
                    help='Attempts per record for registry-cohorts (cohorts from the protocol seeds\' registry records)')
     p.add_argument('--registry-cohort-concurrency-per-server', type=int, choices=range(1, 1025), metavar='1..1024',
                    default=512, help='Per-server request ceiling for registry-cohorts')
+    p.add_argument('--protocol-cohort-chunks-in-flight', type=int, choices=range(1, 17), metavar='1..16', default=2,
+                   help='Chunks of 500 requests protocol-cohorts sends at once in each step (extraction, merge, '
+                        'boilerplate); raise it for a large server pool (registry-cohorts runs per listing)')
     p.add_argument('--cohort-max-tokens', type=int, default=50000)
     p.add_argument('--data-seed', type=int, default=42)
     p.add_argument('--dfci-trials-csv', type=Path, default=DATA_ROOT / 'dfci_trials_summary_10-18-26.csv')
@@ -275,7 +278,8 @@ def build_plan(args):
               source('synthetic_protocols/generate_batch.py') + package),
         Stage('protocol-cohorts', [py, str(ROOT / 'synthetic_protocols/extract_cohorts.py'), '--batch-dir', str(batch),
               '--output-dir', str(extracted), '--model-name', args.generation_tokenizer,
-              '--max-tokens', str(args.cohort_max_tokens), '--allow-failures', *pool],
+              '--max-tokens', str(args.cohort_max_tokens), '--chunks-in-flight', str(args.protocol_cohort_chunks_in_flight),
+              '--allow-failures', *pool],
               [batch / 'seeds.jsonl', batch / 'protocols.csv'],
               [extracted / 'cohorts.parquet', extracted / 'trials.parquet', extracted / 'run_metadata.json',
                extracted / 'cohorts_unmerged.parquet', extracted / 'cohorts_deboilerplated.parquet'],

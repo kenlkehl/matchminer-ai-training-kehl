@@ -148,7 +148,8 @@ def main(args):
     config.remote["adaptive_concurrency"] = {**config.remote.get("adaptive_concurrency", {}),
                                              "enabled": True, "metrics_interval": 10}
     settings = config.protocol_cohort_extraction
-    settings["chunk_size"] = args.chunk_size
+    # Extraction, merge and boilerplate classification all send these chunks.
+    settings["chunk_size"], settings["chunks_in_flight"] = args.chunk_size, args.chunks_in_flight
     # The runtime model selects the sampling profile; each server's own model ID comes from the registry.
     settings["remote"]["model_name"] = args.model_name
     settings["remote"]["request_params"]["max_tokens"] = args.max_tokens
@@ -198,7 +199,7 @@ def main(args):
         "started_at": started_at, "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "batch_dir": str(args.batch_dir.resolve()), "servers": servers, **repositories,
         "settings": {"model_name": args.model_name, "max_tokens": args.max_tokens, "chunk_size": args.chunk_size,
-                     "limit": args.limit},
+                     "chunks_in_flight": args.chunks_in_flight, "limit": args.limit},
         "synthetic_prompt_sha256": provenance.synthetic_prompt_sha256.iloc[0],
         "trials": len(provenance), "cohort_rows": len(cohorts),
         "cohort_rows_unmerged": None if unmerged is None else len(unmerged),
@@ -234,6 +235,9 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", default="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4")
     parser.add_argument("--max-tokens", type=int, default=50000)
     parser.add_argument("--chunk-size", type=int, default=500)
+    parser.add_argument("--chunks-in-flight", type=int, default=2, choices=range(1, 17), metavar="1..16",
+                        help="Chunks of --chunk-size requests sent at once by each step (extraction, merge, "
+                             "boilerplate); raise it so a large server pool is used")
     parser.add_argument("--limit", type=int, help="Only the first N protocols (smoke tests)")
     parser.add_argument("--no-merge-cohorts", dest="merge_cohorts", action="store_false",
                         help="Keep every extracted cohort instead of combining those with essentially the same criteria")
