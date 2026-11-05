@@ -12,7 +12,7 @@ from trialspace_prompt_profiles import PROFILES, SYMMETRIC_PREFIX, model_prompts
 PROMPT_PREFIX = SYMMETRIC_PREFIX
 DEFAULT_BASE_MODEL = "google/embeddinggemma-2"
 DEFAULT_INPUT = "space_specific_eligibility_checks.parquet"
-MAX_TOKENS = 3000
+MAX_TOKENS = 4096  # key texts only; DFCI key criteria reach ~2,100 tokens
 
 
 def parse_args():
@@ -237,8 +237,8 @@ def train(args):
     if args.loss_mini_batch_size and args.encoder_mini_batch_size:
         raise ValueError('Choose gradient caching or retained encoder chunks, not both')
     input_files = expand_inputs(args.input_parquet)
-    from colbert_experiments.data import write_json
-    from colbert_experiments.regression import MAX_SCORE
+    from trialspace.data import write_json
+    from trialspace.regression import MAX_SCORE
     from trial_cohort_format import file_stamp
     identity = dict(inputs={str(Path(p).resolve()): file_stamp(p) for p in input_files},
         base_model=args.base_model, revision=args.model_revision, max_tokens=args.max_tokens,

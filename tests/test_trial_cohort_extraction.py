@@ -210,9 +210,10 @@ def test_cohorts_are_combined_then_cleared_of_boilerplate_for_training(tmp_path,
     validate_cohort_rows(rows)
     # The merged rows again with boilerplate removed: what training's retrieval reads.
     clean = pd.read_csv(tmp_path / 'cohorts_deboilerplated.csv', keep_default_na=False)
-    separated = ['cohort_eligibility_criteria', 'cohort_boilerplate_criteria']
-    assert clean.drop(columns=separated).equals(pd.read_csv(args.output_cohorts, keep_default_na=False).drop(columns=separated[0]))
-    assert clean.cohort_eligibility_criteria.tolist() == ['Adults with treated lung cancer.', 'Children with untreated sarcoma.']
+    separated = ['cohort_key_criteria', 'cohort_boilerplate_criteria']
+    # The merged rows unchanged (all their criteria), plus the key and boilerplate criteria.
+    assert clean.drop(columns=separated).equals(pd.read_csv(args.output_cohorts, keep_default_na=False))
+    assert clean.cohort_key_criteria.tolist() == ['Adults with treated lung cancer.', 'Children with untreated sarcoma.']
     assert clean.cohort_boilerplate_criteria.tolist() == ['Signed informed consent.', '']
     validate_cohort_rows(clean)
     with gzip.open(tmp_path / 'checkpoints/NCT00000001.json.gz', 'rt') as stream:
@@ -522,8 +523,8 @@ def test_generation_calls_five_positive_and_five_negative_seeds_separately_per_c
     assert histories.groupby(['cohort_trial_id', 'patient_class']).size().eq(5).all()
 
 
-def test_named_production_export_preserves_names_through_sampling_and_colbert(tmp_path):
-    from colbert_experiments.data import prepare, read_jsonl
+def test_named_production_export_preserves_names_through_sampling_and_the_corpus(tmp_path):
+    from trialspace.data import prepare, read_jsonl
     from trial_cohort_format import NAMED_SPLIT_REPRESENTATION, LEGACY_REPRESENTATION, load_production_cohorts
     run, dfci = production_export(tmp_path)
     historical, _ = load_production_cohorts(run)

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from colbert_experiments.retrieval import TrialSampler, query_cohorts
+from trialspace.retrieval import TrialSampler, query_cohorts
 from trial_cohort_format import validate_cohort_rows
 from trialspace_comparison import rank_dense
 

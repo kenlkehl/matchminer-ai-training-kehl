@@ -145,7 +145,7 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
     assert names[:names.index('catalog')] == ['prepare-trialspace',
         'mine-1', 'label-trialspace-1', 'project-trialspace-1', 'train-trialspace-1',
         'mine-2', 'label-trialspace-2', 'project-trialspace-2', 'train-trialspace-2',
-        'mine-3', 'label-trialspace-3']
+        'mine-3', 'label-trialspace-3', 'label-boilerplate', 'train-trial-checker', 'train-boilerplate-checker']
     mines = commands(plan, 'mine-')
     for command in mines:
         assert command[1:3] == ['trialspace_comparison.py', 'dense-mine']
@@ -165,6 +165,22 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
     for command in labels:
         assert command[command.index('--max_attempts') + 1] == '16'
         assert '--scheduler-adaptive-concurrency' in command
+        assert command[command.index('--task') + 1] == 'match'
+    # BoilerplateChecker labels: the separate prompt on a sample of round-3 pairs.
+    boilerplate = commands(plan, 'label-boilerplate')[0]
+    assert boilerplate[boilerplate.index('--task') + 1] == 'boilerplate'
+    assert boilerplate[boilerplate.index('--candidates') + 1].endswith('trialspace_round3/mining/candidates.jsonl')
+    assert boilerplate[boilerplate.index('--max-pairs') + 1] == '100000'
+    # One multi-head TrialChecker on every round's match labels; a separate BoilerplateChecker.
+    trial, separate = commands(plan, 'train-trial-checker')[0], commands(plan, 'train-boilerplate-checker')[0]
+    assert trial[trial.index('train_checkers.py') + 1] == 'trial'
+    assert [path.split('/')[-2] for path in trial[trial.index('--labels') + 1:][:3]] == [
+        f'trialspace_round{n}' for n in (1, 2, 3)]
+    assert separate[separate.index('train_checkers.py') + 1] == 'boilerplate'
+    assert separate[separate.index('--labels') + 1].endswith('boilerplate_teacher')
+    for command in (trial, separate):
+        assert [command[command.index(flag) + 1] for flag in ('--base-model', '--max-length')] == [
+            'answerdotai/ModernBERT-large', '8192']
     fits = commands(plan, 'train-trialspace-')
     assert len(fits) == 2
     for command in fits:
@@ -172,29 +188,11 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
         assert '--mask-known-positives' in command
         assert float(command[command.index('--epochs') + 1]) == 1
         assert [command[command.index(flag) + 1] for flag in ('--batch-size', '--loss-mini-batch-size', '--prompt-profile')] == \
-            ['96', '32', 'colbert_matching']
+            ['96', '32', 'trialspace']
     assert fits[0][fits[0].index('--base-model') + 1] == 'google/embeddinggemma-2'
     assert fits[1][fits[1].index('--base-model') + 1].endswith('trialspace_round1')
     catalog = commands(plan, 'catalog')[0]
     assert catalog[catalog.index('--candidate-files') + 1].endswith('trialspace_round3/mining/patient_to_cohort.parquet')
-
-
-def test_colbert_retriever_keeps_its_fast_shared_settings():
-    plan = dry_run_plan('train_all.sh', '--trialspace-retriever', 'colbert')
-    assert not commands(plan, 'label-trialspace-3') and not commands(plan, 'project-trialspace-')
-    mines = commands(plan, 'mine-')
-    assert len(mines) == 3
-    for command in mines:
-        assert '--nproc_per_node=4' in command
-        assert command[command.index('--pair-batch-size') + 1] == '512'
-        assert command[command.index('--top-k-cohort-to-patient') + 1] == '40'
-    assert [command[command.index('--trial-sample-round') + 1] for command in mines[1:]] == ['2', '3']
-    assert mines[0][mines[0].index('--model') + 1] == 'lightonai/GTE-ModernColBERT-v1'
-    fits = commands(plan, 'train-trialspace-')
-    assert len(fits) == 2
-    for command in fits:
-        assert command[command.index('--loss') + 1] == 'legacy_ranking'
-        assert float(command[command.index('--epochs') + 1]) == 1
 
 
 def test_training_only_retains_original_default_identity(tmp_path):
@@ -269,8 +267,9 @@ def test_preparation_preserves_ids_content_intervals_and_trial_cosplits(tmp_path
     result = tmp_path / 'patient_summaries_with_spaces.parquet'
     prepare.prepare_summaries(summaries, patients, result)
     merged = pd.read_parquet(result)
-    assert 'patient_boilerplate_text' not in merged
-    assert merged.patient_summary.eq('Synthetic summary\n\nOther relevant history:\nNo active infection').all()
+    # The key section and the boilerplate section stay apart.
+    assert merged.patient_summary.eq('Synthetic summary').all()
+    assert merged.patient_boilerplate_text.eq('No active infection').all()
     assert merged.this_space.eq(SPACE).all()
     assert set(merged.pseudo_mrn) == set(frame.pseudo_mrn.astype(str))
     from make_top_matches import load_retrieval_tables

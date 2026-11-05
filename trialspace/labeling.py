@@ -1,4 +1,11 @@
-"""Resumable five-question teacher labels using the existing adaptive vLLM pool."""
+"""Resumable teacher labels using the existing adaptive vLLM pool.
+
+Task ``match`` (the default): one request per pair answers the five match labels on the patient's
+key section and the cohort's key criteria, and each pair's 0-6 score is committed to the score
+journal. Task ``boilerplate``: one request per pair whose cohort has boilerplate criteria decides
+whether the patient clearly fails them, from the patient's boilerplate section. Every response is
+kept with its reasoning and complete prompt.
+"""
 import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import asdict, replace
@@ -45,21 +52,33 @@ def label_key(row):
     return digest([row['patient_id'], row['cohort_id'], row['task']])
 
 
-def questions(pairs, patients, cohorts, *, sources=None):
+def questions(pairs, patients, cohorts, *, task='match', sources=None):
+    """One item per pair: key texts for ``match``; boilerplate texts for ``boilerplate``, whose
+    pairs without cohort boilerplate criteria have nothing to judge and are skipped."""
     patients = patients if isinstance(patients, dict) else {r['id']: r for r in patients}
     cohorts = cohorts if isinstance(cohorts, dict) else {r['id']: r for r in cohorts}
+    field = 'text' if task == 'match' else 'boilerplate'
     seen = set()
     for pair in pairs:
         p, c = patients[pair['patient_id']], cohorts[pair['cohort_id']]
         if p['split'] != c['split'] or pair['split'] != p['split']:
             raise ValueError('Teacher pairs must stay within their corpus split')
-        for task in TASKS:
-            item = {**pair, 'tasks': list(TASKS), 'task': task}
-            key = label_key(item)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield {**item, 'key': key, 'messages': judge_messages(task, p['text'], c['text'], sources=sources)}
+        if task == 'boilerplate' and not (c.get(field) or '').strip():
+            continue
+        item = {**pair, 'task': task}
+        key = label_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield {**item, 'key': key, 'messages': judge_messages(task, p.get(field) or '', c[field], sources=sources)}
+
+
+def validate_row(task, row):
+    """A saved response still satisfies its task's answer contract."""
+    if task == 'match':
+        parse_judgment('match', json.dumps(row['labels']))
+    elif type(row.get('excluded')) is not bool:
+        raise ValueError('A boilerplate label needs a boolean excluded answer')
 
 
 async def label(args):
@@ -81,14 +100,17 @@ async def _label(args, output):
     patients, cohorts = load_corpus(args.corpus)
     pairs = read_jsonl(args.candidates)
     sources = prompt_sources()
+    task = getattr(args, 'task', 'match')
+    if task not in TASKS:
+        raise ValueError(f'task must be one of {TASKS}')
     tokenizer = load_tokenizer(args.teacher_tokenizer, cache_dir=args.cache_dir)
     defaults = resolve_sampling_defaults(args.teacher_tokenizer)
     sampling = CompletionSampling(model=args.teacher_model, request_timeout=args.request_timeout, **defaults)
-    signature = dict(contract=contract_hash(sources), patients=digest(patients), cohorts=digest(cohorts),
+    signature = dict(task=task, contract=contract_hash(task, sources), patients=digest(patients), cohorts=digest(cohorts),
                      pairs=digest(pairs), sampling=asdict(sampling), tokenizer=args.teacher_tokenizer,
                      template=digest(tokenizer.chat_template), max_tokens=args.max_tokens,
                      context_length=args.teacher_context)
-    gated = getattr(args, 'gated_regression', False)
+    gated = task == 'match'  # match labels are scored and journaled per pair
     if gated:
         from .regression import score_contract
         signature['aggregation_contract'] = score_contract(signature['contract'])
@@ -127,7 +149,7 @@ async def _label(args, output):
         try:
             if metadata['finish_reason'] != 'stop':
                 raise ValueError('Incomplete teacher output: ' + metadata['finish_reason'])
-            result = parse_judgment(answer)
+            result = parse_judgment(task, answer)
         except (ValueError, TypeError, IndexError) as error:
             await storage.run(write_json, output / 'invalid_responses' / (str(uuid.uuid4()) + '.json'),
                               dict(key=payload['key'], error=str(error), **trace))
@@ -140,7 +162,7 @@ async def _label(args, output):
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
     if (output / 'reuse_sources.json').exists():
         if not gated:
-            raise ValueError('Candidate-subset reuse requires gated labels')
+            raise ValueError('Candidate-subset reuse requires match labels')
         from .label_reuse import import_completed_sources
         write_json(output / 'status.json', dict(state='waiting_for_source_labels', **timing))
         imported = await asyncio.to_thread(import_completed_sources, output, signature, pmap, cmap, pairs,
@@ -148,14 +170,10 @@ async def _label(args, output):
         print(f'[labels] imported {imported} completed candidate-subset pairs with their reasoning traces', flush=True)
     restored_pairs = set()
     scheduled_pairs = pairs
-    def groups():
-        seen = set()
-        for pair in scheduled_pairs:
-            key = (pair['patient_id'], pair['cohort_id'])
-            if key not in seen:
-                seen.add(key)
-                yield list(questions([pair], pmap, cmap, sources=sources))
-    iterator = iter(groups() if gated else questions(pairs, patients, cohorts, sources=sources))
+    def scheduled():
+        # Read lazily: a resumed journal narrows scheduled_pairs before the first item is drawn.
+        yield from questions(scheduled_pairs, pmap, cmap, task=task, sources=sources)
+    iterator = iter(scheduled())
     completed, failures, scores = {}, {}, {}
     restored_questions = 0
     from .regression import MAX_SCORE
@@ -218,7 +236,7 @@ async def _label(args, output):
             if row is not None:
                 if row['key'] != item['key'] or row['prompt_sha256'] != digest(item['messages']):
                     raise ValueError('Checkpoint key or clinical text mismatch')
-                parse_judgment(json.dumps({k: row[k] for k in ('answer', 'evidence_status', 'reason')}))
+                validate_row(task, row)
                 if 'messages' not in row:
                     row['messages'] = item['messages']
                     row['sampling'] = asdict(sampling)
@@ -257,10 +275,10 @@ async def _label(args, output):
             if not gated:
                 await ask(item)
                 return
-            from .regression import gated_judgments, aggregate_pair
-            rows = await gated_judgments(item, ask)
-            if rows is not None:
-                score = aggregate_pair(item[0], rows, question_contract=signature['contract'])
+            from .regression import aggregate_pair
+            row = await ask(item)
+            if row is not None:
+                score = aggregate_pair(item, row, question_contract=signature['contract'])
                 # All question checkpoints (including reasoning) already exist.
                 # Commit the small score before counting this pair as complete.
                 await journal.commit(score)

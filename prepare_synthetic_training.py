@@ -291,7 +291,10 @@ def _prepare_notes_local(source, spaces_path, destination, patients_path, *, anc
 
 
 def prepare_summaries(source, patients_path, destination):
-    from matchminer_ai.patients.postprocess import normalize_patient_summary
+    """Final summaries with their two sections kept apart: patient_summary is the key section
+    (the cancer history, which TrialSpace and TrialChecker read) and patient_boilerplate_text the
+    boilerplate section (other relevant history, which BoilerplateChecker reads)."""
+    from matchminer_ai.patients.postprocess import normalize_patient_summary, split_patient_summary
     frame, patients = pd.read_parquet(source), pd.read_parquet(patients_path)
     for table in (frame, patients):
         if table.pseudo_mrn.isna().any():
@@ -303,9 +306,10 @@ def prepare_summaries(source, patients_path, destination):
         raise ValueError('Summary patient coverage differs from the generated patients')
     if frame.patient_summary.isna().any() or frame.patient_summary.str.strip().eq('').any() or frame.patient_summary.str.lstrip().str.startswith('ERROR:').any():
         raise ValueError('Empty or failed patient summaries must be resolved before training')
-    frame['patient_summary'] = [normalize_patient_summary(row['patient_summary'], row.get('patient_boilerplate_text'))
-                                for row in frame.to_dict('records')]
-    frame = frame.drop(columns=['patient_boilerplate_text'], errors='ignore')
+    sections = [split_patient_summary(normalize_patient_summary(row['patient_summary'], row.get('patient_boilerplate_text')))
+                for row in frame.to_dict('records')]
+    frame['patient_summary'] = [key for key, _ in sections]
+    frame['patient_boilerplate_text'] = [boilerplate for _, boilerplate in sections]
     for column in set(patients) & set(frame) - {'pseudo_mrn'}:
         left = frame.set_index('pseudo_mrn')[column].sort_index().fillna('')
         right = patients.set_index('pseudo_mrn')[column].sort_index().fillna('')

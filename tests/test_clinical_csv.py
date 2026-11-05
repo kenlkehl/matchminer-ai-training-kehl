@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from colbert_experiments.data import load_corpus, read_table
+from trialspace.data import load_corpus, read_table
 from generate_synthetic_data import Generator, load_stage
 from make_top_matches import load_retrieval_tables
 from prepare_synthetic_training import load_spaces
@@ -77,7 +77,8 @@ def test_csv_text_survives_sampling_generation_and_both_retrieval_paths(tmp_path
     assert by_id[named_id]['cohort_name'] == literal
     assert by_id['NCT00000002-cohort-0']['cohort_name'] is None
     assert [c['text'] for c in cs] == expected
-    assert ps[0]['text'].endswith('Other relevant history:\n' + literal)
+    # Retrieval and match labels read the key section; the boilerplate section is kept apart.
+    assert 'Other relevant history' not in ps[0]['text'] and ps[0]['boilerplate'] == literal
 
     # Exercise Generator.run's real file loading, stopping before any LLM work.
     generator = Generator(args_for(tmp_path), Tokenizer())

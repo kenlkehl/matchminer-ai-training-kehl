@@ -17,7 +17,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from colbert_experiments.local_teacher import process_identity, open_pidfd, send_pidfd_signal
+from trialspace.local_teacher import process_identity, open_pidfd, send_pidfd_signal
 
 
 def read(path, default=None):

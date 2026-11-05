@@ -1,4 +1,10 @@
-"""Exhaustive single-vector retrieval and shared-label comparison with ColBERT."""
+"""TrialSpace (dense, single-vector) mining, label projection for fitting, and in-sample diagnostics.
+
+dense-mine encodes the corpus's key texts (patients' key summary sections, cohorts' key criteria)
+with EmbeddingGemma 2 or a fitted TrialSpace and ranks exhaustively by cosine similarity, plus
+lexical and random candidates; project-dense-labels joins the candidates with their teacher
+scores for finetune_embedder.py; evaluate-dense compares base and fitted models on those labels.
+"""
 import argparse
 from collections import defaultdict
 import hashlib
@@ -11,18 +17,18 @@ import pandas as pd
 import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from colbert_experiments.contracts import DIRECTIONS, TASKS, contract_hash
-from colbert_experiments.data import digest, load_corpus, read_jsonl, write_json, write_jsonl
-from colbert_experiments.regression import MAX_SCORE, score_contract
-from colbert_experiments.retrieval import (TRIAL_VERSION_POLICY, TrialSampler, has_trial_versions, merge_candidates,
+from trialspace.contracts import DIRECTIONS, contract_hash
+from trialspace.data import digest, load_corpus, read_jsonl, write_json, write_jsonl
+from trialspace.regression import MAX_SCORE, score_contract
+from trialspace.retrieval import (TRIAL_VERSION_POLICY, TrialSampler, has_trial_versions, merge_candidates,
                                            query_cohorts, top_indices)
-from colbert_experiments.score_publication import ready_scores
+from trialspace.score_publication import ready_scores
 from finetune_embedder import load_text_model
 from trial_cohort_format import file_stamp
 from retrieval_workspace import add_retrieval_storage_args, run_retrieval
 from trialspace_prompt_profiles import model_prompts
 
-VERSION = 'embeddinggemma-colbert-exhaustive-comparison-v1'
+VERSION = 'trialspace-dense-mining-v2'
 
 
 def freeze(path, value):
@@ -65,7 +71,7 @@ def encode_corpus(args, patients, cohorts):
         path = output / (name + '.npy')
         if not path.exists():
             if model is None:
-                model = load_text_model(args.model, args.device, prompt_profile='colbert_matching',
+                model = load_text_model(args.model, args.device, prompt_profile='trialspace',
                     max_tokens=args.max_tokens, revision=args.revision, cache_dir=args.cache_dir)
             with torch.inference_mode(), torch.autocast('cuda', dtype=torch.bfloat16,
                     enabled=str(args.device).startswith('cuda')):
@@ -153,7 +159,7 @@ def _dense_mine(args):
     output.mkdir(parents=True, exist_ok=True)
     signature = dict(version=VERSION, sources=source_identity(),
         patients=digest(patients), cohorts=digest(cohorts), contract=score_contract(),
-        model=args.model, revision=args.revision, prompts=model_prompts('colbert_matching'),
+        model=args.model, revision=args.revision, prompts=model_prompts('trialspace'),
         max_tokens=args.max_tokens, dimension=768, scope='exhaustive full synthetic corpus',
         patient_k=args.patient_k, cohort_k=args.cohort_k, lexical_k=args.lexical_k,
         random_k=args.random_k, seed=args.seed, patient_trial_sample=args.patient_trial_sample)
@@ -193,26 +199,8 @@ def _dense_mine(args):
            + (f'; {TRIAL_VERSION_POLICY}' if has_trial_versions(cohorts) else ''))
 
 
-def union_candidates(corpus, sources, output):
-    patients, cohorts = load_corpus(corpus)
-    output = Path(output)
-    freeze(output / 'manifest.json', dict(version=VERSION, patients=digest(patients),
-        cohorts=digest(cohorts), contract=score_contract(),
-        sources={name: file_stamp(Path(path) / 'candidates.jsonl') for name, path in sources.items()}))
-    if completed(output):
-        return
-    def hits():
-        for name, path in sources.items():
-            for pair in read_jsonl(Path(path) / 'candidates.jsonl'):
-                for hit in pair['sources']:
-                    yield dict(hit, patient_id=pair['patient_id'], cohort_id=pair['cohort_id'], retriever=name)
-    pairs = merge_candidates(patients, cohorts, hits())
-    write_jsonl(output / 'candidates.jsonl', pairs)
-    finish(output, ['candidates.jsonl'], pairs=len(pairs))
-
-
 def project_labels(corpus, union, labels, sources, output, *, reasoning_source=None, source_origins=None):
-    """One teacher judgment; independent self-contained pair tables per retriever."""
+    """Self-contained pair tables (key texts, scores and the five answers) for fitting."""
     patients, cohorts = load_corpus(corpus)
     union, labels, output = Path(union), Path(labels), Path(output)
     reasoning_source = reasoning_source or str(labels / 'responses')
@@ -222,7 +210,7 @@ def project_labels(corpus, union, labels, sources, output, *, reasoning_source=N
         raise ValueError('The candidate set must be completely labeled before projection or training')
     scores = {(s['patient_id'], s['cohort_id']): s for s in read_jsonl(labels / 'scores.jsonl')}
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
-    contract, question_contract = score_contract(), contract_hash()
+    contract, question_contract = score_contract(), contract_hash('match')
     result = {}
     for name, source in sources.items():
         target = output / name
@@ -268,34 +256,6 @@ def project_labels(corpus, union, labels, sources, output, *, reasoning_source=N
         shared_label_contract=contract, shared_reasoning=reasoning_source))
 
 
-def compare_rankings(corpus, sources, labels, output):
-    """Describe each saved top-k list using the identical shared teacher labels."""
-    score_rows = read_jsonl(Path(labels) / 'scores.jsonl')
-    scores = {(s['patient_id'], s['cohort_id']): s for s in score_rows}
-    reports, selected = {}, {}
-    for name, path in sources.items():
-        groups = defaultdict(list)
-        for hit in read_jsonl(Path(path) / 'rankings.jsonl'):
-            score = scores[hit['patient_id'], hit['cohort_id']]
-            groups[hit['direction'], score['split']].append((hit, score))
-        reports[name] = {}
-        for (direction, split), rows in groups.items():
-            key = direction + '/' + split
-            values = np.array([s['score'] for h, s in rows])
-            reports[name][key] = dict(hits=len(rows), mean_teacher_score=float(values.mean()),
-                potentially_eligible_fraction=float((values >= 1).mean()),
-                score_at_least_3_fraction=float((values >= 3).mean()))
-            selected[name, key] = {(h['patient_id'], h['cohort_id']) for h, s in rows}
-    names = list(sources)
-    overlap = {}
-    if len(names) == 2:
-        for key in reports[names[0]]:
-            a, b = selected[names[0], key], selected.get((names[1], key), set())
-            overlap[key] = dict(shared=len(a & b), union=len(a | b), jaccard=len(a & b) / max(1, len(a | b)))
-    write_json(output, dict(version=VERSION, contract=score_contract(), models=reports, overlap=overlap,
-        interpretation='Teacher-assessed precision/specificity of exhaustive top-k; no claim of full-corpus recall.'))
-
-
 def evaluate_dense(args):
     """Before/after in-sample diagnostics; no synthetic holdout exists."""
     from scipy.stats import spearmanr
@@ -306,7 +266,7 @@ def evaluate_dense(args):
     model_path = Path(args.model)
     freeze(output / 'manifest.json', dict(version=VERSION, patients=digest(patients), cohorts=digest(cohorts),
         scores=file_stamp(Path(args.labels) / 'scores.jsonl'), max_tokens=args.max_tokens,
-        prompts=model_prompts('colbert_matching'),
+        prompts=model_prompts('trialspace'),
         trained_model={str(p.relative_to(model_path)): file_stamp(p) for p in sorted(model_path.rglob('*'))
                        if p.is_file() and p.suffix in ('.json', '.safetensors')}))
     vectors = encode_corpus(args, patients, cohorts)
@@ -337,7 +297,7 @@ def evaluate_dense(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['dense-mine', 'union', 'project-labels', 'project-dense-labels', 'report', 'evaluate-dense'])
+    parser.add_argument('command', choices=['dense-mine', 'project-dense-labels', 'evaluate-dense'])
     add_retrieval_storage_args(parser)
     parser.add_argument('--corpus', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
@@ -361,8 +321,6 @@ def main():
                         help='Mining round; each round draws a fresh trial sample and version choice per patient (1 = original draws)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--embeddinggemma', type=Path)
-    parser.add_argument('--colbert', type=Path)
-    parser.add_argument('--union', type=Path)
     parser.add_argument('--labels', type=Path)
     args = parser.parse_args()
     if min(args.encode_batch_size, args.score_batch_size, args.patient_k, args.cohort_k) < 1:
@@ -373,21 +331,10 @@ def main():
     if args.command == 'evaluate-dense':
         evaluate_dense(args)
         return
-    if args.command == 'project-dense-labels':
-        if not args.embeddinggemma or not args.labels:
-            parser.error('EmbeddingGemma candidates and their labels are required')
-        project_labels(args.corpus, args.embeddinggemma, args.labels,
-                       {'embeddinggemma2': args.embeddinggemma}, args.output)
-        return
-    if not args.embeddinggemma or not args.colbert:
-        parser.error('Both retriever output directories are required')
-    sources = dict(embeddinggemma2=args.embeddinggemma, colbert_modernbert=args.colbert)
-    if args.command == 'union':
-        union_candidates(args.corpus, sources, args.output)
-    elif args.command == 'project-labels':
-        project_labels(args.corpus, args.union, args.labels, dict(sources, union=args.union), args.output)
-    else:
-        compare_rankings(args.corpus, sources, args.labels, args.output)
+    if not args.embeddinggemma or not args.labels:
+        parser.error('EmbeddingGemma candidates and their labels are required')
+    project_labels(args.corpus, args.embeddinggemma, args.labels,
+                   {'embeddinggemma2': args.embeddinggemma}, args.output)
 
 
 if __name__ == '__main__':

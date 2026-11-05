@@ -142,7 +142,8 @@ cohort_extraction/
     deboilerplate.json   each merged cohort's criteria lines, each classified as
                          boilerplate or not in its own request (answer and reasoning
                          kept; reused per unchanged cohort), and the two lists code
-                         sorted them into
+                         sorted them into (key_criteria, boilerplate_criteria; earlier
+                         runs named the key list eligibility_criteria)
   cohorts_unmerged.parquet, .csv
                          one row per extracted cohort (criteria verbatim, boilerplate
                          included), with provenance
@@ -150,10 +151,12 @@ cohort_extraction/
                          same criteria (merged_from: the extracted cohort numbers),
                          boilerplate included (they seed patients), with provenance
   cohorts_deboilerplated.parquet, .csv
-                         the merged cohorts with their boilerplate criteria separated:
-                         cohort_eligibility_criteria holds the criteria that are not
-                         boilerplate (retrieval's protocol version), cohort_boilerplate_criteria the
-                         boilerplate (consent, compliance, samples/tissue/biopsy, measurable
+                         the merged cohorts with their criteria separated (retrieval's
+                         protocol version): cohort_eligibility_criteria keeps all the
+                         criteria, cohort_key_criteria holds the key criteria (those that
+                         are not boilerplate; retrieval, match labels and TrialChecker
+                         read them) and cohort_boilerplate_criteria the boilerplate
+                         (BoilerplateChecker reads it: consent, compliance, samples/tissue/biopsy, measurable
                          or evaluable disease, prognosis, performance status, organ
                          function, brain metastases, toxicities of earlier treatment,
                          washout periods of 30 days or less from radiation, systemic or trial
@@ -203,8 +206,9 @@ and every provenance column. Single-cohort rows keep `cohort_criteria_source`
 adapter reproduces the extracted criteria exactly, and writes
 `<output>.provenance.json` (source stamps, counts, failures, prompt hashes).
 `--retrieval-output` also writes the same rows, in the same order with the same
-`cohort_index`, from `cohorts_deboilerplated.parquet` (`--deboilerplated-file`), with its
-own receipt: the protocol version that `retrieval_cohorts.py` reads.
+`cohort_index`, from `cohorts_deboilerplated.parquet` (`--deboilerplated-file`; with
+`cohort_key_criteria` and `cohort_boilerplate_criteria`), with its own receipt: the
+protocol version that `retrieval_cohorts.py` reads.
 
 ## In the training pipeline
 
@@ -236,11 +240,13 @@ copied verbatim with boilerplate included, and training gives registry listings 
 same two follow-on steps as protocols: the merge, then the boilerplate step, which
 classifies each line of a merged cohort's criteria in its own request and sorts the
 unchanged lines in code (since 2026-11-04, user instruction; the model never copies
-the criteria). Retrieval and labeling read both
-versions with boilerplate removed (`--output-deboilerplated-cohorts`, and
+the criteria). Retrieval, match labels and TrialChecker read both versions' key
+criteria (the criteria that are not boilerplate) and BoilerplateChecker their
+boilerplate criteria (`--output-deboilerplated-cohorts`, and
 `patient_cohorts.py --retrieval-output` beside the generation table, from
-`cohorts_deboilerplated.parquet`), while patients are seeded from the merged cohorts with all
-their criteria (user, 2026-11-04). Earlier runs used
+`cohorts_deboilerplated.parquet`: `cohort_key_criteria`, `cohort_boilerplate_criteria`),
+while patients are seeded from the merged cohorts with all their criteria (user,
+2026-11-04). Earlier runs used
 the single-request registry prompt (`trial.cohorts.user.txt`, schema
 `trial-registry-cohorts-v1`):
 
@@ -266,7 +272,8 @@ keeps the protocol rows unchanged and adds the registry rows with IDs
 fields as `registry_*`, and the trial's split from `--splits-from`; a trial
 accepted in only one version keeps that one. This table, not the
 patient-generation table, is the `--cohorts` input to `trialspace_training.py
-prepare`. Patients are still generated from the protocol cohorts only.
+prepare`, which gives each cohort its key criteria as `text` and its boilerplate
+criteria as `boilerplate`. Patients are still generated from the protocol cohorts only.
 
 Mining then represents each trial by one version (main README, Mining): each
 patient searches one version of each of its sampled trials, chosen at random

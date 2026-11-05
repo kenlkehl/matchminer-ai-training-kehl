@@ -5,6 +5,15 @@
 > and all-synthetic training. The upstream trial inputs are moving to cohorts
 > extracted from synthetic protocols (`../synthetic_protocols/`), so expect
 > further revisions. The code is authoritative where this file disagrees.
+>
+> **2026-11-04 (user instruction).** ColBERT is removed; TrialSpace is dense
+> EmbeddingGemma 2 only. In this file TrialChecker, BoilerplateChecker and
+> GoodOption name question families of the `clinical_qa` adapter (adapted from
+> the inference rubrics, `llm_match_quality.user.txt` for TrialChecker). They are
+> distinct from the ModernBERT
+> TrialChecker (five match-label heads) and BoilerplateChecker (two classes) that
+> `../train_checkers.py` now trains (root README, Training). The OncoReasoning
+> stages themselves are unchanged.
 
 The student defaults to `google/gemma-4-E4B-it`, with only the text model loaded.
 Select a future base using `prepare --model-name`; the trainer reads that choice
@@ -12,8 +21,9 @@ from the prepared manifest. Use a new data and model directory when changing it.
 The two training categories are patient summarization and clinical question
 answering. Each has its own LoRA adapter on the same frozen base. The integrated
 runner, `train_from_summaries.py` (the `train` stage of `run_pipeline.py`, which
-`train_all*.sh` runs), trains them sequentially after the ColBERT TrialSpace
-rounds, the GoodOption catalog and exclusion extraction, through the stages
+`train_all*.sh` runs), trains them sequentially after the three TrialSpace
+(EmbeddingGemma 2) rounds, the ModernBERT TrialChecker and BoilerplateChecker,
+the GoodOption catalog and exclusion extraction, through the stages
 `prepare-exclusions`, `prepare-oncoreasoning`, `distill-oncoreasoning`,
 `build-oncoreasoning` and `train-oncoreasoning`. QA includes all three checker
 families.
@@ -173,7 +183,11 @@ no scoreable drugs contributes TrialChecker questions only.
 
 Candidate inputs must contain patient IDs (`pseudo_mrn` or `patient_id`), patient
 summaries (`patient_summary` or `cancer_history_summary`), trial IDs (`nct_id` or
-`trial_id`), and trial spaces (`this_space` or `clinical_space_summary`). Notes
+`trial_id`), and trial spaces (`this_space` or `clinical_space_summary`). Since
+2026-11-04 the integrated run's round-3 candidate tables carry the patient
+summary's key section as `patient_summary`, the cohort's key criteria as
+`this_space`, and the boilerplate section and boilerplate criteria as
+`patient_boilerplate_text` and `trial_boilerplate_text`. Notes
 default to `pseudo_mrn`, `date`, and `synthetic_note`; column flags can override
 these. Repeated candidate questions are deduplicated; the same patient/drug
 question is generated once across multiple trial spaces.

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from colbert_experiments.regression import MAX_SCORE
+from trialspace.regression import MAX_SCORE
 from finetune_embedder import load_text_model
 from trialspace_embedding_losses import KnownPositiveRankingLoss, CachedEmbeddingLoss, RetainedEmbeddingLoss
 from trialspace_prompt_profiles import model_prompts
@@ -56,7 +56,7 @@ def main():
     identities = np.column_stack([pcode, ccode])
     positive = np.flatnonzero(frame.eligibility_result.to_numpy() >= 1)
     positive_keys = pcode[positive]*len(cohorts) + ccode[positive]
-    model = load_text_model(args.model, 'cuda:0', prompt_profile='colbert_matching',
+    model = load_text_model(args.model, 'cuda:0', prompt_profile='trialspace',
                             max_tokens=8192, revision=args.revision, cache_dir=args.cache_dir)
     model.train()
     if args.gradient_checkpointing:
@@ -70,7 +70,7 @@ def main():
                   for name, loss in losses.items()}
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5, fused=True)
     rng = np.random.default_rng(42)
-    prompts = model_prompts('colbert_matching')
+    prompts = model_prompts('trialspace')
     longest = {}
     for kind, indices in [('mnrl',positive),('cosent',np.arange(len(frame)))]:
         longest[kind] = [int(frame.iloc[indices][column].str.len().idxmax())

@@ -8,9 +8,10 @@ essentially the same are then combined (merge_equivalent_cohorts; --no-merge-coh
 it), and each merged cohort's boilerplate criteria are removed: each criteria line is
 classified in its own request and code sorts the unchanged lines (remove_boilerplate_criteria;
 --no-deboilerplate skips it). Exports, with the same
-provenance: cohorts_unmerged (as extracted), cohorts (merged, boilerplate kept) and
-cohorts_deboilerplated (merged, boilerplate removed: the cohorts that seed synthetic
-patients, read by patient_cohorts.py), each as .parquet and .csv.
+provenance: cohorts_unmerged (as extracted), cohorts (merged, all criteria; they seed synthetic
+patients) and cohorts_deboilerplated (the merged rows with their key criteria in
+cohort_key_criteria and boilerplate criteria in cohort_boilerplate_criteria, which retrieval,
+match labels and BoilerplateChecker labels read), each as .parquet and .csv.
 
 Reads a generate_batch.py output directory: every protocols/<NCT>/protocol.md
 whose meta.json records a completed generation, plus the registry seeds in

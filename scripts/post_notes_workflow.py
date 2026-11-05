@@ -13,7 +13,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.gcp_note_fleet import Fleet, now, process_identity, save, ensure_ssh_descriptor_capacity
-from colbert_experiments.local_teacher import (process_identity as teacher_identity,
+from trialspace.local_teacher import (process_identity as teacher_identity,
                                                open_pidfd, send_pidfd_signal)
 
 

@@ -150,28 +150,28 @@ class TrialSpaceEmbeddingTests(unittest.TestCase):
                 expected = model.encode(texts, prompt_name="query", convert_to_tensor=True)
                 torch.testing.assert_close(torch.from_numpy(actual), expected)
 
-    def test_colbert_clinical_profile_training_and_retrieval_prefixes_match(self):
+    def test_trialspace_profile_training_and_retrieval_prefixes_match(self):
         import torch
         from datasets import Dataset
         from sentence_transformers import SentenceTransformerTrainer, SentenceTransformerTrainingArguments
         from trialspace_prompt_profiles import model_prompts, training_prompts, SYMMETRIC_PREFIX
-        from colbert_experiments.regression import regression_query
-        model = self.training.load_text_model(str(self.base), 'cpu', prompt_profile='colbert_matching')
+        from matchminer_ai.embedding.trialspace_contract import INSTRUCTION
+        model = self.training.load_text_model(str(self.base), 'cpu', prompt_profile='trialspace')
         row = dict(patient_summary='lung cancer patient', this_space='lung cancer trial', label=1.)
-        prompts = model_prompts('colbert_matching')
-        for column, direction in [('patient_summary', 'patient_to_cohort'), ('this_space', 'cohort_to_patient')]:
-            self.assertEqual(prompts[column] + row[column], SYMMETRIC_PREFIX + regression_query(direction, row[column]))
+        prompts = model_prompts('trialspace')
+        for column, subject in [('patient_summary', 'Patient history'), ('this_space', 'Cohort eligibility criteria')]:
+            self.assertEqual(prompts[column], f'{SYMMETRIC_PREFIX}{INSTRUCTION}\n\n{subject}:\n')
         with tempfile.TemporaryDirectory() as folder:
             trainer = SentenceTransformerTrainer(model=model,
                 args=SentenceTransformerTrainingArguments(output_dir=folder,
-                    prompts=training_prompts('colbert_matching'), use_cpu=True, report_to=[]),
+                    prompts=training_prompts('trialspace'), use_cpu=True, report_to=[]),
                 train_dataset=Dataset.from_list([row]))
             batch = trainer.data_collator([row])
             for column in ('patient_summary', 'this_space'):
                 expected = model.preprocess([row[column]], prompt=prompts[column])
                 torch.testing.assert_close(batch[column + '_input_ids'], expected['input_ids'])
             model.save(folder)
-            self.training.validate_resume_checkpoint(folder, prompt_profile='colbert_matching')
+            self.training.validate_resume_checkpoint(folder, prompt_profile='trialspace')
             with self.assertRaises(ValueError):
                 self.training.validate_resume_checkpoint(folder)
 
@@ -192,19 +192,19 @@ class TrialSpaceEmbeddingTests(unittest.TestCase):
     def test_tiny_training_saves_and_resumes_both_losses(self):
         self._tiny_training('sentence_similarity')
 
-    def test_tiny_colbert_profile_training_and_resume_both_losses(self):
-        self._tiny_training('colbert_matching')
+    def test_tiny_trialspace_profile_training_and_resume_both_losses(self):
+        self._tiny_training('trialspace')
 
     def test_tiny_larger_batch_known_positive_mask_and_checkpointing(self):
-        self._tiny_training('colbert_matching', extra=['--batch-size','4',
+        self._tiny_training('trialspace', extra=['--batch-size','4',
             '--mask-known-positives','--gradient-checkpointing'])
 
     def test_tiny_cached_training_and_resume_both_losses(self):
-        self._tiny_training('colbert_matching', extra=['--batch-size','4',
+        self._tiny_training('trialspace', extra=['--batch-size','4',
             '--mask-known-positives','--loss-mini-batch-size','1'])
 
     def test_tiny_retained_training_and_resume_both_losses(self):
-        self._tiny_training('colbert_matching', extra=['--batch-size','4',
+        self._tiny_training('trialspace', extra=['--batch-size','4',
             '--mask-known-positives','--encoder-mini-batch-size','1','--encoder-token-budget','32'])
 
     def _tiny_training(self, profile, extra=None):

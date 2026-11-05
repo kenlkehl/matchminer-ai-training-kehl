@@ -35,7 +35,7 @@ def require_full_pool(patients, cohorts):
 
 
 def require_full_corpus(path):
-    from colbert_experiments.data import load_corpus
+    from trialspace.data import load_corpus
     patients, cohorts = load_corpus(path)
     require_full_pool(patients, cohorts)
     return patients, cohorts

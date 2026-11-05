@@ -1,4 +1,10 @@
-"""Lossless adapters and provenance-preserving experiment files."""
+"""Lossless adapters and provenance-preserving TrialSpace corpus files.
+
+A corpus entity's ``text`` is what retrieval and the match teacher read: a patient's key summary
+section (the cancer history) and a cohort's key criteria. ``boilerplate`` is what the
+BoilerplateChecker teacher reads: a patient's boilerplate section (other relevant history) and a
+cohort's boilerplate criteria.
+"""
 from pathlib import Path
 import hashlib
 import json
@@ -39,15 +45,21 @@ def text(value):
     return value if isinstance(value, str) and value.strip() else ''
 
 
-def combined_patient_history(row):
-    from matchminer_ai.patients.postprocess import normalize_patient_summary
-    if text(row.get('combined_patient_summary')):
-        return normalize_patient_summary(row['combined_patient_summary'])
-    cancer = text(row.get('patient_summary')) or text(row.get('cancer_history_summary'))
-    other = text(row.get('other_relevant_history')) or text(row.get('general_exclusion_criteria_evidence')) or text(row.get('patient_boilerplate_text'))
-    if not cancer:
+def patient_sections(row):
+    """(key, boilerplate): a summary's cancer history and its other relevant history.
+
+    Accepts the separate training columns (``patient_summary`` key section plus
+    ``patient_boilerplate_text``), the public ones (``cancer_history_summary`` plus
+    ``general_exclusion_criteria_evidence``), or one complete summary with an ``Other relevant
+    history:`` heading, which is split.
+    """
+    from matchminer_ai.patients.postprocess import normalize_patient_summary, split_patient_summary
+    key = text(row.get('patient_summary')) or text(row.get('cancer_history_summary'))
+    other = text(row.get('patient_boilerplate_text')) or text(row.get('general_exclusion_criteria_evidence'))
+    if not key:
         raise ValueError('Missing patient summary')
-    return normalize_patient_summary(cancer, other)
+    key_section, embedded = split_patient_summary(normalize_patient_summary(key, other or None))
+    return key_section, embedded
 
 
 def read_table(path):
@@ -86,15 +98,18 @@ def prepare(patients_path, cohorts_path, output, *, merge_source_splits=False):
         identifier = row.get('patient_id', row.get('pseudo_mrn'))
         if pd.isna(identifier):
             raise ValueError('Missing patient identifier')
-        item = dict(id=str(identifier), text=combined_patient_history(row), split=split_name(row.get('split')))
+        key, boilerplate = patient_sections(row)
+        item = dict(id=str(identifier), text=key, boilerplate=boilerplate, split=split_name(row.get('split')))
         origin = row.get('source_trial_id', row.get('nct_id'))
         if isinstance(origin, str) and origin.strip():
             item['source_trial_id'] = origin
         patient_rows.append(item)
     # source: which version of its trial a cohort is ('protocol' or 'registry');
     # mining represents each trial by one version (retrieval.TrialSampler).
+    key_column = 'cohort_key_criteria' if 'cohort_key_criteria' in normalized else 'cohort_eligibility_criteria'
     cohort_rows = [dict(id=row['cohort_trial_id'], trial_id=row['nct_id'], source=version,
-                       text=row['cohort_eligibility_criteria'], split=split_name(row.get('split')))
+                       text=row[key_column], boilerplate=text(row.get('cohort_boilerplate_criteria')),
+                       split=split_name(row.get('split')))
                    for row, version in zip(normalized.to_dict('records'), cohort_version(normalized))]
     if 'cohort_name' in normalized:
         for row, name in zip(cohort_rows, normalized.cohort_name):
@@ -136,57 +151,3 @@ def load_corpus(directory):
     patients, cohorts = read_jsonl(directory / 'patients.jsonl'), read_jsonl(directory / 'cohorts.jsonl')
     validate_corpus(patients, cohorts)
     return patients, cohorts
-
-
-def sample_v22(patients_path, cohorts_path, output, *, train_count=256, val_count=64, seed=42):
-    """Freeze a diverse patient sample without moving source trials across splits."""
-    from trial_cohort_format import file_stamp
-    output = Path(output)
-    signature = dict(patient_source=str(Path(patients_path).resolve()),
-                     cohort_source=str(Path(cohorts_path).resolve()),
-                     patient_stamp=file_stamp(patients_path), cohort_stamp=file_stamp(cohorts_path),
-                     train_count=train_count, val_count=val_count, seed=seed)
-    path = output / 'sample_manifest.json'
-    if path.exists():
-        saved = json.loads(path.read_text())
-        if saved['request'] != signature:
-            raise ValueError('Patient sampling identity changed; use a new corpus directory')
-        load_corpus(output)
-        return saved
-    columns = ['pseudo_mrn', 'patient_summary', 'patient_boilerplate_text', 'nct_id', 'split']
-    import pyarrow.parquet as pq
-    available = pq.read_schema(patients_path).names
-    patients = pd.read_parquet(patients_path, columns=[c for c in columns if c in available])
-    cohorts = read_table(cohorts_path)
-    trial_splits = cohorts[['trial_id', 'split']].drop_duplicates().set_index('trial_id')['split']
-    if not trial_splits.index.is_unique:
-        raise ValueError('Trial cohorts disagree on their split')
-    mapped = patients.nct_id.map(trial_splits)
-    conflicts = mapped.notna() & mapped.ne(patients.split)
-    eligible = patients.loc[~conflicts].copy()
-    sampled = []
-    for split, count in [('train', train_count), ('val', val_count)]:
-        # One patient per source trial first; additional patients only if requested.
-        pool = eligible[eligible.split.eq(split)].sample(frac=1, random_state=seed)
-        if len(pool) < count or count < 1:
-            raise ValueError(f'Insufficient patients or invalid requested count for {split}')
-        diverse = pool.drop_duplicates('nct_id')
-        ordered = pd.concat([diverse, pool.loc[~pool.index.isin(diverse.index)]])
-        sampled.append(ordered.iloc[:count])
-    selected = pd.concat(sampled).reset_index(drop=True)
-    output.mkdir(parents=True, exist_ok=True)
-    patient_file = output / 'sampled_patients.parquet'
-    selected.to_parquet(patient_file, index=False)
-    prepare(patient_file, cohorts_path, output)
-    normalized_patients, normalized_cohorts = load_corpus(output)
-    lineage = [dict(patient_id=p['id'], cohort_id=c['id'], split=p['split'])
-               for p in normalized_patients for c in normalized_cohorts
-               if p.get('source_trial_id') == c['trial_id'] and p['split'] == c['split']]
-    write_jsonl(output / 'source_trial_pairs.jsonl', lineage)
-    saved = dict(request=signature, source_patient_rows=len(patients), conflicting_origin_splits=int(conflicts.sum()),
-                 sampled_patients=len(selected), patient_source_trials=int(selected.nct_id.nunique()),
-                 patient_splits=selected.split.value_counts().to_dict(), cohort_rows=len(normalized_cohorts),
-                 trials=int(cohorts.trial_id.nunique()), source_trial_pairs=len(lineage),
-                 bridge='Other relevant history:', all_trial_cohorts_retained=True)
-    write_json(path, saved)
-    return saved

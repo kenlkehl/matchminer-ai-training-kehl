@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Resumable TrialSpace → catalog → answer-first OncoReasoning pipeline.
+"""Resumable TrialSpace → TrialChecker / BoilerplateChecker → catalog → OncoReasoning pipeline.
 
-Only two student models are trained. Existing non-PHI summaries seed mining;
-the NVIDIA teacher provides all fresh labels, catalog evidence, and distillation.
+Existing non-PHI summaries seed mining; the NVIDIA teacher provides all fresh labels,
+catalog evidence and distillation. TrialSpace (EmbeddingGemma 2) is mined and refit over
+three rounds on the patients' key summary sections and the cohorts' key criteria; every
+round's five-answer match labels train the multi-head TrialChecker, and boilerplate labels
+of round-3 pairs train the separate BoilerplateChecker. OncoReasoning is distilled last.
 """
 from __future__ import annotations
 import argparse
@@ -23,10 +26,11 @@ from oncoreasoning_training.contracts import DEFAULT_MODEL_NAME, TRIAL_RUBRIC_DI
 from oncoreasoning_training.create_all_training_data import atomic_json, source_record
 from oncoreasoning_training.teacher import DEFAULT_TEACHER
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
-from colbert_experiments.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
+from trialspace.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_EMBEDDERS = {'embeddinggemma': 'google/embeddinggemma-2', 'colbert': 'lightonai/GTE-ModernColBERT-v1'}
+DEFAULT_EMBEDDER = 'google/embeddinggemma-2'
+DEFAULT_CHECKER = 'answerdotai/ModernBERT-large'
 EMBEDDINGGEMMA2_REVISION = '914f7f89142e33e77833254d9c9b90c3cef7303b'
 
 TRIALSPACE_OPERATIONAL_OPTIONS = {
@@ -84,9 +88,7 @@ def parser():
                    help="Live per-server limits for TrialSpace labeling only; its short requests "
                         "need higher limits than generation or summary stages.")
     p.add_argument("--student-model", default=DEFAULT_MODEL_NAME)
-    p.add_argument('--trialspace-retriever', choices=['embeddinggemma', 'colbert'], default='embeddinggemma',
-                   help='Dense EmbeddingGemma 2 (exhaustive cosine mining, finetune_embedder fits) or ColBERT MaxSim')
-    p.add_argument("--embedding-model", help="Round-1 base model; default: the selected retriever's base model")
+    p.add_argument("--embedding-model", default=DEFAULT_EMBEDDER, help="Round-1 TrialSpace base model")
     p.add_argument('--embedding-revision', help='Base model revision; default: the pinned EmbeddingGemma 2 revision')
     p.add_argument('--embedding-python', type=Path,
                    help='Python for dense mining, projection and fits (needs EmbeddingGemma 2 support); default: this one')
@@ -99,28 +101,11 @@ def parser():
                         'and an optimizer step covers this times the GPU count')
     p.add_argument('--trialspace-loss-mini-batch-size', type=int, default=32,
                    help='EmbeddingGemma 2 gradient-cache encoder chunk; the loss still spans each rank\'s full batch '
-                        '(48 peaked at 212 GiB on the GB300 with a 2,500-token cap; the cap is now 3,000)')
-    p.add_argument('--trialspace-accumulation', type=int, default=32,
-                   help='Query groups per GPU per optimizer update, sampled across available scores')
-    p.add_argument('--trialspace-documents-per-query', type=int, default=8,
-                   help='Full-text labeled candidates encoded together for each training query')
-    p.add_argument('--trialspace-query-groups-per-forward', type=int, default=2)
-    p.add_argument('--trialspace-encoder-token-budget', type=int, default=32768)
-    p.add_argument('--trialspace-token-cache-tokens', type=int, default=8000000)
-    p.add_argument('--trialspace-ranking-backward', choices=['replay', 'retained'], default='replay')
-    p.add_argument('--trialspace-activation-storage', choices=['auto', 'gpu', 'cpu', 'direct'], default='auto')
-    p.add_argument('--trialspace-activation-gpu-budget-gb', type=float, default=0)
-    p.add_argument('--trialspace-learning-rate', type=float, default=2e-5)
-    p.add_argument('--trialspace-loss', choices=['mse', 'cosent', 'legacy_ranking'], default='legacy_ranking')
-    p.add_argument('--trialspace-ranking-scale', type=float, default=20.)
-    p.add_argument('--trialspace-contrastive-weight', type=float, default=1.)
-    p.add_argument('--trialspace-lr-scheduler', choices=['constant', 'linear'], default='linear')
-    p.add_argument('--trialspace-warmup-ratio', type=float, default=.01)
+                        '(48 peaked at 212 GiB on the GB300 with a 2,500-token cap; the cap is now 4,096 on key text)')
     p.add_argument('--trialspace-save-steps', type=int, default=200)
     p.add_argument('--trialspace-save-total-limit', type=int, default=2)
     p.add_argument('--trialspace-stop-at', help='Pause student training at an ISO timestamp with timezone offset')
     p.add_argument('--trialspace-pause-file', type=Path, help='Pause student training when this file exists')
-    p.add_argument('--trialspace-candidate-limit', type=int, default=256)
     p.add_argument('--trialspace-top-k', type=int, default=20)
     p.add_argument('--trialspace-top-k-patient-to-cohort', type=int)
     p.add_argument('--trialspace-top-k-cohort-to-patient', type=int, default=40)
@@ -129,15 +114,17 @@ def parser():
     p.add_argument('--trialspace-patient-trial-sample', type=int, default=500,
                    help="Trials sampled per patient for patient-to-cohort mining, like one center's open trials (0 = all); "
                         'redrawn for each mining round')
-    p.add_argument('--trialspace-encode-batch-size', type=int, default=16)
-    p.add_argument('--trialspace-score-batch-size', type=int, default=16)
-    p.add_argument('--trialspace-pair-batch-size', type=int, default=512)
-    p.add_argument('--trialspace-score-query-batches', type=int, default=4)
-    p.add_argument('--trialspace-device-cache-gb', type=float, default=8)
     p.add_argument('--trialspace-label-workers', type=int, default=0,
                    help='Concurrent pair chains; 0 scales automatically with the live teacher pool')
     p.add_argument('--trialspace-label-max-auto-workers', type=int, default=DEFAULT_AUTO_WORKERS_MAX)
-    p.add_argument('--trialspace-extra-pairs', type=Path, help='Additional independent/challenge candidate JSONL')
+    p.add_argument('--checker-model', default=DEFAULT_CHECKER, help='Base model of TrialChecker and BoilerplateChecker')
+    p.add_argument('--checker-max-length', type=int, default=8192,
+                   help='Checker context: key or boilerplate criteria plus the patient section (ModernBERT maximum)')
+    p.add_argument('--checker-epochs', type=float, default=2)
+    p.add_argument('--checker-batch-size', type=int, default=8, help='Pairs per GPU per step')
+    p.add_argument('--checker-learning-rate', type=float, default=2e-5)
+    p.add_argument('--boilerplate-label-pairs', type=int, default=100000,
+                   help='Round-3 candidate pairs (with cohort boilerplate criteria) sampled for BoilerplateChecker labels; 0 = all')
     p.add_argument('--trialspace-cache-dir', type=Path, help='Local Hugging Face model cache')
     p.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     p.add_argument("--vllm", default=str(Path(sys.executable).parent / "vllm"))
@@ -169,6 +156,23 @@ def input_paths(args):
             for key, filename in defaults.items()}
 
 
+def teacher_args(args, servers):
+    """Teacher endpoint, model and concurrency options shared by every labeling stage."""
+    teacher_model = args.teacher_served_model or args.teacher_model
+    command = ['--server_urls_file', str(servers), '--teacher-model', teacher_model,
+        '--teacher-tokenizer', args.teacher_model, '--teacher-context', str(args.teacher_max_context),
+        '--max_concurrent_per_server', str(args.label_concurrency_per_server),
+        '--initial-concurrent-per-server', str(min(args.label_initial_concurrency_per_server, args.label_concurrency_per_server)),
+        '--pending-requests', str(args.trialspace_label_workers),
+        '--max-auto-pending-requests', str(args.trialspace_label_max_auto_workers), '--max_attempts', '16',
+        '--request_timeout', '7200', '--scheduler-adaptive-concurrency']
+    if args.trialspace_cache_dir:
+        command += ['--cache-dir', str(args.trialspace_cache_dir)]
+    if args.teacher_concurrency_file:
+        command += ['--concurrency-control-file', str(args.teacher_concurrency_file)]
+    return command
+
+
 def stages(args):
     run, models = args.run_dir, args.models_dir
     inputs = input_paths(args)
@@ -182,77 +186,39 @@ def stages(args):
         '--patients', str(inputs['patient_summaries']), '--cohorts', str(inputs['trial_spaces']),
         '--output', str(corpus),
         '--merge-source-splits'], [corpus / 'prepared.json'])]
-    common = ['--corpus', str(corpus), '--query-length', str(args.trialspace_context),
-              '--document-length', str(args.trialspace_context)]
     from synthetic_pool import require_all_sources
     require_all_sources(args.synthetic_training_splits)
     training_splits = args.synthetic_training_splits
     mining_splits = ['train', 'val', 'test'] if 'test' in training_splits else ['train', 'val']
-    if args.trialspace_cache_dir:
-        common += ['--cache-dir', str(args.trialspace_cache_dir)]
-    dense = args.trialspace_retriever == 'embeddinggemma'
     dense_py = str(args.embedding_python or py)
     dense_launch = [dense_py, *launch[1:]]  # One finetune_embedder rank per GPU in --gpus.
-    if dense and args.trialspace_extra_pairs:
-        raise ValueError('Extra candidate pairs are supported only by ColBERT mining')
-    embedding = args.embedding_model or DEFAULT_EMBEDDERS[args.trialspace_retriever]
-    revision = args.embedding_revision or (EMBEDDINGGEMMA2_REVISION if embedding == DEFAULT_EMBEDDERS['embeddinggemma'] else None)
-    # Three mining and labeling rounds; the student is refit after rounds 1 and 2,
-    # and round 3's candidates and labels supply the checker and distillation stages.
+    embedding = args.embedding_model
+    revision = args.embedding_revision or (EMBEDDINGGEMMA2_REVISION if embedding == DEFAULT_EMBEDDER else None)
+    # Three mining and labeling rounds; TrialSpace is refit after rounds 1 and 2, every
+    # round's labels train TrialChecker, and round 3's candidates supply the other stages.
+    teacher_dirs = []
     for iteration in (1, 2, 3):
         round_dir = run / f'trialspace_round{iteration}'
         mining = round_dir / 'mining'
         candidates = [mining / f'{direction}.parquet' for direction in ('patient_to_cohort', 'cohort_to_patient')]
-        if dense:
-            mine = [dense_py, 'trialspace_comparison.py', 'dense-mine', '--corpus', str(corpus),
-                '--output', str(mining), '--model', str(embedding), '--max-tokens', str(args.trialspace_context),
-                '--patient-k', str(args.trialspace_top_k_patient_to_cohort or args.trialspace_top_k),
-                '--cohort-k', str(args.trialspace_top_k_cohort_to_patient or args.trialspace_top_k),
-                '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
-                '--patient-trial-sample', str(args.trialspace_patient_trial_sample)]
-            if iteration == 1 and revision:
-                mine += ['--revision', revision]
-            if args.trialspace_cache_dir:
-                mine += ['--cache-dir', str(args.trialspace_cache_dir)]
-        else:
-            mine = launch + ['trialspace_training.py', 'mine', *common, '--model', str(embedding),
-                '--output', str(mining), '--candidate-limit', str(args.trialspace_candidate_limit),
-                '--proposal-strategy', 'lexical_random', '--top-k', str(args.trialspace_top_k),
-                '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
-                '--patient-trial-sample', str(args.trialspace_patient_trial_sample),
-                '--document-batch-size', str(args.trialspace_encode_batch_size),
-                '--query-batch-size', str(args.trialspace_encode_batch_size),
-                '--score-batch-size', str(args.trialspace_score_batch_size),
-                '--pair-batch-size', str(args.trialspace_pair_batch_size),
-                '--score-query-batches', str(args.trialspace_score_query_batches),
-                '--device-cache-gb', str(args.trialspace_device_cache_gb)]
-            mine += ['--splits', *mining_splits]
-            if args.trialspace_extra_pairs:
-                mine += ['--extra-pairs', str(args.trialspace_extra_pairs)]
-            for direction in ('patient-to-cohort', 'cohort-to-patient'):
-                value = getattr(args, 'trialspace_top_k_' + direction.replace('-', '_'), None)
-                if value is not None:
-                    mine += ['--top-k-' + direction, str(value)]
+        mine = [dense_py, 'trialspace_comparison.py', 'dense-mine', '--corpus', str(corpus),
+            '--output', str(mining), '--model', str(embedding), '--max-tokens', str(args.trialspace_context),
+            '--patient-k', str(args.trialspace_top_k_patient_to_cohort or args.trialspace_top_k),
+            '--cohort-k', str(args.trialspace_top_k_cohort_to_patient or args.trialspace_top_k),
+            '--lexical-k', str(args.trialspace_lexical_k), '--random-k', str(args.trialspace_random_k),
+            '--patient-trial-sample', str(args.trialspace_patient_trial_sample)]
+        if iteration == 1 and revision:
+            mine += ['--revision', revision]
+        if args.trialspace_cache_dir:
+            mine += ['--cache-dir', str(args.trialspace_cache_dir)]
         if iteration > 1:  # A fresh trial sample per patient each round; round 1 keeps the original draws.
             mine += ['--trial-sample-round', str(iteration)]
         result.append(Stage(f'mine-{iteration}', mine, [mining / 'complete.json', mining / 'candidates.jsonl', *candidates]))
-        if iteration == 3 and not dense:
-            break
         directory = round_dir / 'teacher'
+        teacher_dirs.append(directory)
         scores = directory / 'scores.jsonl'
-        label = [py, 'trialspace_training.py', 'label', '--gated-regression', '--corpus', str(corpus),
-            '--candidates', str(mining / 'candidates.jsonl'), '--output', str(directory),
-            '--server_urls_file', str(servers), '--teacher-model', teacher_model,
-            '--teacher-tokenizer', args.teacher_model, '--teacher-context', str(args.teacher_max_context),
-            '--max_concurrent_per_server', str(args.label_concurrency_per_server),
-            '--initial-concurrent-per-server', str(min(args.label_initial_concurrency_per_server, args.label_concurrency_per_server)),
-            '--pending-requests', str(args.trialspace_label_workers),
-            '--max-auto-pending-requests', str(args.trialspace_label_max_auto_workers), '--max_attempts', '16',
-            '--request_timeout', '7200', '--scheduler-adaptive-concurrency']
-        if args.trialspace_cache_dir:
-            label += ['--cache-dir', str(args.trialspace_cache_dir)]
-        if args.teacher_concurrency_file:
-            label += ['--concurrency-control-file', str(args.teacher_concurrency_file)]
+        label = [py, 'trialspace_training.py', 'label', '--task', 'match', '--corpus', str(corpus),
+            '--candidates', str(mining / 'candidates.jsonl'), '--output', str(directory), *teacher_args(args, servers)]
         if iteration > 1:  # Pairs judged in the previous round are imported, not judged again.
             previous = run / f'trialspace_round{iteration - 1}'
             label += ['--reuse-labels', str(previous / 'teacher'),
@@ -263,55 +229,42 @@ def stages(args):
             break
         previous_embedding = embedding
         embedding = models / f"trialspace_round{iteration}"
-        if dense:
-            pairs = round_dir / 'pairs'
-            result.append(Stage(f'project-trialspace-{iteration}', [dense_py, 'trialspace_comparison.py',
-                'project-dense-labels', '--corpus', str(corpus), '--embeddinggemma', str(mining),
-                '--labels', str(directory), '--output', str(pairs)],
-                [pairs / 'embeddinggemma2' / 'complete.json', pairs / 'embeddinggemma2' / 'pairs.parquet']))
-            command = dense_launch + ['finetune_embedder.py', '-i', str(pairs / 'embeddinggemma2' / 'pairs.parquet'),
-                '-c', str(round_dir / 'fit'), '-o', str(embedding), '--base-model', str(previous_embedding),
-                '--prompt-profile', 'colbert_matching', '--model-dtype', 'bfloat16',
-                '--batch-size', str(args.trialspace_batch_size),
-                '--loss-mini-batch-size', str(args.trialspace_loss_mini_batch_size), '--mask-known-positives',
-                '--logging-steps', '25', '--save-steps', str(args.trialspace_save_steps)]
-            command += (['--max-steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
-                        else ['--epochs', str(args.trialspace_epochs)])
-            if iteration == 1 and revision:
-                command += ['--model-revision', revision]
-            if args.trialspace_cache_dir:
-                command += ['--model-cache-dir', str(args.trialspace_cache_dir)]
-            result.append(Stage(f'train-trialspace-{iteration}', command,
-                                [embedding / 'modules.json', embedding / 'model.safetensors']))
-            continue
-        command = launch + ['trialspace_training.py', 'train', *common, '--model', str(previous_embedding),
-            '--labels', str(scores), '--output', str(round_dir / 'fit'), '--output-model', str(embedding),
-            '--objective', 'gated_regression', '--prediction-link', 'identity',
-            '--loss', args.trialspace_loss, '--ranking-scale', str(args.trialspace_ranking_scale),
-            '--contrastive-weight', str(args.trialspace_contrastive_weight),
-            '--lr-scheduler', args.trialspace_lr_scheduler, '--warmup-ratio', str(args.trialspace_warmup_ratio),
-            '--accumulation', str(args.trialspace_accumulation), '--learning-rate', str(args.trialspace_learning_rate),
-            '--documents-per-query', str(args.trialspace_documents_per_query),
-            '--query-groups-per-forward', str(args.trialspace_query_groups_per_forward),
-            '--encoder-token-budget', str(args.trialspace_encoder_token_budget),
-            '--token-cache-tokens', str(args.trialspace_token_cache_tokens),
-            '--ranking-backward', args.trialspace_ranking_backward,
-            '--activation-storage', args.trialspace_activation_storage,
-            '--activation-gpu-budget-gb', str(args.trialspace_activation_gpu_budget_gb),
-            '--save-steps', str(args.trialspace_save_steps),
-            '--save-total-limit', str(args.trialspace_save_total_limit),
-            '--training-splits', *training_splits,
-            '--eval-every', '100', '--eval-groups-per-stratum', '32']
-        command += (['--steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
+        pairs = round_dir / 'pairs'
+        result.append(Stage(f'project-trialspace-{iteration}', [dense_py, 'trialspace_comparison.py',
+            'project-dense-labels', '--corpus', str(corpus), '--embeddinggemma', str(mining),
+            '--labels', str(directory), '--output', str(pairs)],
+            [pairs / 'embeddinggemma2' / 'complete.json', pairs / 'embeddinggemma2' / 'pairs.parquet']))
+        command = dense_launch + ['finetune_embedder.py', '-i', str(pairs / 'embeddinggemma2' / 'pairs.parquet'),
+            '-c', str(round_dir / 'fit'), '-o', str(embedding), '--base-model', str(previous_embedding),
+            '--prompt-profile', 'trialspace', '--model-dtype', 'bfloat16',
+            '--batch-size', str(args.trialspace_batch_size),
+            '--loss-mini-batch-size', str(args.trialspace_loss_mini_batch_size), '--mask-known-positives',
+            '--logging-steps', '25', '--save-steps', str(args.trialspace_save_steps)]
+        command += (['--max-steps', str(args.trialspace_steps)] if args.trialspace_steps is not None
                     else ['--epochs', str(args.trialspace_epochs)])
-        if args.trialspace_ranking_backward == 'retained':
-            command += ['--no-gradient-checkpointing']
-        if args.trialspace_stop_at:
-            command += ['--stop-at', args.trialspace_stop_at]
-        if args.trialspace_pause_file:
-            command += ['--pause-file', str(args.trialspace_pause_file)]
+        if iteration == 1 and revision:
+            command += ['--model-revision', revision]
+        if args.trialspace_cache_dir:
+            command += ['--model-cache-dir', str(args.trialspace_cache_dir)]
         result.append(Stage(f'train-trialspace-{iteration}', command,
-                            [embedding / 'regression_scoring.json', embedding / 'model.safetensors']))
+                            [embedding / 'modules.json', embedding / 'model.safetensors']))
+    # BoilerplateChecker labels: the separate boilerplate prompt on a seeded sample of round-3 pairs
+    # whose cohort has boilerplate criteria, from the patients' boilerplate sections.
+    boilerplate = run / 'boilerplate_teacher'
+    result.append(Stage('label-boilerplate', [py, 'trialspace_training.py', 'label', '--task', 'boilerplate',
+        '--corpus', str(corpus), '--candidates', str(mining / 'candidates.jsonl'), '--output', str(boilerplate),
+        '--max-pairs', str(args.boilerplate_label_pairs), *teacher_args(args, servers)],
+        [boilerplate / 'labels.jsonl', boilerplate / 'labeling_manifest.json'], True))
+    checker = [*launch, 'train_checkers.py']
+    settings = ['--corpus', str(corpus), '--base-model', args.checker_model, '--max-length', str(args.checker_max_length),
+                '--epochs', str(args.checker_epochs), '--batch-size', str(args.checker_batch_size),
+                '--learning-rate', str(args.checker_learning_rate)]
+    trial_checker, boilerplate_checker = models / 'trial_checker', models / 'boilerplate_checker'
+    result.append(Stage('train-trial-checker', checker + ['trial', *settings, '--output-model', str(trial_checker),
+        '--labels', *map(str, teacher_dirs)], [trial_checker / 'checker_contract.json', trial_checker / 'model.safetensors']))
+    result.append(Stage('train-boilerplate-checker', checker + ['boilerplate', *settings,
+        '--output-model', str(boilerplate_checker), '--labels', str(boilerplate)],
+        [boilerplate_checker / 'checker_contract.json', boilerplate_checker / 'model.safetensors']))
     catalog = run / "good_option_catalog"
     result.append(Stage("catalog", [py, "train_good_option_checker.py", "catalog",
         "--catalog", str(catalog), "--catalog-checkpoint-dir", str(run / "catalog_checkpoints"),
@@ -531,7 +484,7 @@ def main():
     for key in ("data_dir", "run_dir", "models_dir", "inference_repo"):
         setattr(args, key, getattr(args, key).expanduser().resolve())
     for key in ("trial_spaces", "patient_summaries", "synthetic_notes", "teacher_servers_file", "teacher_concurrency_file",
-                'trialspace_extra_pairs', 'trialspace_cache_dir'):
+                'trialspace_cache_dir'):
         if getattr(args, key) is not None:
             setattr(args, key, getattr(args, key).expanduser().resolve())
     if args.teacher_servers_file and args.teacher_url:
@@ -554,15 +507,14 @@ def main():
                 "training_commit": git_revision(ROOT), "inference_commit": git_revision(args.inference_repo),
                 "trial_rubric_digest": TRIAL_RUBRIC_DIGEST,
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}
-    from colbert_experiments.regression import score_contract
+    from trialspace.regression import score_contract
     identity['trialspace_contract'] = score_contract()
     source_paths = [ROOT / 'train_from_summaries.py', ROOT / 'trialspace_training.py',
                     ROOT / 'retrieval_workspace.py', ROOT / 'label_workspace.py', ROOT / 'synthetic_pool.py', ROOT / 'retrieval_cache_import.py',
                     ROOT / 'trial_cohort_format.py',
                     ROOT / 'remote_vllm_pool.py', ROOT / 'adaptive_controller.py',
-                    ROOT / 'train_good_option_checker.py',
-                    *sorted((ROOT / 'colbert_experiments').glob('*.py')),
-                    *sorted((ROOT / 'colbert_experiments/prompts').glob('*.txt')),
+                    ROOT / 'train_good_option_checker.py', ROOT / 'train_checkers.py',
+                    *sorted((ROOT / 'trialspace').glob('*.py')),
                     ROOT / 'oncoreasoning_training/create_all_training_data.py',
                     ROOT / 'oncoreasoning_training/prepare_boilerplate.py',
                     ROOT / 'oncoreasoning_training/teacher.py',
@@ -571,7 +523,11 @@ def main():
                     args.inference_repo / 'src/matchminer_ai/llm/remote_inference.py',
                     args.inference_repo / 'src/matchminer_ai/llm/endpoint_pool.py',
                     args.inference_repo / 'src/matchminer_ai/llm/dispatch.py',
-                    *sorted((args.inference_repo / 'src/matchminer_ai/embedding').glob('*.py'))]
+                    *sorted((args.inference_repo / 'src/matchminer_ai/embedding').glob('*.py')),
+                    args.inference_repo / 'src/matchminer_ai/matching/match_labels.py',
+                    *(args.inference_repo / 'src/matchminer_ai/prompts' / name for name in (
+                        'match_quality.labels.system.txt', 'llm_exclusion_criteria.user.txt',
+                        'match_quality_checker_template.txt', 'exclusion_criteria_checker_template.txt'))]
     identity['production_sources'] = [source_record(path) for path in source_paths]
     if manifest_path.exists():
         from oncoreasoning_training.pipeline_upgrade import compatible_identity
@@ -582,7 +538,8 @@ def main():
     atomic_json(args.run_dir / 'reasoning_archives.json', dict(
         policy='Preserve returned reasoning and complete responses; answer-only targets remain separate.',
         pooled_teacher_traces=str(args.run_dir / 'llm_traces'),
-        colbert_question_traces=[str(args.run_dir / f'trialspace_round{i}/teacher/responses') for i in (1, 2)],
+        match_label_traces=[str(args.run_dir / f'trialspace_round{i}/teacher/responses') for i in (1, 2, 3)],
+        boilerplate_label_traces=str(args.run_dir / 'boilerplate_teacher/responses'),
         distillation_traces=str(args.run_dir / 'oncoreasoning/teacher_attempts'),
         distillation_validated_responses=str(args.run_dir / 'oncoreasoning/responses'),
         exclusion_traces=str(args.run_dir / 'boilerplate_components/teacher_attempts')))

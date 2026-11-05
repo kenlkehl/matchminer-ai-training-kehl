@@ -6,7 +6,9 @@ registry rule (first posted since 2020, interventional, early phase I-IV), then 
 listing (`screen-trials`, `0b_screen_trials.py`; every answer and its reasoning saved), then a seed-42
 draw of exactly 5,000 accepted trials (`sample-trials`). A synthetic protocol is generated for each of
 the 5,000. Later attrition is reported from these counts; never sample from an already-filtered
-older table or drop sampled trials without replacement silently.
+older table or drop sampled trials without replacement silently. The first run on this path,
+`training_run_screened_sample5000_20261104`, screened 29,005 listings (21,789 cancer treatment trials,
+7,216 not, 0 errors) and drew 5,000 with seed 42; its synthetic protocols are generating.
 
 Two trial versions (user instruction, October 31; the new default path): every
 sampled trial is represented by its synthetic-protocol cohorts and by cohorts
@@ -17,7 +19,7 @@ both versions go through the inference package's three-step workflow with the
 same prompts: a cancer-treatment screen, the cohort names, and one request per
 cohort for its complete criteria (schema `trial-cohorts-stepwise-v1`, rows
 `trial-treatment-cohorts-v5`); a listing is its title, brief summary and
-eligibility criteria as one document. Since November 4 (user instruction) the criteria step copies every criterion verbatim, boilerplate included; training then merges each trial's equivalent cohorts (the merge ignores differences of extraction) and removes the boilerplate from each merged cohort (`remove_boilerplate_criteria`, which returns the boilerplate separately in `cohort_boilerplate_criteria`; since late November 4 (user instruction) it splits the criteria into lines, classifies each line as boilerplate or not in its own request, and sorts the unchanged lines in code, so the model never re-transcribes criteria; broadened November 4 to prognosis, performance status, organ function, brain metastases, prior-treatment toxicities and non-cancer conditions unless central to the trial, then (user, November 4) unrelated other cancers, simultaneous participation in another trial, washout periods of 30 days or less from radiation, systemic or trial therapy, and recovery from recent major surgery; whether a treatment was ever received is not boilerplate). Registry listings get the same steps as protocols, and retrieval and labeling use the boilerplate-removed cohorts of both versions (option 2, user, November 4); since late November 4 (user instruction) patients are seeded from the merged protocol cohorts with all their criteria, boilerplate included (`patient_cohorts.py`, which also writes the same rows with boilerplate removed for retrieval); both steps are optional at inference and keep their reasoning. Mining represents each trial by one
+eligibility criteria as one document. Since November 4 (user instruction) the criteria step copies every criterion verbatim, boilerplate included; training then merges each trial's equivalent cohorts (the merge ignores differences of extraction) and removes the boilerplate from each merged cohort (`remove_boilerplate_criteria`, which returns the boilerplate separately in `cohort_boilerplate_criteria`; since late November 4 (user instruction) it splits the criteria into lines, classifies each line as boilerplate or not in its own request, and sorts the unchanged lines in code, so the model never re-transcribes criteria; broadened November 4 to prognosis, performance status, organ function, brain metastases, prior-treatment toxicities and non-cancer conditions unless central to the trial, then (user, November 4) unrelated other cancers, simultaneous participation in another trial, washout periods of 30 days or less from radiation, systemic or trial therapy, and recovery from recent major surgery; whether a treatment was ever received is not boilerplate). Registry listings get the same steps as protocols. A cohort's key criteria are its criteria that are not boilerplate: the de-boilerplated tables keep `cohort_eligibility_criteria` (all criteria) and add `cohort_key_criteria` and `cohort_boilerplate_criteria`. Retrieval, match labels and TrialChecker read the key criteria of both versions (option 2, user, November 4) and BoilerplateChecker reads the boilerplate criteria; since late November 4 (user instruction) patients are seeded from the merged protocol cohorts with all their criteria, boilerplate included (`cohorts.parquet` via `patient_cohorts.py`, which also writes the same rows with the key and boilerplate columns for retrieval); both steps are optional at inference and keep their reasoning. Mining represents each trial by one
 version: chosen at random per patient-trial pair within each patient's 500-trial
 sample (each mining round redraws that sample and those versions, user
 instruction November 2; round 1 keeps its original draws), and per trial for
@@ -25,6 +27,34 @@ cohort queries; source-trial pairs include both
 versions; a trial accepted in only one version uses it. Patients are generated
 from protocol cohorts only. Do not revert to single-version retrieval without
 the user's instruction.
+
+Retriever, labels and checkers (user instruction, November 4): every ColBERT retrieval path is
+removed from both repositories; TrialSpace (dense `google/embeddinggemma-2`) is the only retriever.
+`colbert_experiments/` is now `trialspace/` without its ColBERT-only modules, and its October run
+logs are in `docs/history/`. Patient summaries keep two sections: `patient_summary` is the key
+section (the cancer history, before `Other relevant history:`) and `patient_boilerplate_text` the
+boilerplate section. Retrieval embeds key texts only: the patient's key section and the cohort's key
+criteria (finetune cap 4,096 tokens; prompt profile `trialspace`). The match teacher asks all five
+match labels (reasonableness, cancer_type, burden, treatment_history, biomarker; each yes/no with
+evidence_status and reason) in ONE request per pair with the inference prompt
+`match_quality.labels.system.txt`, on the key texts; score 0-6 = 0 unless reasonable, else 1 +
+cancer type + burden + treatment history + 2 x biomarker. The gated one-question-per-request design
+(`potentially_eligible` first) is gone. TrialChecker is one ModernBERT-large with five sigmoid heads
+trained on every round's match labels (`match_quality_checker_template.txt`: cohort key criteria,
+then patient key section; 8,192 tokens). BoilerplateChecker is a separate two-class ModernBERT-large
+trained on `llm_exclusion_criteria.user.txt` labels (Yes!/No!: does the patient clearly fail any
+boilerplate criterion) of a seeded 100,000-pair sample of round-3 candidates whose cohort has
+boilerplate (`exclusion_criteria_checker_template.txt`: patient boilerplate section, cohort
+boilerplate criteria). Do not restore ColBERT or the gated labels without the user's instruction.
+
+HISTORICAL (October 26-31 comparison run state, kept as recorded): ColBERT was removed on
+November 4, so mentions below of ModernColBERT files, ColBERT scoring or deferred ColBERT-only
+labeling, gated labels and the deleted `scripts/trialspace_comparison_workflow.py` describe that run,
+not current code. Its comparison, handoff and memory documents are in `docs/history/`
+(`COMPARISON_GB300_20261026.md`, `HANDOFF_GB300_TRAINING_20261026.md`,
+`GB300_MEMORY_RESULTS_20261026.*`, `colbert_experiments_README.md`). The standing policies among
+these paragraphs still apply: all synthetic data with no holdouts, judgment-reuse integrity, no
+idle cloud GPUs, file identity and the test policy.
 
 STOPPED at user request (October 28): the batch-96 training run and its full
 controller service were terminated so the user can make adjustments. Trainer,
@@ -44,7 +74,9 @@ cohorts still exceed it), and the teacher label stage defaults to 32,768 output
 tokens. The batch-96 restart below runs frozen source at 2,500 tokens. Label
 `max_tokens` is part of the labeling identity: directories labeled at 8,192
 resume or are reused only with an explicit `--max-tokens 8192`, which the
-comparison workflow's label commands already pass.
+comparison workflow's label commands already passed (that workflow is deleted). Since November 4
+the `finetune_embedder.py` default, which `make_top_matches.py` shares, is 4,096 tokens on key
+texts only.
 
 ACTIVE RESTART (October 28, 01:19 UTC): the user authorized a fresh start.
 EmbeddingGemma 2 is training from the pinned base model, not checkpoint 200:
@@ -127,7 +159,7 @@ The v22 source bytes and mtime were verified unchanged. This used current
 libraries, not the historical v22 environment. Production remains paused at
 checkpoint 200; no benchmark weights were exported and no production settings
 were changed. Artifacts and exact commands are in the comparison run's
-`recovery/v22_baseline_20261028/`. See COMPARISON_GB300_20261026.md for details.
+`recovery/v22_baseline_20261028/`. See docs/history/COMPARISON_GB300_20261026.md for details.
 
 Latest diagnostic (October 28, 00:22 UTC): a benchmark-only 512-token cohort
 cap leaves patient inputs at their 8,192-token maximum (dynamic padding).
@@ -199,7 +231,7 @@ and optimizer updates. Do not reserve synthetic validation/calibration/test
 partitions or accept a train-only override. Historical partition assignments
 are provenance (`source_split`), never candidate filters or training exclusions.
 Both retrieval directions must search the full opposite-side corpus. At the
-current 5,000-trial sample this is 66,800 patients and 6,680 extracted cohorts.
+October 5,000-trial sample this was 66,800 patients and 6,680 extracted cohorts.
 
 The source-partition-restricted comparison rankings are invalid and archived.
 Rebuild both directions: the old implementation filtered cohorts for a patient
@@ -209,6 +241,7 @@ Completed judgments may be imported only for current candidate pairs after
 verifying clinical text, exact prompts, teacher settings and response integrity.
 Preserve complete original prompts, answers, reasoning and old artifacts.
 
+Historical (October 27 comparison; ColBERT removed November 4):
 Keep separate EmbeddingGemma 2 and ModernColBERT candidate and label files.
 Overlapping pairs are judged once and copied into both exports. Train
 EmbeddingGemma 2 only on its own candidates, using all source patients.
@@ -248,7 +281,8 @@ Metrics over these synthetic training examples are in-sample diagnostics,
 not held-out validation or full-corpus recall estimates. This policy does not
 remove independent real-data evaluation or DFCI trial exclusion rules.
 
-Current operational request: shut down the eight RTX Spot VMs until corrected
+Historical (October 27; ColBERT removed November 4). Operational request at the
+time: shut down the eight RTX Spot VMs until corrected
 candidates are ready for labeling, then restart them with preemption/startup
 retries. Verify all eight are TERMINATED again before student training.
 Immediately after ColBERT scoring completes, restart the registered GB300
@@ -260,7 +294,8 @@ Keep the publisher supervised and require verified publication before consuming
 its outputs. Do not wait for copy-back or dense labeling to return the GB300.
 Use local SSD for active preparation, retrieval and label checkpoints; publish
 and verify final products at their intended shared no_phi destinations.
-Read colbert_experiments/COMPARISON_GB300_20261026.md and the handoff for paths.
+Read docs/history/COMPARISON_GB300_20261026.md and
+docs/history/HANDOFF_GB300_TRAINING_20261026.md for paths.
 
 Latest pool update (October 27, 18:28 UTC): the user restored Camus ports 8000
 and 8001. All four Camus ports 8000–8003 are authorized for labeling, through

@@ -9,8 +9,8 @@ checkpoints), so a refresh picks up newly decided trials. The protocol view show
 protocol; the registry view shows the listing exactly as the prompts receive it (title, brief
 summary and eligibility criteria as one document). Cohorts can be shown as extracted, as merged
 for training, or merged with the boilerplate separated (remove_boilerplate_criteria;
-deboilerplate.json): each cohort's criteria that are not boilerplate (they seed synthetic patients),
-then its boilerplate criteria, with each line's classification reasoning. Clicking a criterion line jumps to the document lines that share the most of its
+deboilerplate.json): each cohort's key criteria (the criteria that are not boilerplate, which
+retrieval and match labels read), then its boilerplate criteria, with each line's classification reasoning. Clicking a criterion line jumps to the document lines that share the most of its
 distinctive words (a navigation aid for spotting paraphrase or unsupported criteria, not a
 correctness check). Each --oncore directory (a prepared real-protocol run: inputs.csv plus
 trials/<protocol_no>/ from extract_protocol_cohorts, merge_equivalent_cohorts and
@@ -241,7 +241,8 @@ class Collection:
             original = record["cohorts"][group[0]]["eligibility_criteria"]
             entry = saved.get(number) or {}
             current = entry.get("input_sha256") == hashlib.sha256(json.dumps([name, original]).encode()).hexdigest()
-            text = entry.get("eligibility_criteria") if current else None
+            # deboilerplate.json names the key criteria key_criteria (eligibility_criteria before November 4)
+            text = entry.get("key_criteria", entry.get("eligibility_criteria")) if current else None
             boilerplate = entry.get("boilerplate_criteria") if current else None
             classified = entry.get("items") if current else None
             if classified is not None:  # schema v3: nothing to compare, the lines are the merged criteria's
@@ -296,16 +297,21 @@ class PipelineRun(Collection):
             if (requests / "protocol-cohorts.json").exists() else []
         registry = json.loads((requests / "registry-cohorts.json").read_text())["execution_command"] \
             if (requests / "registry-cohorts.json").exists() else []
-        self.batch = batch_dir or option(protocol, "--batch-dir") or (option(registry, "--trials-jsonl") or Path()).parent
+        protocols = json.loads((requests / "synthetic-protocols.json").read_text())["execution_command"] \
+            if (requests / "synthetic-protocols.json").exists() else []
+        self.batch = (batch_dir or option(protocol, "--batch-dir") or option(protocols, "--output-dir")
+                      or (option(registry, "--trials-jsonl") or run_dir / "synthetic_protocols" / "seeds.jsonl").parent)
         self.protocol_dir = protocol_dir or option(protocol, "--output-dir") or self.batch / "cohort_extraction"
         self.registry_dir = registry_dir or option(registry, "--work-dir") or run_dir / "upstream" / "registry_extraction"
-        self.seeds, self.failed = {}, (None, {})
-        for line in (self.batch / "seeds.jsonl").read_text().splitlines():
-            if line.strip():
-                seed = json.loads(line)
-                self.seeds[seed["nct_id"]] = seed
+        self.seeds, self.seeds_stamp, self.failed = {}, None, (None, {})
 
     def ids(self):
+        """The batch's seeds, read again when seeds.jsonl changes (it appears once protocol generation starts)."""
+        path = self.batch / "seeds.jsonl"
+        stamp = mtime(path)
+        if stamp is not None and stamp != self.seeds_stamp:
+            self.seeds = {seed["nct_id"]: seed for seed in map(json.loads, filter(str.strip, path.read_text().splitlines()))}
+            self.seeds_stamp = stamp
         return list(self.seeds)
 
     def info(self, nct):
@@ -790,7 +796,7 @@ function renderDetail() {
     '<span class="title">' + esc(d.title || "") + "</span></div>" +
     '<div class="controls">' + (state.index.sources.length > 1 ? '<span class="seg"><button id="srcP">Protocol</button><button id="srcR">Registry listing</button></span>' : "") +
     '<span class="seg"><button id="modeE">As extracted</button><button id="modeM">Merged</button>' +
-    '<button id="modeC" title="Merged, then the boilerplate step: criteria that are not boilerplate (these seed synthetic patients) and, separately, the boilerplate">Boilerplate separated</button></span>' +
+    '<button id="modeC" title="Merged, then the boilerplate step: key criteria (not boilerplate; retrieval and match labels read them) and, separately, the boilerplate">Boilerplate separated</button></span>' +
     (t.protocol ? state.index.sources.map(function (s) { return statusBadge(SOURCE[s], t[s]); }).join("") : "") + "</div></div>" +
     '<div class="panes"><div class="pane"><div class="panebar"><strong>' + (d.source === "registry" ? "Registry listing as the prompts see it" :
       state.index.confidential ? "Protocol text (converted from the PDF)" : "Synthetic protocol") +
@@ -861,7 +867,7 @@ function renderCohorts() {
       if (!d.clean) html += '<div class="note">The boilerplate step has not run for this trial yet (it follows the merge); showing cohorts ' +
         (d.groups ? "as merged" : "as extracted") + ".</div>";
       else html += '<div class="note">' + d.clean.length + " merged cohort" + (d.clean.length === 1 ? "" : "s") +
-        " after the boilerplate step: each card lists the criteria that are not boilerplate (these seed synthetic patients), then the boilerplate criteria." +
+        " after the boilerplate step: each card lists the key criteria (not boilerplate; retrieval and match labels read them), then the boilerplate criteria." +
         (d.clean.some(function (c) { return c.unplaced; }) ? " These answers rewrote the criteria; merged-criteria lines found in neither list are flagged." :
          " Each line was classified in its own request and sorted in code; “why” beside a line shows the model's reasoning.") + "</div>";
     }
@@ -884,7 +890,7 @@ function renderCohorts() {
     cards.forEach(function (c, i) {
       html += '<div class="card" id="card' + i + '"><h3><span class="num">' + c.num + "</span><span>" + esc(c.title) + "</span>" + c.chip + "</h3>" +
         (c.error ? '<div class="note">Boilerplate step: ' + esc(c.error) + "</div>" :
-         '<div class="cov">' + coverage(c.items) + "</div>" + critList(c.items, c.ci, c.kind)) +
+         (c.boilerplate ? "<h4>Key criteria</h4>" : "") + '<div class="cov">' + coverage(c.items) + "</div>" + critList(c.items, c.ci, c.kind)) +
         (c.boilerplate && !c.error ? '<div class="boiler"><h4>Boilerplate criteria</h4>' + (c.boilerplate.length ?
            '<div class="cov">' + coverage(c.boilerplate) + "</div>" + critList(c.boilerplate, c.ci, "boiler") : '<div class="cov">None.</div>') + "</div>" : "") +
         (c.unclassified && c.unclassified.length ? '<div class="unplaced"><strong>Line' + (c.unclassified.length === 1 ? " " : "s ") +

@@ -10,8 +10,8 @@ seeded from, and every provenance column kept. Cohort criteria come from the
 synthetic protocol; the original registry criteria stay in
 registry_eligibility_criteria and are never used as cohort criteria. --retrieval-output
 also writes the same rows from cohorts_deboilerplated.parquet (--deboilerplated-file: the
-merged cohorts with their boilerplate criteria removed), the protocol version that
-retrieval_cohorts.py reads. A <output>.provenance.json receipt beside each output records
+merged cohorts with their key criteria in cohort_key_criteria and boilerplate criteria in
+cohort_boilerplate_criteria), the protocol version that retrieval_cohorts.py reads. A <output>.provenance.json receipt beside each output records
 its sources. See synthetic_protocols/README.md.
 """
 import argparse

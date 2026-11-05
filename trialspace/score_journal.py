@@ -11,7 +11,7 @@ from pathlib import Path
 import time
 
 from .data import digest, write_json
-from .export_completed_scores import validate_score
+from .regression import validate_score
 from .label_preprocessing import BackgroundWork
 
 
@@ -35,7 +35,7 @@ class ScoreJournal:
         self.root = self.output / 'score_journal'
         self.path = self.root / 'scores.jsonl'
         manifest = self.root / 'manifest.json'
-        expected = dict(format='gated-score-journal-v1', teacher_manifest=signature)
+        expected = dict(format='match-score-journal-v1', teacher_manifest=signature)
         if (self.root / 'IMPORTING').exists():
             raise ValueError('Score journal import is incomplete; finish the explicit import first')
         if manifest.exists():
@@ -44,8 +44,7 @@ class ScoreJournal:
         else:
             responses = self.output / 'responses'
             if not allow_import and responses.exists() and next(responses.iterdir(), None) is not None:
-                raise ValueError('Legacy labels need a one-time compact score import; '
-                                 'use colbert_experiments.import_score_journal before resuming')
+                raise ValueError('Responses exist without a score journal; label into a new directory')
             if self.path.exists():
                 raise ValueError('Score journal is missing its identity manifest')
             self.root.mkdir(parents=True, exist_ok=True)

@@ -6,8 +6,9 @@ cohorts extracted from its synthetic protocol (extract_cohorts.py, via
 patient_cohorts.py) and the cohorts extracted from the registry record that
 protocol was written from (0b_extract_trial_cohorts.py --trials-jsonl on the
 batch's seeds.jsonl). Both use the same prompt rules and response contract, and
-the same training steps after extraction: merged, then boilerplate removed
-(patient_cohorts.py --retrieval-output and 0b's --output-deboilerplated-cohorts).
+the same training steps after extraction: merged, then key and boilerplate criteria separated
+(patient_cohorts.py --retrieval-output and 0b's --output-deboilerplated-cohorts); retrieval and
+match labels read the key criteria, BoilerplateChecker labels the boilerplate criteria.
 Patients are generated from the protocol cohorts only, with all their criteria.
 
 The output keeps every protocol row unchanged (cohort_criteria_source
@@ -17,7 +18,7 @@ cohort_index continuing after the protocol rows), each trial's split taken
 from the registry sample. A trial accepted in only one version keeps that one.
 Mining then represents each trial by one version, chosen at random per
 patient-trial pair and per trial for cohort queries
-(colbert_experiments/retrieval.py). Writes <output> and <output>.provenance.json.
+(trialspace/retrieval.py). Writes <output> and <output>.provenance.json.
 See synthetic_protocols/README.md.
 """
 import argparse
@@ -102,7 +103,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--protocol-cohorts", type=Path, required=True,
-                        help="patient_cohorts.py --retrieval-output: the cohorts patients were generated from, boilerplate removed")
+                        help="patient_cohorts.py --retrieval-output: the cohorts patients were generated from, with key criteria")
     parser.add_argument("--registry-cohorts", type=Path, required=True,
                         help="0b_extract_trial_cohorts.py --trials-jsonl cohort rows for the same batch's seeds")
     parser.add_argument("--registry-trials", type=Path, required=True,

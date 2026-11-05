@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 from synthetic_pool import pooled_records, require_full_pool
-from .contracts import judge_messages, parse_judgment, prompt_sources
+from .contracts import judge_messages, prompt_sources
 from .data import digest, load_corpus, read_jsonl, write_json
+from .labeling import validate_row
 from .label_checkpoints import ResponseStore
 from .score_journal import ScoreJournal, pending_candidates
 
@@ -65,7 +66,7 @@ def import_full_pool_source(output, signature, patients, cohorts, pairs, entry, 
                         or row.get('messages') != messages or row.get('finish_reason') != 'stop'
                         or row['split'] != old_p[pid]['split'] or row['split'] != old_c[cid]['split']):
                     raise ValueError('Reused question identity, clinical prompt, or completion changed: '+key)
-                parse_judgment(json.dumps({k:row[k] for k in ('answer','evidence_status','reason')}))
+                validate_row(row['task'], row)
                 migrated = row if intersection else dict(row, source_split=row.get('source_split', row['split']), split='train')
                 path, saved = dst.read(key)
                 if saved is not None and saved != migrated:
