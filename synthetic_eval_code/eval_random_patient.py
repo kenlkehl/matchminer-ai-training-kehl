@@ -46,7 +46,7 @@ TRIAL_SPACE_FILE = DATA_DIR / "sample_trial_space_lineitems.csv"
 QUERY_PROMPT = (
     "Instruct: Given a cancer patient summary, retrieve clinical trial options "
     "that are reasonable for that patient; or, given a clinical trial option, "
-    "retrieve cancer patients who are reasonable candidates for that trial."
+    "retrieve cancer patients who are reasonable candidates for that trial. "  # as TrialSpace-0526 saved it
 )
 
 
