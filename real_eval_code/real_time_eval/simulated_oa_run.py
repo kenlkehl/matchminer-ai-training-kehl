@@ -161,19 +161,9 @@ def parse_args():
              "If provided, scores exclusion probability for retrieved trials.",
     )
     parser.add_argument(
-        "--llm-trial-checker", action="store_true",
-        help="Run ../../llm_check_trials.py on the final top-10 pairs to "
-             "produce an LLM reasonableness score (0-5) + rationale.",
-    )
-    parser.add_argument(
         "--llm-boilerplate-checker", action="store_true",
         help="Run ../../14_check_boilerplate.py on the final top-10 pairs to "
              "produce an LLM exclusion call (Yes/No) + rationale.",
-    )
-    parser.add_argument(
-        "--llm-check-script-trial", type=str,
-        default=str(Path(__file__).resolve().parents[2] / "llm_check_trials.py"),
-        help="Path to llm_check_trials.py",
     )
     parser.add_argument(
         "--llm-check-script-boilerplate", type=str,
@@ -704,7 +694,11 @@ def run_or_resume_summarization(notes_df, args):
 
 
 def run_or_resume_llm_checks(pair_rows, args):
-    """Stage, reuse, or resume external LLM trial/boilerplate check runs.
+    """Stage, reuse, or resume external LLM boilerplate check runs.
+
+    The legacy single-score LLM trial check (llm_check_trials.py) was removed on
+    2026-11-04 (user instruction); the inference package's score_match_quality_with_llm
+    is the LLM alternative to TrialChecker.
 
     pair_rows is a list of dicts, each containing at least:
         pair_id, patient_id, mrn, nct_id, patient_summary, this_space,
@@ -712,19 +706,14 @@ def run_or_resume_llm_checks(pair_rows, args):
 
     Returns (results, run_dir) where results is dict[pair_id] -> dict with
     any of these keys populated depending on which flags are enabled:
-        llm_trialcheck_score (float or NaN; NaN on parse failure)
-        llm_trialcheck_reasoning (str)
         llm_boilerplate_excluded (float 0.0/1.0 or NaN)
         llm_boilerplate_reasoning (str)
     """
-    if not (args.llm_trial_checker or args.llm_boilerplate_checker):
+    if not args.llm_boilerplate_checker:
         return {}, None
 
-    trial_script = Path(args.llm_check_script_trial).resolve()
     bp_script = Path(args.llm_check_script_boilerplate).resolve()
-    if args.llm_trial_checker and not trial_script.exists():
-        raise FileNotFoundError(f"LLM trial check script not found: {trial_script}")
-    if args.llm_boilerplate_checker and not bp_script.exists():
+    if not bp_script.exists():
         raise FileNotFoundError(f"LLM boilerplate check script not found: {bp_script}")
 
     if args.resume_llm_check_dir:
@@ -789,47 +778,6 @@ def run_or_resume_llm_checks(pair_rows, args):
         ])
 
     results = {row["pair_id"]: {} for row in pair_rows}
-
-    if args.llm_trial_checker:
-        tc_out_dir = run_dir / "trial_check"
-        tc_final_name = "llm_trial_check.parquet"
-        tc_final = tc_out_dir / tc_final_name
-        if tc_final.exists():
-            print(f"Reusing completed LLM trial-check output at {tc_final}")
-        else:
-            cmd = [
-                sys.executable, str(trial_script),
-                "--input_parquet", str(staging_path),
-                "--out_dir", str(tc_out_dir),
-                "--final_output", tc_final_name,
-            ] + common_args
-            print("Running LLM trial check:")
-            print(f"  {shlex.join(cmd)}")
-            subprocess.run(cmd, check=True)
-            if not tc_final.exists():
-                raise FileNotFoundError(
-                    f"LLM trial check completed but {tc_final} was not created."
-                )
-        tc_df = pd.read_parquet(tc_final)
-        if "pair_id" not in tc_df.columns:
-            raise KeyError(
-                f"{tc_final} is missing pair_id (got columns {tc_df.columns.tolist()})"
-            )
-        for r in tc_df[
-            ["pair_id", "eligibility_result", "trialcheck_llm_response"]
-        ].to_dict("records"):
-            pid = int(r["pair_id"])
-            score = r.get("eligibility_result")
-            try:
-                score_int = int(score) if score is not None else -1
-            except (TypeError, ValueError):
-                score_int = -1
-            results[pid]["llm_trialcheck_score"] = (
-                float(score_int) if score_int >= 0 else np.nan
-            )
-            results[pid]["llm_trialcheck_reasoning"] = (
-                r.get("trialcheck_llm_response") or ""
-            )
 
     if args.llm_boilerplate_checker:
         bp_out_dir = run_dir / "boilerplate_check"
@@ -1183,7 +1131,7 @@ def main():
             pair_id_counter += 1
 
     llm_results = {}
-    if args.llm_trial_checker or args.llm_boilerplate_checker:
+    if args.llm_boilerplate_checker:
         print(f"Running LLM-based checks on {len(pair_rows_for_llm)} "
               f"(patient, trial) pairs ...")
         llm_results, llm_run_dir = run_or_resume_llm_checks(
@@ -1211,8 +1159,6 @@ def main():
                 "cosine_similarity": top_selected_cos_sims[i][j],
                 "trialchecker_score": top_selected_tc_scores[i][j],
                 "boilerplate_score": bp_scores_per_patient[i][j],
-                "llm_trialcheck_score": llm.get("llm_trialcheck_score", np.nan),
-                "llm_trialcheck_reasoning": llm.get("llm_trialcheck_reasoning", ""),
                 "llm_boilerplate_excluded": llm.get("llm_boilerplate_excluded", np.nan),
                 "llm_boilerplate_reasoning": llm.get("llm_boilerplate_reasoning", ""),
                 "rank": j + 1,

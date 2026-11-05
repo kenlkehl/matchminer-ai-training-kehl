@@ -1,41 +1,7 @@
-"""Keep aggregate labeling and individual questions on the current cached rubric."""
-from types import SimpleNamespace
-import sys
-
+"""Keep OncoReasoning's questions on the current teacher prompts, and the teacher on its model family."""
 import pytest
 
-import llm_check_trials as labeling
 from oncoreasoning_training import contracts as c
-
-
-def test_local_and_remote_scoring_render_the_canonical_prompt(monkeypatch):
-    calls = []
-
-    def render(**kwargs):
-        calls.append(kwargs)
-        return kwargs["conversation"][-1]["content"]
-
-    tokenizer = SimpleNamespace(apply_chat_template=render)
-    patient = "Fabricated patient: stable in January, progression in March. Marker {unknown}."
-    trial = "Requires currently non-progressive metastatic Ewing sarcoma."
-    remote_prompt = labeling.build_trial_check_prompt(tokenizer, patient, trial)
-    generated = []
-
-    def generate(prompts, params):
-        generated.extend(prompts)
-        return [SimpleNamespace(outputs=[SimpleNamespace(text="Final score: 0")])]
-
-    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(SamplingParams=lambda **kw: kw))
-    monkeypatch.setattr("vllm_reasoning_utils.parse_reasoning_output",
-                        lambda *args: ("", "Final score: 0"))
-    model = SimpleNamespace(get_tokenizer=lambda: tokenizer, generate=generate)
-    result = labeling.ask_about_trials_loosely([patient], [trial], model, "gemma4")
-    # The legacy aggregate labeler keeps the single-score rubric, read as the package ships it.
-    source = (c.DEFAULT_INFERENCE_REPO / "src/matchminer_ai/prompts/llm_match_quality.user.txt").read_text(encoding="utf-8")
-    assert generated == [remote_prompt] == [source.strip().format(
-        patient_summary=patient, trial_summary=trial)]
-    assert result[3:] == ([0], ["Score:0"])
-    assert all(call["enable_thinking"] is True for call in calls)
 
 
 @pytest.mark.parametrize("component", c.TRIAL_COMPONENTS)
@@ -76,18 +42,6 @@ def test_boilerplatechecker_questions_take_each_boilerplate_line_in_context():
     assert text.endswith("CRITERION TO ASSESS\n[3] - Active hepatitis B.\n\nAnswer with the single letter first, then an explanation.")
     assert "inclusion requirements as well as exclusions" in text and "Missing or undocumented information is not a failure" in text
     assert "PATIENT OTHER RELEVANT HISTORY\nECOG 1." in text
-
-
-def test_aggregate_labeling_rejects_an_unreviewed_rubric(monkeypatch):
-    from importlib import resources
-    altered = SimpleNamespace(read_text=lambda **kwargs: "unreviewed rubric")
-    monkeypatch.setattr(resources, "files", lambda *args: SimpleNamespace(joinpath=lambda *args: altered))
-    labeling.trial_check_template.cache_clear()
-    try:
-        with pytest.raises(ValueError, match="TrialChecker rubric changed"):
-            labeling.trial_check_template()
-    finally:
-        labeling.trial_check_template.cache_clear()
 
 
 @pytest.mark.parametrize("root", ["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4",

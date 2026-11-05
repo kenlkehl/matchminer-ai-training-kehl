@@ -528,7 +528,7 @@ and `scripts/benchmark_embeddinggemma_batches.py`.
 | `claude_oracle/` | Claude Code plugin with judge skills for evaluations | Current |
 | `real_eval_code/` | Retrospective evaluations on real (PHI) data | Current; some scripts use the legacy extractor |
 | `legacy_trial_space_extraction.py`, `trial_hierarchy*.py`, `trial_prompts/`, `trial_space_export.py`, `trial_treatment_screening.py` | Pre-cohort trial-space extraction, superseded by `0b` | Legacy |
-| `llm_check_trials.py`, `14_check_boilerplate.py`, `make_top_matches.py`, `train_good_option_cosplit.py` | Earlier checker labeling and retrieval, superseded by the match and boilerplate labels, `train_checkers.py` and OncoReasoning | Legacy |
+| `14_check_boilerplate.py`, `make_top_matches.py`, `train_good_option_cosplit.py` | Earlier checker labeling and retrieval, superseded by the match and boilerplate labels, `train_checkers.py` and OncoReasoning (the single-score LLM labeler `llm_check_trials.py` was removed on 2026-11-04) | Legacy |
 | `gcp_vllm_orchestrator.py`, `pdfify_synthetic_notes.py`, `synthetic_eval_code/` | Earlier fleet management, synthetic-note PDFs, a one-patient demo | Legacy |
 | `pull_spacify_and_embed_ctgov` | Pulls current ClinicalTrials.gov cancer trials, extracts legacy trial spaces and embeds them for `real_eval_code/real_time_eval/` | Legacy (uses the legacy extractor) |
 

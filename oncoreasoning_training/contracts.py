@@ -18,8 +18,6 @@ DEFAULT_INFERENCE_REPO = next(
 )
 TASKS = ("summarization", "clinical_qa")
 OPTIONS = {"A": "Yes", "B": "No"}
-# The legacy aggregate labeler (llm_check_trials.py) still pins the old single-score rubric.
-TRIAL_RUBRIC_DIGEST = "3714f5f416fa5db3e51ddc79e92a350ef041d358849c861a14e98ade73b02419"
 # TrialChecker questions are the inference package's five match labels (user instruction,
 # 2026-11-04), one per request, cut verbatim from the teacher's five-answer prompt and asked about
 # the patient's key summary section and the cohort's key criteria.

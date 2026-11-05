@@ -68,7 +68,7 @@ text, so a pair's questions share a cacheable prefix.
 
 The format version is `oncoreasoning-answer-first-v7-key-match-labels` (v6 asked six
 matching and four specificity components cut from the earlier single-score rubric
-`llm_match_quality.user.txt`, on combined texts). Data prepared or distilled under v6 must
+`llm_match_quality.user.txt`, on combined texts; that rubric and its labeler, `llm_check_trials.py`, were removed on 2026-11-04). Data prepared or distilled under v6 must
 not be resumed under v7; regenerate it from the current candidates.
 
 BoilerplateChecker supplies one question per line of the cohort's boilerplate criteria

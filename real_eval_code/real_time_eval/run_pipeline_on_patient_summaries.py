@@ -16,10 +16,10 @@ n_patients * --top-k-output rows. (The legacy --top-k flag sets both.)
 Ranking is always by TrialSpace cosine similarity; the checker stages only
 populate score columns and never re-order or filter the output.
 
-Default behavior runs all four scoring stages. Use --stages to subset.
+Default behavior runs all three scoring stages. Use --stages to subset.
 
 Examples:
-    # All four stages, local GPUs for everything
+    # All three stages, local GPUs for everything
     python run_pipeline_on_patient_summaries.py \
         --input-summaries patient_summaries.parquet \
         --embedding-model ../../../models/trialspace \
@@ -85,7 +85,8 @@ DEFAULT_ONCORE_CSV = (
 
 HARDCODED_EXCLUDED_NCTS = {"NCT04301765", "NCT04049331"}
 
-ALL_STAGES = ("trial", "boilerplate", "llm_trial", "llm_boilerplate")
+# The legacy single-score LLM trial check (llm_trial) was removed on 2026-11-04 (user instruction).
+ALL_STAGES = ("trial", "boilerplate", "llm_boilerplate")
 
 
 def parse_stages(raw: str):
@@ -175,9 +176,7 @@ def parse_args():
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT),
                         help="Output parquet path (also writes .csv and .xlsx).")
 
-    # ----- LLM-check passthrough (only used if llm_trial / llm_boilerplate selected)
-    parser.add_argument("--llm-check-script-trial", default=str(
-        Path(__file__).resolve().parents[2] / "llm_check_trials.py"))
+    # ----- LLM-check passthrough (only used if llm_boilerplate is selected)
     parser.add_argument("--llm-check-script-boilerplate", default=str(
         Path(__file__).resolve().parents[2] / "14_check_boilerplate.py"))
     parser.add_argument("--llm-check-model", default="google/gemma-4-31b-it",
@@ -416,11 +415,10 @@ def main():
 
     # Expose stage selection to run_or_resume_llm_checks via the attributes
     # it looks up on `args`.
-    args.llm_trial_checker = "llm_trial" in stages
     args.llm_boilerplate_checker = "llm_boilerplate" in stages
 
     llm_results = {}
-    if args.llm_trial_checker or args.llm_boilerplate_checker:
+    if args.llm_boilerplate_checker:
         print(f"Running LLM-based checks on {len(pair_rows_for_llm)} "
               f"(patient, trial) pairs ...")
         llm_results, llm_run_dir = run_or_resume_llm_checks(
@@ -447,8 +445,6 @@ def main():
                 "cosine_similarity": float(sim_matrix[i, idx]),
                 "trialchecker_score": float(tc_scores_matrix[i, j]),
                 "boilerplate_score": float(bp_scores_matrix[i, j]),
-                "llm_trialcheck_score": llm.get("llm_trialcheck_score", np.nan),
-                "llm_trialcheck_reasoning": llm.get("llm_trialcheck_reasoning", ""),
                 "llm_boilerplate_excluded": llm.get("llm_boilerplate_excluded", np.nan),
                 "llm_boilerplate_reasoning": llm.get("llm_boilerplate_reasoning", ""),
                 "rank": j + 1,
