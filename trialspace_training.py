@@ -115,30 +115,47 @@ def parser():
     sub.choices['label'].add_argument('--reuse-labels', type=Path,
         help='Completed labels of an earlier round over the same corpus; its judgments of pairs in --candidates are imported')
     sub.choices['label'].add_argument('--reuse-candidates', type=Path, help='The candidates.jsonl --reuse-labels judged')
-    sub.choices['label'].add_argument('--max-pairs', type=int, default=0,
-        help='--task boilerplate: label a seeded sample of this many pairs whose cohort has boilerplate criteria (0 = all)')
-    sub.choices['label'].add_argument('--seed', type=int, default=42)
+    sub.choices['label'].add_argument('--combine-candidates', type=Path, nargs='+', default=[],
+        help='--task boilerplate: further candidate files (earlier rounds); each unique combination of patient '
+             'boilerplate section and cohort boilerplate criteria across all of them is labeled once')
     return p
 
 
-def sample_candidates(corpus, candidates, output, *, count, seed):
-    """The pairs whose cohort has boilerplate criteria, or a seeded sample of count of them, saved to output."""
-    import random
-    _, cohorts = load_corpus(corpus)
-    with_boilerplate = {c['id'] for c in cohorts if (c.get('boilerplate') or '').strip()}
-    pairs = sorted((pair for pair in read_jsonl(candidates) if pair['cohort_id'] in with_boilerplate),
-                   key=lambda pair: (pair['patient_id'], pair['cohort_id']))
-    chosen = sorted(random.Random(seed).sample(pairs, count), key=lambda pair: (pair['patient_id'], pair['cohort_id'])) \
-        if 0 < count < len(pairs) else pairs
+def unique_boilerplate_pairs(corpus, candidate_files, output):
+    """One pair per unique (patient boilerplate section, cohort boilerplate criteria) combination.
+
+    Reads every candidate file (TrialSpace rounds 1-3), keeps pairs whose cohort has boilerplate
+    criteria, and takes the first pair in (patient_id, cohort_id) order for each combination of
+    the two texts, as BoilerplateChecker training always deduplicated them. Saved to
+    <output>/candidates.jsonl with a receipt; a rerun must find the same pairs.
+    """
+    patients, cohorts = load_corpus(corpus)
+    pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
+    pairs, seen_pairs = [], set()
+    for path in candidate_files:
+        for pair in read_jsonl(path):
+            key = (pair['patient_id'], pair['cohort_id'])
+            if key not in seen_pairs and (cmap[pair['cohort_id']].get('boilerplate') or '').strip():
+                seen_pairs.add(key)
+                pairs.append(dict(patient_id=pair['patient_id'], cohort_id=pair['cohort_id'],
+                                  trial_id=pair.get('trial_id', cmap[pair['cohort_id']]['trial_id']), split=pair['split']))
+    chosen, combinations = [], {}
+    for pair in sorted(pairs, key=lambda pair: (pair['patient_id'], pair['cohort_id'])):
+        combination = digest([pmap[pair['patient_id']].get('boilerplate') or '', cmap[pair['cohort_id']]['boilerplate']])
+        if combination not in combinations:
+            combinations[combination] = 0
+            chosen.append(dict(pair, boilerplate_combination=combination))
+        combinations[combination] += 1
     path = Path(output) / 'candidates.jsonl'
     if path.exists():
         if read_jsonl(path) != chosen:
-            raise ValueError('This label directory was sampled from different candidates; use a new directory')
+            raise ValueError('This label directory was built from different candidates; use a new directory')
     else:
         write_jsonl(path, chosen)
-    write_json(Path(output) / 'sampling.json', dict(source=str(Path(candidates).resolve()),
-        source_stamp=file_stamp(candidates), pairs_with_boilerplate=len(pairs), requested=count, seed=seed,
-        sampled=len(chosen)))
+    write_json(Path(output) / 'combinations.json', dict(
+        sources=[dict(path=str(Path(f).resolve()), stamp=file_stamp(f)) for f in candidate_files],
+        candidate_pairs_with_boilerplate=len(pairs), unique_combinations=len(chosen),
+        pairs_per_combination_max=max(combinations.values(), default=0)))
     return path
 
 
@@ -168,10 +185,10 @@ def main():
         if args.reuse_labels or args.reuse_candidates:
             write_reuse_plan(args)
         if args.task == 'boilerplate':
-            args.candidates = str(sample_candidates(args.corpus, args.candidates, args.output,
-                                                    count=args.max_pairs, seed=args.seed))
-        elif args.max_pairs:
-            raise ValueError('--max-pairs samples boilerplate labels only; match labels cover every candidate')
+            args.candidates = str(unique_boilerplate_pairs(args.corpus, [Path(args.candidates), *args.combine_candidates],
+                                                           args.output))
+        elif args.combine_candidates:
+            raise ValueError('--combine-candidates is for boilerplate labels; match labels cover --candidates')
         asyncio.run(label(args))
 
 

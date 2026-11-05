@@ -166,11 +166,12 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
         assert command[command.index('--max_attempts') + 1] == '16'
         assert '--scheduler-adaptive-concurrency' in command
         assert command[command.index('--task') + 1] == 'match'
-    # BoilerplateChecker labels: the separate prompt on a sample of round-3 pairs.
+    # BoilerplateChecker labels: the separate prompt on every unique boilerplate combination of rounds 1-3.
     boilerplate = commands(plan, 'label-boilerplate')[0]
     assert boilerplate[boilerplate.index('--task') + 1] == 'boilerplate'
     assert boilerplate[boilerplate.index('--candidates') + 1].endswith('trialspace_round3/mining/candidates.jsonl')
-    assert boilerplate[boilerplate.index('--max-pairs') + 1] == '100000'
+    combined = boilerplate[boilerplate.index('--combine-candidates') + 1:][:2]
+    assert [path.split('/')[-3] for path in combined] == ['trialspace_round1', 'trialspace_round2']
     # One multi-head TrialChecker on every round's match labels; a separate BoilerplateChecker.
     trial, separate = commands(plan, 'train-trial-checker')[0], commands(plan, 'train-boilerplate-checker')[0]
     assert trial[trial.index('train_checkers.py') + 1] == 'trial'

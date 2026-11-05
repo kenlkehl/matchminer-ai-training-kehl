@@ -357,9 +357,11 @@ specificity questions only after a yes, one question per request, prompts in
 current contract.
 
 **Boilerplate labels** (`label-boilerplate`: `trialspace_training.py label
---task boilerplate --max-pairs 100000`, set by `--boilerplate-label-pairs`; 0 =
-all). A seeded (42) sample of round-3 candidate pairs whose cohort has
-boilerplate criteria (recorded in `sampling.json`) is asked the inference
+--task boilerplate --combine-candidates <round 1 and 2 candidates>`; user,
+2026-11-04). Every unique combination of patient boilerplate section and cohort
+boilerplate criteria among the rounds 1-3 candidate pairs (pairs whose cohort
+has boilerplate criteria; one representative pair each, counts in
+`combinations.json`) is asked the inference
 package's `llm_exclusion_criteria.user.txt` (Yes!/No!: does the patient clearly
 fail any boilerplate criterion) on the patient's boilerplate section and the
 cohort's boilerplate criteria. Pairs whose cohort has no boilerplate are
@@ -441,7 +443,7 @@ the run identity. Any change to settings, inputs, sources or either repository's
 commit makes a resume fail unless a scoped upgrade is registered
 (`scripts/register_*_upgrade.py`). Checker settings: `--checker-model`,
 `--checker-max-length`, `--checker-epochs`, `--checker-batch-size`,
-`--checker-learning-rate`; boilerplate label sample: `--boilerplate-label-pairs`.
+`--checker-learning-rate`.
 
 ### Labeling and retrieval storage
 

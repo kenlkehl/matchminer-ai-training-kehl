@@ -43,9 +43,11 @@ cancer type + burden + treatment history + 2 x biomarker. The gated one-question
 trained on every round's match labels (`match_quality_checker_template.txt`: cohort key criteria,
 then patient key section; 8,192 tokens). BoilerplateChecker is a separate two-class ModernBERT-large
 trained on `llm_exclusion_criteria.user.txt` labels (Yes!/No!: does the patient clearly fail any
-boilerplate criterion) of a seeded 100,000-pair sample of round-3 candidates whose cohort has
-boilerplate (`exclusion_criteria_checker_template.txt`: patient boilerplate section, cohort
-boilerplate criteria). Do not restore ColBERT or the gated labels without the user's instruction.
+boilerplate criterion) of every unique combination of patient boilerplate section and cohort
+boilerplate criteria among the rounds 1-3 candidate pairs (user, November 4; as BoilerplateChecker
+training always deduplicated them), with `exclusion_criteria_checker_template.txt` (patient
+boilerplate section, cohort boilerplate criteria). It stays a two-class model whose output keeps
+its earlier meaning (the predicted label's score; pass = NEGATIVE). Do not restore ColBERT or the gated labels without the user's instruction.
 
 HISTORICAL (October 26-31 comparison run state, kept as recorded): ColBERT was removed on
 November 4, so mentions below of ModernColBERT files, ColBERT scoring or deferred ColBERT-only

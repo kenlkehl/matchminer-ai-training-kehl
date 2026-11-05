@@ -70,3 +70,18 @@ def test_five_answers_give_one_validated_zero_to_six_score():
     with pytest.raises(ValueError):
         parse_judgment('match', json.dumps({label: {'answer': 'yes'} for label in LABELS}))
     assert judge_messages('match', 'P', 'C')[1]['content'].endswith('COHORT KEY ELIGIBILITY CRITERIA\nC')
+
+
+def test_boilerplate_labels_cover_each_unique_boilerplate_combination_of_every_round_once(tmp_path):
+    from trialspace.data import read_jsonl, write_jsonl
+    from trialspace_training import unique_boilerplate_pairs
+    patients, cohorts, _ = corpus()
+    cohorts.append(dict(id='c3', trial_id='T1', text='Key: other arm.', boilerplate='No dialysis.', split='train'))
+    write_jsonl(tmp_path / 'corpus' / 'patients.jsonl', patients)
+    write_jsonl(tmp_path / 'corpus' / 'cohorts.jsonl', cohorts)
+    pair = lambda c: dict(patient_id='p1', cohort_id=c, split='train', sources=[])
+    write_jsonl(tmp_path / 'round1.jsonl', [pair('c1'), pair('c2')])
+    write_jsonl(tmp_path / 'round3.jsonl', [pair('c1'), pair('c3')])
+    path = unique_boilerplate_pairs(tmp_path / 'corpus', [tmp_path / 'round3.jsonl', tmp_path / 'round1.jsonl'], tmp_path / 'out')
+    # c1 and c3 share their boilerplate criteria; c2 has none: one combination to label.
+    assert [p['cohort_id'] for p in read_jsonl(path)] == ['c1']

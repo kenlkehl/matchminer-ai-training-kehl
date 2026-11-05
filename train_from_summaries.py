@@ -123,8 +123,6 @@ def parser():
     p.add_argument('--checker-epochs', type=float, default=2)
     p.add_argument('--checker-batch-size', type=int, default=8, help='Pairs per GPU per step')
     p.add_argument('--checker-learning-rate', type=float, default=2e-5)
-    p.add_argument('--boilerplate-label-pairs', type=int, default=100000,
-                   help='Round-3 candidate pairs (with cohort boilerplate criteria) sampled for BoilerplateChecker labels; 0 = all')
     p.add_argument('--trialspace-cache-dir', type=Path, help='Local Hugging Face model cache')
     p.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     p.add_argument("--vllm", default=str(Path(sys.executable).parent / "vllm"))
@@ -248,12 +246,13 @@ def stages(args):
             command += ['--model-cache-dir', str(args.trialspace_cache_dir)]
         result.append(Stage(f'train-trialspace-{iteration}', command,
                             [embedding / 'modules.json', embedding / 'model.safetensors']))
-    # BoilerplateChecker labels: the separate boilerplate prompt on a seeded sample of round-3 pairs
-    # whose cohort has boilerplate criteria, from the patients' boilerplate sections.
+    # BoilerplateChecker labels: the separate boilerplate prompt on every unique combination of patient
+    # boilerplate section and cohort boilerplate criteria among the rounds 1-3 candidate pairs.
     boilerplate = run / 'boilerplate_teacher'
     result.append(Stage('label-boilerplate', [py, 'trialspace_training.py', 'label', '--task', 'boilerplate',
         '--corpus', str(corpus), '--candidates', str(mining / 'candidates.jsonl'), '--output', str(boilerplate),
-        '--max-pairs', str(args.boilerplate_label_pairs), *teacher_args(args, servers)],
+        '--combine-candidates', *(str(run / f'trialspace_round{n}' / 'mining' / 'candidates.jsonl') for n in (1, 2)),
+        *teacher_args(args, servers)],
         [boilerplate / 'labels.jsonl', boilerplate / 'labeling_manifest.json'], True))
     checker = [*launch, 'train_checkers.py']
     settings = ['--corpus', str(corpus), '--base-model', args.checker_model, '--max-length', str(args.checker_max_length),
