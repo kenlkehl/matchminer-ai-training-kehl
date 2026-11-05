@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Screen the registry trials training can sample: registry rule, DFCI holdout, cancer-treatment screen.
 
-Production training draws its trial sample (0c_sample_trial_spaces.py --screened-trials) from the
+Production training draws its trial sample (0c_sample_trials.py --screened-trials) from the
 trials this step accepts, in this order (user instruction, 2026-11-04):
 
-1. Registry rule: 0b_extract_trial_cohorts.select_trials keeps interventional early phase I-IV
+1. Registry rule: select_trials keeps interventional early phase I-IV
    trials first posted since --start-year from the parsed ClinicalTrials.gov export, and assigns
    each trial's split by NCT ID.
 2. DFCI holdout: trials open at DFCI between --dfci-first-year and --dfci-last-year
-   (0c_sample_trial_spaces.dfci_nct_ids_open_during) are excluded.
+   (0c_sample_trials.dfci_nct_ids_open_during) are excluded.
 3. Cancer-treatment screen: every remaining listing (title, brief summary and eligibility criteria
    as one document) gets the inference package's screen_trials, the first step of the cohort
    workflow, with the same prompt and settings as cohort extraction. Every attempt's answer and
@@ -25,15 +25,18 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import resource
 import subprocess
 import sys
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+from registry_llm import add_llm_arguments, make_config, prepare_runtime  # noqa: E402
 from trial_cohort_format import file_stamp, read_clinical_csv  # noqa: E402
+
+PHASES = {'EARLY_PHASE1', 'PHASE1', 'PHASE2', 'PHASE3', 'PHASE4'}
 
 
 def load_stage(filename):
@@ -47,15 +50,44 @@ def git_commit(path):
     return subprocess.run(['git', '-C', str(path), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip() or None
 
 
+def select_trials(frame, *, start_year=2020, seed=42):
+    """The registry rule: interventional early phase I-IV trials first posted since start_year; splits by NCT ID."""
+    required = {'nct_id', 'study_first_post_date', 'study_type', 'phases',
+                'title', 'brief_summary', 'eligibility_criteria'}
+    if required - set(frame):
+        raise ValueError(f'Missing parsed CT.gov columns: {sorted(required - set(frame))}')
+    def eligible_phases(value):
+        try:
+            phases = json.loads(value)
+        except (TypeError, ValueError):
+            return False
+        return (isinstance(phases, list) and bool(phases)
+                and all(isinstance(p, str) and p in PHASES for p in phases))
+    dates = pd.to_datetime(frame.study_first_post_date, format='mixed', errors='coerce')
+    frame = frame.loc[dates.dt.year.ge(start_year) & frame.study_type.eq('INTERVENTIONAL')
+                      & frame.phases.map(eligible_phases)].copy()
+    if frame.empty:
+        raise ValueError('No trials meet the date, study type and phase selection')
+    if not frame.nct_id.str.fullmatch(r'NCT\d{8}', na=False).all():
+        raise ValueError('Expected ClinicalTrials.gov NCT identifiers')
+    frame = frame.drop_duplicates()
+    if frame.nct_id.duplicated().any():
+        raise ValueError('Conflicting duplicate source records for an NCT ID')
+    frame = frame.sort_values('nct_id').reset_index(drop=True)
+    if 'split' in frame:
+        if not frame.split.isin(['train', 'val', 'validation', 'test']).all():
+            raise ValueError('Missing or invalid source splits')
+    else:
+        frame['split'] = np.random.default_rng(seed).choice(['train', 'val', 'test'],
+                                                         len(frame), p=[.8, .1, .1])
+    for column in ('title', 'brief_summary', 'eligibility_criteria'):
+        frame[column] = frame[column].fillna('')
+    return frame
+
+
 def main(args):
-    extract, sample = load_stage('0b_extract_trial_cohorts.py'), load_stage('0c_sample_trial_spaces.py')
-    sys.path.insert(0, str(args.inference_repo.resolve() / 'src'))
-    if args.api_key_env != 'OPENAI_API_KEY':
-        os.environ['OPENAI_API_KEY'] = os.environ.get(args.api_key_env, '')
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    needed = 4 * args.workers + 1024
-    if soft != resource.RLIM_INFINITY and soft < needed:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (needed if hard == resource.RLIM_INFINITY else min(needed, hard), hard))
+    sample = load_stage('0c_sample_trials.py')
+    prepare_runtime(args)
     import matchminer_ai
     from matchminer_ai.trials import screen_trials
     from matchminer_ai.trials.cohort_screen import SCREEN_FILE, SCREEN_SCHEMA_VERSION
@@ -64,7 +96,7 @@ def main(args):
     with (args.work_dir / 'screen.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         export = read_clinical_csv(args.input)
-        selected = extract.select_trials(export, start_year=args.start_year, seed=args.seed)
+        selected = select_trials(export, start_year=args.start_year, seed=args.seed)
         held_out = sample.dfci_nct_ids_open_during(pd.read_csv(args.dfci_trials_csv), args.dfci_first_year,
                                                    args.dfci_last_year)
         selected['dfci_holdout'] = selected.nct_id.isin(held_out)
@@ -72,7 +104,7 @@ def main(args):
         print(f'{len(export)} exported trials; {len(selected)} meet the registry rule; '
               f'{int(selected.dfci_holdout.sum())} open at DFCI {args.dfci_first_year}-{args.dfci_last_year} '
               f'are held out; screening {len(candidates)}', flush=True)
-        config = extract.make_config(args)
+        config = make_config(args)
         decisions, metadata = screen_trials(
             candidates[['nct_id', 'title', 'brief_summary', 'eligibility_criteria']].rename(columns={'nct_id': 'trial_id'}),
             config=config, output_dir=args.work_dir, return_metadata=True)
@@ -93,7 +125,7 @@ def main(args):
             'output': str(args.output.resolve()), 'output_stamp': file_stamp(args.output),
             'exported_trials': len(export),
             'registry_rule': dict(start_year=args.start_year, study_type='INTERVENTIONAL',
-                                  phases=sorted(extract.PHASES), trials=len(selected), split_seed=args.seed),
+                                  phases=sorted(PHASES), trials=len(selected), split_seed=args.seed),
             'dfci_holdout': dict(path=str(Path(args.dfci_trials_csv).resolve()), first_year=args.dfci_first_year,
                                  last_year=args.dfci_last_year, trials=int(selected.dfci_holdout.sum()),
                                  nct_ids=sorted(selected.nct_id[selected.dfci_holdout])),
@@ -115,16 +147,19 @@ def main(args):
 
 
 def parser():
-    extract = load_stage('0b_extract_trial_cohorts.py')
-    p = extract.parser()
-    p.description = __doc__.split('\n')[0]
+    p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     data = ROOT.parent / 'data/no_phi'
-    p.set_defaults(work_dir=data / 'trial_screen')
+    p.add_argument('--input', type=Path, default=data / 'ctgov_trials.csv', help='Parsed ClinicalTrials.gov export')
+    p.add_argument('--start-year', type=int, default=2020)
+    p.add_argument('--seed', type=int, default=42, help='Split assignment by NCT ID')
+    p.add_argument('--work-dir', type=Path, default=data / 'trial_screen')
+    p.add_argument('--allow-failures', action='store_true',
+                   help='Write the table even if some trials have no validated screen answer')
     p.add_argument('--output', type=Path, default=data / 'screened_trials.csv')
     p.add_argument('--dfci-trials-csv', type=Path, default=data / 'dfci_trials_summary_10-18-26.csv')
     p.add_argument('--dfci-first-year', type=int, default=2025)
     p.add_argument('--dfci-last-year', type=int, default=2026)
-    return p
+    return add_llm_arguments(p)
 
 
 if __name__ == '__main__':

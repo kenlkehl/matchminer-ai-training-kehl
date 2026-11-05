@@ -4,7 +4,7 @@ Users may hold some trials' full protocols and only the ClinicalTrials.gov text
 of others, so retrieval and labeling see both representations of a trial: the
 cohorts extracted from its synthetic protocol (extract_cohorts.py, via
 patient_cohorts.py) and the cohorts extracted from the registry record that
-protocol was written from (0b_extract_trial_cohorts.py --trials-jsonl on the
+protocol was written from (0d_extract_registry_cohorts.py --trials-jsonl on the
 batch's seeds.jsonl). Both use the same prompt rules and response contract, and
 the same training steps after extraction: merged, then key and boilerplate criteria separated
 (patient_cohorts.py --retrieval-output and 0b's --output-deboilerplated-cohorts); retrieval and
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     parser.add_argument("--protocol-cohorts", type=Path, required=True,
                         help="patient_cohorts.py --retrieval-output: the cohorts patients were generated from, with key criteria")
     parser.add_argument("--registry-cohorts", type=Path, required=True,
-                        help="0b_extract_trial_cohorts.py --trials-jsonl cohort rows for the same batch's seeds")
+                        help="0d_extract_registry_cohorts.py --trials-jsonl cohort rows for the same batch's seeds")
     parser.add_argument("--registry-trials", type=Path, required=True,
                         help="The same run's per-trial audit table (--output-trials)")
     parser.add_argument("--output", type=Path, required=True, help="Retrieval cohort CSV to write")

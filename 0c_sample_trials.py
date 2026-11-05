@@ -4,8 +4,8 @@
 Production (--screened-trials, user instruction 2026-11-04): a seeded draw of whole trials from
 those 0b_screen_trials.py accepted (registry rule, DFCI holdout, then the cancer-treatment screen),
 before any cohort extraction; the receipt carries the counts of every step. The older modes sample
-already-extracted cohort tables; the historical filename and space-input adapter remain for older
-datasets.
+already-extracted cohort tables, and the space-input adapter remains for older datasets. (This was
+0c_sample_trial_spaces.py until 2026-11-05.)
 """
 import argparse
 import json

@@ -196,7 +196,7 @@ def training_command(args):
 
 
 def unmerged(cohorts_csv):
-    """0b_extract_trial_cohorts.py's export of the cohort rows before merging (None when training starts later)."""
+    """0d_extract_registry_cohorts.py's export of the cohort rows before merging (None when training starts later)."""
     return cohorts_csv and cohorts_csv.with_name(f'{cohorts_csv.stem}_unmerged{cohorts_csv.suffix}')
 
 
@@ -242,7 +242,7 @@ def build_plan(args):
     registry_rows = [registry_cohorts / 'trial_cohort_lineitems.csv', registry_cohorts / 'trials_with_cohorts.csv',
                      registry_cohorts / 'trial_cohorts.json', unmerged(registry_cohorts / 'trial_cohort_lineitems.csv'),
                      deboilerplated(registry_cohorts / 'trial_cohort_lineitems.csv')]
-    registry_extraction = [py, str(ROOT / '0b_extract_trial_cohorts.py'), '--trials-jsonl', str(batch / 'seeds.jsonl'),
+    registry_extraction = [py, str(ROOT / '0d_extract_registry_cohorts.py'), '--trials-jsonl', str(batch / 'seeds.jsonl'),
                   '--output-trials', str(registry_rows[1]), '--output-cohorts', str(registry_rows[0]),
                   '--output-json', str(registry_rows[2]), '--output-unmerged-cohorts', str(registry_rows[3]),
                   '--output-deboilerplated-cohorts', str(registry_rows[4]),
@@ -262,13 +262,13 @@ def build_plan(args):
         # Registry rule, DFCI holdout and the cancer-treatment screen; every screen answer is saved.
         Stage('screen-trials', screening, [args.parsed_trials, args.dfci_trials_csv],
               [args.screened_trials, Path(f'{args.screened_trials}.screening.json')],
-              source('0b_screen_trials.py', '0b_extract_trial_cohorts.py', '0c_sample_trial_spaces.py',
+              source('0b_screen_trials.py', 'registry_llm.py', '0c_sample_trials.py',
                      'trial_cohort_format.py') + package),
-        Stage('sample-trials', [py, str(ROOT / '0c_sample_trial_spaces.py'), '--screened-trials', str(args.screened_trials),
+        Stage('sample-trials', [py, str(ROOT / '0c_sample_trials.py'), '--screened-trials', str(args.screened_trials),
               '--output-csv', str(args.registry_sample), '--n-trials', str(args.sample_trials), '--seed', str(args.data_seed)],
               [args.screened_trials, Path(f'{args.screened_trials}.screening.json')],
               [args.registry_sample, args.registry_sample.with_suffix('.sampling.json')],
-              source('0c_sample_trial_spaces.py', 'trial_cohort_format.py')),
+              source('0c_sample_trials.py', 'trial_cohort_format.py')),
         # One synthetic full protocol per sampled trial, seeded from its registry record.
         Stage('synthetic-protocols', [py, str(ROOT / 'synthetic_protocols/generate_batch.py'),
               '--nct-ids-from', str(args.registry_sample), '--output-dir', str(batch),
@@ -287,7 +287,7 @@ def build_plan(args):
         # The same trials from the registry records their protocols were written
         # from, with the registry prompt that follows the protocol prompt's rules.
         Stage('registry-cohorts', registry_extraction, [batch / 'seeds.jsonl'], registry_rows,
-              source('0b_extract_trial_cohorts.py', 'trial_cohort_format.py') + package),
+              source('0d_extract_registry_cohorts.py', 'registry_llm.py', 'trial_cohort_format.py') + package),
         # Patients are seeded from the merged cohorts with all their criteria, boilerplate included
         # (user, 2026-11-04); retrieval reads the same cohorts with the boilerplate removed.
         Stage('generation-cohorts', [py, str(ROOT / 'synthetic_protocols/patient_cohorts.py'), '--batch-dir', str(batch),

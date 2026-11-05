@@ -1,7 +1,7 @@
 """Extract cohorts and eligibility criteria from a synthetic protocol batch with matchminer_ai.trials.extract_protocol_cohorts.
 
 Each protocol goes through the inference package's three-step workflow, with the
-same prompts as registry listings (0b_extract_trial_cohorts.py): a cancer-treatment
+same prompts as registry listings (0d_extract_registry_cohorts.py): a cancer-treatment
 screen, the cohort names, and one request per cohort for its criteria, copied verbatim
 with boilerplate included. For training, each trial's cohorts whose criteria are
 essentially the same are then combined (merge_equivalent_cohorts; --no-merge-cohorts skips

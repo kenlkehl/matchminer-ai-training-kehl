@@ -61,7 +61,7 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert args.sampled_spaces not in stage['retrieval-cohorts'].inputs
     assert stage['retrieval-cohorts'].outputs[0] == args.retrieval_cohorts
     from generate_synthetic_data import load_stage
-    extract = load_stage('0b_extract_trial_cohorts.py')
+    extract = load_stage('0d_extract_registry_cohorts.py')
     screening = pipeline_stage('0b_screen_trials.py').parser().parse_args(screen[2:])
     assert screening.max_attempts == 3 and screening.max_tokens == 50000
     assert screening.inference_repo == args.inference_repo and screening.output == args.screened_trials

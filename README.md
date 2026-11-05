@@ -76,7 +76,7 @@ its sample in this order, so the denominator is exactly 5,000:
   `screen-trials` (`0b_screen_trials.py`): every answer and its reasoning goes
   to `<run>/upstream/screen/screen.jsonl`, and the counts and removed IDs of
   every step go to `screened_trials.csv.screening.json` →
-- `sample-trials` (`0c_sample_trial_spaces.py --screened-trials`): a draw of
+- `sample-trials` (`0c_sample_trials.py --screened-trials`): a draw of
   5,000 accepted trials with `random_state=42`
   (`registry_sample_trials.csv` + `.sampling.json`).
 
@@ -97,7 +97,7 @@ generating. The steps below describe the October runs.
    completion tokens): 23,818 treatment trials and 6,349 others, with no errors
    (`AR/ctgov_treatment_cohorts_since2020_gemma4_31b_20261023/`). The pipeline
    now runs `screen-trials` instead (above).
-3. **Sample 5,000 trials.** `sample-trials` (`0c_sample_trial_spaces.py`) keeps
+3. **Sample 5,000 trials.** `sample-trials` (`0c_sample_trials.py`) keeps
    screened treatment trials with complete cohort sets, excludes DFCI trials
    open in 2025–2026 (`dfci_trials_summary_10-18-26.csv`), leaving 22,734, and
    draws 5,000 with `random_state=42` (2026-10-24).
@@ -126,7 +126,7 @@ generating. The steps below describe the October runs.
    **Registry versions (new default, 2026-10-31).** The same trials are also
    extracted from the registry records their protocols were written from, with
    the registry prompt brought into line with the protocol prompt (schema
-   `trial-registry-cohorts-v1`), by `0b_extract_trial_cohorts.py --trials-jsonl`;
+   `trial-registry-cohorts-v1`), by `0d_extract_registry_cohorts.py --trials-jsonl`;
    `synthetic_protocols/retrieval_cohorts.py` combines both versions into the
    retrieval cohort table (see [`synthetic_protocols/README.md`](synthetic_protocols/README.md)).
    **Three-step extraction (default since 2026-11-03, user instruction).**
@@ -175,10 +175,10 @@ default range is `train` only.
 | --- | --- | --- |
 | `parse-trials` | `0a_parse_ctgov_json.py` (requires `--ctgov-json`, a CT.gov API v2 export) | `ctgov_trials.csv` |
 | `screen-trials` | `0b_screen_trials.py` | `screened_trials.csv` + `.screening.json`: every trial meeting the registry rule, with its DFCI holdout flag and screen decision; the counts and removed IDs of each step. Every screen answer and its reasoning goes to `upstream/screen/screen.jsonl`. |
-| `sample-trials` | `0c_sample_trial_spaces.py --screened-trials` | `registry_sample_trials.csv` + `.sampling.json`: the seeded draw of `--sample-trials` (5,000) accepted trials, which seed the protocols and give the source splits |
+| `sample-trials` | `0c_sample_trials.py --screened-trials` | `registry_sample_trials.csv` + `.sampling.json`: the seeded draw of `--sample-trials` (5,000) accepted trials, which seed the protocols and give the source splits |
 | `synthetic-protocols` | `synthetic_protocols/generate_batch.py` | `synthetic_protocols/` (`seeds.jsonl`, `protocols/<NCT>/protocol.md`, `protocols.csv`) |
 | `protocol-cohorts` | `synthetic_protocols/extract_cohorts.py` | `synthetic_protocols/cohort_extraction/` or `--protocol-cohort-dir` (`cohorts.parquet` merged, `cohorts_unmerged.parquet`, `cohorts_deboilerplated.parquet` merged with key and boilerplate criteria, `trials.parquet`) |
-| `registry-cohorts` | `0b_extract_trial_cohorts.py --trials-jsonl` (the protocol seeds) | `registry_cohorts/` (`trial_cohort_lineitems.csv` merged, `trial_cohort_lineitems_unmerged.csv`, `trial_cohort_lineitems_deboilerplated.csv` merged with key and boilerplate criteria, `trials_with_cohorts.csv`, `trial_cohorts.json`) |
+| `registry-cohorts` | `0d_extract_registry_cohorts.py --trials-jsonl` (the protocol seeds) | `registry_cohorts/` (`trial_cohort_lineitems.csv` merged, `trial_cohort_lineitems_unmerged.csv`, `trial_cohort_lineitems_deboilerplated.csv` merged with key and boilerplate criteria, `trials_with_cohorts.csv`, `trial_cohorts.json`) |
 | `generation-cohorts` | `synthetic_protocols/patient_cohorts.py` | `synthetic_generation/sample_trial_cohort_lineitems.csv` (merged protocol cohorts with all their criteria, for patient generation) and `sample_trial_cohort_lineitems_deboilerplated.csv` (the same rows, for retrieval: `cohort_eligibility_criteria` keeps all the criteria, `cohort_key_criteria` holds the key criteria and `cohort_boilerplate_criteria` the boilerplate), each + `.provenance.json` |
 | `retrieval-cohorts` | `synthetic_protocols/retrieval_cohorts.py` | `retrieval_cohorts.csv` (both versions of every trial) + `.provenance.json` |
 | `generate-synthetic` | `generate_synthetic_data.py` | `synthetic_generation/all_synthetic_events.parquet`, `all_synthetic_notes.parquet`, `manifest.json` |
@@ -232,20 +232,12 @@ templates are identical).
   type, phases, registry status and dates (with original precision and
   ACTUAL/ESTIMATED types, `ctgov_metadata.py`), title, brief summary,
   eligibility criteria and `trial_text`. No filtering and no LLM.
-- **0b — screen** (`0b_screen_trials.py`). The registry rule, the DFCI holdout,
-  then the cohort workflow's cancer-treatment screen on every remaining listing,
-  with every answer and its reasoning saved (see Sampling above).
-- **0b — cohorts.** Selects interventional trials first posted in `--start-year`
-  (2020) or later with early phase 1 through phase 4, assigns 80/10/10 splits
-  with seed 42 (or keeps an existing `split`), or with `--trials-jsonl` extracts
-  every given record, and calls `matchminer_ai.trials.summarize_trials` with the
-  package's three-step workflow (screen, cohort names, one request per cohort
-  for its criteria, copied verbatim). For training, equivalent cohorts are then
-  merged and each merged cohort's boilerplate separated
-  (`--output-deboilerplated-cohorts`: key criteria in `cohort_key_criteria`,
-  boilerplate in `cohort_boilerplate_criteria`, `cohort_eligibility_criteria`
-  unchanged). Remote only; per-trial gzip checkpoints and a run fingerprint make
-  it resumable, and failed trials leave `.partial` outputs and an error.
+- **0b — screen** (`0b_screen_trials.py`). The registry rule (interventional
+  trials first posted in `--start-year` (2020) or later with early phase 1
+  through phase 4; 80/10/10 splits with seed 42), the DFCI holdout, then the
+  cohort workflow's cancer-treatment screen on every remaining listing, with
+  every answer and its reasoning saved (see Sampling above). Its LLM settings and
+  endpoint options are shared with 0d (`registry_llm.py`).
 - **0c — sample.** Production (`--screened-trials`) draws 5,000 whole trials
   (seed 42) from those `0b_screen_trials.py` accepted, before any cohort
   extraction. The older modes keep cancer-treatment trials from an extracted
@@ -255,6 +247,19 @@ templates are identical).
   samples a completed extraction export without new LLM calls, and
   `repair_single_cohort_criteria.py` fixes exports made before the single-cohort
   correction.
+- **Synthetic protocols and their cohorts** (`synthetic_protocols/generate_batch.py`,
+  `synthetic_protocols/extract_cohorts.py`): one synthetic protocol per sampled
+  trial, then its cohorts; see `synthetic_protocols/README.md`.
+- **0d — registry cohorts** (`0d_extract_registry_cohorts.py --trials-jsonl`,
+  formerly `0b_extract_trial_cohorts.py`). Extracts every sampled registry record
+  (the protocol batch's `seeds.jsonl`) with `matchminer_ai.trials.summarize_trials`
+  and the package's three-step workflow (screen, cohort names, one request per
+  cohort for its criteria, copied verbatim). For training, equivalent cohorts are
+  then merged and each merged cohort's boilerplate separated
+  (`--output-deboilerplated-cohorts`: key criteria in `cohort_key_criteria`,
+  boilerplate in `cohort_boilerplate_criteria`, `cohort_eligibility_criteria`
+  unchanged). Remote only; per-trial gzip checkpoints and a run fingerprint make
+  it resumable, and failed trials leave `.partial` outputs and an error.
 - **Synthetic patients** (`generate_synthetic_data.py`, prompts in
   `synthetic_event_prompts.py`, note prompt and masking in
   `2_make_synthetic_notes_sharded.py`). For every cohort: five positive seeds

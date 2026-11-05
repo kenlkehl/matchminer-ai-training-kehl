@@ -21,12 +21,12 @@ read the key criteria, BoilerplateChecker the boilerplate criteria. Checkpoints 
 merged and de-boilerplated rows, reasoning and answers of every step, validation
 attempts per step and endpoint provenance.
 
-Two inputs: the parsed registry export (--input), from which interventional
-early phase I-IV trials first posted since --start-year are selected, or an
-already-sampled set of registry records (--trials-jsonl, e.g. the seeds.jsonl of
-a synthetic protocol batch), every one of which is extracted. The second gives
-each sampled trial its registry-derived cohorts beside the cohorts extracted
-from its synthetic protocol (synthetic_protocols/README.md).
+Input: an already-sampled set of registry records (--trials-jsonl: the seeds.jsonl of a
+synthetic protocol batch, drawn by 0b_screen_trials.py and 0c_sample_trials.py), every one of
+which is extracted. This gives each sampled trial its registry-derived cohorts beside the cohorts
+extracted from its synthetic protocol (synthetic_protocols/README.md); in run_pipeline.py it is
+the registry-cohorts stage. (Until 2026-11-05 this was 0b_extract_trial_cohorts.py, which could
+also select trials from the parsed export itself; the registry rule now lives in the screen.)
 """
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -37,18 +37,14 @@ import fcntl
 import gzip
 import hashlib
 import json
-import os
 from pathlib import Path
-import resource
-import sys
 
-import numpy as np
 import pandas as pd
 
-from trial_cohort_format import REPRESENTATION, validate_cohort_rows, read_clinical_csv, file_stamp
+from registry_llm import add_llm_arguments, make_config, prepare_runtime
+from trial_cohort_format import REPRESENTATION, validate_cohort_rows, file_stamp
 
 ROOT = Path(__file__).resolve().parent
-PHASES = {'EARLY_PHASE1', 'PHASE1', 'PHASE2', 'PHASE3', 'PHASE4'}
 
 
 def sha_file(path):
@@ -70,41 +66,6 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
-def select_trials(frame, *, start_year=2020, seed=42):
-    """2020-inclusive interventional early phase I–IV; assign splits by NCT ID."""
-    required = {'nct_id', 'study_first_post_date', 'study_type', 'phases',
-                'title', 'brief_summary', 'eligibility_criteria'}
-    if required - set(frame):
-        raise ValueError(f'Missing parsed CT.gov columns: {sorted(required - set(frame))}')
-    def eligible_phases(value):
-        try:
-            phases = json.loads(value)
-        except (TypeError, ValueError):
-            return False
-        return (isinstance(phases, list) and bool(phases)
-                and all(isinstance(p, str) and p in PHASES for p in phases))
-    dates = pd.to_datetime(frame.study_first_post_date, format='mixed', errors='coerce')
-    frame = frame.loc[dates.dt.year.ge(start_year) & frame.study_type.eq('INTERVENTIONAL')
-                      & frame.phases.map(eligible_phases)].copy()
-    if frame.empty:
-        raise ValueError('No trials meet the date, study type and phase selection')
-    if not frame.nct_id.str.fullmatch(r'NCT\d{8}', na=False).all():
-        raise ValueError('Expected ClinicalTrials.gov NCT identifiers')
-    frame = frame.drop_duplicates()
-    if frame.nct_id.duplicated().any():
-        raise ValueError('Conflicting duplicate source records for an NCT ID')
-    frame = frame.sort_values('nct_id').reset_index(drop=True)
-    if 'split' in frame:
-        if not frame.split.isin(['train', 'val', 'validation', 'test']).all():
-            raise ValueError('Missing or invalid source splits')
-    else:
-        frame['split'] = np.random.default_rng(seed).choice(['train', 'val', 'test'],
-                                                         len(frame), p=[.8, .1, .1])
-    for column in ('title', 'brief_summary', 'eligibility_criteria'):
-        frame[column] = frame[column].fillna('')
-    return frame
-
-
 def load_sampled_trials(path):
     """Registry records of an already-sampled trial set; no selection or split assignment."""
     frame = pd.DataFrame([json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()])
@@ -118,27 +79,6 @@ def load_sampled_trials(path):
     for column in ('title', 'brief_summary', 'eligibility_criteria'):
         frame[column] = frame[column].fillna('')
     return frame.sort_values('nct_id').reset_index(drop=True)
-
-
-def make_config(args):
-    from matchminer_ai.config import load_default_preset
-    from matchminer_ai.llm.model_profiles import apply_model_profile
-    config = load_default_preset()
-    config.debug_mode = True
-    family = args.tokenizer_model or args.model
-    if apply_model_profile(config, family, sections=['trial']) is None:
-        raise ValueError('No vendor sampling profile; supply a recognized --tokenizer-model')
-    config.trial['extraction_method'] = 'cohorts'
-    config.trial['cohorts'] = {'max_attempts': args.max_attempts}
-    config.trial['remote'].update(model_name=args.model, tokenizer_name=family)
-    config.trial['remote']['request_params']['max_tokens'] = args.max_tokens
-    config.remote.update(enabled=True, server_urls=args.server_urls or [],
-        server_urls_file=str(args.server_urls_file) if args.server_urls_file else None,
-        max_concurrent_requests=args.max_concurrent_per_server, pool_max_workers=args.workers,
-        request_timeout=args.request_timeout, recovery_timeout=args.recovery_timeout)
-    config.remote['adaptive_concurrency'].update(enabled=True, metrics_interval=10)
-    config.model_metadata_cache_dir = str(args.work_dir / 'model_metadata')
-    return config
 
 
 def extract_one(row, config, merge=True, deboilerplate=True):
@@ -293,15 +233,10 @@ def run(args, config):
     from matchminer_ai.trials.cohort_workflow import SCHEMA_VERSION, load_prompts, prompt_sha256
     from matchminer_ai.llm.prompts import load_prompt_text
     import matchminer_ai
-    if args.trials_jsonl:
-        frame = load_sampled_trials(args.trials_jsonl)
-    else:
-        frame = select_trials(read_clinical_csv(args.input), start_year=args.start_year, seed=args.seed)
+    frame = load_sampled_trials(args.trials_jsonl)
     package = Path(matchminer_ai.__file__).parent
-    source = args.trials_jsonl or args.input
-    identity = dict(input=str(source.resolve()), input_stamp=file_stamp(source),
-        selection='sampled_trials' if args.trials_jsonl else 'registry_export',
-        start_year=args.start_year, seed=args.seed,
+    source = args.trials_jsonl
+    identity = dict(input=str(source.resolve()), input_stamp=file_stamp(source), selection='sampled_trials',
         schema=SCHEMA_VERSION, prompt_sha256=prompt_sha256(load_prompts(config.trial['cohorts'].get('prompt_files'))),
         merge=dict(schema=MERGE_SCHEMA_VERSION, prompt_sha256=hashlib.sha256(load_prompt_text(MERGE_PROMPT).encode()).hexdigest())
         if args.merge_cohorts else None,
@@ -362,10 +297,9 @@ def run(args, config):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     data = ROOT.parent / 'data/no_phi'
-    p.add_argument('--input', type=Path, default=data / 'ctgov_trials.csv')
-    p.add_argument('--trials-jsonl', type=Path,
+    p.add_argument('--trials-jsonl', type=Path, required=True,
                    help='Already-sampled registry records (nct_id, title, brief_summary, eligibility_criteria), '
-                        'such as a synthetic protocol batch seeds.jsonl; all are extracted, replacing --input selection')
+                        'such as a synthetic protocol batch seeds.jsonl; every one is extracted')
     p.add_argument('--output-trials', type=Path, default=data / 'trials_with_cohorts.csv')
     p.add_argument('--output-cohorts', type=Path, default=data / 'trial_cohort_lineitems.csv')
     p.add_argument('--output-json', type=Path, default=data / 'trial_cohorts.json')
@@ -375,51 +309,22 @@ def parser():
                    help='Merged cohort rows with boilerplate removed; default <output-cohorts stem>_deboilerplated.csv '
                         '(not with --no-deboilerplate-cohorts)')
     p.add_argument('--work-dir', type=Path, default=data / 'trial_cohort_extraction')
-    p.add_argument('--inference-repo', type=Path, default=ROOT.parent / 'matchminer-ai-inference-kehl')
-    p.add_argument('--start-year', type=int, default=2020)
-    p.add_argument('--seed', type=int, default=42)
-    p.add_argument('--model', default='nvidia/Gemma-4-31B-IT-NVFP4')
-    p.add_argument('--tokenizer-model', help='Underlying model family when --model is a served alias')
-    endpoints = p.add_mutually_exclusive_group(required=True)
-    endpoints.add_argument('--server_urls', '--server-urls', nargs='+')
-    endpoints.add_argument('--server_urls_file', '--server-urls-file', type=Path)
-    p.add_argument('--max_concurrent_per_server', type=int, default=768,
-                   help='Adaptive ceiling when registry entries do not specify upstream_concurrency')
-    p.add_argument('--workers', type=int, default=1536, help='Total in-flight public API calls')
-    p.add_argument('--request_timeout', type=float, default=7200)
-    p.add_argument('--recovery-timeout', type=float, default=86400)
-    p.add_argument('--max-attempts', type=int, choices=range(1, 11), default=3)
     p.add_argument('--allow-failures', action='store_true',
                    help='Export complete files even if some trials fail every attempt (listed in errors.json); '
                         'for registry versions of sampled trials, whose protocol versions remain')
-    p.add_argument('--max-tokens', type=int, default=50000)
     p.add_argument('--no-merge-cohorts', dest='merge_cohorts', action='store_false',
                    help='Keep every extracted cohort instead of combining those with essentially the same criteria')
     p.add_argument('--no-deboilerplate-cohorts', dest='deboilerplate_cohorts', action='store_false',
                    help='Do not remove boilerplate criteria (no --output-deboilerplated-cohorts export)')
-    p.add_argument('--api-key-env', default='OPENAI_API_KEY')
-    return p
+    return add_llm_arguments(p)
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    if min(args.workers, args.max_concurrent_per_server, args.max_tokens,
-           args.request_timeout, args.recovery_timeout) <= 0:
-        raise ValueError('Concurrency, output budget and timeouts must be positive')
     destinations = [p.resolve() for p in output_paths(args)]
-    if len(set(destinations)) != len(destinations) or (args.trials_jsonl or args.input).resolve() in destinations:
+    if len(set(destinations)) != len(destinations) or args.trials_jsonl.resolve() in destinations:
         raise ValueError('Input and all output paths must be distinct')
-    source = args.inference_repo.resolve() / 'src'
-    if not (source / 'matchminer_ai/trials/cohort_workflow.py').is_file():
-        raise ValueError('Expected the cohort API in --inference-repo')
-    sys.path.insert(0, str(source))
-    if args.api_key_env != 'OPENAI_API_KEY':
-        os.environ['OPENAI_API_KEY'] = os.environ.get(args.api_key_env, '')
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    needed = 4 * args.workers + 1024
-    if soft != resource.RLIM_INFINITY and soft < needed:
-        target = needed if hard == resource.RLIM_INFINITY else min(needed, hard)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    prepare_runtime(args)
     args.work_dir.mkdir(parents=True, exist_ok=True)
     with (args.work_dir / 'extraction.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -13,7 +13,7 @@ older table or drop sampled trials without replacement silently. The first run o
 Two trial versions (user instruction, October 31; the new default path): every
 sampled trial is represented by its synthetic-protocol cohorts and by cohorts
 extracted from the registry record its protocol was written from
-(`0b_extract_trial_cohorts.py --trials-jsonl`), combined by
+(`0d_extract_registry_cohorts.py --trials-jsonl`), combined by
 `synthetic_protocols/retrieval_cohorts.py`. Since November 3 (user instruction)
 both versions go through the inference package's three-step workflow with the
 same prompts: a cancer-treatment screen, the cohort names, and one request per

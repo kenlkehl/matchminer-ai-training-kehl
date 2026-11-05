@@ -4,7 +4,7 @@
 """
 Legacy trial-space extraction for historical matching/evaluation workflows.
 
-The active synthetic-data stage is 0b_extract_trial_cohorts.py.
+The active synthetic-data stage is 0d_extract_registry_cohorts.py.
 
 Usage examples
 --------------

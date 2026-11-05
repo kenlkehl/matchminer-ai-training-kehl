@@ -18,7 +18,7 @@ extraction and matching; it is **not** a set of real trial criteria.
 | Batch driver | `synthetic_protocols/generate_batch.py` (this repository) |
 | Cohort extraction API | `matchminer_ai.trials.extract_protocol_cohorts` (inference package) |
 | Cohort extraction driver | `synthetic_protocols/extract_cohorts.py` (this repository) |
-| Registry-version cohorts | `0b_extract_trial_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl` (this repository) |
+| Registry-version cohorts | `0d_extract_registry_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl` (this repository) |
 | Retrieval cohort table (both versions) | `synthetic_protocols/retrieval_cohorts.py` (this repository) |
 | Prompt history and findings | [`PROMPT_HISTORY.md`](PROMPT_HISTORY.md) |
 | Real protocol PDFs (comparison data) | `scripts/download_ctgov_protocols.py` |
@@ -218,7 +218,7 @@ protocol version that `retrieval_cohorts.py` reads.
 `temp_train_gcp.sh` wrappers) runs this track as stages after `sample-trials`:
 `synthetic-protocols` (`generate_batch.py --nct-ids-from` the registry sample),
 `protocol-cohorts` (`extract_cohorts.py`), `registry-cohorts`
-(`0b_extract_trial_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl`),
+(`0d_extract_registry_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl`),
 `generation-cohorts` (`patient_cohorts.py`, the patient-generation input) and
 `retrieval-cohorts` (`retrieval_cohorts.py`, the `train` stage's cohort table).
 There `generate_batch.py` and `extract_cohorts.py` use the pipeline's
@@ -253,7 +253,7 @@ the single-request registry prompt (`trial.cohorts.user.txt`, schema
 `trial-registry-cohorts-v1`):
 
 ```bash
-python 0b_extract_trial_cohorts.py --trials-jsonl "$B/seeds.jsonl" \
+python 0d_extract_registry_cohorts.py --trials-jsonl "$B/seeds.jsonl" \
   --work-dir <run>/registry_cohorts/work --output-trials <run>/registry_cohorts/trials_with_cohorts.csv \
   --output-cohorts <run>/registry_cohorts/trial_cohort_lineitems.csv --output-json <run>/registry_cohorts/trial_cohorts.json \
   --output-unmerged-cohorts <run>/registry_cohorts/trial_cohort_lineitems_unmerged.csv \

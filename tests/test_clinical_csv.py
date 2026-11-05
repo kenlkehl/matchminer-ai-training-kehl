@@ -54,7 +54,7 @@ def test_csv_text_survives_sampling_generation_and_both_retrieval_paths(tmp_path
     dfci = tmp_path / 'dfci.csv'
     pd.DataFrame(columns=['nct_id', 'open_date', 'close_date', 'status']).to_csv(dfci, index=False)
     sampled_path = tmp_path / 'sample.csv'
-    sampled = load_stage('0c_sample_trial_spaces.py').sample_trial_spaces(
+    sampled = load_stage('0c_sample_trials.py').sample_trial_spaces(
         cohorts, sampled_path, dfci, n_trials=2, chunksize=1)
     expected_by_id = dict(zip(raw.cohort_trial_id, expected))
     expected = [expected_by_id[cid] for cid in sampled.cohort_trial_id]

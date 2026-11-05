@@ -11,8 +11,9 @@ from generate_synthetic_data import load_stage, Generator
 from trial_cohort_format import training_rows, validate_cohort_rows, complete_cohort_criteria, file_stamp
 from tests.test_synthetic_generation import Tokenizer, args_for
 
-extract = load_stage('0b_extract_trial_cohorts.py')
-sample = load_stage('0c_sample_trial_spaces.py')
+extract = load_stage('0d_extract_registry_cohorts.py')
+screen = load_stage('0b_screen_trials.py')
+sample = load_stage('0c_sample_trials.py')
 
 
 def source(number=1, **changes):
@@ -88,9 +89,14 @@ def backend(monkeypatch):
 def arguments(tmp_path):
     return extract.parser().parse_args(['--server_urls', 'http://fake/v1',
         '--model', 'gemma4-31b', '--tokenizer-model', 'nvidia/Gemma-4-31B-IT-NVFP4',
-        '--input', str(tmp_path / 'source.csv'), '--work-dir', str(tmp_path), '--workers', '2',
+        '--trials-jsonl', str(tmp_path / 'source.jsonl'), '--work-dir', str(tmp_path), '--workers', '2',
         '--output-trials', str(tmp_path / 'audit.csv'), '--output-cohorts', str(tmp_path / 'cohorts.csv'),
         '--output-json', str(tmp_path / 'combined.json')])
+
+
+def write_trials(args, rows):
+    """Sampled registry records, as a synthetic protocol batch's seeds.jsonl holds them."""
+    args.trials_jsonl.write_text(''.join(json.dumps(row) + '\n' for row in rows))
 
 
 def test_extraction_csv_preserves_literal_none_as_original_eligibility(tmp_path, backend):
@@ -100,7 +106,7 @@ def test_extraction_csv_preserves_literal_none_as_original_eligibility(tmp_path,
     args = arguments(tmp_path)
     row = source()
     row['eligibility_criteria'] = 'None'
-    pd.DataFrame([row]).to_csv(args.input, index=False)
+    write_trials(args, [row])
     extract.run(args, extract.make_config(args))
     assert len(calls) == 4  # screen, cohort names, the one cohort's criteria, its boilerplate removal
     assert read_clinical_csv(args.output_cohorts).cohort_eligibility_criteria.tolist() == ['None']
@@ -116,14 +122,14 @@ def test_selection_includes_phase4_and_boundary_preserves_metadata_and_splits():
     rows[5]['phases'] = '["NA"]'
     rows[6]['study_first_post_date'] = None
     rows[7]['phases'] = '"PHASE1"'
-    frame = extract.select_trials(pd.DataFrame(rows))
+    frame = screen.select_trials(pd.DataFrame(rows))
     assert frame.nct_id.tolist() == [f'NCT{i:08}' for i in [1, 2, 3]]
     assert frame.last_update_post_date.eq('2026-10').all()
-    pd.testing.assert_frame_equal(frame, extract.select_trials(pd.DataFrame(rows[::-1])))
+    pd.testing.assert_frame_equal(frame, screen.select_trials(pd.DataFrame(rows[::-1])))
     frame['split'] = ['train', 'test', 'val']
-    assert extract.select_trials(frame, seed=99).split.tolist() == frame.split.tolist()
+    assert screen.select_trials(frame, seed=99).split.tolist() == frame.split.tolist()
     with pytest.raises(ValueError, match='duplicate'):
-        extract.select_trials(pd.concat([frame, frame.assign(title='Conflicting title')]))
+        screen.select_trials(pd.concat([frame, frame.assign(title='Conflicting title')]))
 
 
 def test_public_api_stepwise_decisions_complete_rows_and_resume(tmp_path, backend, monkeypatch):
@@ -136,7 +142,7 @@ def test_public_api_stepwise_decisions_complete_rows_and_resume(tmp_path, backen
                                dict(cohort_name='Cohort B', eligibility_criteria=f'Previously treated breast cancer.\n{shared}')])]
     answers.update({f'Trial {i}': d for i, d in enumerate(decisions, 1)}, fence=True)
     args = arguments(tmp_path)
-    pd.DataFrame([source(i) for i in range(1, 4)]).to_csv(args.input, index=False)
+    write_trials(args, [source(i) for i in range(1, 4)])
     config = extract.make_config(args)
     assert config.remote['adaptive_concurrency']['enabled'] is True
     assert config.trial['remote']['request_params']['temperature'] == 1
@@ -177,7 +183,7 @@ def test_failure_is_not_rejection_or_sampleable_output_and_only_failed_trial_ret
     answers, calls = backend
     answers.update({'Trial 1': '{"cancer_treatment_trial":"no"}', 'Trial 2': 'invalid'})
     args = arguments(tmp_path)
-    pd.DataFrame([source(1), source(2)]).to_csv(args.input, index=False)
+    write_trials(args, [source(1), source(2)])
     config = extract.make_config(args)
     with pytest.raises(RuntimeError, match='1 trials failed'):
         extract.run(args, config)
@@ -200,7 +206,7 @@ def test_cohorts_are_combined_then_cleared_of_boilerplate_for_training(tmp_path,
         dict(cohort_name='Arm C', eligibility_criteria='Children with untreated sarcoma.')])
     answers.update({'Trial 1': decision, 'merge:Trial 1': [[1, 2], [3]]})
     args = arguments(tmp_path)
-    pd.DataFrame([source(1)]).to_csv(args.input, index=False)
+    write_trials(args, [source(1)])
     extract.run(args, extract.make_config(args))
     rows = pd.read_csv(args.output_cohorts)
     assert rows.cohort_name.tolist() == ['Arm A; Arm B', 'Arm C'] and rows.cohort_count.tolist() == [2, 2]
@@ -299,17 +305,17 @@ def test_all_rejected_run_exports_empty_cohort_table_with_schema(tmp_path, backe
     answers, calls = backend
     answers['Trial 1'] = '{"cancer_treatment_trial":"no"}'
     args = arguments(tmp_path)
-    pd.DataFrame([source()]).to_csv(args.input, index=False)
+    write_trials(args, [source()])
     extract.run(args, extract.make_config(args))
     empty = pd.read_csv(args.output_cohorts)
     assert empty.empty and 'cohort_eligibility_criteria' in empty
-    assert 'last_update_post_date' in empty and 'split' in empty
+    assert 'last_update_post_date' in empty  # the registry records' fields are kept (splits come from the sample)
     assert pd.read_csv(args.output_trials).cancer_treatment_trial.tolist() == ['no']
 
 
 def test_new_run_does_not_overwrite_outputs_from_another_run(tmp_path, backend):
     args = arguments(tmp_path)
-    pd.DataFrame([source()]).to_csv(args.input, index=False)
+    write_trials(args, [source()])
     args.output_cohorts.write_text('previous output')
     with pytest.raises(ValueError, match='fresh output paths'):
         extract.run(args, extract.make_config(args))

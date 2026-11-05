@@ -800,7 +800,7 @@ def test_full_generation_and_resume_preserve_all_patients_and_reasoning(tmp_path
 
 
 def test_sampling_retains_every_space_and_user_dfci_holdout(tmp_path):
-    module = generation.load_stage('0c_sample_trial_spaces.py')
+    module = generation.load_stage('0c_sample_trials.py')
     input_csv, dfci_csv, output_csv = [tmp_path / name for name in ('input.csv', 'dfci.csv', 'sample.csv')]
     frame = pd.DataFrame([dict(nct_id=f'NCT{i}', this_space=SPACE, space_number=j)
                           for i in range(5) for j in range(i + 1)])

@@ -111,7 +111,7 @@ class Collection:
 
     @staticmethod
     def registry_record(path, nct):
-        """A registry listing's decision from its 0b_extract_trial_cohorts.py checkpoint (with merge and boilerplate)."""
+        """A registry listing's decision from its 0d_extract_registry_cohorts.py checkpoint (with merge and boilerplate)."""
         if not path.exists():
             return {"status": "pending"}
         with gzip.open(path, "rt") as stream:
@@ -360,7 +360,7 @@ class ProtocolSet(Collection):
     """Protocol documents prepared into inputs.csv and extracted into trials/<id>/ (e.g. the DFCI OnCore runs).
 
     A registry_cohorts/ folder beside them (trials.jsonl of the trials' ClinicalTrials.gov listings and a
-    0b_extract_trial_cohorts.py --trials-jsonl work dir, work/) adds the Registry listing version, matched by nct_id.
+    0d_extract_registry_cohorts.py --trials-jsonl work dir, work/) adds the Registry listing version, matched by nct_id.
     """
 
     PAGE = re.compile(r"^── page \d+ ──$")
