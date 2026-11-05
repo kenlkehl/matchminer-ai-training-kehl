@@ -252,7 +252,7 @@ templates are identical).
   trial, then its cohorts; see `synthetic_protocols/README.md`.
 - **0d — registry cohorts** (`0d_extract_registry_cohorts.py --trials-jsonl`,
   formerly `0b_extract_trial_cohorts.py`). Extracts every sampled registry record
-  (the protocol batch's `seeds.jsonl`) with `matchminer_ai.trials.summarize_trials`
+  (the protocol batch's `seeds.jsonl`) with `matchminer_ai.trials.extract_cohorts`
   and the package's three-step workflow (screen, cohort names, one request per
   cohort for its criteria, copied verbatim). For training, equivalent cohorts are
   then merged and each merged cohort's boilerplate separated

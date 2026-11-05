@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extract cancer-treatment cohorts through the sibling inference package API.
 
-summarize_trials runs the inference package's three-step workflow on each
+extract_cohorts runs the inference package's three-step workflow on each
 registry listing (title, brief summary and eligibility criteria as one document):
 a cancer-treatment screen, the cohort names, and one request per cohort for its
 criteria, copied verbatim with boilerplate included, with the same prompts as
@@ -82,19 +82,19 @@ def load_sampled_trials(path):
 
 
 def extract_one(row, config, merge=True, deboilerplate=True):
-    from matchminer_ai.trials import merge_equivalent_cohorts, remove_boilerplate_criteria, summarize_trials
+    from matchminer_ai.trials import merge_equivalent_cohorts, remove_boilerplate_criteria, extract_cohorts
     from matchminer_ai.trials.cohorts import COHORT_COLUMNS
     trial = row['nct_id']
     inputs = pd.DataFrame([dict(trial_id=trial, trial_title=row['title'],
         brief_summary=row['brief_summary'], eligibility_criteria=row['eligibility_criteria'])])
     record = dict(trial_id=trial, result=None, cohort_rows=[])
     try:
-        cohorts, metadata = summarize_trials(inputs, config=config, return_metadata=True)
+        cohorts, metadata = extract_cohorts(inputs, config=config, return_metadata=True)
         record.update(result=metadata['trial_decisions'].get(trial),
             error=metadata['trial_errors'].get(trial), metadata=metadata,
             cohort_rows=json.loads(cohorts[COHORT_COLUMNS].to_json(orient='records')))
         if record['result'] is None:
-            record['error'] = record['error'] or 'No validated decision returned by summarize_trials'
+            record['error'] = record['error'] or 'No validated decision returned by extract_cohorts'
         elif record['result']['cancer_treatment_trial'] == 'yes':
             if merge and len(cohorts) > 1:
                 # Training keeps one row per distinct population; the extraction stays in the checkpoint.
@@ -254,7 +254,7 @@ def run(args, config):
     if not manifest.exists() and any(p.exists() for p in output_paths(args)):
         raise ValueError('Outputs already exist without this run identity; use fresh output paths')
     atomic_json(manifest, dict(run_identity=fingerprint, identity=identity,
-        selected_trials=len(frame), api='matchminer_ai.trials.summarize_trials'))
+        selected_trials=len(frame), api='matchminer_ai.trials.extract_cohorts'))
     directory = args.work_dir / 'checkpoints'
     directory.mkdir(exist_ok=True)
     pending, completed = [], 0
