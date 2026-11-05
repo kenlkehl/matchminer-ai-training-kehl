@@ -165,6 +165,9 @@ def main(args):
             flush=True),
     )
 
+    # The decisions are also in metadata. pandas deep-copies attrs into every copy and group, which
+    # stalled the merge of 5,000 trials on CPU before it sent a request.
+    cohorts.attrs = {}
     merging, unmerged = None, cohorts if args.merge_cohorts else None
     if args.merge_cohorts and not cohorts.empty:
         # Saved groupings under trials/<NCT>/merge.json are reused for unchanged cohorts.
