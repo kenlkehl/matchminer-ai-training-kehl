@@ -40,16 +40,16 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert [screen[screen.index(flag) + 1] for flag in ('--dfci-first-year', '--dfci-last-year')] == ['2025', '2026']
     assert screen[screen.index('--dfci-trials-csv') + 1] == str(args.dfci_trials_csv)
     assert stage['sample-trials'].command[stage['sample-trials'].command.index('--n-trials') + 1] == '5000'
-    # Registry rule, DFCI holdout and screen -> seeded draw -> synthetic protocols -> both versions' cohorts.
+    # ctgov rule, DFCI holdout and screen -> seeded draw -> synthetic protocols -> both versions' cohorts.
     assert stage['screen-trials'].outputs[0] == args.screened_trials == stage['sample-trials'].inputs[0]
     sample = stage['sample-trials'].command
     assert sample[sample.index('--screened-trials') + 1] == str(args.screened_trials)
     assert [sample[sample.index(flag) + 1] for flag in ('--n-trials', '--seed')] == ['5000', '42']
-    assert stage['sample-trials'].outputs[0] == args.registry_sample == stage['synthetic-protocols'].inputs[0]
+    assert stage['sample-trials'].outputs[0] == args.ctgov_sample == stage['synthetic-protocols'].inputs[0]
     seeds = stage['synthetic-protocols'].outputs[0]
-    assert seeds in stage['protocol-cohorts'].inputs and seeds == stage['registry-cohorts'].inputs[0]
+    assert seeds in stage['protocol-cohorts'].inputs and seeds == stage['ctgov-cohorts'].inputs[0]
     assert {stage['protocol-cohorts'].outputs[i] for i in (0, 1, 4)} <= set(stage['generation-cohorts'].inputs)
-    assert args.registry_sample in stage['generation-cohorts'].inputs
+    assert args.ctgov_sample in stage['generation-cohorts'].inputs
     # Patients come from the protocol cohorts, boilerplate included; retrieval and training use both
     # versions with the boilerplate removed.
     assert stage['generation-cohorts'].outputs[0] == args.sampled_spaces == stage['generate-synthetic'].inputs[0]
@@ -57,23 +57,23 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert clean == args.sampled_spaces.with_name('sample_trial_cohort_lineitems_deboilerplated.csv')
     generation = stage['generation-cohorts'].command
     assert generation[generation.index('--retrieval-output') + 1] == str(clean) and '--cohorts-file' not in generation
-    assert {clean, *(stage['registry-cohorts'].outputs[i] for i in (1, 4))} <= set(stage['retrieval-cohorts'].inputs)
+    assert {clean, *(stage['ctgov-cohorts'].outputs[i] for i in (1, 4))} <= set(stage['retrieval-cohorts'].inputs)
     assert args.sampled_spaces not in stage['retrieval-cohorts'].inputs
     assert stage['retrieval-cohorts'].outputs[0] == args.retrieval_cohorts
     from generate_synthetic_data import load_stage
-    extract = load_stage('0d_extract_registry_cohorts.py')
+    extract = load_stage('0d_extract_ctgov_cohorts.py')
     screening = pipeline_stage('0b_screen_trials.py').parser().parse_args(screen[2:])
     assert screening.max_attempts == 3 and screening.max_tokens == 50000
     assert screening.inference_repo == args.inference_repo and screening.output == args.screened_trials
-    registry = extract.parser().parse_args(stage['registry-cohorts'].command[2:])
-    assert registry.trials_jsonl == seeds and registry.allow_failures
+    ctgov = extract.parser().parse_args(stage['ctgov-cohorts'].command[2:])
+    assert ctgov.trials_jsonl == seeds and ctgov.allow_failures
     # Cohort rows are kept both before and after merging.
-    assert extract.output_paths(registry)[3] == registry.output_unmerged_cohorts == stage['registry-cohorts'].outputs[3]
+    assert extract.output_paths(ctgov)[3] == ctgov.output_unmerged_cohorts == stage['ctgov-cohorts'].outputs[3]
     assert stage['protocol-cohorts'].outputs[3] == args.protocol_dir / 'cohort_extraction/cohorts_unmerged.parquet'
-    # Registry rows are de-boilerplated too, and retrieval reads them beside the de-boilerplated protocol cohorts.
-    assert extract.output_paths(registry)[4] == registry.output_deboilerplated_cohorts == stage['registry-cohorts'].outputs[4]
+    # ctgov rows are de-boilerplated too, and retrieval reads them beside the de-boilerplated protocol cohorts.
+    assert extract.output_paths(ctgov)[4] == ctgov.output_deboilerplated_cohorts == stage['ctgov-cohorts'].outputs[4]
     retrieval = stage['retrieval-cohorts'].command
-    assert retrieval[retrieval.index('--registry-cohorts') + 1] == str(stage['registry-cohorts'].outputs[4])
+    assert retrieval[retrieval.index('--ctgov-cohorts') + 1] == str(stage['ctgov-cohorts'].outputs[4])
     assert retrieval[retrieval.index('--protocol-cohorts') + 1] == str(clean)
     moved = arguments(tmp_path, '--start-at', 'protocol-cohorts', '--protocol-dir', str(tmp_path / 'data/no_phi/batch'),
                       '--protocol-cohort-dir', str(tmp_path / 'data/no_phi/rerun/protocol_cohorts'))
@@ -89,12 +89,12 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     assert args.retrieval_cohorts in plan[-1].inputs
     train_command = plan[-1].command
     assert train_command[train_command.index('--trial-spaces') + 1] == str(args.retrieval_cohorts)
-    for name in ('screen-trials', 'registry-cohorts', 'generate-synthetic', 'summarize-patients'):
+    for name in ('screen-trials', 'ctgov-cohorts', 'generate-synthetic', 'summarize-patients'):
         command = stage[name].command
         assert command[command.index('--model') + 1] == 'gemma4-31b'
         assert command[command.index('--tokenizer-model') + 1] == 'vendor/tokenizer'
         assert command[command.index('--server_urls_file') + 1] == str(args.server_urls_file)
-        if name not in ('screen-trials', 'registry-cohorts'):
+        if name not in ('screen-trials', 'ctgov-cohorts'):
             assert '--concurrency-control-file' in command
     for name in ('synthetic-protocols', 'protocol-cohorts'):
         command = stage[name].command
@@ -423,3 +423,10 @@ def test_external_teacher_registry_is_not_rewritten(tmp_path, monkeypatch):
     with training.managed_teacher_pool(args):
         assert registry.read_bytes() == original
     assert registry.read_bytes() == original
+
+
+def test_stage_and_option_names_from_before_the_ctgov_rename_are_accepted(tmp_path):
+    args = arguments(tmp_path, '--start-at', 'registry-cohorts', '--stop-after', 'registry-cohorts',
+                     '--registry-sample', str(tmp_path / 'sample.csv'), '--registry-cohort-max-attempts', '4')
+    assert args.start_at == args.stop_after == 'ctgov-cohorts'
+    assert args.ctgov_sample == tmp_path / 'sample.csv' and args.ctgov_cohort_max_attempts == 4

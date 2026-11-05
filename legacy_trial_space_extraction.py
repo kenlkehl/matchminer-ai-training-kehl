@@ -4,7 +4,7 @@
 """
 Legacy trial-space extraction for historical matching/evaluation workflows.
 
-The active synthetic-data stage is 0d_extract_registry_cohorts.py.
+The active synthetic-data stage is 0d_extract_ctgov_cohorts.py.
 
 Usage examples
 --------------
@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 import multiprocessing as mp
 from copy import copy
-from ctgov_metadata import REGISTRY_METADATA_COLUMNS
+from ctgov_metadata import CTGOV_METADATA_COLUMNS
 from trial_space_format import has_required_space_fields
 from trial_treatment_screening import (
     build_screening_messages, parse_screening_output, screening_record,
@@ -587,7 +587,7 @@ def split_into_groups(items, group_size):
 
 
 def select_trials_since_year(trials: pd.DataFrame, start_year: int) -> pd.DataFrame:
-    """Keep trials first posted in or after start_year, using registry dates only."""
+    """Keep trials first posted in or after start_year, using ctgov dates only."""
     if not 1 <= start_year <= 9999:
         raise ValueError("--start-year must be a calendar year between 1 and 9999")
     if "study_first_post_date" not in trials.columns:
@@ -602,7 +602,7 @@ def select_trials_since_year(trials: pd.DataFrame, start_year: int) -> pd.DataFr
 
 
 def select_trials(trials: pd.DataFrame, trial_filter: str) -> pd.DataFrame:
-    """Filter on registry metadata, never phase words in eligibility text."""
+    """Filter on ctgov metadata, never phase words in eligibility text."""
     if trial_filter == "all":
         return trials.copy()
     if trial_filter != "interventional-phase1-3":

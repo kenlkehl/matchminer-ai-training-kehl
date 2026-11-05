@@ -19,20 +19,20 @@ NAMED_REPRESENTATIONS = {NAMED_SPLIT_REPRESENTATION, REPRESENTATION}
 COHORT_REQUIRED = {'trial_id', 'cohort_trial_id', 'cohort_number', 'cohort_count',
                    'cohort_eligibility_criteria', 'cancer_treatment_trial', 'multiple_cohorts'}
 # Model-extracted criteria whose single-cohort text is the model's own, never a
-# registry eligibility field: full protocols and registry text (schemas
+# ctgov eligibility field: full protocols and ctgov text (schemas
 # trial-registry-cohorts-v1 and trial-cohorts-stepwise-v1).
-EXTRACTED_SOURCES = ('protocol', 'registry')
+EXTRACTED_SOURCES = ('protocol', 'ctgov')
 
 
 def cohort_version(frame):
-    """'protocol' or 'registry' per row: which representation of its trial a cohort belongs to.
+    """'protocol' or 'ctgov' per row: which representation of its trial a cohort belongs to.
 
     A retrieval table can hold both versions of a trial, each a complete cohort set.
-    Historical registry sources ('llm', 'eligibility_criteria') are 'registry'.
+    Historical ctgov sources ('registry' before 2026-11-05, and 'llm', 'eligibility_criteria') are 'ctgov'.
     """
     if 'cohort_criteria_source' not in frame:
-        return pd.Series('registry', index=frame.index)
-    return frame.cohort_criteria_source.map(lambda s: 'protocol' if s == 'protocol' else 'registry')
+        return pd.Series('ctgov', index=frame.index)
+    return frame.cohort_criteria_source.map(lambda s: 'protocol' if s == 'protocol' else 'ctgov')
 
 
 def read_clinical_csv(path, **kwargs):
@@ -96,8 +96,8 @@ stale. Missing common text represents no shared criteria, not a missing cohort.
                     f'Common eligibility criteria:\n{common}') if common else specific
         if row.multiple_cohorts == 'no':
             if row.get('cohort_criteria_source') in EXTRACTED_SOURCES:
-                # Protocol and current registry extraction return the sole cohort's
-                # own criteria; registry eligibility text must not replace them.
+                # Protocol and current ctgov extraction return the sole cohort's
+                # own criteria; ctgov eligibility text must not replace them.
                 eligibility = row.cohort_eligibility_criteria
             elif 'eligibility_criteria' in frame:
                 eligibility = row.eligibility_criteria
@@ -144,7 +144,7 @@ def load_production_cohorts(directory, *, seed=42):
 
     Decisions supply authoritative expected cohort counts, so a missing JSONL
     row cannot be mistaken for a smaller but complete trial. Source rows supply
-    original eligibility and registry metadata. Splits are assigned before filtering.
+    original eligibility and ctgov metadata. Splits are assigned before filtering.
     """
     directory = Path(directory)
     status = json.loads((directory / 'status.json').read_text())
@@ -239,7 +239,7 @@ def validate_cohort_rows(frame):
         if 'split' in group and (not group.split.isin(['train', 'val', 'validation', 'test']).all()
                                  or group.split.nunique() != 1):
             raise ValueError(f'Conflicting/missing split for {trial}')
-    # Each version of a trial (protocol, registry) is its own complete cohort set.
+    # Each version of a trial (protocol, ctgov) is its own complete cohort set.
     for (trial, _), group in frame.groupby([frame.trial_id, cohort_version(frame)], sort=False):
         count = group.cohort_count.iloc[0]
         if isinstance(count, bool) or not isinstance(count, Real) or not math.isfinite(count):

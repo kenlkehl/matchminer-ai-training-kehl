@@ -1,7 +1,7 @@
 """Extract cohorts and eligibility criteria from a synthetic protocol batch with matchminer_ai.trials.extract_protocol_cohorts.
 
 Each protocol goes through the inference package's three-step workflow, with the
-same prompts as registry listings (0d_extract_registry_cohorts.py): a cancer-treatment
+same prompts as ctgov listings (0d_extract_ctgov_cohorts.py): a cancer-treatment
 screen, the cohort names, and one request per cohort for its criteria, copied verbatim
 with boilerplate included. For training, each trial's cohorts whose criteria are
 essentially the same are then combined (merge_equivalent_cohorts; --no-merge-cohorts skips
@@ -14,13 +14,13 @@ cohort_key_criteria and boilerplate criteria in cohort_boilerplate_criteria, whi
 match labels and BoilerplateChecker labels read), each as .parquet and .csv.
 
 Reads a generate_batch.py output directory: every protocols/<NCT>/protocol.md
-whose meta.json records a completed generation, plus the registry seeds in
+whose meta.json records a completed generation, plus the ctgov seeds in
 seeds.jsonl. Each trial's decision is saved under <output-dir>/trials/ and
 reused on rerun, with merge.json and deboilerplate.json beside it (every step keeps its
 answers and reasoning). The exports carry each cohort's provenance: the synthetic
 protocol (path, SHA-256, generation prompt hash, layout, generating model and
 endpoint), the ClinicalTrials.gov record it was seeded from (including the
-original registry eligibility criteria and when they were retrieved), and the
+original ctgov eligibility criteria and when they were retrieved), and the
 extraction prompt hash, schema, model and endpoint. Servers come from
 <output-dir>/servers.json, written from --server on first run and re-read while
 running, as in generate_batch.py. See synthetic_protocols/README.md.
@@ -42,7 +42,7 @@ from matchminer_ai.trials import extract_protocol_cohorts, merge_equivalent_coho
 
 
 SEED_FIELDS = ("title", "brief_summary", "detailed_description", "eligibility_criteria")
-REGISTRY_FIELDS = (*SEED_FIELDS, "last_update_post_date", "retrieved_at")
+CTGOV_FIELDS = (*SEED_FIELDS, "last_update_post_date", "retrieved_at")
 
 
 def served_model(url):
@@ -66,7 +66,7 @@ def text(value):
 
 
 def load_batch(batch_dir):
-    """Completed synthetic protocols in seed order, with generation and registry provenance."""
+    """Completed synthetic protocols in seed order, with generation and ctgov provenance."""
     seeds = [json.loads(line) for line in (batch_dir / "seeds.jsonl").read_text().splitlines() if line.strip()]
     trials, not_generated = [], []
     for seed in seeds:
@@ -75,7 +75,7 @@ def load_batch(batch_dir):
         if meta.get("finish_reason") != "stop" or not (trial_dir / "protocol.md").exists():
             not_generated.append(seed["nct_id"])
             continue
-        # The protocol must have been written from this exact registry record.
+        # The protocol must have been written from this exact ctgov record.
         changed = [key for key in SEED_FIELDS if text(meta["seed"].get(key)) != text(seed.get(key))]
         if changed:
             raise ValueError(f"{seed['nct_id']}: meta.json seed differs from seeds.jsonl in {changed}")
@@ -85,7 +85,7 @@ def load_batch(batch_dir):
             "synthetic_prompt_sha256": meta["prompt_sha256"], "synthetic_layout_index": meta["layout_index"],
             "synthetic_attempt": meta["attempt"], "synthetic_completed_at": meta["completed_at"],
             "synthetic_endpoint": response.get("endpoint"), "synthetic_model": response.get("request_model"),
-            **{f"registry_{key}": seed.get(key) for key in REGISTRY_FIELDS},
+            **{f"ctgov_{key}": seed.get(key) for key in CTGOV_FIELDS},
         })
     trials = pd.DataFrame(trials)
     if trials.empty:

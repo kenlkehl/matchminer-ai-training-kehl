@@ -95,7 +95,7 @@ def rank_dense(patients, cohorts, vectors, *, device='cpu', score_batch_size=128
                trial_sample_round=1):
     """Cohort queries search every patient; patients search their sampled trials' cohorts.
 
-    A trial with protocol and registry versions is searched in one version per
+    A trial with protocol and ctgov versions is searched in one version per
     patient and queries with one version, chosen per trial (TrialSampler, query_cohorts).
     Each mining round (trial_sample_round) draws a fresh trial sample per patient.
     """
@@ -234,7 +234,7 @@ def project_labels(corpus, union, labels, sources, output, *, reasoning_source=N
             rows.append(dict(patient_id=p['id'], cohort_id=c['id'], cohort_trial_id=c['id'],
                 nct_id=c['trial_id'], patient_summary=p['text'], this_space=c['text'], split=p['split'],
                 patient_source_split=p.get('source_split', p['split']),
-                cohort_source_split=c.get('source_split', c['split']), cohort_source=c.get('source', 'registry'),
+                cohort_source_split=c.get('source_split', c['split']), cohort_source=c.get('source', 'ctgov'),
                 eligibility_result=score['score'], normalized_score=score['normalized_score'],
                 answers=json.dumps(score['answers']), question_keys=json.dumps(score['question_keys']),
                 question_contract=score['question_contract'], score_contract=score['contract'],

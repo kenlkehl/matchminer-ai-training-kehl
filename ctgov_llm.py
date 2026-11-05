@@ -1,5 +1,5 @@
-"""LLM settings shared by the registry screen (0b_screen_trials.py) and registry cohort extraction
-(0d_extract_registry_cohorts.py): the sibling inference package's cohort-workflow configuration,
+"""LLM settings shared by the ctgov screen (0b_screen_trials.py) and ctgov cohort extraction
+(0d_extract_ctgov_cohorts.py): the sibling inference package's cohort-workflow configuration,
 its endpoints and its limits, so both steps send their requests the same way."""
 import os
 from pathlib import Path

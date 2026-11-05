@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Screen the registry trials training can sample: registry rule, DFCI holdout, cancer-treatment screen.
+"""Screen the ctgov trials training can sample: ctgov rule, DFCI holdout, cancer-treatment screen.
 
 Production training draws its trial sample (0c_sample_trials.py --screened-trials) from the
 trials this step accepts, in this order (user instruction, 2026-11-04):
 
-1. Registry rule: select_trials keeps interventional early phase I-IV
+1. ctgov rule: select_trials keeps interventional early phase I-IV
    trials first posted since --start-year from the parsed ClinicalTrials.gov export, and assigns
    each trial's split by NCT ID.
 2. DFCI holdout: trials open at DFCI between --dfci-first-year and --dfci-last-year
@@ -14,7 +14,7 @@ trials this step accepts, in this order (user instruction, 2026-11-04):
    workflow, with the same prompt and settings as cohort extraction. Every attempt's answer and
    reasoning is appended to <work-dir>/screen.jsonl as it returns and reused on rerun.
 
-Writes --output, one row per trial the registry rule kept (nct_id, split, dates, dfci_holdout,
+Writes --output, one row per trial the ctgov rule kept (nct_id, split, dates, dfci_holdout,
 cancer_treatment_trial, screen_error), and <output>.screening.json with the count and IDs removed at
 each step, the prompt hash, model, settings and commits.
 """
@@ -33,7 +33,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-from registry_llm import add_llm_arguments, make_config, prepare_runtime  # noqa: E402
+from ctgov_llm import add_llm_arguments, make_config, prepare_runtime  # noqa: E402
 from trial_cohort_format import file_stamp, read_clinical_csv  # noqa: E402
 
 PHASES = {'EARLY_PHASE1', 'PHASE1', 'PHASE2', 'PHASE3', 'PHASE4'}
@@ -51,7 +51,7 @@ def git_commit(path):
 
 
 def select_trials(frame, *, start_year=2020, seed=42):
-    """The registry rule: interventional early phase I-IV trials first posted since start_year; splits by NCT ID."""
+    """The ctgov rule: interventional early phase I-IV trials first posted since start_year; splits by NCT ID."""
     required = {'nct_id', 'study_first_post_date', 'study_type', 'phases',
                 'title', 'brief_summary', 'eligibility_criteria'}
     if required - set(frame):
@@ -101,7 +101,7 @@ def main(args):
                                                    args.dfci_last_year)
         selected['dfci_holdout'] = selected.nct_id.isin(held_out)
         candidates = selected.loc[~selected.dfci_holdout]
-        print(f'{len(export)} exported trials; {len(selected)} meet the registry rule; '
+        print(f'{len(export)} exported trials; {len(selected)} meet the ctgov rule; '
               f'{int(selected.dfci_holdout.sum())} open at DFCI {args.dfci_first_year}-{args.dfci_last_year} '
               f'are held out; screening {len(candidates)}', flush=True)
         config = make_config(args)
@@ -124,7 +124,7 @@ def main(args):
             'input': str(args.input.resolve()), 'input_stamp': file_stamp(args.input),
             'output': str(args.output.resolve()), 'output_stamp': file_stamp(args.output),
             'exported_trials': len(export),
-            'registry_rule': dict(start_year=args.start_year, study_type='INTERVENTIONAL',
+            'ctgov_rule': dict(start_year=args.start_year, study_type='INTERVENTIONAL',
                                   phases=sorted(PHASES), trials=len(selected), split_seed=args.seed),
             'dfci_holdout': dict(path=str(Path(args.dfci_trials_csv).resolve()), first_year=args.dfci_first_year,
                                  last_year=args.dfci_last_year, trials=int(selected.dfci_holdout.sum()),

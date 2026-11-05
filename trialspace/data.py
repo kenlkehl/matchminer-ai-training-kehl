@@ -104,7 +104,7 @@ def prepare(patients_path, cohorts_path, output, *, merge_source_splits=False):
         if isinstance(origin, str) and origin.strip():
             item['source_trial_id'] = origin
         patient_rows.append(item)
-    # source: which version of its trial a cohort is ('protocol' or 'registry');
+    # source: which version of its trial a cohort is ('protocol' or 'ctgov');
     # mining represents each trial by one version (retrieval.TrialSampler).
     key_column = 'cohort_key_criteria' if 'cohort_key_criteria' in normalized else 'cohort_eligibility_criteria'
     cohort_rows = [dict(id=row['cohort_trial_id'], trial_id=row['nct_id'], source=version,
@@ -149,5 +149,8 @@ def validate_corpus(patients, cohorts):
 def load_corpus(directory):
     directory = Path(directory)
     patients, cohorts = read_jsonl(directory / 'patients.jsonl'), read_jsonl(directory / 'cohorts.jsonl')
+    for cohort in cohorts:  # corpora prepared before 2026-11-05 called the ctgov version 'registry'
+        if cohort.get('source') == 'registry':
+            cohort['source'] = 'ctgov'
     validate_corpus(patients, cohorts)
     return patients, cohorts

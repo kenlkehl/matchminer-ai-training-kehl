@@ -58,9 +58,9 @@ def prepare_corpus(patients, cohorts, output, *, merge_source_splits=True):
     write_jsonl(output / 'source_trial_pairs.jsonl', lineage)
     versions = defaultdict(set)
     for cohort in cs:
-        versions[cohort['trial_id']].add(cohort.get('source', 'registry'))
+        versions[cohort['trial_id']].add(cohort.get('source', 'ctgov'))
     result = dict(version=VERSION, patients=len(ps), cohorts=len(cs), trials=len(by_trial),
-                  cohort_sources={name: sum(c.get('source', 'registry') == name for c in cs) for name in ('protocol', 'registry')},
+                  cohort_sources={name: sum(c.get('source', 'ctgov') == name for c in cs) for name in ('protocol', 'ctgov')},
                   trials_with_both_versions=sum(len(v) > 1 for v in versions.values()),
                   source_trial_pairs=len(lineage), contract=score_contract(),
                   output_stamp={name: file_stamp(output / name) for name in
@@ -92,7 +92,7 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
                 split=p['split'], candidate_id=digest([p['id'], c['id']]),
                 patient_source_split=p.get('source_split', p['split']),
                 cohort_source_split=c.get('source_split', c['split']),
-                cohort_source=c.get('source', 'registry'),
+                cohort_source=c.get('source', 'ctgov'),
                 retrieval_sources=json.dumps(sources), trialspace_contract=contract))
     for direction, path in zip(DIRECTIONS, (cohort_output, patient_output), strict=True):
         path = Path(path)

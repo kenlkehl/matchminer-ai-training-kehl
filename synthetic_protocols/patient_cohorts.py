@@ -5,10 +5,10 @@ Reads cohorts.parquet (the merged cohorts with all their criteria, boilerplate i
 directory (--extraction-dir, default <batch-dir>/cohort_extraction)
 and writes a CSV that generate_synthetic_data.py (run_pipeline.py --sampled-cohorts)
 accepts: the accepted cancer-treatment cohorts in seed order with a contiguous
-cohort_index, each trial's source split copied from the registry sample it was
+cohort_index, each trial's source split copied from the ctgov sample it was
 seeded from, and every provenance column kept. Cohort criteria come from the
-synthetic protocol; the original registry criteria stay in
-registry_eligibility_criteria and are never used as cohort criteria. --retrieval-output
+synthetic protocol; the original ctgov criteria stay in
+ctgov_eligibility_criteria (registry_eligibility_criteria before 2026-11-05) and are never used as cohort criteria. --retrieval-output
 also writes the same rows from cohorts_deboilerplated.parquet (--deboilerplated-file: the
 merged cohorts with their key criteria in cohort_key_criteria and boilerplate criteria in
 cohort_boilerplate_criteria), the protocol version that retrieval_cohorts.py reads. A <output>.provenance.json receipt beside each output records
@@ -119,5 +119,5 @@ if __name__ == "__main__":
     parser.add_argument("--retrieval-output", type=Path,
                         help="Also write the same cohorts from --deboilerplated-file (retrieval's protocol version)")
     parser.add_argument("--splits-from", type=Path, default=DATA / "sample_trial_cohort_lineitems.csv",
-                        help="Registry cohort sample whose nct_id/split columns give each trial's source split")
+                        help="ctgov sample whose nct_id/split columns give each trial's source split")
     main(parser.parse_args())

@@ -2,7 +2,7 @@
 """Extract cancer-treatment cohorts through the sibling inference package API.
 
 extract_cohorts runs the inference package's three-step workflow on each
-registry listing (title, brief summary and eligibility criteria as one document):
+ctgov listing (title, brief summary and eligibility criteria as one document):
 a cancer-treatment screen, the cohort names, and one request per cohort for its
 criteria, copied verbatim with boilerplate included, with the same prompts as
 synthetic protocols. No training-owned prompt. For training, the same steps as
@@ -21,12 +21,13 @@ read the key criteria, BoilerplateChecker the boilerplate criteria. Checkpoints 
 merged and de-boilerplated rows, reasoning and answers of every step, validation
 attempts per step and endpoint provenance.
 
-Input: an already-sampled set of registry records (--trials-jsonl: the seeds.jsonl of a
+Input: an already-sampled set of ctgov records (--trials-jsonl: the seeds.jsonl of a
 synthetic protocol batch, drawn by 0b_screen_trials.py and 0c_sample_trials.py), every one of
-which is extracted. This gives each sampled trial its registry-derived cohorts beside the cohorts
+which is extracted. This gives each sampled trial its ctgov-derived cohorts beside the cohorts
 extracted from its synthetic protocol (synthetic_protocols/README.md); in run_pipeline.py it is
-the registry-cohorts stage. (Until 2026-11-05 this was 0b_extract_trial_cohorts.py, which could
-also select trials from the parsed export itself; the registry rule now lives in the screen.)
+the ctgov-cohorts stage. (Until 2026-11-05 this was 0b_extract_trial_cohorts.py, which could
+also select trials from the parsed export itself; the ctgov rule now lives in the screen. Until 2026-11-05 "ctgov" was called
+"registry", and this script 0d_extract_registry_cohorts.py.)
 """
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -41,7 +42,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from registry_llm import add_llm_arguments, make_config, prepare_runtime
+from ctgov_llm import add_llm_arguments, make_config, prepare_runtime
 from trial_cohort_format import REPRESENTATION, validate_cohort_rows, file_stamp
 
 ROOT = Path(__file__).resolve().parent
@@ -67,7 +68,7 @@ def atomic_json(path, value):
 
 
 def load_sampled_trials(path):
-    """Registry records of an already-sampled trial set; no selection or split assignment."""
+    """ctgov records of an already-sampled trial set; no selection or split assignment."""
     frame = pd.DataFrame([json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()])
     required = {'nct_id', 'title', 'brief_summary', 'eligibility_criteria'}
     if frame.empty or required - set(frame):
@@ -298,7 +299,7 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     data = ROOT.parent / 'data/no_phi'
     p.add_argument('--trials-jsonl', type=Path, required=True,
-                   help='Already-sampled registry records (nct_id, title, brief_summary, eligibility_criteria), '
+                   help='Already-sampled ctgov records (nct_id, title, brief_summary, eligibility_criteria), '
                         'such as a synthetic protocol batch seeds.jsonl; every one is extracted')
     p.add_argument('--output-trials', type=Path, default=data / 'trials_with_cohorts.csv')
     p.add_argument('--output-cohorts', type=Path, default=data / 'trial_cohort_lineitems.csv')
@@ -311,7 +312,7 @@ def parser():
     p.add_argument('--work-dir', type=Path, default=data / 'trial_cohort_extraction')
     p.add_argument('--allow-failures', action='store_true',
                    help='Export complete files even if some trials fail every attempt (listed in errors.json); '
-                        'for registry versions of sampled trials, whose protocol versions remain')
+                        'for ctgov versions of sampled trials, whose protocol versions remain')
     p.add_argument('--no-merge-cohorts', dest='merge_cohorts', action='store_false',
                    help='Keep every extracted cohort instead of combining those with essentially the same criteria')
     p.add_argument('--no-deboilerplate-cohorts', dest='deboilerplate_cohorts', action='store_false',

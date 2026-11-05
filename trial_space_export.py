@@ -6,7 +6,7 @@ import re
 
 import pyarrow.parquet as pq
 
-from ctgov_metadata import REGISTRY_METADATA_COLUMNS
+from ctgov_metadata import CTGOV_METADATA_COLUMNS
 from trial_space_format import has_required_space_fields
 
 GENERATED_TRIAL_COLUMNS = (
@@ -21,7 +21,7 @@ TRIAL_ONLY_COLUMNS = frozenset({
 
 
 def trial_output_columns(available_columns):
-    ordered = ['nct_id', 'study_type', 'phases', *REGISTRY_METADATA_COLUMNS,
+    ordered = ['nct_id', 'study_type', 'phases', *CTGOV_METADATA_COLUMNS,
                'split', 'title', 'brief_summary', 'eligibility_criteria', 'trial_text',
                *GENERATED_TRIAL_COLUMNS]
     return [column for column in ordered if column in available_columns]

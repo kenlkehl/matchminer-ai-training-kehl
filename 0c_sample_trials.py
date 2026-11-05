@@ -2,7 +2,7 @@
 """Sample 5,000 trials for training.
 
 Production (--screened-trials, user instruction 2026-11-04): a seeded draw of whole trials from
-those 0b_screen_trials.py accepted (registry rule, DFCI holdout, then the cancer-treatment screen),
+those 0b_screen_trials.py accepted (ctgov rule, DFCI holdout, then the cancer-treatment screen),
 before any cohort extraction; the receipt carries the counts of every step. The older modes sample
 already-extracted cohort tables, and the space-input adapter remains for older datasets. (This was
 0c_sample_trial_spaces.py until 2026-11-05.)
@@ -62,7 +62,7 @@ def sample_screened_trials(screened_csv, output_csv, *, n_trials=5000, seed=42):
     output.to_csv(temporary, index=False)
     temporary.replace(path)
     manifest = dict(input=str(Path(screened_csv).resolve()), output=str(path.resolve()), seed=seed,
-                    exported_trials=screening['exported_trials'], registry_rule=screening['registry_rule'],
+                    exported_trials=screening['exported_trials'], ctgov_rule=screening.get('ctgov_rule', screening.get('registry_rule')),  # 'registry_rule' before 2026-11-05
                     dfci_holdout={k: v for k, v in screening['dfci_holdout'].items() if k != 'nct_ids'},
                     screen={k: v for k, v in screening['screen'].items() if k != 'rejected_nct_ids'},
                     eligible_trials=len(eligible), sampled_trials=n_trials, sampled_nct_ids=sampled,

@@ -1,4 +1,4 @@
-"""Registry status and dates retained beside trial text, never inferred from it."""
+"""ctgov status and dates retained beside trial text, never inferred from it."""
 
 
 DATE_FIELDS = {
@@ -9,14 +9,14 @@ DATE_FIELDS = {
     "last_update_post_date": "lastUpdatePostDateStruct",
 }
 
-REGISTRY_METADATA_COLUMNS = (
+CTGOV_METADATA_COLUMNS = (
     "overall_status",
     "status_verified_date",
     *(column for name in DATE_FIELDS for column in (name, f"{name}_type")),
 )
 
 
-def extract_registry_metadata(protocol):
+def extract_ctgov_metadata(protocol):
     """Preserve date precision and ACTUAL/ESTIMATED labels; missing values stay blank.
 
     Completion dates describe data collection, not necessarily accrual closure.

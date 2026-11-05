@@ -2,7 +2,7 @@
 
 ClinicalTrials.gov eligibility text is much less granular than the eligibility
 sections of full protocols. This workflow generates a corpus of synthetic full
-protocol documents, one per registry seed, whose eligibility reads like real
+protocol documents, one per ctgov seed, whose eligibility reads like real
 protocols: often messily specified, with one or more protocol-defined cohorts,
 parts or arms. The corpus is training material for cohort and criteria
 extraction and matching; it is **not** a set of real trial criteria.
@@ -18,7 +18,7 @@ extraction and matching; it is **not** a set of real trial criteria.
 | Batch driver | `synthetic_protocols/generate_batch.py` (this repository) |
 | Cohort extraction API | `matchminer_ai.trials.extract_protocol_cohorts` (inference package) |
 | Cohort extraction driver | `synthetic_protocols/extract_cohorts.py` (this repository) |
-| Registry-version cohorts | `0d_extract_registry_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl` (this repository) |
+| ctgov-version cohorts | `0d_extract_ctgov_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl` (this repository) |
 | Retrieval cohort table (both versions) | `synthetic_protocols/retrieval_cohorts.py` (this repository) |
 | Prompt history and findings | [`PROMPT_HISTORY.md`](PROMPT_HISTORY.md) |
 | Real protocol PDFs (comparison data) | `scripts/download_ctgov_protocols.py` |
@@ -29,9 +29,9 @@ and Markdown input).
 
 ## What the prompt does
 
-The registry record (official title, brief summary, detailed description and
+The ctgov record (official title, brief summary, detailed description and
 eligibility criteria) is a **seed, not a specification**: the protocol may refine
-or differ from it, as a real protocol does from its registry entry. The prompt
+or differ from it, as a real protocol does from its ctgov entry. The prompt
 asks for a complete sponsor-style protocol in Markdown, written prospectively
 (no enrollment status or results), with cohorts defined in the study design,
 eligibility detail scaled to the trial's kind and sponsor, sponsor texture
@@ -67,7 +67,7 @@ python -I synthetic_protocols/generate_batch.py \
   --server http://172.24.216.113:8003=32 --server http://localhost:8002=128
 ```
 
-- **Seeds:** `--nct-ids-from` fetches registry records for the CSV's `nct_id`
+- **Seeds:** `--nct-ids-from` fetches ctgov records for the CSV's `nct_id`
   column once into `<output-dir>/seeds.jsonl` (with `retrieved_at`);
   `--seeds FILE` uses an existing JSON-lines file instead. `--limit N` runs the
   first N seeds for a smoke test.
@@ -94,7 +94,7 @@ python -I synthetic_protocols/generate_batch.py \
 
 ```text
 <output-dir>/
-  seeds.jsonl            registry seeds and their retrieval time
+  seeds.jsonl            ctgov seeds and their retrieval time
   servers.json           live endpoint registry
   protocols/<NCT>/
     protocol.md          the synthetic protocol
@@ -178,7 +178,7 @@ Each row in `cohorts` and `trials` carries its provenance:
 | --- | --- |
 | `protocol_origin` (`synthetic`), `protocol_path`, `protocol_sha256` | The synthetic protocol |
 | `synthetic_prompt_sha256`, `synthetic_layout_index`, `synthetic_attempt`, `synthetic_completed_at`, `synthetic_endpoint`, `synthetic_model` | Its generation (`meta.json`) |
-| `registry_title`, `registry_brief_summary`, `registry_detailed_description`, `registry_eligibility_criteria`, `registry_last_update_post_date`, `registry_retrieved_at` | The ClinicalTrials.gov seed record, including its original eligibility criteria |
+| `ctgov_title`, `ctgov_brief_summary`, `ctgov_detailed_description`, `ctgov_eligibility_criteria`, `ctgov_last_update_post_date`, `ctgov_retrieved_at` (`ctgov_*` before 2026-11-05) | The ClinicalTrials.gov seed record, including its original eligibility criteria |
 | `extraction_status`, `cohort_count`, `extraction_error`, `extraction_attempts`, `extraction_endpoint`, `extraction_model`, `extraction_prompt_sha256`, `extraction_schema_version`, `extraction_decision_path` | The extraction |
 
 `cohorts` also has the inference package's cohort columns (`COHORT_COLUMNS`,
@@ -199,12 +199,12 @@ their criteria, boilerplate included, since 2026-11-04 by user instruction; `--c
 `--extraction-dir`, default `<batch-dir>/cohort_extraction/`) into the cohort
 table that `generate_synthetic_data.py` (`run_pipeline.py --sampled-cohorts`)
 reads: accepted cohorts in seed order with a contiguous `cohort_index`, each
-trial's source `split` copied from the registry sample it was seeded from
+trial's source `split` copied from the ctgov sample it was seeded from
 (`--splits-from`, default `../data/no_phi/sample_trial_cohort_lineitems.csv`),
 and every provenance column. Single-cohort rows keep `cohort_criteria_source`
 `protocol`, so the generator uses the protocol's criteria; the table has no
-`eligibility_criteria` column, and the registry text stays in
-`registry_eligibility_criteria`. The script checks that the generator's own
+`eligibility_criteria` column, and the ctgov text stays in
+`ctgov_eligibility_criteria`. The script checks that the generator's own
 adapter reproduces the extracted criteria exactly, and writes
 `<output>.provenance.json` (source stamps, counts, failures, prompt hashes).
 `--retrieval-output` also writes the same rows, in the same order with the same
@@ -216,9 +216,9 @@ protocol version that `retrieval_cohorts.py` reads.
 
 `run_pipeline.py` (and the identical `train_all.sh`, `train_all_gcp.sh` and
 `temp_train_gcp.sh` wrappers) runs this track as stages after `sample-trials`:
-`synthetic-protocols` (`generate_batch.py --nct-ids-from` the registry sample),
-`protocol-cohorts` (`extract_cohorts.py`), `registry-cohorts`
-(`0d_extract_registry_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl`),
+`synthetic-protocols` (`generate_batch.py --nct-ids-from` the ctgov sample),
+`protocol-cohorts` (`extract_cohorts.py`), `ctgov-cohorts`
+(`0d_extract_ctgov_cohorts.py --trials-jsonl` on the batch's `seeds.jsonl`),
 `generation-cohorts` (`patient_cohorts.py`, the patient-generation input) and
 `retrieval-cohorts` (`retrieval_cohorts.py`, the `train` stage's cohort table).
 There `generate_batch.py` and `extract_cohorts.py` use the pipeline's
@@ -226,19 +226,19 @@ There `generate_batch.py` and `extract_cohorts.py` use the pipeline's
 `--allow-failures` lets a stage finish when a few trials fail every attempt;
 those trials keep whichever version they have.
 
-## Registry versions and the retrieval cohort table
+## ctgov versions and the retrieval cohort table
 
 Users may be allowed to send some trials' full protocols to an LLM and only the
 ClinicalTrials.gov text of others, so TrialSpace and the downstream models are
 trained on both representations. Every sampled trial is therefore also
-extracted from the registry record its protocol was written from. Since
+extracted from the ctgov record its protocol was written from. Since
 2026-11-03 both extractions run the inference package's three-step workflow with
 the same prompts (`trial.cohorts.screen.user.txt`, `trial.cohorts.list.user.txt`,
 `trial.cohorts.criteria.user.txt`; schema `trial-cohorts-stepwise-v1`): a
 cancer-treatment screen, the cohort names, and one request per cohort for its
 complete criteria, with the listing's title, brief summary and eligibility
 criteria as one document. Since 2026-11-04 (user instruction) the criteria are
-copied verbatim with boilerplate included, and training gives registry listings the
+copied verbatim with boilerplate included, and training gives ctgov listings the
 same two follow-on steps as protocols: the merge, then the boilerplate step, which
 classifies each line of a merged cohort's criteria in its own request and sorts the
 unchanged lines in code (since 2026-11-04, user instruction; the model never copies
@@ -249,29 +249,29 @@ boilerplate criteria (`--output-deboilerplated-cohorts`, and
 `cohorts_deboilerplated.parquet`: `cohort_key_criteria`, `cohort_boilerplate_criteria`),
 while patients are seeded from the merged cohorts with all their criteria (user,
 2026-11-04). Earlier runs used
-the single-request registry prompt (`trial.cohorts.user.txt`, schema
+the single-request ctgov prompt (`trial.cohorts.user.txt`, schema
 `trial-registry-cohorts-v1`):
 
 ```bash
-python 0d_extract_registry_cohorts.py --trials-jsonl "$B/seeds.jsonl" \
-  --work-dir <run>/registry_cohorts/work --output-trials <run>/registry_cohorts/trials_with_cohorts.csv \
-  --output-cohorts <run>/registry_cohorts/trial_cohort_lineitems.csv --output-json <run>/registry_cohorts/trial_cohorts.json \
-  --output-unmerged-cohorts <run>/registry_cohorts/trial_cohort_lineitems_unmerged.csv \
-  --output-deboilerplated-cohorts <run>/registry_cohorts/trial_cohort_lineitems_deboilerplated.csv \
+python 0d_extract_ctgov_cohorts.py --trials-jsonl "$B/seeds.jsonl" \
+  --work-dir <run>/ctgov_cohorts/work --output-trials <run>/ctgov_cohorts/trials_with_cohorts.csv \
+  --output-cohorts <run>/ctgov_cohorts/trial_cohort_lineitems.csv --output-json <run>/ctgov_cohorts/trial_cohorts.json \
+  --output-unmerged-cohorts <run>/ctgov_cohorts/trial_cohort_lineitems_unmerged.csv \
+  --output-deboilerplated-cohorts <run>/ctgov_cohorts/trial_cohort_lineitems_deboilerplated.csv \
   --model <served alias> --tokenizer-model <model or tokenizer path> --server-urls-file <servers.json> \
   --max-attempts 5 --allow-failures
 python -I synthetic_protocols/retrieval_cohorts.py \
   --protocol-cohorts <generation-run>/sample_trial_cohort_lineitems_deboilerplated.csv \
-  --registry-cohorts <run>/registry_cohorts/trial_cohort_lineitems_deboilerplated.csv \
-  --registry-trials <run>/registry_cohorts/trials_with_cohorts.csv --output <run>/retrieval_cohorts.csv
+  --ctgov-cohorts <run>/ctgov_cohorts/trial_cohort_lineitems_deboilerplated.csv \
+  --ctgov-trials <run>/ctgov_cohorts/trials_with_cohorts.csv --output <run>/retrieval_cohorts.csv
 ```
 
 `--trials-jsonl` extracts every record, without `0b`'s date and phase selection
 or split assignment; `--allow-failures` exports even when a trial fails every
 attempt (that trial keeps only its protocol version). `retrieval_cohorts.py`
-keeps the protocol rows unchanged and adds the registry rows with IDs
-`<NCT>-registry-cohort-<n>`, `cohort_criteria_source` `registry`, their registry
-fields as `registry_*`, and the trial's split from `--splits-from`; a trial
+keeps the protocol rows unchanged and adds the ctgov rows with IDs
+`<NCT>-ctgov-cohort-<n>`, `cohort_criteria_source` `ctgov`, their ctgov
+fields as `ctgov_*`, and the trial's split from `--splits-from`; a trial
 accepted in only one version keeps that one. This table, not the
 patient-generation table, is the `--cohorts` input to `trialspace_training.py
 prepare`, which gives each cohort its key criteria as `text` and its boilerplate
@@ -287,7 +287,7 @@ include both versions.
 
 - These are fabricated documents. Label any dataset built from them as
   synthetic; the documents themselves deliberately carry no disclaimer.
-- Seeds sent to the generation endpoints are public registry text. Do not add
+- Seeds sent to the generation endpoints are public ctgov text. Do not add
   patient data to seeds.
 - A batch can mix model builds (NVFP4 and FP8); each protocol's `meta.json`
   records the endpoint and model that produced it.
@@ -297,9 +297,9 @@ include both versions.
   protocol PDFs are for comparison and evaluation only. The extracted cohorts
   reach patient generation through `patient_cohorts.py` and
   `run_pipeline.py --sampled-cohorts`, and retrieval together with the
-  registry versions through `retrieval_cohorts.py`.
-- Extracted criteria come from the synthetic protocol, not the registry; the
-  `registry_*` columns are the seed, which the protocol may refine or differ from.
+  ctgov versions through `retrieval_cohorts.py`.
+- Extracted criteria come from the synthetic protocol, not the ctgov; the
+  `ctgov_*` columns are the seed, which the protocol may refine or differ from.
 
 ## Batches
 

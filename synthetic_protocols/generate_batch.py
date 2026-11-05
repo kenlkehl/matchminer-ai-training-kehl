@@ -1,6 +1,6 @@
-"""Generate registry-seeded synthetic protocols with matchminer_ai.trials.generate_synthetic_protocols.
+"""Generate ctgov-seeded synthetic protocols with matchminer_ai.trials.generate_synthetic_protocols.
 
-Seeds are registry records (nct_id, title, brief_summary, detailed_description,
+Seeds are ctgov records (nct_id, title, brief_summary, detailed_description,
 eligibility_criteria): either an existing JSON-lines file (--seeds) or fetched
 from the ClinicalTrials.gov API for the nct_id column of a CSV (--nct-ids-from)
 into <output-dir>/seeds.jsonl, with the retrieval time. Requests go through the
@@ -30,7 +30,7 @@ IDS_PER_REQUEST = 200
 
 
 def fetch_seeds(nct_ids, path):
-    """Fetch registry records in batches and write them, in input order, as JSON lines."""
+    """Fetch ctgov records in batches and write them, in input order, as JSON lines."""
     retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     seeds = {}
     with httpx.Client(timeout=120) as client:
@@ -114,7 +114,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--seeds", type=Path, help="Existing JSON lines of registry records")
+    source.add_argument("--seeds", type=Path, help="Existing JSON lines of ctgov records")
     source.add_argument("--nct-ids-from", type=Path,
                         help="CSV with an nct_id column; records are fetched into <output-dir>/seeds.jsonl once")
     parser.add_argument("--output-dir", type=Path, required=True)

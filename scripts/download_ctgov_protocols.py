@@ -9,8 +9,8 @@ Every protocol version is kept, because amendments change eligibility.
 Scope defaults to the term query behind the oncology export parsed by
 0a_parse_ctgov_json.py; --nct-ids-from restricts it to a table's nct_id column
 (e.g. ctgov_trials.csv or sample_trial_cohort_lineitems.csv). Files are checked
-against the registry size and the PDF header, written atomically and skipped on
-reruns when the size already matches. manifest.jsonl records registry
+against the ctgov size and the PDF header, written atomically and skipped on
+reruns when the size already matches. manifest.jsonl records ctgov
 identifiers, document/upload dates, retrieval time and each file's outcome.
 
 Sponsors can hold copyright in these documents; check terms before
@@ -156,7 +156,7 @@ async def download(client, doc, output_dir, semaphore, attempts=4):
                 if not header.startswith(b"%PDF-"):
                     raise ValueError(f"not a PDF (starts {header!r})")
                 if doc.size_bytes and written != doc.size_bytes:
-                    raise ValueError(f"size {written} != registry size {doc.size_bytes}")
+                    raise ValueError(f"size {written} != ctgov size {doc.size_bytes}")
                 partial.replace(dest)
                 doc.status, doc.error = "downloaded", ""
                 doc.retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")

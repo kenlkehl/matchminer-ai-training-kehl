@@ -67,7 +67,8 @@ MIN_GOOD_OPTION_OUTPUT_TOKENS = 100_000
 _NON_LLM_GOOD_OPTION_STATUSES = {
     "no_scoreable_drug",
     "drug_research_blocked",
-    "trial_registry_blocked",
+    "trial_ctgov_blocked",
+    "trial_registry_blocked",  # its name before 2026-11-05
     "missing_catalog_trial",
     "missing_drug_summary",
 }
@@ -300,7 +301,7 @@ def _research_settings(args: argparse.Namespace) -> ResearchSettings:
     return ResearchSettings(
         request_timeout=args.research_request_timeout,
         max_attempts=args.max_source_attempts,
-        registry_max_attempts=args.registry_max_attempts,
+        ctgov_max_attempts=args.ctgov_max_attempts,
         initial_backoff=args.initial_backoff,
         maximum_backoff=args.maximum_backoff,
         max_concurrency=args.research_concurrency,
@@ -308,7 +309,7 @@ def _research_settings(args: argparse.Namespace) -> ResearchSettings:
         max_web_results_per_drug=args.max_web_results_per_drug,
         max_web_documents_per_drug=args.max_web_documents_per_drug,
         max_pubmed_records=args.max_pubmed_records,
-        max_registry_studies=args.max_registry_studies,
+        max_ctgov_studies=args.max_ctgov_studies,
         max_civic_records=args.max_civic_records,
         max_europe_pmc_records=args.max_europe_pmc_records,
         max_regulatory_records=args.max_regulatory_records,
@@ -345,7 +346,7 @@ def run_catalog(args: argparse.Namespace) -> None:
         (~screening.get("included", pd.Series(dtype=bool)).astype(bool)).sum()
     )
     print(
-        f"Saved catalog {catalog.path} ({len(catalog.trial_registry)} trials, "
+        f"Saved catalog {catalog.path} ({len(catalog.trial_ctgov)} trials, "
         f"{len(screening)} screened interventions, {excluded} excluded, "
         f"{len(catalog.drug_summaries)} unique cancer-treatment drugs)."
     )
@@ -1042,7 +1043,7 @@ def _build_all_stage_commands(
     for flag, value in (
         ("--research-request-timeout", args.research_request_timeout),
         ("--max-source-attempts", args.max_source_attempts),
-        ("--registry-max-attempts", args.registry_max_attempts),
+        ("--ctgov-max-attempts", args.ctgov_max_attempts),
         ("--initial-backoff", args.initial_backoff),
         ("--maximum-backoff", args.maximum_backoff),
         ("--research-concurrency", args.research_concurrency),
@@ -1050,7 +1051,7 @@ def _build_all_stage_commands(
         ("--max-web-results-per-drug", args.max_web_results_per_drug),
         ("--max-web-documents-per-drug", args.max_web_documents_per_drug),
         ("--max-pubmed-records", args.max_pubmed_records),
-        ("--max-registry-studies", args.max_registry_studies),
+        ("--max-ctgov-studies", args.max_ctgov_studies),
         ("--max-civic-records", args.max_civic_records),
         ("--max-europe-pmc-records", args.max_europe_pmc_records),
         ("--max-regulatory-records", args.max_regulatory_records),
@@ -1160,7 +1161,7 @@ def run_all(args: argparse.Namespace) -> None:
     if skip_catalog:
         existing = load_good_option_catalog(catalog_path)
         requested_trial_ids = set(resolve_nct_ids(args))
-        existing_trial_ids = set(existing.trial_registry["trial_id"].astype(str))
+        existing_trial_ids = set(existing.trial_ctgov["trial_id"].astype(str))
         # A catalog shared across corpora legitimately holds more trials than any
         # one run needs, so require coverage rather than an exact match.
         missing_trial_ids = sorted(requested_trial_ids - existing_trial_ids)
@@ -1213,7 +1214,7 @@ def add_teacher_arguments(parser: argparse.ArgumentParser) -> None:
 def add_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--research-request-timeout", type=float, default=30.0)
     parser.add_argument("--max-source-attempts", type=int, default=5)
-    parser.add_argument("--registry-max-attempts", type=int, default=10)
+    parser.add_argument("--ctgov-max-attempts", "--registry-max-attempts", type=int, default=10)
     parser.add_argument("--initial-backoff", type=float, default=1.0)
     parser.add_argument("--maximum-backoff", type=float, default=60.0)
     parser.add_argument("--research-concurrency", type=int, default=6)
@@ -1221,7 +1222,7 @@ def add_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-web-results-per-drug", type=int, default=60)
     parser.add_argument("--max-web-documents-per-drug", type=int, default=24)
     parser.add_argument("--max-pubmed-records", type=int, default=40)
-    parser.add_argument("--max-registry-studies", type=int, default=25)
+    parser.add_argument("--max-ctgov-studies", "--max-registry-studies", type=int, default=25)
     parser.add_argument("--max-civic-records", type=int, default=40)
     parser.add_argument("--max-europe-pmc-records", type=int, default=12)
     parser.add_argument("--max-regulatory-records", type=int, default=8)

@@ -311,7 +311,7 @@ class Workflow:
                 self.run_stage('summarizing')
                 self.stop_cloud()
                 # LLM stages that still need the GPUs released below for mining,
-                # e.g. registry-version cohort extraction.
+                # e.g. ctgov-version cohort extraction.
                 for name in self.config.get('before_release_stages', []):
                     self.run_stage(name)
                 self.release_gpus()

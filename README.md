@@ -52,7 +52,7 @@ start one vLLM teacher per local GPU.
 The process now being followed, with the runs that produced the current
 artifacts (paths under `../data/no_phi`; `AR` is
 `archives/trialspace_reset_20261026T190832Z`). Steps 1–4 and 8 have run on
-registry-derived cohorts; steps 5–6 are the synthetic-protocol track, and
+ctgov-derived cohorts; steps 5–6 are the synthetic-protocol track, and
 step 7 is now generating patients from its cohorts.
 
 1. **ClinicalTrials.gov export.** The JSON export
@@ -67,7 +67,7 @@ re-extraction that dropped 19 trials without replacement. Training now draws
 its sample in this order, so the denominator is exactly 5,000:
 
 - the export above (148,056 trials) →
-- the registry rule: first posted in 2020 or later, interventional, every
+- the ctgov rule: first posted in 2020 or later, interventional, every
   phase early phase 1 to phase 4 (30,167) →
 - the DFCI holdout: trials open at DFCI in 2025–2026
   (`dfci_trials_summary_10-18-26.csv`; 1,162 of them) →
@@ -78,15 +78,15 @@ its sample in this order, so the denominator is exactly 5,000:
   every step go to `screened_trials.csv.screening.json` →
 - `sample-trials` (`0c_sample_trials.py --screened-trials`): a draw of
   5,000 accepted trials with `random_state=42`
-  (`registry_sample_trials.csv` + `.sampling.json`).
+  (`ctgov_sample_trials.csv` + `.sampling.json`).
 
-Each sampled trial then gets a synthetic protocol from its registry record.
+Each sampled trial then gets a synthetic protocol from its ctgov record.
 The first run on this path, `training_run_screened_sample5000_20261104/`
 (2026-11-04), screened 29,005 listings (21,789 cancer treatment trials, 7,216
 not, 0 errors) and drew 5,000 with seed 42; its synthetic protocols are
 generating. The steps below describe the October runs.
 
-2. **Treatment screening and registry cohorts, before sampling.** Trials first
+2. **Treatment screening and ctgov cohorts, before sampling.** Trials first
    posted in 2020 or later, interventional, with every phase in early phase 1
    to phase 4 (30,167 trials) go to the inference package's combined cohort
    prompt (`trial.cohorts.user.txt`, schema `trial-treatment-cohorts-v3`). One
@@ -107,7 +107,7 @@ generating. The steps below describe the October runs.
    **4,981 trials and 6,680 cohorts** in `sample_trial_cohort_lineitems.csv`
    (`cohort_reextract_named_sample5000_gemma4_31b_20261026/`).
 5. **Synthetic protocols.** For each of the 4,981 trials, a synthetic full
-   protocol is generated from its registry record, fetched again from the
+   protocol is generated from its ctgov record, fetched again from the
    ClinicalTrials.gov API on 2026-10-28 (so the text can differ slightly from
    the 10-15 export), by Nemotron 3.5 Super VL (NVFP4 and FP8) with prompt v11:
    `synthetic_protocols/generate_batch.py`, into
@@ -116,27 +116,27 @@ generating. The steps below describe the October runs.
    `synthetic_protocols/extract_cohorts.py` (Nemotron, schema
    `trial-protocol-cohorts-v2` with structured outputs) writes `cohorts` and
    `trials` tables that keep each cohort's synthetic protocol and its original
-   registry record and eligibility criteria. The protocol prompt decides again
+   ctgov record and eligibility criteria. The protocol prompt decides again
    whether each trial is a cancer treatment trial (`extraction_status`
    `not_cancer_treatment`). The current run, `cohort_extraction_v2/`
    (2026-10-29, 17:22–19:35 UTC), gave 7,721 cohorts from 4,848 trials; 132
    were judged not cancer treatment and 1 failed. It replaces the schema-v1
    run in `cohort_extraction/`, whose criteria lost every line break and
    double quote. See [`synthetic_protocols/README.md`](synthetic_protocols/README.md).
-   **Registry versions (new default, 2026-10-31).** The same trials are also
-   extracted from the registry records their protocols were written from, with
-   the registry prompt brought into line with the protocol prompt (schema
-   `trial-registry-cohorts-v1`), by `0d_extract_registry_cohorts.py --trials-jsonl`;
+   **ctgov versions (new default, 2026-10-31).** The same trials are also
+   extracted from the ctgov records their protocols were written from, with
+   the ctgov prompt brought into line with the protocol prompt (schema
+   `trial-registry-cohorts-v1`), by `0d_extract_ctgov_cohorts.py --trials-jsonl`;
    `synthetic_protocols/retrieval_cohorts.py` combines both versions into the
    retrieval cohort table (see [`synthetic_protocols/README.md`](synthetic_protocols/README.md)).
    **Three-step extraction (default since 2026-11-03, user instruction).**
-   Protocols and registry listings now share one inference workflow and prompt
+   Protocols and ctgov listings now share one inference workflow and prompt
    set (schema `trial-cohorts-stepwise-v1`): a cancer-treatment screen, the
    cohort names, and one request per cohort for its complete criteria (a
    listing is its title, brief summary and eligibility criteria as one
    document). Rows use representation `trial-treatment-cohorts-v5`, without the
    specific/common split. The runs above used the earlier single-request
-   prompts; rerunning `protocol-cohorts` and `registry-cohorts` re-extracts
+   prompts; rerunning `protocol-cohorts` and `ctgov-cohorts` re-extracts
    every trial.
 7. **Patient seeds, event histories, notes and summaries.** `generate-synthetic`
    (`generate_synthetic_data.py`) writes five positive and five near-miss
@@ -144,7 +144,7 @@ generating. The steps below describe the October runs.
    merged protocol cohort's criteria, boilerplate included), then
    event histories, then notes; then `prepare-notes`, `summarize-patients`
    (serial summaries) and `prepare-training`. The default model is the teacher,
-   `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`. The last completed run used the registry
+   `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`. The last completed run used the ctgov
    cohorts from step 4: 66,800 patients, 1,661,021 events and 1,137,527 notes
    (`synthetic_namedcohorts_5000_gemma4_31b_20261026/`, 2026-10-26 to 10-27).
    For the step-6 cohorts, `synthetic_protocols/patient_cohorts.py` builds the
@@ -174,11 +174,11 @@ default range is `train` only.
 | Stage | Command | Main outputs (defaults under `../data/no_phi`) |
 | --- | --- | --- |
 | `parse-trials` | `0a_parse_ctgov_json.py` (requires `--ctgov-json`, a CT.gov API v2 export) | `ctgov_trials.csv` |
-| `screen-trials` | `0b_screen_trials.py` | `screened_trials.csv` + `.screening.json`: every trial meeting the registry rule, with its DFCI holdout flag and screen decision; the counts and removed IDs of each step. Every screen answer and its reasoning goes to `upstream/screen/screen.jsonl`. |
-| `sample-trials` | `0c_sample_trials.py --screened-trials` | `registry_sample_trials.csv` + `.sampling.json`: the seeded draw of `--sample-trials` (5,000) accepted trials, which seed the protocols and give the source splits |
+| `screen-trials` | `0b_screen_trials.py` | `screened_trials.csv` + `.screening.json`: every trial meeting the ctgov rule, with its DFCI holdout flag and screen decision; the counts and removed IDs of each step. Every screen answer and its reasoning goes to `upstream/screen/screen.jsonl`. |
+| `sample-trials` | `0c_sample_trials.py --screened-trials` | `ctgov_sample_trials.csv` + `.sampling.json`: the seeded draw of `--sample-trials` (5,000) accepted trials, which seed the protocols and give the source splits |
 | `synthetic-protocols` | `synthetic_protocols/generate_batch.py` | `synthetic_protocols/` (`seeds.jsonl`, `protocols/<NCT>/protocol.md`, `protocols.csv`) |
 | `protocol-cohorts` | `synthetic_protocols/extract_cohorts.py` | `synthetic_protocols/cohort_extraction/` or `--protocol-cohort-dir` (`cohorts.parquet` merged, `cohorts_unmerged.parquet`, `cohorts_deboilerplated.parquet` merged with key and boilerplate criteria, `trials.parquet`) |
-| `registry-cohorts` | `0d_extract_registry_cohorts.py --trials-jsonl` (the protocol seeds) | `registry_cohorts/` (`trial_cohort_lineitems.csv` merged, `trial_cohort_lineitems_unmerged.csv`, `trial_cohort_lineitems_deboilerplated.csv` merged with key and boilerplate criteria, `trials_with_cohorts.csv`, `trial_cohorts.json`) |
+| `ctgov-cohorts` | `0d_extract_ctgov_cohorts.py --trials-jsonl` (the protocol seeds) | `ctgov_cohorts/` (`trial_cohort_lineitems.csv` merged, `trial_cohort_lineitems_unmerged.csv`, `trial_cohort_lineitems_deboilerplated.csv` merged with key and boilerplate criteria, `trials_with_cohorts.csv`, `trial_cohorts.json`) |
 | `generation-cohorts` | `synthetic_protocols/patient_cohorts.py` | `synthetic_generation/sample_trial_cohort_lineitems.csv` (merged protocol cohorts with all their criteria, for patient generation) and `sample_trial_cohort_lineitems_deboilerplated.csv` (the same rows, for retrieval: `cohort_eligibility_criteria` keeps all the criteria, `cohort_key_criteria` holds the key criteria and `cohort_boilerplate_criteria` the boilerplate), each + `.provenance.json` |
 | `retrieval-cohorts` | `synthetic_protocols/retrieval_cohorts.py` | `retrieval_cohorts.csv` (both versions of every trial) + `.provenance.json` |
 | `generate-synthetic` | `generate_synthetic_data.py` | `synthetic_generation/all_synthetic_events.parquet`, `all_synthetic_notes.parquet`, `manifest.json` |
@@ -189,7 +189,7 @@ default range is `train` only.
 
 Patients are generated only from the protocol cohorts (`generation-cohorts`),
 with all their criteria; retrieval, labeling and training use
-`retrieval_cohorts.csv`, which holds each trial's protocol and registry versions
+`retrieval_cohorts.csv`, which holds each trial's protocol and ctgov versions
 (see Mining below) with their key and boilerplate criteria. The three LLM
 extraction/generation stages after sampling share `--server-urls-file`; a trial
 that fails every attempt in one of them keeps whichever version it has.
@@ -229,15 +229,15 @@ templates are identical).
 ## Data stages
 
 - **0a — parse.** Flattens the CT.gov JSON to one row per trial: NCT ID, study
-  type, phases, registry status and dates (with original precision and
+  type, phases, ctgov status and dates (with original precision and
   ACTUAL/ESTIMATED types, `ctgov_metadata.py`), title, brief summary,
   eligibility criteria and `trial_text`. No filtering and no LLM.
-- **0b — screen** (`0b_screen_trials.py`). The registry rule (interventional
+- **0b — screen** (`0b_screen_trials.py`). The ctgov rule (interventional
   trials first posted in `--start-year` (2020) or later with early phase 1
   through phase 4; 80/10/10 splits with seed 42), the DFCI holdout, then the
   cohort workflow's cancer-treatment screen on every remaining listing, with
   every answer and its reasoning saved (see Sampling above). Its LLM settings and
-  endpoint options are shared with 0d (`registry_llm.py`).
+  endpoint options are shared with 0d (`ctgov_llm.py`).
 - **0c — sample.** Production (`--screened-trials`) draws 5,000 whole trials
   (seed 42) from those `0b_screen_trials.py` accepted, before any cohort
   extraction. The older modes keep cancer-treatment trials from an extracted
@@ -250,8 +250,8 @@ templates are identical).
 - **Synthetic protocols and their cohorts** (`synthetic_protocols/generate_batch.py`,
   `synthetic_protocols/extract_cohorts.py`): one synthetic protocol per sampled
   trial, then its cohorts; see `synthetic_protocols/README.md`.
-- **0d — registry cohorts** (`0d_extract_registry_cohorts.py --trials-jsonl`,
-  formerly `0b_extract_trial_cohorts.py`). Extracts every sampled registry record
+- **0d — ctgov cohorts** (`0d_extract_ctgov_cohorts.py --trials-jsonl`,
+  formerly `0b_extract_trial_cohorts.py`). Extracts every sampled ctgov record
   (the protocol batch's `seeds.jsonl`) with `matchminer_ai.trials.extract_cohorts`
   and the package's three-step workflow (screen, cohort names, one request per
   cohort for its criteria, copied verbatim). For training, equivalent cohorts are
@@ -401,7 +401,7 @@ this candidate set by default, with no flags needed:
   sample, drawn reproducibly from `--seed` (42), the patient ID and the
   mining round: every round draws a fresh sample (`--trial-sample-round`,
   which the runner sets to 2 and 3; round 1 keeps the original draws).
-- A trial with both a synthetic-protocol version and a registry
+- A trial with both a synthetic-protocol version and a ctgov
   (ClinicalTrials.gov) version of its cohorts (`synthetic_protocols/retrieval_cohorts.py`)
   is represented by one of them: in each patient's search, a version chosen at
   random per patient and trial; as a cohort query, a version chosen at random
@@ -475,7 +475,7 @@ storage. There is no Hugging Face upload code in this repository.
 ## Synthetic trial protocols
 
 `synthetic_protocols/` builds a corpus of synthetic full protocol documents
-seeded by registry records, with realistic, often messily specified eligibility
+seeded by ctgov records, with realistic, often messily specified eligibility
 covering one or more cohorts. Generation runs through
 `matchminer_ai.trials.generate_synthetic_protocols`; see
 [`synthetic_protocols/README.md`](synthetic_protocols/README.md). Training uses
@@ -488,7 +488,7 @@ cohorts and eligibility criteria with
 provenance: the synthetic protocol and its generation, and the original
 ClinicalTrials.gov record and eligibility criteria it was seeded from. In the
 pipeline above, these cohorts seed the synthetic patients (`generation-cohorts`)
-and, beside the registry versions, form the retrieval cohort table
+and, beside the ctgov versions, form the retrieval cohort table
 (`retrieval-cohorts`).
 
 ## History: the October 2026 retriever comparison
@@ -554,7 +554,7 @@ is not tested here by policy. Embedder tests skip in environments older than the
 
 ## Data and clinical safety
 
-- Synthetic data, registry text and public protocols are the only inputs to
+- Synthetic data, ctgov text and public protocols are the only inputs to
   training. Keep real patient data in `real_eval_code/` workflows, never in
   fixtures, logs or committed files.
 - Synthetic calendar dates are fabricated and must not be treated as real.

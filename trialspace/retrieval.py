@@ -13,16 +13,16 @@ def top_indices(scores, count):
 
 
 # A trial can be represented twice: by the cohorts extracted from its full
-# (synthetic) protocol and by those extracted from its registry text. Mining
+# (synthetic) protocol and by those extracted from its ctgov text. Mining
 # uses one version per trial so neither direction sees a trial twice.
 TRIAL_VERSION_POLICY = 'one version per trial: random per patient-trial pair; per trial for cohort queries'
 
 
 def _versions(cohorts):
-    """trial_id -> version ('protocol'/'registry') -> cohort indices, in corpus order."""
+    """trial_id -> version ('protocol'/'ctgov') -> cohort indices, in corpus order."""
     by_trial = defaultdict(lambda: defaultdict(list))
     for index, cohort in enumerate(cohorts):
-        by_trial[cohort['trial_id']][cohort.get('source', 'registry')].append(index)
+        by_trial[cohort['trial_id']][cohort.get('source', 'ctgov')].append(index)
     return by_trial
 
 
@@ -35,7 +35,7 @@ class TrialSampler:
 
     A patient searches the cohorts of ``trials`` sampled trials, approximating one
     cancer center's open-trial portfolio instead of every synthetic trial; 0 or
-    None keeps every trial. A trial with both a protocol and a registry version
+    None keeps every trial. A trial with both a protocol and a ctgov version
     contributes one version's cohorts, chosen at random for each patient and
     trial. Both choices depend only on the seed, the mining round and IDs: each
     round draws a fresh portfolio and version choice per patient (user

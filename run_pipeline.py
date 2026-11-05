@@ -2,13 +2,13 @@
 """Resumable CT.gov → synthetic protocols → synthetic notes → summaries → model training orchestration.
 
 The trial sample is drawn from the CT.gov export in this order (user instruction,
-2026-11-04): the registry rule (first posted since --start-year, interventional,
+2026-11-04): the ctgov rule (first posted since --start-year, interventional,
 early phase I-IV), the DFCI holdout (trials open at DFCI in --dfci-first-year to
 --dfci-last-year), the cohort workflow's cancer-treatment screen (screen-trials,
 every answer and its reasoning saved), then a seeded draw of --sample-trials
 (sample-trials). Each sampled trial gets a synthetic full protocol. Patients are
 generated from the protocol cohorts; retrieval, labeling and training see every
-trial in both versions, its protocol cohorts and its registry cohorts
+trial in both versions, its protocol cohorts and its ctgov cohorts
 (retrieval-cohorts), so the models work for users holding either source.
 
 The default starts at training for compatibility with existing train_all commands.
@@ -36,11 +36,19 @@ DATA_ROOT = next((p for p in ROOT.parents if p.name == 'no_phi' and p.parent.nam
                  ROOT.parent / 'data/no_phi')
 # Every sampled trial gets a synthetic protocol; patients are generated from the
 # protocol's cohorts, and retrieval/labeling/training see both the protocol and
-# the registry (ClinicalTrials.gov) version of each trial's cohorts.
+# the ctgov (ClinicalTrials.gov) version of each trial's cohorts. Until 2026-11-05
+# "ctgov" was called "registry"; the old stage name and options are still accepted.
 STAGES = ('parse-trials', 'screen-trials', 'sample-trials', 'synthetic-protocols', 'protocol-cohorts',
-          'registry-cohorts', 'generation-cohorts', 'retrieval-cohorts', 'generate-synthetic',
+          'ctgov-cohorts', 'generation-cohorts', 'retrieval-cohorts', 'generate-synthetic',
           'prepare-notes', 'summarize-patients', 'prepare-training', 'train')
-LLM_STAGES = {'screen-trials', 'synthetic-protocols', 'protocol-cohorts', 'registry-cohorts',
+
+
+def stage_name(value):
+    """A stage name; 'registry-cohorts' (its name before 2026-11-05) is ctgov-cohorts."""
+    return 'ctgov-cohorts' if value == 'registry-cohorts' else value
+
+
+LLM_STAGES = {'screen-trials', 'synthetic-protocols', 'protocol-cohorts', 'ctgov-cohorts',
               'generate-synthetic', 'summarize-patients'}
 
 
@@ -56,17 +64,17 @@ class Stage:
 def parser():
     p = training.parser()
     p.description = __doc__
-    p.add_argument('--start-at', choices=STAGES, default='train')
-    p.add_argument('--stop-after', choices=STAGES, default='train')
+    p.add_argument('--start-at', type=stage_name, choices=STAGES, default='train')
+    p.add_argument('--stop-after', type=stage_name, choices=STAGES, default='train')
     p.add_argument('--pipeline-dir', type=Path, help='Upstream state/log directory; default RUN_DIR/upstream')
     p.add_argument('--ctgov-json', type=Path)
     p.add_argument('--parsed-trials', type=Path)
     p.add_argument('--start-year', type=int, default=2020)
-    p.add_argument('--registry-sample', type=Path,
+    p.add_argument('--ctgov-sample', '--registry-sample', type=Path,
                    help='sample-trials output: the sampled trials (protocol seeds, source splits); '
-                        'default DATA_DIR/registry_sample_trials.csv')
+                        'default DATA_DIR/ctgov_sample_trials.csv')
     p.add_argument('--screened-trials', type=Path,
-                   help='screen-trials output: every trial meeting the registry rule, with its DFCI holdout '
+                   help='screen-trials output: every trial meeting the ctgov rule, with its DFCI holdout '
                         'flag and screen decision; default DATA_DIR/screened_trials.csv')
     p.add_argument('--protocol-dir', type=Path, help='Synthetic protocol batch; default DATA_DIR/synthetic_protocols')
     p.add_argument('--protocol-cohort-dir', type=Path,
@@ -81,13 +89,13 @@ def parser():
     p.add_argument('--sample-trials', type=int, default=5000)
     p.add_argument('--cohort-workers', type=int, default=1536)
     p.add_argument('--cohort-max-attempts', type=int, choices=range(1, 11), default=3)
-    p.add_argument('--registry-cohort-max-attempts', type=int, choices=range(1, 11), default=5,
-                   help='Attempts per record for registry-cohorts (cohorts from the protocol seeds\' registry records)')
-    p.add_argument('--registry-cohort-concurrency-per-server', type=int, choices=range(1, 1025), metavar='1..1024',
-                   default=512, help='Per-server request ceiling for registry-cohorts')
+    p.add_argument('--ctgov-cohort-max-attempts', '--registry-cohort-max-attempts', type=int, choices=range(1, 11), default=5,
+                   help='Attempts per record for ctgov-cohorts (cohorts from the protocol seeds\' ctgov records)')
+    p.add_argument('--ctgov-cohort-concurrency-per-server', '--registry-cohort-concurrency-per-server', type=int, choices=range(1, 1025), metavar='1..1024',
+                   default=512, help='Per-server request ceiling for ctgov-cohorts')
     p.add_argument('--protocol-cohort-chunks-in-flight', type=int, choices=range(1, 17), metavar='1..16', default=2,
                    help='Chunks of 500 requests protocol-cohorts sends at once in each step (extraction, merge, '
-                        'boilerplate); raise it for a large server pool (registry-cohorts runs per listing)')
+                        'boilerplate); raise it for a large server pool (ctgov-cohorts runs per listing)')
     p.add_argument('--cohort-max-tokens', type=int, default=50000)
     p.add_argument('--data-seed', type=int, default=42)
     p.add_argument('--dfci-trials-csv', type=Path, default=DATA_ROOT / 'dfci_trials_summary_10-18-26.csv')
@@ -145,7 +153,7 @@ def resolve_paths(args):
             continue
         if getattr(args, key) is None:
             setattr(args, key, value)
-    args.registry_sample = args.registry_sample or args.data_dir / 'registry_sample_trials.csv'
+    args.ctgov_sample = args.ctgov_sample or args.data_dir / 'ctgov_sample_trials.csv'
     args.screened_trials = args.screened_trials or args.data_dir / 'screened_trials.csv'
     args.protocol_dir = args.protocol_dir or args.data_dir / 'synthetic_protocols'
     args.protocol_cohort_dir = args.protocol_cohort_dir or args.protocol_dir / 'cohort_extraction'
@@ -166,7 +174,7 @@ def resolve_paths(args):
 def training_arguments(args):
     # The upstream extraction contains the full denominator. Training retrieves
     # over the sampled trials in both versions: the protocol cohorts that seeded
-    # synthetic generation and the same trials' registry cohorts.
+    # synthetic generation and the same trials' ctgov cohorts.
     if args.start_at == 'train':
         return args
     return argparse.Namespace(**{**vars(args), 'trial_spaces': args.retrieval_cohorts})
@@ -196,7 +204,7 @@ def training_command(args):
 
 
 def unmerged(cohorts_csv):
-    """0d_extract_registry_cohorts.py's export of the cohort rows before merging (None when training starts later)."""
+    """0d_extract_ctgov_cohorts.py's export of the cohort rows before merging (None when training starts later)."""
     return cohorts_csv and cohorts_csv.with_name(f'{cohorts_csv.stem}_unmerged{cohorts_csv.suffix}')
 
 
@@ -237,19 +245,19 @@ def build_plan(args):
     package = sorted(p for p in inference_sources.rglob('*') if p.suffix in ('.py', '.txt', '.yaml'))
     pool = ['--server-urls-file', str(registry)] if registry else []
     batch, extracted = args.protocol_dir, args.protocol_cohort_dir
-    registry_cohorts = d / 'registry_cohorts'
+    ctgov_cohorts = d / 'ctgov_cohorts'
     # Merged rows (used downstream), audit, decisions, then the rows before merging.
-    registry_rows = [registry_cohorts / 'trial_cohort_lineitems.csv', registry_cohorts / 'trials_with_cohorts.csv',
-                     registry_cohorts / 'trial_cohorts.json', unmerged(registry_cohorts / 'trial_cohort_lineitems.csv'),
-                     deboilerplated(registry_cohorts / 'trial_cohort_lineitems.csv')]
-    registry_extraction = [py, str(ROOT / '0d_extract_registry_cohorts.py'), '--trials-jsonl', str(batch / 'seeds.jsonl'),
-                  '--output-trials', str(registry_rows[1]), '--output-cohorts', str(registry_rows[0]),
-                  '--output-json', str(registry_rows[2]), '--output-unmerged-cohorts', str(registry_rows[3]),
-                  '--output-deboilerplated-cohorts', str(registry_rows[4]),
-                  '--work-dir', str(work / 'registry_extraction'),
+    ctgov_rows = [ctgov_cohorts / 'trial_cohort_lineitems.csv', ctgov_cohorts / 'trials_with_cohorts.csv',
+                     ctgov_cohorts / 'trial_cohorts.json', unmerged(ctgov_cohorts / 'trial_cohort_lineitems.csv'),
+                     deboilerplated(ctgov_cohorts / 'trial_cohort_lineitems.csv')]
+    ctgov_extraction = [py, str(ROOT / '0d_extract_ctgov_cohorts.py'), '--trials-jsonl', str(batch / 'seeds.jsonl'),
+                  '--output-trials', str(ctgov_rows[1]), '--output-cohorts', str(ctgov_rows[0]),
+                  '--output-json', str(ctgov_rows[2]), '--output-unmerged-cohorts', str(ctgov_rows[3]),
+                  '--output-deboilerplated-cohorts', str(ctgov_rows[4]),
+                  '--work-dir', str(work / 'ctgov_extraction'),
                   '--inference-repo', str(args.inference_repo), '--workers', str(args.cohort_workers),
-                  '--max-attempts', str(args.registry_cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
-                  '--max_concurrent_per_server', str(args.registry_cohort_concurrency_per_server),
+                  '--max-attempts', str(args.ctgov_cohort_max_attempts), '--max-tokens', str(args.cohort_max_tokens),
+                  '--max_concurrent_per_server', str(args.ctgov_cohort_concurrency_per_server),
                   '--request_timeout', str(args.generation_request_timeout), '--api-key-env', args.api_key_env,
                   '--allow-failures', *model, *(['--server_urls_file', str(registry)] if registry else [])]
     generated = [g / name for name in ('all_synthetic_notes.parquet', 'all_synthetic_events.parquet', 'manifest.json')]
@@ -259,22 +267,22 @@ def build_plan(args):
         Stage('parse-trials', [py, str(ROOT / '0a_parse_ctgov_json.py'), '--input', str(args.ctgov_json),
                               '--output', str(args.parsed_trials)],
               [args.ctgov_json] if args.ctgov_json else [], [args.parsed_trials], source('0a_parse_ctgov_json.py', 'ctgov_metadata.py')),
-        # Registry rule, DFCI holdout and the cancer-treatment screen; every screen answer is saved.
+        # ctgov rule, DFCI holdout and the cancer-treatment screen; every screen answer is saved.
         Stage('screen-trials', screening, [args.parsed_trials, args.dfci_trials_csv],
               [args.screened_trials, Path(f'{args.screened_trials}.screening.json')],
-              source('0b_screen_trials.py', 'registry_llm.py', '0c_sample_trials.py',
+              source('0b_screen_trials.py', 'ctgov_llm.py', '0c_sample_trials.py',
                      'trial_cohort_format.py') + package),
         Stage('sample-trials', [py, str(ROOT / '0c_sample_trials.py'), '--screened-trials', str(args.screened_trials),
-              '--output-csv', str(args.registry_sample), '--n-trials', str(args.sample_trials), '--seed', str(args.data_seed)],
+              '--output-csv', str(args.ctgov_sample), '--n-trials', str(args.sample_trials), '--seed', str(args.data_seed)],
               [args.screened_trials, Path(f'{args.screened_trials}.screening.json')],
-              [args.registry_sample, args.registry_sample.with_suffix('.sampling.json')],
+              [args.ctgov_sample, args.ctgov_sample.with_suffix('.sampling.json')],
               source('0c_sample_trials.py', 'trial_cohort_format.py')),
-        # One synthetic full protocol per sampled trial, seeded from its registry record.
+        # One synthetic full protocol per sampled trial, seeded from its ctgov record.
         Stage('synthetic-protocols', [py, str(ROOT / 'synthetic_protocols/generate_batch.py'),
-              '--nct-ids-from', str(args.registry_sample), '--output-dir', str(batch),
+              '--nct-ids-from', str(args.ctgov_sample), '--output-dir', str(batch),
               '--chunk-size', str(args.protocol_chunk_size), '--model-name', args.generation_tokenizer,
               '--max-tokens', str(args.protocol_max_tokens), '--allow-failures', *pool],
-              [args.registry_sample], [batch / 'seeds.jsonl', batch / 'protocols.csv', batch / 'run_metadata.json'],
+              [args.ctgov_sample], [batch / 'seeds.jsonl', batch / 'protocols.csv', batch / 'run_metadata.json'],
               source('synthetic_protocols/generate_batch.py') + package),
         Stage('protocol-cohorts', [py, str(ROOT / 'synthetic_protocols/extract_cohorts.py'), '--batch-dir', str(batch),
               '--output-dir', str(extracted), '--model-name', args.generation_tokenizer,
@@ -284,26 +292,26 @@ def build_plan(args):
               [extracted / 'cohorts.parquet', extracted / 'trials.parquet', extracted / 'run_metadata.json',
                extracted / 'cohorts_unmerged.parquet', extracted / 'cohorts_deboilerplated.parquet'],
               source('synthetic_protocols/extract_cohorts.py') + package),
-        # The same trials from the registry records their protocols were written
-        # from, with the registry prompt that follows the protocol prompt's rules.
-        Stage('registry-cohorts', registry_extraction, [batch / 'seeds.jsonl'], registry_rows,
-              source('0d_extract_registry_cohorts.py', 'registry_llm.py', 'trial_cohort_format.py') + package),
+        # The same trials from the ctgov records their protocols were written
+        # from, with the ctgov prompts that follow the protocol prompts' rules.
+        Stage('ctgov-cohorts', ctgov_extraction, [batch / 'seeds.jsonl'], ctgov_rows,
+              source('0d_extract_ctgov_cohorts.py', 'ctgov_llm.py', 'trial_cohort_format.py') + package),
         # Patients are seeded from the merged cohorts with all their criteria, boilerplate included
         # (user, 2026-11-04); retrieval reads the same cohorts with the boilerplate removed.
         Stage('generation-cohorts', [py, str(ROOT / 'synthetic_protocols/patient_cohorts.py'), '--batch-dir', str(batch),
               '--extraction-dir', str(extracted), '--output', str(args.sampled_spaces),
               '--retrieval-output', str(deboilerplated(args.sampled_spaces)),
-              '--splits-from', str(args.registry_sample)],
+              '--splits-from', str(args.ctgov_sample)],
               [extracted / 'cohorts.parquet', extracted / 'cohorts_deboilerplated.parquet', extracted / 'trials.parquet',
-               args.registry_sample],
+               args.ctgov_sample],
               [args.sampled_spaces, Path(f'{args.sampled_spaces}.provenance.json'), deboilerplated(args.sampled_spaces),
                Path(f'{deboilerplated(args.sampled_spaces)}.provenance.json')],
               source('synthetic_protocols/patient_cohorts.py', 'trial_cohort_format.py')),
         Stage('retrieval-cohorts', [py, str(ROOT / 'synthetic_protocols/retrieval_cohorts.py'),
-              '--protocol-cohorts', str(deboilerplated(args.sampled_spaces)), '--registry-cohorts', str(registry_rows[4]),
-              '--registry-trials', str(registry_rows[1]), '--output', str(args.retrieval_cohorts),
-              '--splits-from', str(args.registry_sample)],
-              [deboilerplated(args.sampled_spaces), registry_rows[4], registry_rows[1], args.registry_sample],
+              '--protocol-cohorts', str(deboilerplated(args.sampled_spaces)), '--ctgov-cohorts', str(ctgov_rows[4]),
+              '--ctgov-trials', str(ctgov_rows[1]), '--output', str(args.retrieval_cohorts),
+              '--splits-from', str(args.ctgov_sample)],
+              [deboilerplated(args.sampled_spaces), ctgov_rows[4], ctgov_rows[1], args.ctgov_sample],
               [args.retrieval_cohorts, Path(f'{args.retrieval_cohorts}.provenance.json')],
               source('synthetic_protocols/retrieval_cohorts.py', 'trial_cohort_format.py')),
         Stage('generate-synthetic', [py, str(ROOT / 'generate_synthetic_data.py'), '--input-csv', str(args.sampled_spaces),

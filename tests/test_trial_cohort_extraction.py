@@ -11,7 +11,7 @@ from generate_synthetic_data import load_stage, Generator
 from trial_cohort_format import training_rows, validate_cohort_rows, complete_cohort_criteria, file_stamp
 from tests.test_synthetic_generation import Tokenizer, args_for
 
-extract = load_stage('0d_extract_registry_cohorts.py')
+extract = load_stage('0d_extract_ctgov_cohorts.py')
 screen = load_stage('0b_screen_trials.py')
 sample = load_stage('0c_sample_trials.py')
 
@@ -95,7 +95,7 @@ def arguments(tmp_path):
 
 
 def write_trials(args, rows):
-    """Sampled registry records, as a synthetic protocol batch's seeds.jsonl holds them."""
+    """Sampled ctgov records, as a synthetic protocol batch's seeds.jsonl holds them."""
     args.trials_jsonl.write_text(''.join(json.dumps(row) + '\n' for row in rows))
 
 
@@ -158,9 +158,9 @@ def test_public_api_stepwise_decisions_complete_rows_and_resume(tmp_path, backen
     assert rows.cohort_count.tolist() == [1, 2, 2]
     assert rows.cohort_name.tolist() == ['All participants', 'Cohort A', 'Cohort B']
     assert not rows.cohort_eligibility_criteria.str.contains('Cohort A|Cohort B').any()
-    # The model's extracted single-cohort criteria, not the registry field.
+    # The model's extracted single-cohort criteria, not the ctgov field.
     assert rows.cohort_eligibility_criteria.iloc[0] == 'Inclusion criteria:\nAdults with treated cancer.'
-    assert rows.cohort_criteria_source.eq('registry').all()
+    assert rows.cohort_criteria_source.eq('ctgov').all()
     assert training_rows(rows).cohort_eligibility_criteria.tolist() == rows.cohort_eligibility_criteria.tolist()
     assert rows.cohort_eligibility_criteria.iloc[1:].str.contains('Age >= 18; exclude active infection.', regex=False).all()
     assert rows.last_update_post_date.eq('2026-10').all()
@@ -309,7 +309,7 @@ def test_all_rejected_run_exports_empty_cohort_table_with_schema(tmp_path, backe
     extract.run(args, extract.make_config(args))
     empty = pd.read_csv(args.output_cohorts)
     assert empty.empty and 'cohort_eligibility_criteria' in empty
-    assert 'last_update_post_date' in empty  # the registry records' fields are kept (splits come from the sample)
+    assert 'last_update_post_date' in empty  # the ctgov records' fields are kept (splits come from the sample)
     assert pd.read_csv(args.output_trials).cancer_treatment_trial.tolist() == ['no']
 
 
