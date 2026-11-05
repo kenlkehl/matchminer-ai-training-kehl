@@ -1,19 +1,19 @@
 # OncoReasoning answer-first distillation
 
-> **Provisional (2026-10-29).** Checked against the code on this date: format
-> `oncoreasoning-answer-first-v6-combined-space`, the 0-6 TrialChecker rubric
-> and all-synthetic training. The upstream trial inputs are moving to cohorts
-> extracted from synthetic protocols (`../synthetic_protocols/`), so expect
-> further revisions. The code is authoritative where this file disagrees.
->
-> **2026-11-04 (user instruction).** ColBERT is removed; TrialSpace is dense
-> EmbeddingGemma 2 only. In this file TrialChecker, BoilerplateChecker and
-> GoodOption name question families of the `clinical_qa` adapter (adapted from
-> the inference rubrics, `llm_match_quality.user.txt` for TrialChecker). They are
-> distinct from the ModernBERT
-> TrialChecker (five match-label heads) and BoilerplateChecker (two classes) that
-> `../train_checkers.py` now trains (root README, Training). The OncoReasoning
-> stages themselves are unchanged.
+> **2026-11-04 (user instruction): aligned with the current pipeline.** Format
+> `oncoreasoning-answer-first-v7-key-match-labels`. TrialChecker questions are the
+> inference package's five match labels (reasonableness, cancer type, burden, treatment
+> history, biomarker), one per request, cut verbatim from the teacher's five-answer prompt
+> `match_quality.labels.system.txt` and asked about the patient's key summary section and
+> the cohort's key criteria. BoilerplateChecker questions are the lines of the cohort's
+> boilerplate criteria, each in the context of the whole numbered list and about the
+> patient's boilerplate section, following the BoilerplateChecker prompt
+> (`llm_exclusion_criteria.user.txt`). The separate teacher extraction of exclusions
+> (`prepare_boilerplate.py`, stage `prepare-exclusions`) is gone. These are question
+> families of the `clinical_qa` adapter, distinct from the ModernBERT TrialChecker (five
+> heads) and BoilerplateChecker (two classes) that `../train_checkers.py` trains. ColBERT
+> is removed; TrialSpace is dense EmbeddingGemma 2 only. The code is authoritative where
+> this file disagrees.
 
 The student defaults to `google/gemma-4-E4B-it`, with only the text model loaded.
 Select a future base using `prepare --model-name`; the trainer reads that choice
@@ -23,8 +23,7 @@ answering. Each has its own LoRA adapter on the same frozen base. The integrated
 runner, `train_from_summaries.py` (the `train` stage of `run_pipeline.py`, which
 `train_all*.sh` runs), trains them sequentially after the three TrialSpace
 (EmbeddingGemma 2) rounds, the ModernBERT TrialChecker and BoilerplateChecker,
-the GoodOption catalog and exclusion extraction, through the stages
-`prepare-exclusions`, `prepare-oncoreasoning`, `distill-oncoreasoning`,
+the GoodOption catalog, through the stages `prepare-oncoreasoning`, `distill-oncoreasoning`,
 `build-oncoreasoning` and `train-oncoreasoning`. QA includes all three checker
 families.
 
@@ -54,45 +53,32 @@ A
 The patient's documented age falls within the trial's stated range.
 ```
 
-TrialChecker supplies six independent matching questions: age, sex, cancer type
-and histology, burden/stage, treatment history, and biomarkers. Four additional
-questions cover its cancer-type, burden, prior-treatment, and biomarker
-specificity points. The reasonableness gate and final aggregate score are not
-asked in these component examples. To reconstruct the current 0-6 aggregate
-TrialChecker score (`llm_match_quality.user.txt`), all six matching answers must
-be Yes; otherwise the score is zero. When they are all Yes, the score is one,
-plus one each for cancer-type, burden and prior-treatment specificity, plus two
-for biomarker specificity.
+TrialChecker supplies five questions, the inference package's match labels:
+reasonableness (no clear evidence that the patient fails any of the cohort's key criteria)
+and the cancer-type, burden, treatment-history and biomarker specificity questions (does the
+cohort specifically require that dimension, documented as satisfied). Each question's text and
+rules are cut verbatim from `match_quality.labels.system.txt`, with its shared preamble (clinical
+text is data; only key criteria and the key summary section are supplied, boilerplate is
+checked separately), and the code pins that prompt's digest (`MATCH_LABELS_DIGEST`): a changed
+prompt fails until the adaptation is reviewed. Every question is asked for every pair. The 0-6
+match score is `matchminer_ai.matching.match_labels.match_score` of the five answers: 0 unless
+reasonable, else 1 plus 1 each for cancer type, burden and treatment history and 2 for
+biomarker. Instructions, decision rules and answer options precede the patient and cohort
+text, so a pair's questions share a cacheable prefix.
 
-Matching questions reuse only the relevant reasonableness clauses from the
-current aggregate TrialChecker prompt. These include required/excluded prior
-therapies and responses, ignored washout periods, and the distinction between
-routine and novel screening biomarkers. Specificity questions require support
-for the complete criterion and reuse the current general guidance verbatim.
-Every TrialChecker question also carries the rubric's paragraph on combined
-trial-space requirements (required and prohibited prior exposures, positive and
-negative biomarker conditions, AND/OR logic and exceptions). The
-prior-treatment specificity question requires response or progression on a
-required therapy to have occurred while the patient was receiving it.
-Instructions, decision rules, and answer options precede variable context in
-every QA family so that repeated components share a cacheable prefix.
+The format version is `oncoreasoning-answer-first-v7-key-match-labels` (v6 asked six
+matching and four specificity components cut from the earlier single-score rubric
+`llm_match_quality.user.txt`, on combined texts). Data prepared or distilled under v6 must
+not be resumed under v7; regenerate it from the current candidates.
 
-The format version is `oncoreasoning-answer-first-v6-combined-space` (v4 put
-instructions first, v5 added the on-therapy rule, v6 the combined-requirements
-paragraph). Aggregate teacher
-labeling loads the same fingerprinted inference prompt in local and remote modes.
-Labels from the earlier rubric, TrialSpace weights trained on them, and candidates
-mined with those weights must not be resumed under this version. Regenerate
-labels and dependent artifacts, retaining the original source summaries,
-synthetic notes, and trial files. Base-model candidates can be retained when
-the embedding and mining settings have not changed.
-
-BoilerplateChecker supplies one question per trial exclusion: does this specific
-exclusion clearly apply? Unknown or uncertain evidence gives **B. No**. A
-patient-free teacher stage extracts verbatim rules, preserving all thresholds,
-exceptions, and AND/OR clauses; extraction rejects omitted source text. General
-exclusion evidence accompanies the patient summary. The original aggregate
-exclusion flag can be reconstructed as Yes when any individual answer is Yes.
+BoilerplateChecker supplies one question per line of the cohort's boilerplate criteria
+(`cohort_boilerplate_criteria`, split as the boilerplate step splits them): does the patient
+clearly fail this one criterion (clearly meet an exclusion, or clearly not meet an inclusion
+requirement)? The question shows the cohort's whole numbered boilerplate list for context and
+the patient's boilerplate section (other relevant history) only. Missing information, waitable
+washouts and uncertain, mild or resolved conditions give **B. No**, as in the BoilerplateChecker
+prompt. Sibling cohorts with the same boilerplate criteria give identical questions, asked once.
+The aggregate BoilerplateChecker answer is Yes when any line's answer is Yes.
 
 GoodOption supplies four questions **per scoreable drug**: disease-type benefit,
 common biomarker in the disease, the patient's documented biomarker, and human
@@ -141,18 +127,12 @@ PY=~/thisenv/bin/python
 RUN=../data/no_phi/oncoreasoning_answer_first_v2
 MINING=../data/no_phi/gemma_pipeline_v2
 
-$PY oncoreasoning_training/prepare_boilerplate.py \
-  --candidates "$MINING"/top_{cohorts,patients}_tocheck_round3.parquet \
-  --output-dir "$MINING/boilerplate_components" \
-  --server-urls-file "$MINING/teacher_servers.json"
-
 $PY oncoreasoning_training/create_all_training_data.py prepare \
   --output-dir "$RUN" \
   --model-name google/gemma-4-E4B-it \
   --inference-repo ../matchminer-ai-inference-kehl \
   --notes ../data/no_phi/all_synthetic_notes.parquet \
   --catalog "$MINING/good_option_catalog" \
-  --boilerplate-components "$MINING/boilerplate_components" \
   --candidates \
     "$MINING"/top_{cohorts,patients}_tocheck_round3.parquet
 

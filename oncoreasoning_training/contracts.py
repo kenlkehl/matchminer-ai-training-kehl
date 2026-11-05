@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 DEFAULT_MODEL_NAME = "google/gemma-4-E4B-it"
-FORMAT_VERSION = "oncoreasoning-answer-first-v6-combined-space"
+FORMAT_VERSION = "oncoreasoning-answer-first-v7-key-match-labels"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT.parent / "data" / "no_phi"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "oncoreasoning_answer_first_v2"
@@ -18,22 +18,33 @@ DEFAULT_INFERENCE_REPO = next(
 )
 TASKS = ("summarization", "clinical_qa")
 OPTIONS = {"A": "Yes", "B": "No"}
+# The legacy aggregate labeler (llm_check_trials.py) still pins the old single-score rubric.
 TRIAL_RUBRIC_DIGEST = "3714f5f416fa5db3e51ddc79e92a350ef041d358849c861a14e98ade73b02419"
-SPECIFICITY_RULES_HEADER = "GENERAL GUIDANCE"
-SPECIFICITY_COMPONENTS = frozenset({
-    "cancer_type_specificity", "cancer_burden_specificity",
-    "prior_treatment_specificity", "biomarker_specificity",
-})
-MATCHING_RULE_MARKERS = {
-    "age_matching": ("a) Age -", "b) Sex -"),
-    "sex_matching": ("b) Sex -", "c) Required prior therapies -"),
-    "treatment_history_matching": ("c) Required prior therapies -", "(e) Required biomarkers -"),
-    "biomarker_matching": ("(e) Required biomarkers -", "(g) Disease status/burden -"),
-    "cancer_burden_matching": ("(g) Disease status/burden -", "If, by any of the above criteria,"),
-}
-MATCHING_DECISION = (
-    "Apply the supplied reasonableness rule to this component. Answer No when it makes "
-    "the trial unreasonable; otherwise answer Yes. Assess only this component."
+# TrialChecker questions are the inference package's five match labels (user instruction,
+# 2026-11-04), one per request, cut verbatim from the teacher's five-answer prompt and asked about
+# the patient's key summary section and the cohort's key criteria.
+MATCH_LABELS_PROMPT = "match_quality.labels.system.txt"
+MATCH_LABELS_DIGEST = "4fdef82515bcf1df3a603d941e1c1f5c73f35bd450899ceb37c2686049578aea"
+TRIAL_COMPONENTS = ("reasonableness", "cancer_type", "burden", "treatment_history", "biomarker")
+# BoilerplateChecker questions: one per line of the cohort's boilerplate criteria, about the
+# patient's boilerplate section, following the BoilerplateChecker prompt's rules.
+BOILERPLATE_PROMPT = "llm_exclusion_criteria.user.txt"
+BOILERPLATE_QUESTION = "Does the patient clearly fail this one boilerplate criterion of the cohort?"
+BOILERPLATE_RULE = (
+    "Boilerplate criteria are the general requirements most cancer trials share, such as performance "
+    "status, organ function, brain metastases, recent treatment or surgery, other medical conditions, "
+    "other cancers, infections, contraception and pregnancy; they include inclusion requirements as "
+    "well as exclusions. Answer Yes only when the patient clearly fails this criterion: clearly meets it "
+    "if it is an exclusion, or clearly does not meet it if it is an inclusion requirement. Missing or "
+    "undocumented information is not a failure, nor is a requirement the patient could meet by waiting, "
+    "such as a washout period. If it is not completely clear, give the patient the benefit of the doubt "
+    "and answer No. A description that a condition is mild, low-grade, or resolved is even more reason "
+    "not to fail the patient on it. Apply all thresholds and exceptions as written. The patient extract "
+    "summarizes the patient's other relevant history; a mention of a condition may be reasoning about "
+    "whether the patient has it, not evidence that the patient does. Read the item in the context of "
+    "the cohort's other boilerplate criteria: a sub-item, note or continuation belongs to the criterion "
+    "above it, and an item that only introduces the items below it is failed only when one of them is. "
+    "Assess only this item."
 )
 QA_SYSTEM = (
     "You are an oncology clinical question answering assistant. Answer ONLY the one "
@@ -46,75 +57,13 @@ QA_SYSTEM = (
 )
 SUMMARY_SYSTEM = "Update the running clinical summary. Return only the finished summary."
 
-# Adaptations of llm_match_quality.user.txt, with one judgment per request.
-# The final four are specificity points, independent of the reasonableness gate.
-TRIAL_COMPONENTS = {
-    "age_matching": (
-        "Is this trial a reasonable consideration based ONLY on the age requirements?",
-        MATCHING_DECISION,
-    ),
-    "sex_matching": (
-        "Is this trial a reasonable consideration based ONLY on the sex requirements?",
-        MATCHING_DECISION,
-    ),
-    "cancer_type_matching": (
-        "Is this trial a reasonable consideration based ONLY on cancer type and histology?",
-        "Answer No if the patient's active cancer type or histology clearly falls outside "
-        "the allowed cancers. Otherwise answer Yes. Broad all-solid-tumor criteria can match; "
-        "matching does not require cancer-type specificity.",
-    ),
-    "cancer_burden_matching": (
-        "Is this trial a reasonable consideration based ONLY on stage, extent, disease burden, "
-        "and any specified current disease-status requirements?",
-        MATCHING_DECISION,
-    ),
-    "treatment_history_matching": (
-        "Is this trial a reasonable consideration based ONLY on prior treatment requirements "
-        "and exclusions, including any required response to those treatments?",
-        MATCHING_DECISION,
-    ),
-    "biomarker_matching": (
-        "Is this trial a reasonable consideration based ONLY on required and excluded biomarkers?",
-        MATCHING_DECISION,
-    ),
-    "cancer_type_specificity": (
-        "Does the trial specifically name this patient's cancer type, rather than broadly accepting any cancer?",
-        "Answer Yes only if a specifically allowed cancer type matches the patient's active "
-        "cancer. 'Solid tumors' or 'advanced cancers' alone yields No. Assess only this point; "
-        "do not apply an overall eligibility gate.",
-    ),
-    "cancer_burden_specificity": (
-        "Does a specific trial stage or burden requirement match this patient's disease status?",
-        "Answer Yes only for an explicitly specified stage or burden that matches the patient, "
-        "including any attached current disease-status conditions. No stage/burden requirement, "
-        "an unknown match, or a contradictory match yields No. Assess only this specificity point.",
-    ),
-    "prior_treatment_specificity": (
-        "Does the patient's history match a specific prior-treatment requirement of this trial?",
-        "Answer Yes only when the full specific prior-treatment requirement, including every "
-        "required therapy and all associated response conditions, is clearly documented as "
-        "satisfied in the patient's history, including required resistance, "
-        "relapse, intolerance, duration, or timing. Exposure alone is insufficient when an "
-        "outcome is a specified requirement for the trial. Exposure in a different line of therapy "
-        "is insufficient when a specific line is required. No specific requirement or an unknown match yields No. "
-        "Ignore treatment washout periods, not response-duration or relapse/progression timing "
-        "requirements. When response or progression on a required therapy is specified, "
-        "it must have occurred WHILE RECEIVING THAT THERAPY; later progression after "
-        "stopping it does not establish progression on it. Assess only this specificity point.",
-    ),
-    "biomarker_specificity": (
-        "Does this trial require a specific biomarker that this patient is known to have?",
-        "Answer Yes only when a specific required biomarker is documented as present in the "
-        "patient. No requirement or unknown/untested status yields No. Assess only this point.",
-    ),
-}
 GOOD_OPTION_COMPONENTS = (
     "disease_type_benefit", "common_biomarker_in_disease",
     "patient_biomarker_targeted", "biomarker_targeted_benefit",
 )
 PROMPT_FILES = (
     "patient.serial.user.primer.txt", "patient.serial.user.question.txt",
-    "llm_match_quality.user.txt", "llm_good_option.rubric.txt", "llm_exclusion_criteria.user.txt",
+    MATCH_LABELS_PROMPT, "llm_good_option.rubric.txt", BOILERPLATE_PROMPT,
 )
 
 
@@ -125,30 +74,43 @@ def digest(value) -> str:
 def load_prompt_sources(inference_repo=DEFAULT_INFERENCE_REPO):
     root = Path(inference_repo) / "src" / "matchminer_ai" / "prompts"
     sources = {name: (root / name).read_text(encoding="utf-8") for name in PROMPT_FILES}
-    if digest(sources["llm_match_quality.user.txt"]) != TRIAL_RUBRIC_DIGEST:
-        raise ValueError("TrialChecker rubric changed; review the individual component adaptation")
+    match_label_rules(sources)  # fails on an unreviewed match-label prompt
     return sources
 
 
-def trial_matching_rules(sources, component):
-    """Extract just this component's current reasonableness criteria verbatim."""
-    template = sources["llm_match_quality.user.txt"]
-    if digest(template) != TRIAL_RUBRIC_DIGEST:
-        raise ValueError("TrialChecker rubric changed; review the individual component adaptation")
-    start_marker, end_marker = MATCHING_RULE_MARKERS[component]
-    start = template.index(start_marker)
-    end = template.index(end_marker, start)
-    return template[start:end].strip()
+def match_label_rules(sources):
+    """(preamble, {label: (question, rule)}), cut verbatim from the teacher's five-answer prompt.
+
+    The preamble is the prompt's shared rules (clinical text is data; key criteria only), without
+    its opening "answer five questions" sentence; each label keeps its question and its rules.
+    """
+    prompt = sources[MATCH_LABELS_PROMPT]
+    if digest(prompt) != MATCH_LABELS_DIGEST:
+        raise ValueError("Match-label prompt changed; review the TrialChecker component adaptation")
+    head, body = prompt.split("\n\n1. reasonableness: ", 1)
+    opening, preamble = head.split(" ", 1)[0], head.split(". ", 1)[1]
+    preamble = preamble.split("\n\nAnswer each question on its own terms", 1)[0].strip()
+    sections = re.split(r"(?m)^\n?(\d)\. ([a-z_]+): ", "1. reasonableness: " + body.split("\n\nOUTPUT FORMAT", 1)[0])
+    rules = {}
+    for index in range(1, len(sections), 3):
+        question, rule = sections[index + 2].strip().split("\n", 1)
+        rules[sections[index + 1]] = (question.strip(), rule.strip())
+    if opening != "Answer" or tuple(rules) != TRIAL_COMPONENTS:
+        raise ValueError("Match-label prompt structure changed; review the TrialChecker component adaptation")
+    return preamble, rules
 
 
-def trial_specificity_rules(sources):
-    """Keep the evidence standard identical for aggregate and binary specificity."""
-    template = sources["llm_match_quality.user.txt"]
-    if digest(template) != TRIAL_RUBRIC_DIGEST:
-        raise ValueError("TrialChecker rubric changed; review the individual component adaptation")
-    start = template.index(SPECIFICITY_RULES_HEADER)
-    end = template.index("\nOUTPUT FORMAT", start)
-    return template[start:end].strip()
+def numbered_boilerplate(criteria):
+    """The cohort's boilerplate criteria as the boilerplate step numbers them, and its items."""
+    from matchminer_ai.trials.cohort_boilerplate import split_criteria
+    items = split_criteria(criteria)
+    lines, label = [], ""
+    for number, (item_label, line) in enumerate(items, 1):
+        if item_label and item_label != label:
+            lines.append(item_label)
+            label = item_label
+        lines.append(f"[{number}] {line}")
+    return "\n".join(lines), items
 
 
 def good_option_rules(sources):
@@ -180,35 +142,20 @@ def good_option_rules(sources):
 def build_question_messages(task, sources):
     component = task["component"]
     if task["family"] == "trialchecking":
-        question, rule = TRIAL_COMPONENTS[component]
-        if component in MATCHING_RULE_MARKERS:
-            rule += "\n\n" + trial_matching_rules(sources, component)
-        if component in SPECIFICITY_COMPONENTS:
-            rule += "\n\n" + trial_specificity_rules(sources)
-            rule += ("\nFor this one binary specificity question, earning the point means "
-                     "answer Yes; insufficient evidence for the point means answer No.")
-        format_start = sources["llm_match_quality.user.txt"].index("Trial spaces may combine")
-        format_end = sources["llm_match_quality.user.txt"].index("\n\n", format_start)
-        rule += "\n\n" + sources["llm_match_quality.user.txt"][format_start:format_end]
-        context = f"PATIENT SUMMARY\n{task['patient_summary']}\n\nTRIAL SPACE\n{task['trial_summary']}"
-        scope = (
-            "Judge reasonable consideration, not complete protocol eligibility. Evaluate the "
-            "case at the most recent date in the patient summary, ignoring today's date. "
-            "Ignore ethical judgments and resource constraints."
-        )
+        scope, rules = match_label_rules(sources)
+        question, rule = rules[component]
+        rule += ("\nAnswer Yes for yes and No for no. Assess only this question; do not answer the "
+                 "others or give an overall score.")
+        context = (f"PATIENT HISTORY\n{task['patient_summary']}\n\n"
+                   f"COHORT KEY ELIGIBILITY CRITERIA\n{task['trial_summary']}")
     elif task["family"] == "boilerplatechecking":
-        question = "Does the patient clearly meet this specific trial exclusion criterion?"
-        rule = (
-            "Answer Yes only when the patient clearly meets the supplied exclusion. If it is "
-            "not completely clear, give the patient the benefit of the doubt and answer No. "
-            "Mild, low-grade, resolved, absent, or uncertain conditions do not automatically "
-            "satisfy an exclusion. Apply all thresholds and exceptions as written. A mention "
-            "in the patient extract can discuss whether a condition exists; it does not "
-            "establish that the patient has it. Assess no other exclusion."
-        )
-        context = (f"PATIENT HISTORY AND EXCLUSION EVIDENCE\n{task['patient_summary']}\n"
-                   f"{task['patient_boilerplate']}\n\nSINGLE TRIAL EXCLUSION\n{task['criterion']}")
-        scope = "Yes means this one exclusion clearly applies; No includes insufficient evidence."
+        question, rule = BOILERPLATE_QUESTION, BOILERPLATE_RULE
+        numbered, items = numbered_boilerplate(task["boilerplate_criteria"])
+        number = task["item_number"]
+        context = (f"PATIENT OTHER RELEVANT HISTORY\n{task['patient_boilerplate']}\n\n"
+                   f"COHORT BOILERPLATE CRITERIA\n{numbered}\n\n"
+                   f"CRITERION TO ASSESS\n[{number}] {items[number - 1][1].strip()}")
+        scope = "Yes means this one criterion is clearly failed; No includes insufficient evidence."
     elif task["family"] == "goodoptionschecking":
         question, rule = good_option_rules(sources)[component]
         context = (

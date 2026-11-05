@@ -305,16 +305,18 @@ order:
 4. Round 3: mine with the round-2 model and label (`mine-3`,
    `label-trialspace-3`, importing round-2 judgments). Its candidates feed the
    stages below; there is no third fit.
-5. `label-boilerplate`: BoilerplateChecker labels for a seeded sample of
-   round-3 candidate pairs.
+5. `label-boilerplate`: BoilerplateChecker labels for every unique combination
+   of patient boilerplate section and cohort boilerplate criteria among the
+   rounds 1-3 candidate pairs.
 6. `train-trial-checker`, `train-boilerplate-checker` (`train_checkers.py
    trial` / `boilerplate`).
 7. `catalog`, `validate-catalog`: the patient-free GoodOption drug evidence
    catalog (`train_good_option_checker.py catalog`).
-8. `prepare-exclusions`: teacher extraction of trial exclusion rules
-   (`oncoreasoning_training/prepare_boilerplate.py`).
-9. `prepare-oncoreasoning`, `distill-oncoreasoning`, `build-oncoreasoning`,
-   `train-oncoreasoning`.
+8. `prepare-oncoreasoning`, `distill-oncoreasoning`, `build-oncoreasoning`,
+   `train-oncoreasoning`: OncoReasoning asks the five match labels on key texts
+   and each cohort boilerplate criterion line on the patient's boilerplate
+   section (`oncoreasoning_training/README.md`); the earlier teacher extraction
+   of exclusions (`prepare-exclusions`) is gone.
 
 **Corpus.** `trialspace_training.py prepare` (`trialspace/data.py`) gives each
 patient `text` = the summary's key section and `boilerplate` = its boilerplate

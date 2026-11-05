@@ -170,12 +170,18 @@ def component_tasks(pair, sources, catalog=None, pack_evidence=None):
                 "trial_id": pair["trial_id"], "trial_summary": pair["trial_summary"]}
         task["messages"] = c.build_question_messages(task, sources)
         yield task
-    for criterion in pair.get("exclusion_criteria", []):
-        task = {**base, "family": "boilerplatechecking", "component": "exclusion_" + c.digest(criterion)[:16],
-                "trial_id": pair["trial_id"], "criterion": criterion,
-                "patient_boilerplate": pair.get("patient_boilerplate", "")}
-        task["messages"] = c.build_question_messages(task, sources)
-        yield task
+    # One question per line of the cohort's boilerplate criteria, about the patient's boilerplate
+    # section only; sibling cohorts with the same criteria give identical tasks, written once.
+    boilerplate = pair.get("trial_boilerplate", "")
+    if boilerplate and boilerplate.lower() != "nan":
+        _, items = c.numbered_boilerplate(boilerplate)
+        for number in range(1, len(items) + 1):
+            task = {"category": "clinical_qa", "patient_id": pair["patient_id"], "split": pair["split"],
+                    "family": "boilerplatechecking", "component": "boilerplate_" + c.digest([boilerplate, number])[:16],
+                    "trial_id": pair["trial_id"], "boilerplate_criteria": boilerplate, "item_number": number,
+                    "patient_boilerplate": pair.get("patient_boilerplate", "")}
+            task["messages"] = c.build_question_messages(task, sources)
+            yield task
     if catalog is None:
         return
     status = catalog.trial_status(pair["trial_id"])
@@ -258,18 +264,6 @@ def prepare(args, tokenizer=None):
                           "trial_boilerplate": str(row.get("trial_boilerplate_text") or "").strip()})
     if args.max_pairs:
         pairs = pairs[:args.max_pairs]
-    boilerplate_sources = {}
-    if args.boilerplate_components:
-        from oncoreasoning_training.prepare_boilerplate import validate_criteria
-        for pair in pairs:
-            source = pair["trial_boilerplate"]
-            if source and source.lower() != "nan":
-                key = c.digest([pair["trial_id"], source])
-                record = read_json(Path(args.boilerplate_components) / f"{key}.json")
-                if record["source"] != source:
-                    raise ValueError("Boilerplate component source mismatch")
-                pair["exclusion_criteria"] = validate_criteria(source, record["criteria"])
-                boilerplate_sources[key] = c.digest(record)
     manifest = {"format_version": c.FORMAT_VERSION, "student_model": args.model_name,
                 "tokenizer_fingerprint": c.tokenizer_fingerprint(tokenizer),
                 "contract_sha256": file_digest(c.__file__), "sources": sources,
@@ -277,7 +271,6 @@ def prepare(args, tokenizer=None):
                     required_recorded=[args.notes] if "summarization" in args.tasks else []),
                 "inputs_confirmed_non_phi": non_phi or args.confirm_inputs_are_non_phi,
                 "catalog_id": catalog.compatibility_id if catalog else None,
-                "boilerplate_sources": boilerplate_sources,
                 "settings": {key: getattr(args, key) for key in (
                     "tasks", "chunk_min_tokens", "chunk_max_tokens", "chunk_overlap", "seed",
                     "max_patients", "max_pairs", "patient_id_column", "date_column", "note_column", "splits")}}
@@ -516,7 +509,6 @@ def parser():
     prepare_parser.add_argument("--notes", type=Path, default=c.DEFAULT_DATA_DIR / "all_synthetic_notes.parquet")
     prepare_parser.add_argument("--candidates", type=Path, nargs="+", default=[])
     prepare_parser.add_argument("--catalog", type=Path, default=c.DEFAULT_DATA_DIR / "good_option_catalog_v3")
-    prepare_parser.add_argument("--boilerplate-components", type=Path, help="Validated patient-free exclusion extraction directory")
     prepare_parser.add_argument("--tasks", choices=c.TASKS, nargs="+", default=list(c.TASKS))
     prepare_parser.add_argument("--splits", choices=("train", "validation", "test"), nargs="+",
                                 default=["train", "validation", "test"])

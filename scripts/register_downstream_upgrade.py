@@ -20,7 +20,7 @@ KIND = 'downstream-teacher-recovery-v1'
 TRAINING_PATHS = {
     'README.md', 'oncoreasoning_training/README.md', 'train_from_summaries.py',
     'train_good_option_checker.py', 'oncoreasoning_training/contracts.py',
-    'oncoreasoning_training/create_all_training_data.py', 'oncoreasoning_training/prepare_boilerplate.py',
+    'oncoreasoning_training/create_all_training_data.py',
     'oncoreasoning_training/teacher.py', 'oncoreasoning_training/scheduling.py',
     'oncoreasoning_training/pipeline_upgrade.py', 'scripts/teacher_proxy.py',
     'scripts/register_downstream_upgrade.py', 'tests/test_teacher_execution.py',

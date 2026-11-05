@@ -22,7 +22,7 @@ import sys
 import time
 import urllib.request
 
-from oncoreasoning_training.contracts import DEFAULT_MODEL_NAME, TRIAL_RUBRIC_DIGEST, digest
+from oncoreasoning_training.contracts import DEFAULT_MODEL_NAME, MATCH_LABELS_DIGEST, digest
 from oncoreasoning_training.create_all_training_data import atomic_json, source_record
 from oncoreasoning_training.teacher import DEFAULT_TEACHER
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
@@ -272,18 +272,15 @@ def stages(args):
         [catalog / "manifest.json"], True))
     result.append(Stage("validate-catalog", [py, "train_good_option_checker.py", "validate-catalog",
         "--catalog", str(catalog)], [catalog / "manifest.json"]))
-    exclusions = run / "boilerplate_components"
-    result.append(Stage("prepare-exclusions", [py, "oncoreasoning_training/prepare_boilerplate.py",
-        "--candidates", *map(str, candidates), "--output-dir", str(exclusions),
-        "--server-urls-file", str(servers), "--teacher-model", teacher_model,
-        "--concurrency", str(args.teacher_concurrency)], [exclusions / "manifest.json"], True))
+    # OncoReasoning asks the five match labels on key texts and each cohort boilerplate criterion
+    # line on the patients' boilerplate sections, so no separate exclusion extraction runs.
     data = run / "oncoreasoning"
     program = [py, "oncoreasoning_training/create_all_training_data.py"]
     result.append(Stage("prepare-oncoreasoning", program + ["prepare", "--output-dir", str(data),
         "--notes", str(inputs['synthetic_notes']),
         "--pipeline-manifest", str(run / "pipeline_manifest.json"),
         "--candidates", *map(str, candidates), "--catalog", str(catalog),
-        "--boilerplate-components", str(exclusions), "--model-name", args.student_model,
+        "--model-name", args.student_model,
         "--inference-repo", str(args.inference_repo),
         '--splits', *['validation' if split == 'val' else split for split in mining_splits]], [data / "prepared.json"]))
     result.append(Stage("distill-oncoreasoning", program + ["generate", "--output-dir", str(data),
@@ -504,7 +501,7 @@ def main():
     manifest_path = args.run_dir / "pipeline_manifest.json"
     identity = {"args": training_identity_arguments(args),
                 "training_commit": git_revision(ROOT), "inference_commit": git_revision(args.inference_repo),
-                "trial_rubric_digest": TRIAL_RUBRIC_DIGEST,
+                "match_labels_digest": MATCH_LABELS_DIGEST,
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}
     from trialspace.regression import score_contract
     identity['trialspace_contract'] = score_contract()
@@ -515,7 +512,6 @@ def main():
                     ROOT / 'train_good_option_checker.py', ROOT / 'train_checkers.py',
                     *sorted((ROOT / 'trialspace').glob('*.py')),
                     ROOT / 'oncoreasoning_training/create_all_training_data.py',
-                    ROOT / 'oncoreasoning_training/prepare_boilerplate.py',
                     ROOT / 'oncoreasoning_training/teacher.py',
                     args.inference_repo / 'src/matchminer_ai/llm/traces.py',
                     args.inference_repo / 'src/matchminer_ai/llm/async_processing.py',
@@ -540,8 +536,7 @@ def main():
         match_label_traces=[str(args.run_dir / f'trialspace_round{i}/teacher/responses') for i in (1, 2, 3)],
         boilerplate_label_traces=str(args.run_dir / 'boilerplate_teacher/responses'),
         distillation_traces=str(args.run_dir / 'oncoreasoning/teacher_attempts'),
-        distillation_validated_responses=str(args.run_dir / 'oncoreasoning/responses'),
-        exclusion_traces=str(args.run_dir / 'boilerplate_components/teacher_attempts')))
+        distillation_validated_responses=str(args.run_dir / 'oncoreasoning/responses')))
     fingerprint = digest(identity)
     os.environ["PYTHONPATH"] = str(args.inference_repo / "src") + os.pathsep + str(ROOT)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
