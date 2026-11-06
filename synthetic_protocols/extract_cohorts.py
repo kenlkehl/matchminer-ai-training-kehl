@@ -239,8 +239,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-tokens", type=int, default=50000)
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--chunks-in-flight", type=int, default=2, choices=range(1, 17), metavar="1..16",
-                        help="Chunks of --chunk-size requests sent at once by each step (extraction, merge, "
-                             "boilerplate); raise it so a large server pool is used")
+                        help="Each step (extraction, merge, boilerplate) keeps --chunk-size x this many requests "
+                             "in flight, each sent as another returns; raise it so a large server pool is used")
     parser.add_argument("--limit", type=int, help="Only the first N protocols (smoke tests)")
     parser.add_argument("--no-merge-cohorts", dest="merge_cohorts", action="store_false",
                         help="Keep every extracted cohort instead of combining those with essentially the same criteria")

@@ -80,8 +80,9 @@ python -I synthetic_protocols/generate_batch.py \
 - **Concurrency:** the inference package's endpoint pool runs adaptive
   concurrency per server (starting at 32, growing in saturated successful
   windows up to the cap, halving under vLLM load pressure read from `/metrics`).
-  Two 500-trial chunks stay in flight so fast servers are not left idle while a
-  slow server finishes a chunk.
+  The inference package sends each request on its own and starts another as
+  soon as one returns, keeping `--chunk-size` x `chunks_in_flight` (500 x 2 by
+  default) requests in flight, so one slow protocol holds up only itself.
 - **Sampling:** the runtime model name (`--model-name`, default Nemotron 3.5
   Super VL NVFP4) selects the package's sampling profile (temperature 1.0,
   top-p 0.95, thinking on); `--max-tokens` defaults to 100,000.
@@ -123,12 +124,13 @@ The driver takes every protocol in the batch whose `meta.json` records a
 completed generation, checks that its seed matches `seeds.jsonl`, and sends the
 whole Markdown document to `extract_protocol_cohorts` with the full-protocol
 prompt and JSON-schema structured outputs (default model Nemotron 3.5 Super VL
-NVFP4, 50,000 completion tokens, chunks of 500 with two in flight). The merge and
-boilerplate steps send the same chunks, so at most 1,000 requests are in flight; with a
-large server pool raise `--chunks-in-flight` (up to 16; `run_pipeline.py
---protocol-cohort-chunks-in-flight`). It refuses a batch that mixes generation prompt versions. Servers, adaptive concurrency,
+NVFP4, 50,000 completion tokens). Each step (extraction, merge, boilerplate) keeps
+`--chunk-size` x `--chunks-in-flight` requests in flight (500 x 2 = 1,000 by default;
+`run_pipeline.py --protocol-cohort-chunks-in-flight` defaults to 16, 8,000 requests, for the
+GPU fleet), sending each request on its own as another returns, so one slow answer
+never holds up a batch. It refuses a batch that mixes generation prompt versions. Servers, adaptive concurrency,
 stopping and resuming work as for generation: each accepted decision is saved
-when its chunk returns and reused on rerun when the extraction prompt, schema and
+when its trial is decided and reused on rerun when the extraction prompt, schema and
 protocol bytes are unchanged. Output goes to `<batch-dir>/cohort_extraction/`
 (or `--output-dir`):
 

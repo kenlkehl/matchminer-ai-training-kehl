@@ -93,9 +93,10 @@ def parser():
                    help='Attempts per record for ctgov-cohorts (cohorts from the protocol seeds\' ctgov records)')
     p.add_argument('--ctgov-cohort-concurrency-per-server', '--registry-cohort-concurrency-per-server', type=int, choices=range(1, 1025), metavar='1..1024',
                    default=512, help='Per-server request ceiling for ctgov-cohorts')
-    p.add_argument('--protocol-cohort-chunks-in-flight', type=int, choices=range(1, 17), metavar='1..16', default=2,
-                   help='Chunks of 500 requests protocol-cohorts sends at once in each step (extraction, merge, '
-                        'boilerplate); raise it for a large server pool (ctgov-cohorts runs per listing)')
+    p.add_argument('--protocol-cohort-chunks-in-flight', type=int, choices=range(1, 17), metavar='1..16', default=16,
+                   help='protocol-cohorts keeps 500 x this many requests in flight in each step (extraction, merge, '
+                        'boilerplate), each sent as another returns; the default 8,000 fills the GPU fleet '
+                        '(ctgov-cohorts runs per listing)')
     p.add_argument('--cohort-max-tokens', type=int, default=50000)
     p.add_argument('--data-seed', type=int, default=42)
     p.add_argument('--dfci-trials-csv', type=Path, default=DATA_ROOT / 'dfci_trials_summary_10-18-26.csv')
