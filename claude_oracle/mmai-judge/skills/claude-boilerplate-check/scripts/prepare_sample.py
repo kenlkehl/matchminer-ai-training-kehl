@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sample rows from a parquet or CSV of patient/trial boilerplate pairs.
 
-Mirrors the preprocessing in 14_check_boilerplate.py:
+Mirrors the preprocessing in 14_check_boilerplate.py (removed 2026-11-05):
   * Drop rows where patient_boilerplate_text or trial_boilerplate_text is
     null or empty string.
 Then randomly samples n rows with the given seed and writes:

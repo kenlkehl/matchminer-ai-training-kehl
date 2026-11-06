@@ -5,8 +5,8 @@ Unlike simulated_oa_run.py, this script does NOT touch the database and does
 NOT re-summarize patients. It starts from a pre-existing
 patient_summaries.parquet (the schema produced by summarize_patients.py)
 and runs: patient embedding -> top-K trial-space retrieval -> TrialChecker ->
-BoilerplateChecker -> (optional) LLM trial check -> (optional) LLM
-boilerplate check.
+BoilerplateChecker. (The optional LLM boilerplate check, which ran the removed
+14_check_boilerplate.py, was removed on 2026-11-05, user instruction.)
 
 Each row of the output parquet is one (patient, retrieved trial space) pair.
 No NCT-level deduplication is applied. Trial spaces are retrieved by TrialSpace
@@ -16,18 +16,17 @@ n_patients * --top-k-output rows. (The legacy --top-k flag sets both.)
 Ranking is always by TrialSpace cosine similarity; the checker stages only
 populate score columns and never re-order or filter the output.
 
-Default behavior runs all three scoring stages. Use --stages to subset.
+Default behavior runs both scoring stages. Use --stages to subset.
 
 Examples:
-    # All three stages, local GPUs for everything
+    # Both stages
     python run_pipeline_on_patient_summaries.py \
         --input-summaries patient_summaries.parquet \
         --embedding-model ../../../models/trialspace \
         --embeddings trial_space_embeddings.parquet \
         --trial-checker ../../../models/trialchecker \
         --boilerplate-checker ../../../models/boilerplatechecker \
-        --gpu 0,1 \
-        --llm-check-gpus 2,3 --llm-check-gpus-per-kernel 2
+        --gpu 0,1
 
     # Only the two ModernBERT checkers
     python run_pipeline_on_patient_summaries.py \
@@ -37,15 +36,6 @@ Examples:
         --trial-checker ../../../models/trialchecker \
         --boilerplate-checker ../../../models/boilerplatechecker \
         --stages trial,boilerplate --gpu 0
-
-    # LLM checks dispatched to already-running vLLM servers
-    python run_pipeline_on_patient_summaries.py \
-        --input-summaries patient_summaries.parquet \
-        --embedding-model ../../../models/trialspace \
-        --embeddings trial_space_embeddings.parquet \
-        --trial-checker ../../../models/trialchecker \
-        --boilerplate-checker ../../../models/boilerplatechecker \
-        --llm-check-server-urls http://node-a:8000,http://node-b:8000
 """
 
 import argparse
@@ -59,7 +49,6 @@ from simulated_oa_run import (
     QUERY_PROMPT,
     parallel_encode,
     parallel_checker,
-    run_or_resume_llm_checks,
 )
 
 
@@ -73,11 +62,6 @@ DEFAULT_EMBEDDINGS = (
     / "data" / "phi" / "real_time" / "trial_space_embeddings.parquet"
 )
 
-DEFAULT_LLM_CHECK_ARTIFACT_ROOT = (
-    Path(__file__).resolve().parents[3]
-    / "data" / "phi" / "real_time" / "run_pipeline_llm_checks"
-)
-
 DEFAULT_ONCORE_CSV = (
     Path(__file__).resolve().parents[3]
     / "data" / "phi" / "real_time" / "oncore_data.csv"
@@ -86,7 +70,7 @@ DEFAULT_ONCORE_CSV = (
 HARDCODED_EXCLUDED_NCTS = {"NCT04301765", "NCT04049331"}
 
 # The legacy single-score LLM trial check (llm_trial) was removed on 2026-11-04 (user instruction).
-ALL_STAGES = ("trial", "boilerplate", "llm_boilerplate")
+ALL_STAGES = ("trial", "boilerplate")
 
 
 def parse_stages(raw: str):
@@ -176,37 +160,6 @@ def parse_args():
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT),
                         help="Output parquet path (also writes .csv and .xlsx).")
 
-    # ----- LLM-check passthrough (only used if llm_boilerplate is selected)
-    parser.add_argument("--llm-check-script-boilerplate", default=str(
-        Path(__file__).resolve().parents[2] / "14_check_boilerplate.py"))
-    parser.add_argument("--llm-check-model", default="google/gemma-4-31b-it",
-                        help="Model passed to both LLM check scripts. Ignored "
-                             "(auto-discovered from /v1/models) when "
-                             "--llm-check-server-urls / "
-                             "--llm-check-server-urls-file is set.")
-    parser.add_argument("--llm-check-download-dir", default="/data1/ken/models")
-    parser.add_argument("--llm-check-gpus", default=None,
-                        help="Comma-separated GPU ids for LLM-check vLLM kernels. "
-                             "Used only when no --llm-check-server-urls. "
-                             "Defaults to --gpu.")
-    parser.add_argument("--llm-check-gpus-per-kernel", type=int, default=1,
-                        help="tensor_parallel_size for each LLM-check vLLM kernel.")
-    parser.add_argument("--llm-check-server-urls", default=None,
-                        help="Comma-separated existing vLLM server URLs to "
-                             "dispatch LLM checks to (skips in-process vLLM).")
-    parser.add_argument("--llm-check-server-urls-file", default=None,
-                        help="Path to a file listing vLLM server URLs. "
-                             "Mutually exclusive with --llm-check-server-urls.")
-    parser.add_argument("--llm-check-max-model-len", type=int, default=30000)
-    parser.add_argument("--llm-check-max-num-seqs", type=int, default=900)
-    parser.add_argument("--llm-check-gpu-memory-utilization", type=float, default=0.92)
-    parser.add_argument("--llm-check-prompt-batch-size", type=int, default=512)
-    parser.add_argument("--llm-check-artifact-root",
-                        default=str(DEFAULT_LLM_CHECK_ARTIFACT_ROOT),
-                        help="Directory for LLM-check staging + outputs.")
-    parser.add_argument("--resume-llm-check-dir", default=None,
-                        help="Reuse a prior LLM-check run directory.")
-
     return parser.parse_args()
 
 
@@ -274,9 +227,6 @@ def main():
     if "boilerplate" in stages and not args.boilerplate_checker:
         sys.exit("--boilerplate-checker is required when 'boilerplate' is in "
                  "--stages (or drop 'boilerplate' from --stages).")
-    if args.llm_check_server_urls and args.llm_check_server_urls_file:
-        sys.exit("Specify only one of --llm-check-server-urls / "
-                 "--llm-check-server-urls-file.")
 
     print(f"Stages enabled: {sorted(stages)}")
 
@@ -393,47 +343,12 @@ def main():
         bp_scores_matrix = bp_flat.reshape(n_patients, top_k).astype(np.float64)
         print("BoilerplateChecker scoring complete.")
 
-    # --- LLM checks ------------------------------------------------------
-    pair_id_matrix = np.full((n_patients, top_k), -1, dtype=np.int64)
-    pair_rows_for_llm = []
-    pair_id_counter = 0
-    for i in range(n_patients):
-        for j in range(top_k):
-            idx = top_indices[i, j]
-            pair_id_matrix[i, j] = pair_id_counter
-            pair_rows_for_llm.append({
-                "pair_id": pair_id_counter,
-                "patient_id": patient_ids[i],
-                "mrn": patient_ids[i],
-                "nct_id": nct_ids[idx],
-                "patient_summary": patient_summaries[i],
-                "this_space": space_texts[idx],
-                "patient_boilerplate_text": patient_boilerplates[i] or "",
-                "trial_boilerplate_text": trial_boilerplates[idx] or "",
-            })
-            pair_id_counter += 1
-
-    # Expose stage selection to run_or_resume_llm_checks via the attributes
-    # it looks up on `args`.
-    args.llm_boilerplate_checker = "llm_boilerplate" in stages
-
-    llm_results = {}
-    if args.llm_boilerplate_checker:
-        print(f"Running LLM-based checks on {len(pair_rows_for_llm)} "
-              f"(patient, trial) pairs ...")
-        llm_results, llm_run_dir = run_or_resume_llm_checks(
-            pair_rows_for_llm, args,
-        )
-        print(f"LLM check artifacts: {llm_run_dir}")
-
     # --- Build output ----------------------------------------------------
     print("Building output dataframe ...")
     rows = []
     for i in range(n_patients):
         for j in range(top_k):
             idx = top_indices[i, j]
-            pid = int(pair_id_matrix[i, j])
-            llm = llm_results.get(pid, {})
             rows.append({
                 args.patient_id_col: patient_ids[i],
                 "patient_summary": patient_summaries[i],
@@ -445,8 +360,6 @@ def main():
                 "cosine_similarity": float(sim_matrix[i, idx]),
                 "trialchecker_score": float(tc_scores_matrix[i, j]),
                 "boilerplate_score": float(bp_scores_matrix[i, j]),
-                "llm_boilerplate_excluded": llm.get("llm_boilerplate_excluded", np.nan),
-                "llm_boilerplate_reasoning": llm.get("llm_boilerplate_reasoning", ""),
                 "rank": j + 1,
             })
 

@@ -28,13 +28,20 @@ versions; a trial accepted in only one version uses it. Patients are generated
 from protocol cohorts only. Do not revert to single-version retrieval without
 the user's instruction.
 
+Removed components (user instruction, November 5): OncoReasoning distillation (`oncoreasoning_training/`,
+its pipeline stages and the peft/trl/bitsandbytes/liger dependencies), the training GoodOption catalog stages and
+scripts (`train_good_option_checker.py`, `train_good_option_cosplit.py`; GoodOption stays in the inference
+package, scored with LLMs), `14_check_boilerplate.py` and the real-time evaluations' optional LLM-boilerplate
+stage that ran it (question-6 labels come from `trialspace_training.py label --task boilerplate`), and the scoped
+upgrade receipts (`scripts/register_{oncoreasoning,trialspace,downstream}_upgrade.py`, `pipeline_upgrade.py`):
+a changed run identity now always needs a fresh run directory. Do not restore them without the user's instruction.
+
 Sampling (user instruction, November 5): every teacher, generation and summarization script must be
 Nemotron-aware. Resolve sampling from the served model's HF id through the inference package's profiles
 (`vllm_reasoning_utils.resolve_sampling_defaults` / `sampling_from_args`, `apply_model_profile`, or a section
 with `sampling_profile: auto`); never hard-code another family's values. Nemotron 3.5 Super gets NVIDIA's
 sampling (temperature 1.0, top_p 0.95, top_k -1, min_p 0, repetition_penalty 1.0, thinking on) even in
-inference sections whose presets fix greedy decoding (its profile's `replaces_task_sampling`), and the
-GoodOption teacher wrapper applies that profile to its config so catalog fingerprints record it. Free-text
+inference sections whose presets fix greedy decoding (its profile's `replaces_task_sampling`). Free-text
 JSON answers from Nemotron often lose the opening quote of a string field, so the JSON teacher tasks (match
 labels and per-criterion labels) are decoded under their schemas (`trialspace.contracts.answer_schema`, vLLM
 `structured_outputs`; part of each label contract, user instruction November 5); constrain any new one too.

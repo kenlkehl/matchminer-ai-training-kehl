@@ -119,8 +119,6 @@ def test_full_plan_connects_all_stages_and_live_pool(tmp_path):
     for item in training.stages(own):
         if item.name.startswith('label-trialspace-'):
             assert item.command[item.command.index('--concurrency-control-file') + 1] == str(tmp_path / 'label_limits.json')
-    summary_distillation = next(s for s in downstream if s.name == 'prepare-oncoreasoning')
-    assert summary_distillation.command[summary_distillation.command.index('--notes') + 1] == str(args.synthetic_notes)
 
 
 def test_pipeline_passes_note_preparation_workers(tmp_path):
@@ -144,7 +142,7 @@ def commands(plan, prefix):
 def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_path, wrapper):
     plan = dry_run_plan(wrapper)
     names = [row['name'] for row in plan]
-    assert names[:names.index('catalog')] == ['prepare-trialspace',
+    assert names == ['prepare-trialspace',
         'mine-1', 'label-trialspace-1', 'label-boilerplate-1', 'label-criteria-1', 'project-trialspace-1', 'train-trialspace-1',
         'mine-2', 'label-trialspace-2', 'label-boilerplate-2', 'label-criteria-2', 'project-trialspace-2', 'train-trialspace-2',
         'mine-3', 'label-trialspace-3', 'label-boilerplate-3', 'label-criteria-3',
@@ -199,8 +197,6 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
             ['96', '32', 'trialspace']
     assert fits[0][fits[0].index('--base-model') + 1] == 'google/embeddinggemma-2'
     assert fits[1][fits[1].index('--base-model') + 1].endswith('trialspace_round1')
-    catalog = commands(plan, 'catalog')[0]
-    assert catalog[catalog.index('--candidate-files') + 1].endswith('trialspace_round3/mining/patient_to_cohort.parquet')
 
 
 def test_training_only_retains_original_default_identity(tmp_path):

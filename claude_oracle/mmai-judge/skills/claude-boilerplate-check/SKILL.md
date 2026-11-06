@@ -8,7 +8,7 @@ allowed-tools: Read Write Bash(python *) Bash(python3 *) Bash(ls *) Bash(mkdir *
 
 # claude-boilerplate-check
 
-You are running the oracle replica of `14_check_boilerplate.py`. Use
+You are running the oracle replica of `14_check_boilerplate.py` (removed 2026-11-05; this skill keeps its prompt and parsing). Use
 **ultrathink** on every row using Claude's supported controls, so
 extended thinking must be active throughout the scoring loop.
 

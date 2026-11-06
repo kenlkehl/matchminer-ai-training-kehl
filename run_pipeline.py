@@ -102,6 +102,8 @@ def parser():
     p.add_argument('--dfci-first-year', type=int, default=2025)
     p.add_argument('--dfci-last-year', type=int, default=2026)
     p.add_argument('--generation-dir', type=Path)
+    p.add_argument('--synthetic-notes', type=Path,
+                   help='Prepared synthetic notes (prepare-notes output); default: DATA_DIR/all_synthetic_notes.parquet')
     p.add_argument('--raw-synthetic-notes', type=Path)
     p.add_argument('--server-urls-file', type=Path, help='Externally managed live pool for upstream LLM stages')
     p.add_argument('--concurrency-control-file', type=Path,

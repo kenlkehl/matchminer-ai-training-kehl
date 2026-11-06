@@ -7,8 +7,10 @@ labels patient–cohort pairs with an LLM teacher, and trains the models that th
 inference package (`matchminer-ai-inference-kehl`, Python package `matchminer_ai`)
 uses at runtime: the TrialSpace retriever (dense EmbeddingGemma 2), the decision
 model (LiquidAI d1-2B fine-tuned on seven yes/no question families; it replaced
-TrialChecker and BoilerplateChecker on 2026-11-05, user instruction) and the
-OncoReasoning adapters. TrialSpace is the only
+TrialChecker and BoilerplateChecker on 2026-11-05, user instruction). The
+OncoReasoning distillation and the training GoodOption catalog were removed on
+2026-11-05 (user instruction); GoodOption stays in the inference package, scored
+with LLMs. TrialSpace is the only
 retriever: every ColBERT retrieval path was removed from both repositories on
 2026-11-04 (user instruction; see [History](#history-the-october-2026-retriever-comparison)).
 
@@ -166,8 +168,8 @@ generating. The steps below describe the October runs.
    then-current gated 0–6 labels from the Gemma 4 31B NVFP4 teacher (2,403,278
    pairs; that label design was replaced on 2026-11-04), and EmbeddingGemma 2
    training, stopped by the user at checkpoint 11,600 on 2026-10-28. The
-   integrated runner, `train_from_summaries.py` (TrialSpace, the decision model
-   and OncoReasoning), is described under
+   integrated runner, `train_from_summaries.py` (TrialSpace and the decision
+   model), is described under
    [Training](#training-train_from_summariespy).
 
 ## Pipeline
@@ -191,7 +193,7 @@ default range is `train` only.
 | `prepare-notes` | `prepare_synthetic_training.py notes` | `all_synthetic_notes.parquet`, `synthetic_patient_metadata.parquet` |
 | `summarize-patients` | `summarize_patients.py` | `patient_summaries.parquet`, `patient_serial_summaries.parquet` |
 | `prepare-training` | `prepare_synthetic_training.py summaries` | `patient_summaries_with_spaces.parquet` (key section in `patient_summary`, boilerplate section in `patient_boilerplate_text`) |
-| `train` | `train_from_summaries.py` (corpus from `retrieval_cohorts.csv`) | TrialSpace rounds, the decision model and OncoReasoning under `../models/embeddinggemma2_pipeline_v1` |
+| `train` | `train_from_summaries.py` (corpus from `retrieval_cohorts.csv`) | TrialSpace rounds and the decision model under `../models/embeddinggemma2_pipeline_v1` |
 
 Patients are generated only from the protocol cohorts (`generation-cohorts`),
 with all their criteria; retrieval, labeling and training use
@@ -224,7 +226,7 @@ directory prevents concurrent runs, and logs go to `<pipeline-dir>/logs/`.
 `generation.lock` is held.
 
 The default LLM for data production and labeling is
-`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` (`oncoreasoning_training/teacher.py`), overridden
+`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` (`train_from_summaries.DEFAULT_TEACHER`), overridden
 with `--generation-model` / `--generation-tokenizer` (upstream) and
 `--teacher-model` / `--teacher-served-model` (training; an endpoint's model root
 must match the teacher model or be an approved quantization of it, listed in
@@ -302,8 +304,8 @@ such as `None` or `NA`; only empty cells are missing.
 
 ## Training (`train_from_summaries.py`)
 
-The integrated runner trains the TrialSpace retriever (EmbeddingGemma 2), the
-decision model and the OncoReasoning adapters. Its stages, in order:
+The integrated runner trains the TrialSpace retriever (EmbeddingGemma 2) and the
+decision model. Its stages, in order:
 
 1. `prepare-trialspace` (`trialspace_training.py prepare`): the corpus every
    round shares (below).
@@ -315,18 +317,11 @@ decision model and the OncoReasoning adapters. Its stages, in order:
    judgments of pairs mined again (`--reuse-labels`); the boilerplate and
    criteria labels skip what round 1 labeled (`--skip-labeled`).
 4. Round 3: mine with the round-2 model and label (`mine-3`,
-   `label-trialspace-3`, importing round-2 judgments). Its candidates feed the
-   stages below; there is no third fit.
+   `label-trialspace-3`, importing round-2 judgments; `label-boilerplate-3`,
+   `label-criteria-3`). There is no third fit.
 5. `prepare-decision-data`, `train-decision-model` (`train_decision_model.py
    prepare` / `train`): the decision model on every round's labels of all seven
    question families.
-7. `catalog`, `validate-catalog`: the patient-free GoodOption drug evidence
-   catalog (`train_good_option_checker.py catalog`).
-8. `prepare-oncoreasoning`, `distill-oncoreasoning`, `build-oncoreasoning`,
-   `train-oncoreasoning`: OncoReasoning asks the five match labels on key texts
-   and each cohort boilerplate criterion line on the patient's boilerplate
-   section (`oncoreasoning_training/README.md`); the earlier teacher extraction
-   of exclusions (`prepare-exclusions`) is gone.
 
 **Corpus.** `trialspace_training.py prepare` (`trialspace/data.py`) gives each
 patient `text` = the summary's key section and `boilerplate` = its boilerplate
@@ -464,15 +459,7 @@ unless an experiment says otherwise. Each round's `mining/` also holds
 per-direction tables (`patient_to_cohort.parquet`, `cohort_to_patient.parquet`)
 with the key texts as `patient_summary` / `this_space` (also
 `cohort_key_criteria`) and the boilerplate texts as `patient_boilerplate_text` /
-`trial_boilerplate_text`; round 3's feed the catalog, exclusion and OncoReasoning
-stages.
-
-**OncoReasoning.** Student base `google/gemma-4-E4B-it` with two independent
-LoRA adapters on one frozen base (rank 64, alpha 128, all linear layers):
-`summarization` and `clinical_qa`. The QA adapter covers trial checking,
-exclusion (boilerplate) checking and GoodOption checking. Outputs go to
-`oncoreasoning/` under `--models-dir` with `oncoreasoning_contract.json`. These
-QA families are separate from the decision model above.
+`trial_boilerplate_text`.
 
 ```bash
 ~/thisenv/bin/python train_from_summaries.py --dry-run
@@ -490,14 +477,16 @@ Defaults: `--run-dir ../data/no_phi/embeddinggemma2_pipeline_v1`,
 repeated `--teacher-url`, or one vLLM server started per GPU in `--gpus`
 (default 0–7). Completed stages are marked in `<run-dir>/completed/` against
 the run identity. Any change to settings, inputs, sources or either repository's
-commit makes a resume fail unless a scoped upgrade is registered
-(`scripts/register_*_upgrade.py`). Checker settings: `--checker-model`,
-`--checker-max-length`, `--checker-epochs`, `--checker-batch-size`,
-`--checker-learning-rate`.
+commit makes a resume fail: use a fresh run directory (the scoped upgrade
+receipts were removed on 2026-11-05). Decision-model settings:
+`--decision-model`, `--decision-revision`, `--decision-max-length`,
+`--decision-epochs`, `--decision-batch-size`,
+`--decision-gradient-accumulation-steps`, `--decision-learning-rate`,
+`--criteria-pair-fraction`, `--criteria-seed`.
 
 ### Labeling and retrieval storage
 
-- **Labeling** (`trialspace_training.py label --task match|boilerplate`,
+- **Labeling** (`trialspace_training.py label --task match|boilerplate|criteria`,
   `label_workspace.py`) runs on local SSD by default
   (`/tmp/mmai-labels/<hash>`, or `MMAI_LABEL_SCRATCH_DIR`; 16 GiB reserve;
   `MMAI_LOCAL_LABEL_STORAGE=0` disables). Concurrency per server starts at 96 and
@@ -567,16 +556,14 @@ and `scripts/benchmark_embeddinggemma_batches.py`.
 | `summarize_patients.py`, `summary_pool.py`, `summary_workspace.py` | Serial summarization | Current |
 | `train_from_summaries.py`, `trialspace_training.py`, `trialspace/`, `trialspace_comparison.py`, `finetune_embedder.py`, `trialspace_embedding_losses.py`, `trialspace_prompt_profiles.py`, `retrieval_workspace.py`, `label_workspace.py`, `retrieval_cache_import.py`, `training_workspace.py` | TrialSpace corpus, mining, match, boilerplate and per-criterion labeling, fitting | Current |
 | `train_decision_model.py` | The decision model (d1-2B) on all seven question families | Current |
-| `oncoreasoning_training/` | Exclusion extraction, distillation, OncoReasoning adapters | Current (its README is provisional) |
-| `train_good_option_checker.py` | GoodOption catalog (`catalog`, `validate-catalog`) | Current; its `label`/`train` checker modes are deprecated |
 | `remote_vllm_pool.py`, `adaptive_controller.py`, `vllm_reasoning_utils.py` | Server pool, adaptive concurrency, reasoning parsers | Current |
 | `synthetic_protocols/` | Synthetic protocol corpus and its cohort extraction | Current |
-| `scripts/` | GCP fleet (`gcp_note_fleet.py`, `gcp_note_worker.py`, `bootstrap_gcp.sh`), remote TrialSpace jobs, `teacher_proxy.py`, `post_notes_workflow.py`, `label_to_trialspace.py`, `check_patient_summaries.py`, `download_ctgov_protocols.py`, `cohort_dashboard.py` (cohort review: as extracted, merged, or key and boilerplate criteria separated), one-off `register_*_upgrade.py` resume upgrades | Mixed; see each docstring |
+| `scripts/` | GCP fleet (`gcp_note_fleet.py`, `gcp_note_worker.py`, `bootstrap_gcp.sh`), remote TrialSpace jobs, `teacher_proxy.py`, `post_notes_workflow.py`, `label_to_trialspace.py`, `check_patient_summaries.py`, `download_ctgov_protocols.py`, `cohort_dashboard.py` (cohort review: as extracted, merged, or key and boilerplate criteria separated), `register_event_validation_upgrade.py` (a one-off generation resume upgrade) | Mixed; see each docstring |
 | `docs/history/` | October 2026 retriever comparison logs (ColBERT removed 2026-11-04) | Historical |
 | `claude_oracle/` | Claude Code plugin with judge skills for evaluations | Current |
 | `real_eval_code/` | Retrospective evaluations on real (PHI) data | Current; some scripts use the legacy extractor |
 | `legacy_trial_space_extraction.py`, `trial_hierarchy*.py`, `trial_prompts/`, `trial_space_export.py`, `trial_treatment_screening.py` | Pre-cohort trial-space extraction, superseded by `0b` | Legacy |
-| `14_check_boilerplate.py`, `make_top_matches.py`, `train_good_option_cosplit.py` | Earlier checker labeling and retrieval, superseded by the match and boilerplate labels, `train_checkers.py` and OncoReasoning (the single-score LLM labeler `llm_check_trials.py` was removed on 2026-11-04) | Legacy |
+| `make_top_matches.py` | Earlier SentenceTransformer top-match retrieval (kept for the embedder comparison) | Legacy |
 | `gcp_vllm_orchestrator.py`, `pdfify_synthetic_notes.py`, `synthetic_eval_code/` | Earlier fleet management, synthetic-note PDFs, a one-patient demo | Legacy |
 | `pull_spacify_and_embed_ctgov` | Pulls current ClinicalTrials.gov cancer trials, extracts legacy trial spaces and embeds them for `real_eval_code/real_time_eval/` | Legacy (uses the legacy extractor) |
 

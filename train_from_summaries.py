@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Resumable TrialSpace → decision model → catalog → OncoReasoning pipeline.
+"""Resumable TrialSpace → decision model pipeline.
 
-Existing non-PHI summaries seed mining; the NVIDIA teacher provides all fresh labels,
-catalog evidence and distillation. TrialSpace (EmbeddingGemma 2) is mined and refit over
+Existing non-PHI summaries seed mining; the NVIDIA teacher provides all fresh labels.
+TrialSpace (EmbeddingGemma 2) is mined and refit over
 three rounds on the patients' key summary sections and the cohorts' key criteria. Every round
 the teacher labels all seven decision-model question families: the five match labels of each
 candidate pair (also TrialSpace's labels), the boilerplate label of each new unique boilerplate
 combination, and each criteria line of a seeded fraction of the pairs (yes = the patient does
 not clearly fail the line). Every round's labels fine-tune the decision model (LiquidAI d1-2B,
-train_decision_model.py), which replaces TrialChecker and BoilerplateChecker. OncoReasoning is
-distilled last.
+train_decision_model.py), which replaces TrialChecker and BoilerplateChecker. OncoReasoning
+distillation and the training GoodOption catalog were removed on 2026-11-05 (user instruction);
+GoodOption stays in the inference package, scored with LLMs.
 """
 from __future__ import annotations
 import argparse
@@ -26,13 +27,13 @@ import sys
 import time
 import urllib.request
 
-from oncoreasoning_training.contracts import DEFAULT_MODEL_NAME, MATCH_LABELS_DIGEST, digest
-from oncoreasoning_training.create_all_training_data import atomic_json, source_record
-from oncoreasoning_training.teacher import DEFAULT_TEACHER
+from trial_cohort_format import file_stamp
+from trialspace.data import digest, write_json as atomic_json
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 from trialspace.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_TEACHER = 'nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4'
 DEFAULT_EMBEDDER = 'google/embeddinggemma-2'
 DEFAULT_DECISION_MODEL = 'LiquidAI/d1-2B'
 DECISION_MODEL_REVISION = '652f920e544ea37f81e4b0ce89b81d4ed0da90b1'
@@ -46,7 +47,7 @@ TRIALSPACE_OPERATIONAL_OPTIONS = {
 def training_identity_arguments(args):
     return {key: str(value) for key, value in vars(args).items()
             if key not in {'dry_run', 'skip_input_validation', *TRIALSPACE_OPERATIONAL_OPTIONS}
-            and not (key in ('trial_spaces', 'patient_summaries', 'synthetic_notes',
+            and not (key in ('trial_spaces', 'patient_summaries',
                              'teacher_servers_file', 'teacher_concurrency_file') and value is None)}
 
 
@@ -78,8 +79,6 @@ def parser():
                    help="Complete accepted cohort CSV/parquet; default: DATA_DIR/trial_cohort_lineitems.csv")
     p.add_argument("--patient-summaries", type=Path,
                    help="Summarized synthetic patients; default: DATA_DIR/patient_summaries_with_spaces.parquet")
-    p.add_argument("--synthetic-notes", type=Path,
-                   help="Generated synthetic notes; default: DATA_DIR/all_synthetic_notes.parquet")
     p.add_argument("--run-dir", type=Path, default=ROOT.parent / "data/no_phi/embeddinggemma2_pipeline_v1")
     p.add_argument("--models-dir", type=Path, default=ROOT.parent / "models/embeddinggemma2_pipeline_v1")
     p.add_argument("--inference-repo", type=Path, default=ROOT.parent / "matchminer-ai-inference-kehl")
@@ -92,7 +91,6 @@ def parser():
     p.add_argument("--teacher-concurrency-file", type=Path,
                    help="Live per-server limits for TrialSpace labeling only; its short requests "
                         "need higher limits than generation or summary stages.")
-    p.add_argument("--student-model", default=DEFAULT_MODEL_NAME)
     p.add_argument("--embedding-model", default=DEFAULT_EMBEDDER, help="Round-1 TrialSpace base model")
     p.add_argument('--embedding-revision', help='Base model revision; default: the pinned EmbeddingGemma 2 revision')
     p.add_argument('--embedding-python', type=Path,
@@ -141,8 +139,6 @@ def parser():
                    metavar='1..1024', default=256,
                    help='Sequence capacity for locally launched vLLM servers; request concurrency adapts below it')
     p.add_argument("--teacher-port", type=int, default=8100)
-    p.add_argument("--teacher-concurrency", type=int, default=0,
-                   help="Total downstream teacher request limit; 0 uses live per-server capacities")
     p.add_argument("--label-concurrency-per-server", type=int, choices=range(1, 1025),
                    metavar="1..1024", default=DEFAULT_CEILING,
                    help="Adaptive TrialSpace labeling ceiling per endpoint; live per-server limits can lower it.")
@@ -158,8 +154,7 @@ def parser():
 
 def input_paths(args):
     """Use the same explicit filenames in validation, manifests, and every stage."""
-    defaults = dict(patient_summaries="patient_summaries_with_spaces.parquet",
-                    synthetic_notes="all_synthetic_notes.parquet", trial_spaces="trial_cohort_lineitems.csv")
+    defaults = dict(patient_summaries="patient_summaries_with_spaces.parquet", trial_spaces="trial_cohort_lineitems.csv")
     return {key: (getattr(args, key, None) or args.data_dir / filename).expanduser().resolve()
             for key, filename in defaults.items()}
 
@@ -202,9 +197,8 @@ def stages(args):
     dense_launch = [dense_py, *launch[1:]]  # One finetune_embedder rank per GPU in --gpus.
     embedding = args.embedding_model
     revision = args.embedding_revision or (EMBEDDINGGEMMA2_REVISION if embedding == DEFAULT_EMBEDDER else None)
-    # Three mining and labeling rounds; TrialSpace is refit after rounds 1 and 2, every round's
-    # labels of all seven question families train the decision model, and round 3's candidates
-    # supply the catalog and OncoReasoning.
+    # Three mining and labeling rounds; TrialSpace is refit after rounds 1 and 2, and every round's
+    # labels of all seven question families train the decision model.
     teacher_dirs, boilerplate_dirs, criteria_dirs = [], [], []
     for iteration in (1, 2, 3):
         round_dir = run / f'trialspace_round{iteration}'
@@ -287,39 +281,6 @@ def stages(args):
         '--gradient-accumulation-steps', str(args.decision_gradient_accumulation_steps),
         '--learning-rate', str(args.decision_learning_rate)],
         [decision_model / 'decision_contract.json', decision_model / 'model.safetensors']))
-    catalog = run / "good_option_catalog"
-    result.append(Stage("catalog", [py, "train_good_option_checker.py", "catalog",
-        "--catalog", str(catalog), "--catalog-checkpoint-dir", str(run / "catalog_checkpoints"),
-        "--candidate-files", *map(str, candidates), "--model", teacher_model,
-        "--server-urls-file", str(servers), "--max-concurrent-requests", str(args.teacher_concurrency)],
-        [catalog / "manifest.json"], True))
-    result.append(Stage("validate-catalog", [py, "train_good_option_checker.py", "validate-catalog",
-        "--catalog", str(catalog)], [catalog / "manifest.json"]))
-    # OncoReasoning asks the five match labels on key texts and each cohort boilerplate criterion
-    # line on the patients' boilerplate sections, so no separate exclusion extraction runs.
-    data = run / "oncoreasoning"
-    program = [py, "oncoreasoning_training/create_all_training_data.py"]
-    result.append(Stage("prepare-oncoreasoning", program + ["prepare", "--output-dir", str(data),
-        "--notes", str(inputs['synthetic_notes']),
-        "--pipeline-manifest", str(run / "pipeline_manifest.json"),
-        "--candidates", *map(str, candidates), "--catalog", str(catalog),
-        "--model-name", args.student_model,
-        "--inference-repo", str(args.inference_repo),
-        '--splits', *['validation' if split == 'val' else split for split in mining_splits]], [data / "prepared.json"]))
-    result.append(Stage("distill-oncoreasoning", program + ["generate", "--output-dir", str(data),
-        "--server-urls-file", str(servers), "--teacher-model", teacher_model,
-        "--teacher-tokenizer", args.teacher_model,
-        "--teacher-context", str(args.teacher_max_context), "--teacher-thinking",
-        "--concurrency", str(args.teacher_concurrency)], [data / "generation_manifest.json"], True))
-    result.append(Stage("build-oncoreasoning", program + ["build", "--output-dir", str(data)],
-                        [data / "training_manifest.json", data / "tokenized_dataset"]))
-    student = models / "oncoreasoning"
-    result.append(Stage("train-oncoreasoning", launch + ["oncoreasoning_training/fine_tune_llm.py",
-        "--data-dir", str(data), "--output-dir", str(student),
-        "--gradient-accumulation-steps", str(max(1, 64 // gpu_count)),
-        '--training-splits', *['validation' if split == 'val' else split for split in training_splits],
-        "--fsdp", "--resume-from-checkpoint", "auto"],
-        [student / "oncoreasoning_contract.json"]))
     return result
 
 
@@ -418,10 +379,27 @@ def teacher_pool(args):
             handle.close()
 
 
+def source_record(path):
+    path = Path(path).expanduser().resolve()
+    return {"path": str(path), "stamp": file_stamp(path)}
+
+
+def server_urls(url=None, file=None):
+    """Teacher endpoint URLs from one URL or a server registry file."""
+    if file:
+        data = json.loads(Path(file).read_text())
+        entries = data.get("servers", data.get("server_urls", [])) if isinstance(data, dict) else data
+        urls = [entry["url"] if isinstance(entry, dict) else entry for entry in entries]
+    else:
+        urls = [url] if url else []
+    if not urls or any(not value.startswith(("http://", "https://")) for value in urls):
+        raise ValueError("Supply an explicit teacher endpoint or ready server pool")
+    return list(dict.fromkeys(value.rstrip('/') for value in urls))
+
+
 @contextmanager
 def managed_teacher_pool(args):
     """Read an external registry without taking ownership of it or its servers."""
-    from oncoreasoning_training.teacher import server_urls
     path = args.teacher_servers_file
     registry = json.loads(path.read_text())
     entries = registry.get('servers', [])
@@ -447,8 +425,6 @@ def managed_teacher_pool(args):
 @contextmanager
 def external_teacher_pool(args):
     """Publish validated external endpoints without owning their processes."""
-    from oncoreasoning_training.teacher import server_urls
-
     registry = args.run_dir / "teacher_servers.json"
     atomic_json(registry, {"ready": False, "servers": []})
     servers = []
@@ -502,7 +478,7 @@ def main():
     args = parser().parse_args()
     for key in ("data_dir", "run_dir", "models_dir", "inference_repo"):
         setattr(args, key, getattr(args, key).expanduser().resolve())
-    for key in ("trial_spaces", "patient_summaries", "synthetic_notes", "teacher_servers_file", "teacher_concurrency_file",
+    for key in ("trial_spaces", "patient_summaries", "teacher_servers_file", "teacher_concurrency_file",
                 'trialspace_cache_dir'):
         if getattr(args, key) is not None:
             setattr(args, key, getattr(args, key).expanduser().resolve())
@@ -524,7 +500,6 @@ def main():
     manifest_path = args.run_dir / "pipeline_manifest.json"
     identity = {"args": training_identity_arguments(args),
                 "training_commit": git_revision(ROOT), "inference_commit": git_revision(args.inference_repo),
-                "match_labels_digest": MATCH_LABELS_DIGEST,
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}
     from trialspace.regression import score_contract
     identity['trialspace_contract'] = score_contract()
@@ -532,10 +507,8 @@ def main():
                     ROOT / 'retrieval_workspace.py', ROOT / 'label_workspace.py', ROOT / 'synthetic_pool.py', ROOT / 'retrieval_cache_import.py',
                     ROOT / 'trial_cohort_format.py',
                     ROOT / 'remote_vllm_pool.py', ROOT / 'adaptive_controller.py',
-                    ROOT / 'train_good_option_checker.py', ROOT / 'train_decision_model.py',
+                    ROOT / 'train_decision_model.py',
                     *sorted((ROOT / 'trialspace').glob('*.py')),
-                    ROOT / 'oncoreasoning_training/create_all_training_data.py',
-                    ROOT / 'oncoreasoning_training/teacher.py',
                     args.inference_repo / 'src/matchminer_ai/llm/traces.py',
                     args.inference_repo / 'src/matchminer_ai/llm/async_processing.py',
                     args.inference_repo / 'src/matchminer_ai/llm/remote_inference.py',
@@ -552,9 +525,8 @@ def main():
                         'decision.boilerplate.question.txt', 'decision.criterion.state.txt',
                         'decision.criterion.question.txt'))]
     identity['production_sources'] = [source_record(path) for path in source_paths]
-    if manifest_path.exists():
-        from oncoreasoning_training.pipeline_upgrade import compatible_identity
-        identity = compatible_identity(json.loads(manifest_path.read_text()), identity, args.run_dir, ROOT)
+    if manifest_path.exists() and json.loads(manifest_path.read_text()) != identity:
+        raise ValueError("Pipeline inputs/code/settings changed; use a fresh run directory")
     atomic_json(manifest_path, identity)
     atomic_json(args.run_dir / 'trialspace_runtime_controls.json',
                 {key: str(getattr(args, key)) for key in TRIALSPACE_OPERATIONAL_OPTIONS})
@@ -563,9 +535,7 @@ def main():
         pooled_teacher_traces=str(args.run_dir / 'llm_traces'),
         match_label_traces=[str(args.run_dir / f'trialspace_round{i}/teacher/responses') for i in (1, 2, 3)],
         boilerplate_label_traces=[str(args.run_dir / f'trialspace_round{i}/boilerplate_teacher/responses') for i in (1, 2, 3)],
-        criteria_label_traces=[str(args.run_dir / f'trialspace_round{i}/criteria_teacher/responses') for i in (1, 2, 3)],
-        distillation_traces=str(args.run_dir / 'oncoreasoning/teacher_attempts'),
-        distillation_validated_responses=str(args.run_dir / 'oncoreasoning/responses')))
+        criteria_label_traces=[str(args.run_dir / f'trialspace_round{i}/criteria_teacher/responses') for i in (1, 2, 3)]))
     fingerprint = digest(identity)
     os.environ["PYTHONPATH"] = str(args.inference_repo / "src") + os.pathsep + str(ROOT)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"

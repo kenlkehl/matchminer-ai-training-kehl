@@ -14,7 +14,6 @@ dependencies = [
     "numpy>=2.2",
     "openai>=2.8",
     "pandas>=2.3",
-    "peft>=0.18",
     "pillow>=11.0",
     "pyarrow>=23.0",
     "requests>=2.32",
@@ -22,13 +21,10 @@ dependencies = [
     "sentence-transformers>=6.1",
     "torch>=2.9",
     "transformers>=5.19",
-    "trl>=0.29",
     "vllm>=0.16",
 ]
 
 [dependency-groups]
 training = [
-    "bitsandbytes>=0.49",
     "flash-attn>=2.8",
-    "liger-kernel>=0.7",
 ]

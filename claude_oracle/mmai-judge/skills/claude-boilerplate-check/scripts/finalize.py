@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Merge Claude's per-row responses into the sampled dataframe and parse verdicts.
 
-Ports the parsing logic from 14_check_boilerplate.py (parse_yes_no_at_end)
+Ports the parsing logic from 14_check_boilerplate.py (removed 2026-11-05) (parse_yes_no_at_end)
 verbatim so outputs match the format produced by that script: appends
 boilerplate_check_llm_response, exclusion_result (float 0.0/1.0 matching
 production), and exclusion_verdict (readable "Yes!"/"No!"/"PARSE_FAILED").

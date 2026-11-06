@@ -86,60 +86,6 @@ QUERY_PROMPT = (
 )
 
 
-def _read_llm_check_server_urls(server_urls, server_urls_file):
-    """Resolve URLs from --llm-check-server-urls / --llm-check-server-urls-file."""
-    import json
-    if server_urls:
-        return [u.strip() for u in server_urls.split(",") if u.strip()]
-    if server_urls_file:
-        try:
-            with open(server_urls_file) as fh:
-                data = json.load(fh)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return []
-        return [
-            s["url"] for s in (data.get("servers") or [])
-            if isinstance(s, dict) and s.get("url")
-        ]
-    return []
-
-
-def discover_llm_check_remote_model(server_urls, server_urls_file,
-                                    timeout: float = 30.0,
-                                    max_wait: float = 300.0) -> str:
-    """Query a remote vLLM pool's /v1/models and return the served model id.
-
-    Polls each URL listed by --llm-check-server-urls /
-    --llm-check-server-urls-file until one responds, retrying for up to
-    max_wait seconds so dynamic server-list files have time to populate.
-    """
-    import requests
-    deadline = time.time() + max_wait
-    last_err = None
-    while True:
-        urls = _read_llm_check_server_urls(server_urls, server_urls_file)
-        for url in urls:
-            try:
-                base = url.rstrip("/")
-                if not base.endswith("/v1"):
-                    base = base + "/v1"
-                resp = requests.get(f"{base}/models", timeout=timeout)
-                resp.raise_for_status()
-                models = (resp.json() or {}).get("data") or []
-                if models:
-                    return models[0]["id"]
-                last_err = RuntimeError(f"server at {url} reported no models")
-            except Exception as exc:
-                last_err = exc
-        if time.time() >= deadline:
-            raise RuntimeError(
-                f"Could not discover model name from any remote LLM-check "
-                f"vLLM server after waiting up to {max_wait:.0f}s. "
-                f"Last error: {last_err}"
-            )
-        time.sleep(5.0)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -159,67 +105,6 @@ def parse_args():
         "--boilerplate-checker", type=str, default=None,
         help="Path to a trained boilerplate checker model (ModernBERT). "
              "If provided, scores exclusion probability for retrieved trials.",
-    )
-    parser.add_argument(
-        "--llm-boilerplate-checker", action="store_true",
-        help="Run ../../14_check_boilerplate.py on the final top-10 pairs to "
-             "produce an LLM exclusion call (Yes/No) + rationale.",
-    )
-    parser.add_argument(
-        "--llm-check-script-boilerplate", type=str,
-        default=str(Path(__file__).resolve().parents[2] / "14_check_boilerplate.py"),
-        help="Path to 14_check_boilerplate.py",
-    )
-    parser.add_argument(
-        "--llm-check-model", type=str, default="google/gemma-4-31b-it",
-        help="Model passed to both LLM check scripts. Ignored (and "
-             "auto-discovered from /v1/models on the remote server) when "
-             "--llm-check-server-urls / --llm-check-server-urls-file is set.",
-    )
-    parser.add_argument(
-        "--llm-check-download-dir", type=str, default="/data1/ken/models",
-        help="HF/vLLM download cache dir for LLM check scripts",
-    )
-    parser.add_argument(
-        "--llm-check-gpus", type=str, default=None,
-        help="Comma-separated GPU IDs for LLM checks. Defaults to --gpu. "
-             "Ignored when --llm-check-server-urls / "
-             "--llm-check-server-urls-file is set.",
-    )
-    parser.add_argument(
-        "--llm-check-gpus-per-kernel", type=int, default=1,
-        help="tensor_parallel_size for each LLM-check vLLM kernel",
-    )
-    parser.add_argument(
-        "--llm-check-server-urls", type=str, default=None,
-        help="Comma-separated existing vLLM server URLs to dispatch LLM "
-             "checks to (forwarded as --server_urls). If set, the LLM-check "
-             "scripts skip in-process vLLM init.",
-    )
-    parser.add_argument(
-        "--llm-check-server-urls-file", type=str, default=None,
-        help="Path to a file listing vLLM server URLs (forwarded as "
-             "--server_urls_file). Mutually exclusive with "
-             "--llm-check-server-urls.",
-    )
-    parser.add_argument("--llm-check-max-model-len", type=int, default=30000)
-    parser.add_argument("--llm-check-max-num-seqs", type=int, default=900)
-    parser.add_argument(
-        "--llm-check-gpu-memory-utilization", type=float, default=0.92,
-    )
-    parser.add_argument("--llm-check-prompt-batch-size", type=int, default=512)
-    parser.add_argument(
-        "--llm-check-artifact-root", type=str,
-        default=str(
-            Path(__file__).resolve().parents[3]
-            / "data" / "phi" / "real_time" / "simulated_oa_run_llm_checks"
-        ),
-        help="Directory where LLM-check artifacts (staging + shards + finals) go.",
-    )
-    parser.add_argument(
-        "--resume-llm-check-dir", type=str, default=None,
-        help="Reuse a prior LLM-check run directory. If final outputs exist "
-             "they are reused; otherwise per-batch resume kicks in.",
     )
     parser.add_argument("--gpu", type=str, default="0",
                         help="Comma-separated GPU ids, e.g. '0,1,2' (default: 0)")
@@ -693,142 +578,6 @@ def run_or_resume_summarization(notes_df, args):
     return load_summarization_output(patient_output), run_dir
 
 
-def run_or_resume_llm_checks(pair_rows, args):
-    """Stage, reuse, or resume external LLM boilerplate check runs.
-
-    The legacy single-score LLM trial check (llm_check_trials.py) was removed on
-    2026-11-04 (user instruction); the inference package's score_match_quality_with_llm
-    is the LLM alternative to TrialChecker.
-
-    pair_rows is a list of dicts, each containing at least:
-        pair_id, patient_id, mrn, nct_id, patient_summary, this_space,
-        patient_boilerplate_text, trial_boilerplate_text
-
-    Returns (results, run_dir) where results is dict[pair_id] -> dict with
-    any of these keys populated depending on which flags are enabled:
-        llm_boilerplate_excluded (float 0.0/1.0 or NaN)
-        llm_boilerplate_reasoning (str)
-    """
-    if not args.llm_boilerplate_checker:
-        return {}, None
-
-    bp_script = Path(args.llm_check_script_boilerplate).resolve()
-    if not bp_script.exists():
-        raise FileNotFoundError(f"LLM boilerplate check script not found: {bp_script}")
-
-    if args.resume_llm_check_dir:
-        run_dir = Path(args.resume_llm_check_dir).expanduser().resolve()
-        if not run_dir.exists():
-            raise FileNotFoundError(f"Resume LLM-check dir not found: {run_dir}")
-        if not run_dir.is_dir():
-            raise NotADirectoryError(f"Resume LLM-check dir is not a directory: {run_dir}")
-    else:
-        root = Path(args.llm_check_artifact_root)
-        run_dir = root / datetime.now(timezone.utc).strftime("run_%Y%m%dT%H%M%S_%fZ")
-        run_dir.mkdir(parents=True, exist_ok=False)
-
-    staging_path = run_dir / "pairs.parquet"
-    if not staging_path.exists():
-        pd.DataFrame(pair_rows).to_parquet(staging_path, index=False)
-        print(f"Staged {len(pair_rows)} (patient, trial) pairs at {staging_path}")
-    else:
-        print(f"Reusing staged pairs at {staging_path}")
-
-    server_urls = getattr(args, "llm_check_server_urls", None)
-    server_urls_file = getattr(args, "llm_check_server_urls_file", None)
-    if server_urls and server_urls_file:
-        raise ValueError(
-            "Specify only one of --llm-check-server-urls / "
-            "--llm-check-server-urls-file."
-        )
-    remote_mode = bool(server_urls or server_urls_file)
-
-    if remote_mode:
-        discovered_model = discover_llm_check_remote_model(
-            server_urls, server_urls_file,
-        )
-        if discovered_model != args.llm_check_model:
-            print(
-                f"Auto-discovered model on remote vLLM server(s): "
-                f"{discovered_model!r} (overrides "
-                f"--llm-check-model={args.llm_check_model!r})"
-            )
-        else:
-            print(f"Confirmed remote vLLM server(s) serve {discovered_model!r}")
-        args.llm_check_model = discovered_model
-
-    common_args = [
-        "--model", args.llm_check_model,
-        "--download_dir", args.llm_check_download_dir,
-        "--max_model_len", str(args.llm_check_max_model_len),
-        "--max_num_seqs", str(args.llm_check_max_num_seqs),
-        "--prompt_batch_size", str(args.llm_check_prompt_batch_size),
-    ]
-    if remote_mode:
-        if server_urls:
-            common_args.extend(["--server_urls", server_urls])
-        if server_urls_file:
-            common_args.extend(["--server_urls_file", server_urls_file])
-    else:
-        llm_gpus = args.llm_check_gpus or args.gpu
-        common_args.extend([
-            "--gpus", llm_gpus,
-            "--gpus_per_kernel", str(args.llm_check_gpus_per_kernel),
-            "--gpu_memory_utilization", str(args.llm_check_gpu_memory_utilization),
-        ])
-
-    results = {row["pair_id"]: {} for row in pair_rows}
-
-    if args.llm_boilerplate_checker:
-        bp_out_dir = run_dir / "boilerplate_check"
-        bp_final = bp_out_dir / "final_boilerplate_checks.parquet"
-        if bp_final.exists():
-            print(f"Reusing completed LLM boilerplate-check output at {bp_final}")
-        else:
-            cmd = [
-                sys.executable, str(bp_script),
-                "--out_dir", str(bp_out_dir),
-                "--patients_rounds", str(staging_path),
-                "--trials_rounds", str(staging_path),
-            ] + common_args
-            print("Running LLM boilerplate check:")
-            print(f"  {shlex.join(cmd)}")
-            subprocess.run(cmd, check=True)
-            if not bp_final.exists():
-                raise FileNotFoundError(
-                    f"LLM boilerplate check completed but {bp_final} was not created."
-                )
-        bp_df = pd.read_parquet(bp_final)
-        # 14_check_boilerplate.py dedupes by (patient_summary, nct_id,
-        # trial_boilerplate_text) and drops pair_id via its groupby.first().
-        # Re-join to our pair_ids on that triple.
-        key_cols = ["patient_summary", "nct_id", "trial_boilerplate_text"]
-        missing = [c for c in key_cols + ["exclusion_result", "boilerplate_check_llm_response"]
-                   if c not in bp_df.columns]
-        if missing:
-            raise KeyError(
-                f"{bp_final} is missing expected columns {missing} "
-                f"(got {bp_df.columns.tolist()})"
-            )
-        pair_df = pd.DataFrame(pair_rows)[["pair_id"] + key_cols]
-        merged = pair_df.merge(
-            bp_df[key_cols + ["exclusion_result", "boilerplate_check_llm_response"]]
-                 .drop_duplicates(subset=key_cols, keep="first"),
-            on=key_cols, how="left",
-        )
-        for r in merged.to_dict("records"):
-            pid = int(r["pair_id"])
-            excl = r.get("exclusion_result")
-            results[pid]["llm_boilerplate_excluded"] = (
-                float(excl) if excl is not None and not pd.isna(excl) else np.nan
-            )
-            results[pid]["llm_boilerplate_reasoning"] = (
-                r.get("boilerplate_check_llm_response") or ""
-            )
-
-    return results, run_dir
-
-
 def main():
     args = parse_args()
     gpu_ids = [int(x.strip()) for x in args.gpu.split(",") if x.strip()]
@@ -1109,43 +858,11 @@ def main():
             bp_scores_per_patient[i][j] = float(bp_scores_flat[flat_idx])
         print("Boilerplate checker scoring complete.")
 
-    # --- LLM-based trial/boilerplate checks (external subprocess) ---------
-    pair_id_matrix = [
-        [-1] * len(top_selected_indices[i]) for i in range(n_patients)
-    ]
-    pair_rows_for_llm = []
-    pair_id_counter = 0
-    for i in range(n_patients):
-        for j, idx in enumerate(top_selected_indices[i]):
-            pair_id_matrix[i][j] = pair_id_counter
-            pair_rows_for_llm.append({
-                "pair_id": pair_id_counter,
-                "patient_id": patient_ids[i],
-                "mrn": patient_mrns[i],
-                "nct_id": nct_ids[idx],
-                "patient_summary": patient_summaries[i],
-                "this_space": space_texts[idx],
-                "patient_boilerplate_text": patient_boilerplates[i] or "",
-                "trial_boilerplate_text": trial_boilerplates[idx] or "",
-            })
-            pair_id_counter += 1
-
-    llm_results = {}
-    if args.llm_boilerplate_checker:
-        print(f"Running LLM-based checks on {len(pair_rows_for_llm)} "
-              f"(patient, trial) pairs ...")
-        llm_results, llm_run_dir = run_or_resume_llm_checks(
-            pair_rows_for_llm, args,
-        )
-        print(f"LLM check artifacts: {llm_run_dir}")
-
     # --- Build output dataframe -------------------------------------------
     print("Building output dataframe ...")
     rows = []
     for i in range(n_patients):
         for j, idx in enumerate(top_selected_indices[i]):
-            pid = pair_id_matrix[i][j]
-            llm = llm_results.get(pid, {})
             rows.append({
                 "patient_id": patient_ids[i],
                 "mrn": patient_mrns[i],
@@ -1159,8 +876,6 @@ def main():
                 "cosine_similarity": top_selected_cos_sims[i][j],
                 "trialchecker_score": top_selected_tc_scores[i][j],
                 "boilerplate_score": bp_scores_per_patient[i][j],
-                "llm_boilerplate_excluded": llm.get("llm_boilerplate_excluded", np.nan),
-                "llm_boilerplate_reasoning": llm.get("llm_boilerplate_reasoning", ""),
                 "rank": j + 1,
             })
 
