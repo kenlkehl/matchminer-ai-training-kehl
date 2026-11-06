@@ -88,6 +88,7 @@ import subprocess
 import sys
 import time
 import warnings
+from contextlib import nullcontext
 from multiprocessing import Pool
 from typing import List, Dict, Tuple, Optional
 
@@ -268,6 +269,30 @@ def deduplicate_patient_notes(
     return deduped_notes
 
 
+def _patient_notes(df, patient_id_col, date_col, text_col):
+    """Yield (patient_id, [(date_str, note_text), ...]) per patient, patients and their notes in sorted order.
+
+    Rows without a patient ID are skipped, as ``groupby`` drops them.
+    """
+    df = df.sort_values([patient_id_col, date_col]).reset_index(drop=True)
+    pids = df[patient_id_col].tolist()
+    dates = [str(d) if pd.notna(d) else "unknown date" for d in df[date_col].tolist()]
+    texts = [str(t) for t in df[text_col].tolist()]
+    start = 0
+    for end in range(1, len(pids) + 1):
+        if end == len(pids) or pids[end] != pids[start]:
+            if pd.notna(pids[start]):
+                yield str(pids[start]), list(zip(dates[start:end], texts[start:end]))
+            start = end
+
+
+def _prepare_patient_worker(item):
+    """Deduplicate and chunk one patient's notes in a worker process (tokenizer from _init_prompt_worker)."""
+    pid, notes, chunk_size, chunk_overlap = item
+    return pid, concatenate_and_chunk_notes(deduplicate_patient_notes(notes), _worker_tokenizer,
+                                            chunk_size, chunk_overlap)
+
+
 def prepare_rounds(
     df: pd.DataFrame,
     patient_id_col: str,
@@ -276,54 +301,51 @@ def prepare_rounds(
     tokenizer,
     chunk_size: int = 10000,
     chunk_overlap: int = 500,
+    *,
+    workers: int = 1,
+    tokenizer_model: Optional[str] = None,
+    download_dir: Optional[str] = None,
 ) -> Tuple[List[List[Tuple[str, int, str, str, str]]], Dict[str, List[int]], Dict[str, str]]:
     """
     Organize work into rounds for parallel processing using chunk-based approach.
 
     For each patient, all notes are concatenated chronologically and split into
     token-length chunks. Rounds are built so that Round N contains the Nth chunk
-    from each patient.
+    from each patient. Patients are independent, so with ``workers`` > 1 their
+    notes are deduplicated and chunked in that many processes, each loading
+    ``tokenizer_model`` (the model ``tokenizer`` was loaded from); the result is
+    the same as with one.
 
     Returns:
         rounds: List of rounds, each containing list of (patient_id, chunk_idx, first_date, last_date, chunk_text)
         patient_chunk_order: Dict mapping patient_id -> list of chunk indices
         patient_last_dates: Dict mapping patient_id -> last note date string
     """
-    # Sort by patient and date
-    df = df.sort_values([patient_id_col, date_col]).reset_index(drop=True)
+    if workers > 1 and tokenizer_model is None:
+        raise ValueError("workers > 1 needs tokenizer_model, the tokenizer each worker loads")
+    patients = list(_patient_notes(df, patient_id_col, date_col, text_col))
 
     patient_chunks: Dict[str, List[Tuple[str, str, str]]] = {}  # pid -> [(chunk_text, first_date, last_date)]
     patient_chunk_order: Dict[str, List[int]] = {}  # pid -> [chunk_idx, ...]
-    patient_last_dates: Dict[str, str] = {}  # pid -> last_note_date
+    patient_last_dates: Dict[str, str] = {pid: notes[-1][0] for pid, notes in patients}  # pid -> last_note_date
 
-    chunk_idx_counter = 0
-
-    for pid, group in df.groupby(patient_id_col, sort=False):
-        pid = str(pid)
-
-        # Collect notes sorted by date for this patient
-        notes = []
-        last_date_str = "unknown date"
-        for _, row in group.iterrows():
-            date_val = row[date_col]
-            date_str = str(date_val) if pd.notna(date_val) else "unknown date"
-            note_text = str(row[text_col])
-            notes.append((date_str, note_text))
-            last_date_str = date_str
-
-        patient_last_dates[pid] = last_date_str
-
-        # Deduplicate sentences across this patient's notes
-        notes = deduplicate_patient_notes(notes)
-
-        # Concatenate and chunk
-        chunks = concatenate_and_chunk_notes(notes, tokenizer, chunk_size, chunk_overlap)
-        patient_chunks[pid] = chunks
-
-        patient_chunk_order[pid] = []
-        for _ in chunks:
-            patient_chunk_order[pid].append(chunk_idx_counter)
-            chunk_idx_counter += 1
+    if workers > 1:
+        print(f"Chunking {len(patients)} patients' notes with {workers} workers...", flush=True)
+    with (Pool(processes=workers, initializer=_init_prompt_worker, initargs=(tokenizer_model, download_dir))
+          if workers > 1 else nullcontext()) as pool:
+        if pool is not None:
+            prepared = pool.imap(_prepare_patient_worker,
+                                 ((pid, notes, chunk_size, chunk_overlap) for pid, notes in patients), chunksize=64)
+        else:
+            prepared = ((pid, concatenate_and_chunk_notes(deduplicate_patient_notes(notes), tokenizer,
+                                                          chunk_size, chunk_overlap)) for pid, notes in patients)
+        chunk_idx_counter = 0
+        for done, (pid, chunks) in enumerate(prepared, 1):  # in patient order, so chunk indices are unchanged
+            patient_chunks[pid] = chunks
+            patient_chunk_order[pid] = list(range(chunk_idx_counter, chunk_idx_counter + len(chunks)))
+            chunk_idx_counter += len(chunks)
+            if done % 10000 == 0:
+                print(f"  chunked {done}/{len(patients)} patients", flush=True)
 
     # Build rounds: round i contains the (i+1)th chunk for each patient that has one
     max_chunks = max(len(clist) for clist in patient_chunk_order.values()) if patient_chunk_order else 0
@@ -1018,6 +1040,9 @@ def main():
                     help="Maximum tokens per chunk when concatenating patient notes (default: 10000)")
     ap.add_argument("--chunk_overlap", type=int, default=500,
                     help="Token overlap between consecutive chunks (default: 500)")
+    ap.add_argument("--preparation_workers", type=int, default=32,
+                    help="Processes that deduplicate and chunk patients' notes before summarization "
+                         "(default: 32, at most the CPU count; 1 = in this process)")
     ap.add_argument("--model", default=None,
                     help="Model name. Required for local mode. In remote mode "
                          "(--server_urls / --server_urls_file), auto-discovered from the server.")
@@ -1179,7 +1204,9 @@ def summarize(args, *, remote_mode, tokenizer_model, reasoning_parser):
         print("Preparing work rounds (concatenating and chunking notes per patient)...")
         rounds, patient_chunk_order, patient_last_dates = prepare_rounds(
             df, args.patient_id_col, args.date_col, args.text_col,
-            tokenizer, args.chunk_size, args.chunk_overlap
+            tokenizer, args.chunk_size, args.chunk_overlap,
+            workers=min(os.cpu_count() or 1, args.preparation_workers),
+            tokenizer_model=tokenizer_model, download_dir=args.download_dir,
         )
         save_prepared_chunks(args.shard_dir, rounds, patient_chunk_order, patient_last_dates)
 
