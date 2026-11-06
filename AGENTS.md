@@ -35,6 +35,13 @@ package, scored with LLMs), `14_check_boilerplate.py` and the real-time evaluati
 stage that ran it (question-6 labels come from `trialspace_training.py label --task boilerplate`), and the scoped
 upgrade receipts (`scripts/register_{oncoreasoning,trialspace,downstream}_upgrade.py`, `pipeline_upgrade.py`):
 a changed run identity now always needs a fresh run directory. Do not restore them without the user's instruction.
+Also removed (user instruction, November 6): the legacy pre-cohort trial-space extractor
+(`legacy_trial_space_extraction.py`, `trial_hierarchy.py`, `trial_hierarchy_runner.py`, `trial_prompts/`,
+`trial_space_export.py`, `trial_treatment_screening.py`). The real-data evaluations build their trial line items
+from cohorts instead: `real_eval_code/eval_cohort_lineitems.py` runs `0d_extract_ctgov_cohorts.py` (remote only)
+and writes each cohort's key criteria as `this_space` and its boilerplate criteria as `trial_boilerplate_text`
+(used by `pull_spacify_and_embed_ctgov`, `real_time_eval/spacify_trials_freshly.py` and the enrollment
+evaluation's `spacify` stage).
 
 Sampling (user instruction, November 5): every teacher, generation and summarization script must be
 Nemotron-aware. Resolve sampling from the served model's HF id through the inference package's profiles

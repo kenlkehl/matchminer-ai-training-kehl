@@ -8,7 +8,7 @@ and allowing for resumability.
 Pipeline stages:
 0. prepare: Prepare data (uses prepare_data.py)
 1. summarize: Summarize patient EHR (uses summarize_patients.py)
-2. spacify: Create trial spaces
+2. spacify: Extract trial cohorts (remote; ../eval_cohort_lineitems.py, needs --cohort-server-urls[-file])
 3. retrieval: Patient-centric + trial-centric retrieval (trialspace embedding)
 4. llm_checks: Eligibility + boilerplate LLM checks via API (GPT)
 5. oncoreasoning: OncoReasoning LLM inference via vLLM (trial check + boilerplate)
@@ -144,6 +144,14 @@ Examples:
                              "Implies --stages evaluation.")
     parser.add_argument("--force", action="store_true",
                         help="Force re-run of stages even if outputs already exist")
+    # Arguments for the spacify stage: remote cohort extraction (0d_extract_ctgov_cohorts.py)
+    cohort_endpoints = parser.add_mutually_exclusive_group()
+    cohort_endpoints.add_argument("--cohort-server-urls", nargs="+", default=None,
+                                  help="OpenAI-compatible endpoint URLs for cohort extraction")
+    cohort_endpoints.add_argument("--cohort-server-urls-file", type=str, default=None,
+                                  help="Endpoint registry file for cohort extraction")
+    parser.add_argument("--cohort-model", type=str, default=None,
+                        help="Served model id for cohort extraction")
     return parser.parse_args()
 
 
@@ -716,27 +724,32 @@ def main():
     # Stage 2: Create trial spaces
     if "spacify" in stages_to_run:
         print("\n" + "="*70)
-        print("STAGE 3: CREATE TRIAL SPACES")
+        print("STAGE 3: EXTRACT TRIAL COHORTS")
         print("="*70)
 
         spacify_outputs = [
             DATA_DIR / "trial_space_lineitems.csv",
         ]
-        if not args.force and check_outputs_exist(spacify_outputs, "Trial space creation"):
+        if not args.force and check_outputs_exist(spacify_outputs, "Trial cohort extraction"):
             pass  # Skip
+        elif not (args.cohort_server_urls or args.cohort_server_urls_file):
+            print("Error: the spacify stage extracts cohorts remotely; pass --cohort-server-urls "
+                  "or --cohort-server-urls-file (and --cohort-model)")
+            failures.append("spacify")
         else:
-            spacify_gpus = ",".join(gpu_list[:min(2, num_gpus)])
-
             cmd = [
                 "python", "spacify_dfci_trials.py",
-                "--gpus", spacify_gpus,
-                "--gpus-per-instance", "2",
                 "--input-file", str(DATA_DIR / "processed_trial_enrollments.csv"),
                 "--output-dir", str(DATA_DIR),
-                "--download-dir", args.download_dir,
             ]
+            if args.cohort_server_urls:
+                cmd += ["--server_urls", *args.cohort_server_urls]
+            else:
+                cmd += ["--server_urls_file", args.cohort_server_urls_file]
+            if args.cohort_model:
+                cmd += ["--model", args.cohort_model]
 
-            ret = run_command(cmd, "Trial space creation", args.dry_run)
+            ret = run_command(cmd, "Trial cohort extraction", args.dry_run)
             if ret != 0:
                 failures.append("spacify")
 

@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
-Re-pull, re-spacify, and re-embed the trials the system already knows about.
+Re-pull, re-extract (as cohorts), and re-embed the trials the system already knows about.
 
-This refreshes the pre-embedded trial-space index that simulated_oa_run.py reads
+This refreshes the pre-embedded trial index that simulated_oa_run.py reads
 (data/phi/real_time/trial_space_embeddings.parquet). It:
 
   1. Pulls the distinct NCT IDs from the trial_spaces table in the database the
      other real-time scripts access (database_secrets.txt, auto-resolved to
      ../../../data/phi/database_secrets.txt relative to this script).
   2. Drives ../../pull_spacify_and_embed_ctgov in NCT-ID mode, which pulls those
-     trials' current text from ClinicalTrials.gov, runs ../../legacy_trial_space_extraction.py
-     to extract trial spaces, and embeds them with embed_trial_spaces.py.
+     trials' current text from ClinicalTrials.gov, extracts their cohorts with
+     ../eval_cohort_lineitems.py (training's 0d_extract_ctgov_cohorts.py: key criteria in
+     this_space, boilerplate criteria in trial_boilerplate_text), and embeds the cohorts'
+     key criteria with embed_trial_spaces.py.
   3. Writes the embedded parquet (by default the canonical name read by
      simulated_oa_run.py) into ../../../data/phi/real_time.
 
-Spacification needs a vLLM backend, so a real run requires --gpus (local mode)
-or --server_urls / --server_urls_file (remote mode); these are forwarded to the
-wrapper. Any other unrecognized flags are forwarded too (e.g. --spacify-model,
---gpu-mem-util, --skip-embed, --dry-run).
+Cohort extraction is remote only, so a real run requires --server_urls or
+--server_urls_file, plus --cohort-model with the served model's id; these are
+forwarded to the wrapper. Any other unrecognized flags are forwarded too (e.g.
+--skip-embed, --dry-run, or 0d_extract_ctgov_cohorts.py options such as
+--allow-failures and --tokenizer-model).
 
 Examples:
-    # Local GPUs
-    python spacify_trials_freshly.py --gpus 0,1,2,3
-
     # Remote vLLM pool
-    python spacify_trials_freshly.py --server_urls_file /path/to/servers.json
+    python spacify_trials_freshly.py --server_urls_file /path/to/servers.json --cohort-model <served model id>
 
     # Quick test on the first 5 trials
-    python spacify_trials_freshly.py --gpus 0 --limit 5
+    python spacify_trials_freshly.py --server_urls_file servers.json --cohort-model <id> --limit 5
 
-    # Inspect the command without pulling/spacifying/embedding
-    python spacify_trials_freshly.py --gpus 0 --dry-run
+    # Inspect the command without pulling/extracting/embedding
+    python spacify_trials_freshly.py --server_urls_file servers.json --dry-run
 """
 
 from __future__ import annotations
@@ -78,11 +78,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--python", default=sys.executable,
                         help="Python executable used for the wrapper and its child scripts.")
 
-    # Backend pass-through for the spacify stage (forwarded to the wrapper).
-    parser.add_argument("--gpus", default=None,
-                        help="Comma-separated GPU IDs for local spacify mode.")
-    parser.add_argument("--gpus-per-instance", "--gpus-per-server", dest="gpus_per_instance",
-                        type=int, default=None, help="GPUs per local vLLM instance.")
+    # Endpoint pass-through for cohort extraction (forwarded to the wrapper).
     parser.add_argument("--server_urls", "--server-urls", dest="server_urls", default=None)
     parser.add_argument("--server_urls_file", "--server-urls-file", dest="server_urls_file", default=None)
 
@@ -177,8 +173,6 @@ def main() -> None:
         "--parquet-output", str(parquet_output),
         "--browser-json-output", str(browser_json_output),
     ]
-    append_optional(cmd, "--gpus", args.gpus)
-    append_optional(cmd, "--gpus-per-instance", args.gpus_per_instance)
     append_optional(cmd, "--server_urls", args.server_urls)
     append_optional(cmd, "--server_urls_file", args.server_urls_file)
     cmd.extend(extra_args)

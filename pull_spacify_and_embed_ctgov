@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
 """
-Pull current ClinicalTrials.gov cancer trials, extract trial spaces, and
-pre-embed those spaces for the real-time evaluation scripts in
+Pull current ClinicalTrials.gov cancer trials, extract their cohorts, and
+pre-embed them for the real-time evaluation scripts in
 real_eval_code/real_time_eval/ (spacify_trials_freshly.py drives it by NCT ID).
 
 This is an offline/manual orchestration script. It queries open phase 0-3
 interventional cancer trials (or specific NCT IDs), then calls:
 
-  1. legacy_trial_space_extraction.py (pre-cohort trial-space extraction)
+  1. real_eval_code/eval_cohort_lineitems.py: training's ctgov cohort extraction
+     (0d_extract_ctgov_cohorts.py, the inference package's cohort workflow), one row
+     per cohort with its key criteria in this_space and its boilerplate criteria in
+     trial_boilerplate_text;
   2. real_eval_code/real_time_eval/embed_trial_spaces.py --input-spaces ...
 
 The embedding step also writes a JSON index in the format the deleted browser
 app imported; the real-time scripts read the parquet.
 
-Unknown CLI arguments are forwarded to legacy_trial_space_extraction.py so advanced
-vLLM flags can still be supplied without teaching this wrapper every option.
+Extraction is remote only (--server_urls or --server_urls_file, and --cohort-model with
+the served model's id). Unknown CLI arguments are forwarded to 0d_extract_ctgov_cohorts.py
+(for example --tokenizer-model, --allow-failures, --max-tokens, --workers).
+(Until 2026-11-06 this ran the legacy pre-cohort trial-space extractor, now removed.)
 
 Example:
   ./pull_spacify_and_embed_ctgov \
     --embedding-model ../models/trialspace \
-    --gpus 0,1,2,3
-
-Remote vLLM example:
-  ./pull_spacify_and_embed_ctgov \
-    --embedding-model ../models/trialspace \
-    --server_urls_file /path/to/servers.json
+    --server_urls_file /path/to/servers.json \
+    --cohort-model <served model id>
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = REPO_ROOT.parent / "data" / "no_phi" / "ctgov_preembeded"
-DEFAULT_SPACIFICATION_MODEL = "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
+EXTRACTION_SCRIPT = REPO_ROOT / "real_eval_code" / "eval_cohort_lineitems.py"
 CTGOV_STUDIES_URL = "https://clinicaltrials.gov/api/v2/studies"
 CTGOV_VERSION_URL = "https://clinicaltrials.gov/api/v2/version"
 CTGOV_CANCER_QUERY = (
@@ -91,38 +92,18 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
 
     parser.add_argument("--trials-json", default=None, help="Raw CT.gov studies JSON output path.")
     parser.add_argument("--pull-metadata", default=None, help="CT.gov pull metadata JSON output path.")
-    parser.add_argument("--trials-csv", default=None, help="CSV input path for legacy_trial_space_extraction.py.")
-    parser.add_argument("--trials-with-spaces-csv", default=None, help="Per-trial spacifier output CSV path.")
-    parser.add_argument("--spaces-csv", default=None, help="Trial-space line-items CSV path.")
+    parser.add_argument("--trials-csv", default=None, help="Pulled listings CSV, the cohort extraction's input.")
+    parser.add_argument("--spaces-csv", default=None, help="Cohort line-items CSV path.")
     parser.add_argument("--parquet-output", default=None, help="Embedded parquet output path.")
     parser.add_argument("--browser-json-output", default=None, help="Browser-loadable embedded JSON output path.")
 
-    parser.add_argument("--spacify-script", default=str(REPO_ROOT / "legacy_trial_space_extraction.py"))
-    parser.add_argument("--spacify-work-dir", default=None, help="Shard work directory for legacy_trial_space_extraction.py.")
-    parser.add_argument("--gpus", default=None, help="Comma-separated GPU IDs for local legacy_trial_space_extraction.py mode.")
-    parser.add_argument(
-        "--gpus-per-instance",
-        "--gpus-per-server",
-        dest="gpus_per_instance",
-        type=int,
-        default=None,
-        help="Number of GPUs assigned to each local vLLM worker/server for spacification.",
-    )
-    parser.add_argument("--server_urls", "--server-urls", dest="server_urls", default=None)
+    parser.add_argument("--extraction-work-dir", default=None,
+                        help="Cohort extraction inputs, exports and resumable checkpoints.")
+    parser.add_argument("--server_urls", "--server-urls", dest="server_urls", default=None,
+                        help="Comma/space-separated OpenAI-compatible endpoint URLs for cohort extraction.")
     parser.add_argument("--server_urls_file", "--server-urls-file", dest="server_urls_file", default=None)
-    parser.add_argument(
-        "--spacify-model",
-        "--spacification-model",
-        dest="spacify_model",
-        default=DEFAULT_SPACIFICATION_MODEL,
-        help="Model passed to legacy_trial_space_extraction.py --model.",
-    )
-    parser.add_argument("--spacify-download-dir", default=None, help="Value for legacy_trial_space_extraction.py --download-dir.")
-    parser.add_argument("--spacify-batch-size", type=int, default=None, help="Value for legacy_trial_space_extraction.py --batch-size.")
-    parser.add_argument("--spacify-max-model-len", type=int, default=None, help="Value for legacy_trial_space_extraction.py --max-model-len.")
-    parser.add_argument("--spacify-max-tokens", type=int, default=None, help="Value for legacy_trial_space_extraction.py --max-tokens.")
-    parser.add_argument("--spacify-temperature", type=float, default=None, help="Value for legacy_trial_space_extraction.py --temperature.")
-    parser.add_argument("--reasoning-parser", default=None, help="Value for legacy_trial_space_extraction.py --reasoning-parser.")
+    parser.add_argument("--cohort-model", default=None,
+                        help="Served model id for cohort extraction (0d_extract_ctgov_cohorts.py --model).")
 
     parser.add_argument("--embed-script", default=str(REPO_ROOT / "real_eval_code" / "real_time_eval" / "embed_trial_spaces.py"))
     parser.add_argument("--embedding-gpu", default="0", help="GPU ID for embedding stage.")
@@ -130,15 +111,15 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--embedding-max-seq-length", type=int, default=2500)
 
     parser.add_argument("--skip-pull", action="store_true", help="Reuse --trials-csv instead of querying CT.gov.")
-    parser.add_argument("--skip-spacify", action="store_true", help="Reuse --spaces-csv instead of running legacy_trial_space_extraction.py.")
-    parser.add_argument("--skip-embed", action="store_true", help="Stop after producing trial-space line items.")
+    parser.add_argument("--skip-spacify", action="store_true", help="Reuse --spaces-csv instead of extracting cohorts.")
+    parser.add_argument("--skip-embed", action="store_true", help="Stop after producing cohort line items.")
     parser.add_argument("--dry-run", action="store_true", help="Print child commands without running them.")
 
     return parser.parse_known_args()
 
 
 def main() -> None:
-    args, spacify_extra_args = parse_args()
+    args, extraction_args = parse_args()
     if not args.skip_embed and not args.embedding_model:
         raise SystemExit("--embedding-model is required unless --skip-embed is set.")
     requested_nct_ids = load_requested_nct_ids(args)
@@ -183,7 +164,7 @@ def main() -> None:
 
     if not args.skip_spacify:
         ensure_spacify_backend(args)
-        run_command(build_spacify_command(args, paths, spacify_extra_args), args.dry_run)
+        run_command(build_spacify_command(args, paths, extraction_args), args.dry_run)
     elif not args.skip_embed and not paths["spaces_csv"].exists():
         raise SystemExit(f"--skip-spacify was set, but spaces CSV does not exist: {paths['spaces_csv']}")
 
@@ -192,7 +173,7 @@ def main() -> None:
 
     print("\nOutputs:")
     print(f"  CT.gov trials CSV: {paths['trials_csv']}")
-    print(f"  Trial-space CSV:   {paths['spaces_csv']}")
+    print(f"  Cohort CSV:        {paths['spaces_csv']}")
     if not args.skip_embed:
         print(f"  Embedded parquet:  {paths['parquet_output']}")
         print(f"  Browser JSON:      {paths['browser_json_output']}")
@@ -206,11 +187,10 @@ def resolve_paths(args: argparse.Namespace) -> dict[str, Path]:
         "trials_json": resolve_output(args.trials_json, output_dir / f"ctgov_current_cancer_trials_{run_date}.raw.json"),
         "pull_metadata": resolve_output(args.pull_metadata, output_dir / f"ctgov_pull_metadata_{run_date}.json"),
         "trials_csv": resolve_output(args.trials_csv, output_dir / f"ctgov_current_cancer_trials_{run_date}.csv"),
-        "trials_with_spaces_csv": resolve_output(args.trials_with_spaces_csv, output_dir / f"trials_with_spaces_{run_date}.csv"),
         "spaces_csv": resolve_output(args.spaces_csv, output_dir / f"trial_space_lineitems_{run_date}.csv"),
         "parquet_output": resolve_output(args.parquet_output, output_dir / f"trial_space_embeddings_{run_date}.parquet"),
         "browser_json_output": resolve_output(args.browser_json_output, output_dir / f"trial_space_embeddings_{run_date}.browser.json"),
-        "spacify_work_dir": resolve_output(args.spacify_work_dir, output_dir / f"trial_space_shards_{run_date}"),
+        "extraction_work_dir": resolve_output(args.extraction_work_dir, output_dir / f"trial_cohort_extraction_{run_date}"),
     }
 
 
@@ -453,38 +433,26 @@ def write_pull_metadata(
 
 
 def ensure_spacify_backend(args: argparse.Namespace) -> None:
-    if args.gpus or args.server_urls or args.server_urls_file:
+    if args.server_urls or args.server_urls_file:
         return
-    raise SystemExit(
-        "legacy_trial_space_extraction.py needs a vLLM backend. Pass --gpus for local mode, "
-        "or --server_urls / --server_urls_file for remote mode."
-    )
+    raise SystemExit("Cohort extraction is remote only: pass --server_urls or --server_urls_file.")
 
 
 def build_spacify_command(args: argparse.Namespace, paths: dict[str, Path], extra_args: list[str]) -> list[str]:
     cmd = [
         args.python,
-        str(Path(args.spacify_script).expanduser().resolve()),
-        "--input",
+        str(EXTRACTION_SCRIPT),
+        "--trials",
         str(paths["trials_csv"]),
-        "--output-trials",
-        str(paths["trials_with_spaces_csv"]),
         "--output-spaces",
         str(paths["spaces_csv"]),
         "--work-dir",
-        str(paths["spacify_work_dir"]),
+        str(paths["extraction_work_dir"]),
     ]
-    append_optional(cmd, "--gpus", args.gpus)
-    append_optional(cmd, "--gpus-per-instance", args.gpus_per_instance)
-    append_optional(cmd, "--server_urls", args.server_urls)
+    if args.server_urls:
+        cmd.extend(["--server_urls", *args.server_urls.replace(",", " ").split()])
     append_optional(cmd, "--server_urls_file", args.server_urls_file)
-    append_optional(cmd, "--model", args.spacify_model)
-    append_optional(cmd, "--download-dir", args.spacify_download_dir)
-    append_optional(cmd, "--batch-size", args.spacify_batch_size)
-    append_optional(cmd, "--max-model-len", args.spacify_max_model_len)
-    append_optional(cmd, "--max-tokens", args.spacify_max_tokens)
-    append_optional(cmd, "--temperature", args.spacify_temperature)
-    append_optional(cmd, "--reasoning-parser", args.reasoning_parser)
+    append_optional(cmd, "--model", args.cohort_model)
     cmd.extend(extra_args)
     return cmd
 

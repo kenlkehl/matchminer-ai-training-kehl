@@ -561,11 +561,10 @@ and `scripts/benchmark_embeddinggemma_batches.py`.
 | `scripts/` | GCP fleet (`gcp_note_fleet.py`, `gcp_note_worker.py`, `bootstrap_gcp.sh`), remote TrialSpace jobs, `teacher_proxy.py`, `post_notes_workflow.py`, `label_to_trialspace.py`, `check_patient_summaries.py`, `download_ctgov_protocols.py`, `cohort_dashboard.py` (cohort review: as extracted, merged, or key and boilerplate criteria separated), `register_event_validation_upgrade.py` (a one-off generation resume upgrade) | Mixed; see each docstring |
 | `docs/history/` | October 2026 retriever comparison logs (ColBERT removed 2026-11-04) | Historical |
 | `claude_oracle/` | Claude Code plugin with judge skills for evaluations | Current |
-| `real_eval_code/` | Retrospective evaluations on real (PHI) data | Current; some scripts use the legacy extractor |
-| `legacy_trial_space_extraction.py`, `trial_hierarchy*.py`, `trial_prompts/`, `trial_space_export.py`, `trial_treatment_screening.py` | Pre-cohort trial-space extraction, superseded by `0b` | Legacy |
+| `real_eval_code/` | Retrospective evaluations on real (PHI) data. Their trial line items come from cohorts: `eval_cohort_lineitems.py` runs `0d_extract_ctgov_cohorts.py` and writes each cohort's key criteria as `this_space` and its boilerplate criteria as `trial_boilerplate_text` (the legacy pre-cohort trial-space extractor and `trial_prompts/` were removed 2026-11-06) | Current |
 | `make_top_matches.py` | Earlier SentenceTransformer top-match retrieval (kept for the embedder comparison) | Legacy |
 | `gcp_vllm_orchestrator.py`, `pdfify_synthetic_notes.py`, `synthetic_eval_code/` | Earlier fleet management, synthetic-note PDFs, a one-patient demo | Legacy |
-| `pull_spacify_and_embed_ctgov` | Pulls current ClinicalTrials.gov cancer trials, extracts legacy trial spaces and embeds them for `real_eval_code/real_time_eval/` | Legacy (uses the legacy extractor) |
+| `pull_spacify_and_embed_ctgov` | Pulls current ClinicalTrials.gov cancer trials, extracts their cohorts (`real_eval_code/eval_cohort_lineitems.py`, remote endpoints) and embeds them for `real_eval_code/real_time_eval/` | Current |
 
 ## Tests
 

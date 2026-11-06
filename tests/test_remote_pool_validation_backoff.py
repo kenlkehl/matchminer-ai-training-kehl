@@ -7,7 +7,6 @@ import pytest
 from openai import RateLimitError
 
 from remote_vllm_pool import AdaptiveSemaphore, OutputValidationError, ServerEntry, _dispatch_one
-from trial_treatment_screening import parse_screening_output
 
 
 @pytest.mark.parametrize('error,neutral', [
@@ -64,8 +63,8 @@ def test_valid_retry_is_saved_and_success_can_grow_concurrency():
         async def add(work_id, result):
             saved.append((work_id, result))
 
-        async def work(client, payload):
-            return parse_screening_output(payload['final'], 'stop')
+        async def work(client, payload):  # a malformed answer raises JSONDecodeError, a validation error
+            return json.loads(payload['final'])
 
         args = dict(work_fn=work, work_queue=queue, results=SimpleNamespace(add=add),
                     max_attempts=3, error_placeholder=lambda *args: 'ERROR')
@@ -73,23 +72,12 @@ def test_valid_retry_is_saved_and_success_can_grow_concurrency():
         await _dispatch_one(entry, 1, {'final': '{bad JSON'}, 0, **args)
         assert sem.limit == 8
         work_id, payload, attempt = queue.get_nowait()
-        payload['final'] = '{"is_cancer_treatment_trial": false, "rationale": "Diagnostic-only imaging"}'
+        payload['final'] = '{"answer": "no", "reason": "Diagnostic-only imaging"}'
         await sem.acquire()
         await _dispatch_one(entry, work_id, payload, attempt, **args)
         assert sem.limit == 10
-        assert saved == [(1, {'is_cancer_treatment_trial': False, 'treatment_screen_rationale': 'Diagnostic-only imaging'})]
+        assert saved == [(1, {'answer': 'no', 'reason': 'Diagnostic-only imaging'})]
         assert entry.ok_count == 1 and entry.output_validation_err_count == 1
 
     asyncio.run(scenario())
 
-
-@pytest.mark.parametrize('final', ['{bad JSON', '{}', '{"is_cancer_treatment_trial": "false", "rationale": "x"}', '{"is_cancer_treatment_trial": true, "rationale": ""}'])
-def test_screening_json_and_schema_failures_are_explicit_output_errors(final):
-    with pytest.raises(OutputValidationError):
-        parse_screening_output(final, 'stop')
-
-
-def test_token_limit_is_not_misclassified_as_malformed_json():
-    with pytest.raises(ValueError) as caught:
-        parse_screening_output('{}', 'length')
-    assert not isinstance(caught.value, OutputValidationError)
