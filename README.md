@@ -363,7 +363,10 @@ on the patient's key section and the cohort's key criteria. The score is 0–6:
 0 unless reasonable, else 1 plus one each for cancer type, burden and treatment
 history and two for biomarker (`trialspace/regression.py`, `contracts.py`).
 `scores.jsonl` rows keep all five answers (never null) and `question_keys`
-`{"match": key}`. The earlier gated design (`potentially_eligible` first,
+`{"match": key}`. Since 2026-11-05 (user instruction) the answer is decoded under
+the inference package's `MATCH_LABELS_JSON_SCHEMA` (vLLM `structured_outputs`,
+applied after the reasoning), part of the label contract: label directories made
+before then do not match it. The earlier gated design (`potentially_eligible` first,
 specificity questions only after a yes, one question per request, prompts in
 `colbert_experiments/prompts/`) is gone; its label directories do not match the
 current contract.

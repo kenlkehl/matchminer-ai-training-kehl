@@ -26,7 +26,8 @@ from matchminer_ai.matching.decision_model import (
     questions_digest,
 )
 from matchminer_ai.matching.match_labels import (
-    LABELS, MATCH_LABELS_PROMPT, build_match_label_messages, match_labels_contract, parse_match_labels,
+    LABELS, MATCH_LABELS_JSON_SCHEMA, MATCH_LABELS_PROMPT, build_match_label_messages, match_labels_contract,
+    parse_match_labels,
 )
 
 VERSION = 'trialspace-teacher-contracts-v1'
@@ -41,8 +42,8 @@ def prompt_sources():
 
 def contract_hash(task='match', sources=None):
     sources = prompt_sources() if sources is None else sources
-    if task == 'match':
-        detail = match_labels_contract()
+    if task == 'match':  # decoded under its JSON schema since 2026-11-05 (user instruction)
+        detail = dict(match_labels_contract(), structured=MATCH_LABELS_JSON_SCHEMA)
     elif task == 'boilerplate':
         detail = dict(prompt=BOILERPLATE_PROMPT, answer='Yes!/No!')
     else:  # the per-criterion request is built from the decision model's state and question texts
@@ -81,10 +82,11 @@ def parse_boilerplate(answer):
 
 
 def answer_schema(task):
-    """The JSON schema a task's answer is decoded under (structured outputs), or None for free text.
-    Only ``criteria`` is constrained: Nemotron otherwise drops the opening quote of ``reason`` in
-    about a quarter of its answers (2026-11-05 test on 172.24.216.113:8002)."""
-    return CRITERION_LABEL_JSON_SCHEMA if task == 'criteria' else None
+    """The JSON schema a task's answer is decoded under (vLLM structured outputs, after the reasoning),
+    or None for free text. The JSON tasks (``match``, ``criteria``) are constrained: unconstrained,
+    Nemotron 3.5 Super dropped the opening quote of a ``reason`` string in about one answer in six
+    (2026-11-05 test on 172.24.216.113:8002). ``boilerplate`` ends in a free-text Yes!/No!."""
+    return {'match': MATCH_LABELS_JSON_SCHEMA, 'criteria': CRITERION_LABEL_JSON_SCHEMA}.get(task)
 
 
 def parse_judgment(task, answer, criterion_type=None):

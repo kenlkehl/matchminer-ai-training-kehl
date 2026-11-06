@@ -35,8 +35,9 @@ with `sampling_profile: auto`); never hard-code another family's values. Nemotro
 sampling (temperature 1.0, top_p 0.95, top_k -1, min_p 0, repetition_penalty 1.0, thinking on) even in
 inference sections whose presets fix greedy decoding (its profile's `replaces_task_sampling`), and the
 GoodOption teacher wrapper applies that profile to its config so catalog fingerprints record it. Free-text
-JSON answers from Nemotron often lose the opening quote of a string field; constrain new JSON teacher answers
-with a schema (`trialspace.contracts.answer_schema`, vLLM `structured_outputs`).
+JSON answers from Nemotron often lose the opening quote of a string field, so the JSON teacher tasks (match
+labels and per-criterion labels) are decoded under their schemas (`trialspace.contracts.answer_schema`, vLLM
+`structured_outputs`; part of each label contract, user instruction November 5); constrain any new one too.
 
 Retriever, labels and checkers (user instruction, November 4): every ColBERT retrieval path is
 removed from both repositories; TrialSpace (dense `google/embeddinggemma-2`) is the only retriever.
