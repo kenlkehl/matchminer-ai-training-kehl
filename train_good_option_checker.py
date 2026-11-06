@@ -269,6 +269,14 @@ def configure_teacher(args: argparse.Namespace) -> MMAIConfig:
         config.remote["max_concurrent_requests"] = int(args.max_concurrent_requests) or 96
         if model:
             config.llm_good_option.setdefault("remote", {})["model_name"] = model
+            from matchminer_ai.llm.model_profiles import apply_model_profile, resolve_model_profile
+            profile = resolve_model_profile(model)
+            if profile is not None and profile.replaces_task_sampling:
+                # Nemotron (user instruction 2026-11-05): its publisher sampling replaces
+                # llm_good_option's greedy preset in the config itself, so the catalog's
+                # checkpoint fingerprint records what is actually sent.
+                apply_model_profile(config, model, sections=[
+                    "llm_good_option", *(f"good_option_catalog.{stage}_llm" for stage in ("screening", "synthesis", "class"))])
     else:
         config.remote["enabled"] = False
         if model:

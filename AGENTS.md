@@ -28,6 +28,16 @@ versions; a trial accepted in only one version uses it. Patients are generated
 from protocol cohorts only. Do not revert to single-version retrieval without
 the user's instruction.
 
+Sampling (user instruction, November 5): every teacher, generation and summarization script must be
+Nemotron-aware. Resolve sampling from the served model's HF id through the inference package's profiles
+(`vllm_reasoning_utils.resolve_sampling_defaults` / `sampling_from_args`, `apply_model_profile`, or a section
+with `sampling_profile: auto`); never hard-code another family's values. Nemotron 3.5 Super gets NVIDIA's
+sampling (temperature 1.0, top_p 0.95, top_k -1, min_p 0, repetition_penalty 1.0, thinking on) even in
+inference sections whose presets fix greedy decoding (its profile's `replaces_task_sampling`), and the
+GoodOption teacher wrapper applies that profile to its config so catalog fingerprints record it. Free-text
+JSON answers from Nemotron often lose the opening quote of a string field; constrain new JSON teacher answers
+with a schema (`trialspace.contracts.answer_schema`, vLLM `structured_outputs`).
+
 Retriever, labels and checkers (user instruction, November 4): every ColBERT retrieval path is
 removed from both repositories; TrialSpace (dense `google/embeddinggemma-2`) is the only retriever.
 `colbert_experiments/` is now `trialspace/` without its ColBERT-only modules, and its October run

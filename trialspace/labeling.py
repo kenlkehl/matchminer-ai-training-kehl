@@ -24,7 +24,7 @@ from remote_vllm_pool import (CompletionSampling, OutputValidationError, Request
                               build_registry_from_args, make_completion_work_fn)
 from vllm_reasoning_utils import (load_tokenizer, resolve_chat_template_kwargs,
                                  resolve_parser_name, resolve_sampling_defaults)
-from .contracts import TASKS, contract_hash, judge_messages, parse_judgment, prompt_sources
+from .contracts import TASKS, answer_schema, contract_hash, judge_messages, parse_judgment, prompt_sources
 from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl
 from .label_concurrency import DEFAULT_AUTO_WORKERS_MAX, run_workers, worker_target
 from .label_preprocessing import BackgroundWork, PromptPreparer
@@ -286,7 +286,7 @@ async def _label(args, output):
             prompt = prepared['prompt']
             result = await session.submit(dict(prompt=prompt, key=item['key'], max_tokens=args.max_tokens,
                 enable_thinking=True, include_completion_metadata=True, include_raw_text=True,
-                criterion_type=item.get('criterion_type')))
+                criterion_type=item.get('criterion_type'), json_schema=answer_schema(task)))
             if not isinstance(result, dict):
                 failures[item['key']] = str(result)
                 return None

@@ -1214,6 +1214,9 @@ def make_completion_work_fn(
             "repetition_penalty": sampling.repetition_penalty,
             "skip_special_tokens": False,
         }
+        if payload.get("json_schema"):
+            # vLLM constrains the answer after the reasoning (the server's reasoning parser).
+            extra["structured_outputs"] = {"json": payload["json_schema"]}
 
         response = await asyncio.wait_for(
             client.completions.create(
@@ -1306,6 +1309,8 @@ def make_chat_completion_work_fn(sampling: CompletionSampling) -> WorkFn:
                      repetition_penalty=sampling.repetition_penalty)
         if payload.get("chat_template_kwargs"):
             extra["chat_template_kwargs"] = payload["chat_template_kwargs"]
+        if payload.get("json_schema"):
+            extra["structured_outputs"] = {"json": payload["json_schema"]}
         response = await asyncio.wait_for(client.chat.completions.create(
             model=sampling.model, messages=payload["messages"],
             max_tokens=int(payload["max_tokens"]),

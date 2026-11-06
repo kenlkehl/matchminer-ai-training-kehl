@@ -22,7 +22,8 @@ import json
 from matchminer_ai.embedding.trialspace_contract import DIRECTIONS
 from matchminer_ai.llm.prompts import load_prompt_text
 from matchminer_ai.matching.decision_model import (
-    PROMPTS as DECISION_PROMPTS, criterion_teacher_messages, parse_criterion_label, questions_digest,
+    CRITERION_LABEL_JSON_SCHEMA, PROMPTS as DECISION_PROMPTS, criterion_teacher_messages, parse_criterion_label,
+    questions_digest,
 )
 from matchminer_ai.matching.match_labels import (
     LABELS, MATCH_LABELS_PROMPT, build_match_label_messages, match_labels_contract, parse_match_labels,
@@ -45,7 +46,8 @@ def contract_hash(task='match', sources=None):
     elif task == 'boilerplate':
         detail = dict(prompt=BOILERPLATE_PROMPT, answer='Yes!/No!')
     else:  # the per-criterion request is built from the decision model's state and question texts
-        detail = dict(prompt=CRITERIA_PROMPT, answer='answer/criterion_status/reason', builder=questions_digest())
+        detail = dict(prompt=CRITERIA_PROMPT, answer='answer/criterion_status/reason', builder=questions_digest(),
+                      structured=CRITERION_LABEL_JSON_SCHEMA)
     # match and boilerplate hash the two prompts they always hashed; criteria hashes its own
     names = (CRITERIA_PROMPT,) if task == 'criteria' else (MATCH_LABELS_PROMPT, BOILERPLATE_PROMPT)
     sources = {name: sources[name] for name in names}
@@ -78,6 +80,13 @@ def parse_boilerplate(answer):
     raise ValueError('The answer must end with "Yes!" or "No!"')
 
 
+def answer_schema(task):
+    """The JSON schema a task's answer is decoded under (structured outputs), or None for free text.
+    Only ``criteria`` is constrained: Nemotron otherwise drops the opening quote of ``reason`` in
+    about a quarter of its answers (2026-11-05 test on 172.24.216.113:8002)."""
+    return CRITERION_LABEL_JSON_SCHEMA if task == 'criteria' else None
+
+
 def parse_judgment(task, answer, criterion_type=None):
     if task == 'match':
         return dict(labels=parse_match_labels(answer))
@@ -88,5 +97,5 @@ def parse_judgment(task, answer, criterion_type=None):
     raise ValueError('Unknown task')
 
 
-__all__ = ['BOILERPLATE_PROMPT', 'CRITERIA_PROMPT', 'DIRECTIONS', 'LABELS', 'TASKS', 'VERSION', 'contract_hash', 'judge_messages',
+__all__ = ['BOILERPLATE_PROMPT', 'CRITERIA_PROMPT', 'answer_schema', 'DIRECTIONS', 'LABELS', 'TASKS', 'VERSION', 'contract_hash', 'judge_messages',
            'parse_boilerplate', 'parse_judgment', 'prompt_sources']

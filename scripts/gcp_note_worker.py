@@ -52,7 +52,7 @@ def ready(gpu, config):
 
 def smoke(gpu, config):
     body = dict(model=config['served_model'], messages=[dict(role='user', content='What is 7 + 5? Return only the number.')],
-        temperature=1.0, top_p=.95, top_k=64, max_tokens=2048,
+        **config.get('smoke_sampling', dict(temperature=1.0, top_p=.95, top_k=64)), max_tokens=2048,
         chat_template_kwargs={'enable_thinking': True})
     response = request(gpu, '/v1/chat/completions', body)
     choice = response['choices'][0]

@@ -395,7 +395,9 @@ the patient does not clearly fail the line, no means the patient clearly fails
 it (an inclusion line clearly not met, or an exclusion line clearly met)**;
 `criterion_status` (`met`, `not_met`, `insufficient_information`,
 `not_applicable`) records the line as written, and a no must name the failing
-status. At 0.01, about 29,000 pairs × about 30 lines is roughly 0.9 million
+status. The answer is decoded under its JSON schema (vLLM `structured_outputs`,
+applied after the reasoning): unconstrained, Nemotron 3.5 Super dropped the
+opening quote of `reason` in about one answer in six (2026-11-05 test). At 0.01, about 29,000 pairs × about 30 lines is roughly 0.9 million
 requests per round (match labels: about 2.9 million).
 
 **Decision model** (`train_decision_model.py`; 2026-11-05, user instruction).

@@ -151,8 +151,17 @@ def merge_servers(registry, fleet_id, servers):
             'servers': [s for s in registry['servers'] if s.get('fleet_id') != fleet_id] + servers}
 
 
+def smoke_sampling(model):
+    """The served model's publisher sampling for the VM's reasoning smoke request (the worker has
+    no matchminer_ai, so the controller resolves it; Gemma 4's values for an unregistered model)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from vllm_reasoning_utils import resolve_sampling_defaults
+    return resolve_sampling_defaults(model, fallback=dict(temperature=1.0, top_p=.95, top_k=64))
+
+
 def startup_script(config, worker_source):
-    worker = config['worker']
+    worker = {**config['worker'], 'smoke_sampling': smoke_sampling(config['worker']['model'])}
     service = ('[Unit]\nDescription=Gemma note workers\nAfter=network-online.target docker.service\n'
         'Wants=network-online.target\nRequires=docker.service\nStartLimitIntervalSec=0\n'
         '[Service]\nType=oneshot\nExecStart=/usr/bin/python3 ' + REMOTE + '/worker.py\n'
