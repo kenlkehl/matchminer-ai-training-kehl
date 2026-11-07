@@ -32,7 +32,7 @@ Removed components (user instruction, November 5): OncoReasoning distillation (`
 its pipeline stages and the peft/trl/bitsandbytes/liger dependencies), the training GoodOption catalog stages and
 scripts (`train_good_option_checker.py`, `train_good_option_cosplit.py`; GoodOption stays in the inference
 package, scored with LLMs), `14_check_boilerplate.py` and the real-time evaluations' optional LLM-boilerplate
-stage that ran it (question-6 labels come from `trialspace_training.py label --task boilerplate`), and the scoped
+stage that ran it (question-6 labels come from `trialspace_label.py --task boilerplate`), and the scoped
 upgrade receipts (`scripts/register_{oncoreasoning,trialspace,downstream}_upgrade.py`, `pipeline_upgrade.py`):
 a changed run identity now always needs a fresh run directory. Do not restore them without the user's instruction.
 Also removed (user instruction, November 6): the legacy pre-cohort trial-space extractor
@@ -42,6 +42,21 @@ from cohorts instead: `real_eval_code/eval_cohort_lineitems.py` runs `0d_extract
 and writes each cohort's key criteria as `this_space` and its boilerplate criteria as `trial_boilerplate_text`
 (used by `pull_spacify_and_embed_ctgov`, `real_time_eval/spacify_trials_freshly.py` and the enrollment
 evaluation's `spacify` stage).
+
+Stage scripts (user instruction, November 6): every TrialSpace and decision-model stage is its own script
+(`trialspace_prepare.py`, `trialspace_mine.py`, `trialspace_label.py --task match|boilerplate|criteria`,
+`trialspace_project.py`, `finetune_embedder.py`, `train_decision_model.py prepare|train`; `trialspace_evaluate.py`
+outside the plan) that writes `stage_receipt.json` last (`trialspace/stage.py`: an identity with no paths, hosts or
+devices, outputs by name and byte size, provenance) and answers `--check` (0 complete, 10 not yet, 20 changed: use a
+fresh directory). `train_from_summaries.py` only orders them (`--start-at`, `--stop-after`), so a stage can run on
+another machine (for example mining on a cloud VM) and be adopted when its directory is copied back; the run-wide
+fingerprint over git commits and source files is gone. Training uses the inference package's teacher labeler and
+request pool (`matchminer_ai.labeling`, `matchminer_ai.llm.teacher_pool`, moved there unchanged: the label contracts
+still hash the same, so earlier label directories resume), its encoder (`matchminer_ai.embedding.encoder`: one GPU,
+several GPUs with one GPU's batches and vectors, or vLLM >= 0.32 `/v1/embeddings` servers) and its exact batched
+search (`matchminer_ai.matching.retrieval`). `trialspace_training.py`, `trialspace_comparison.py`,
+`remote_vllm_pool.py`, `adaptive_controller.py`, `label_workspace.py` and the labeler modules of `trialspace/` were
+removed; training keeps its mining policy (trial sampling, lexical and random extras), candidate builders and fitting.
 
 Sampling (user instruction, November 5): every teacher, generation and summarization script must be
 Nemotron-aware. Resolve sampling from the served model's HF id through the inference package's profiles

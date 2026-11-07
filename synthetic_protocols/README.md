@@ -275,8 +275,8 @@ keeps the protocol rows unchanged and adds the ctgov rows with IDs
 `<NCT>-ctgov-cohort-<n>`, `cohort_criteria_source` `ctgov`, their ctgov
 fields as `ctgov_*`, and the trial's split from `--splits-from`; a trial
 accepted in only one version keeps that one. This table, not the
-patient-generation table, is the `--cohorts` input to `trialspace_training.py
-prepare`, which gives each cohort its key criteria as `text` and its boilerplate
+patient-generation table, is the `--cohorts` input to `trialspace_prepare.py`,
+which gives each cohort its key criteria as `text` and its boilerplate
 criteria as `boilerplate`. Patients are still generated from the protocol cohorts only.
 
 Mining then represents each trial by one version (main README, Mining): each

@@ -305,9 +305,21 @@ such as `None` or `NA`; only empty cells are missing.
 ## Training (`train_from_summaries.py`)
 
 The integrated runner trains the TrialSpace retriever (EmbeddingGemma 2) and the
-decision model. Its stages, in order:
+decision model. Since 2026-11-06 (user instruction) every stage is its own script,
+and the runner only orders them: it asks each stage script whether its output is
+complete (`--check`), skips it if so, and otherwise runs it and checks again;
+`--start-at` and `--stop-after` choose a range of stages. Each script writes
+`stage_receipt.json` into its output directory last (`trialspace/stage.py`): an
+identity with no paths, hosts or devices (its settings and the receipts of the
+directories it read), its outputs by name and byte size, and provenance. A stage
+run on another machine (for example `trialspace_mine.py` on a cloud VM's GPUs) is
+adopted once its directory is copied back. `--check` exits 0 when complete, 10 when
+not yet, and 20 when the settings or outputs differ (use a fresh directory). The
+teacher labeler, the encoder and the exact search are the inference package's
+(`matchminer_ai.labeling`, `matchminer_ai.embedding.encoder`,
+`matchminer_ai.matching.retrieval`). The stages, in order:
 
-1. `prepare-trialspace` (`trialspace_training.py prepare`): the corpus every
+1. `prepare-trialspace` (`trialspace_prepare.py`): the corpus every
    round shares (below).
 2. Round 1: mine with the base model (`mine-1`), label (`label-trialspace-1`,
    `--task match`; `label-boilerplate-1`; `label-criteria-1`), project the
@@ -323,7 +335,12 @@ decision model. Its stages, in order:
    prepare` / `train`): the decision model on every round's labels of all seven
    question families.
 
-**Corpus.** `trialspace_training.py prepare` (`trialspace/data.py`) gives each
+The other stage scripts: `trialspace_mine.py` (`mine-N`), `trialspace_label.py`
+(`label-{trialspace,boilerplate,criteria}-N`), `trialspace_project.py`
+(`project-trialspace-N`) and `finetune_embedder.py` (`train-trialspace-N`);
+`trialspace_evaluate.py` gives the in-sample diagnostics outside the plan.
+
+**Corpus.** `trialspace_prepare.py` (`trialspace/corpus.py`, `trialspace/data.py`) gives each
 patient `text` = the summary's key section and `boilerplate` = its boilerplate
 section (a complete summary is split at `Other relevant history:`), and each
 cohort `text` = `cohort_key_criteria` and `boilerplate` =
@@ -333,8 +350,9 @@ de-boilerplated `retrieval_cohorts.csv`, not the patient-generation table.
 
 **Retriever.** TrialSpace is the only retriever. Base `google/embeddinggemma-2`
 at revision `914f7f89`, mined by exhaustive cosine similarity over the key texts
-only, with 8,192-token inputs (`trialspace_comparison.py dense-mine`; its other
-commands are `project-dense-labels` and `evaluate-dense`), and fit with
+only, with 8,192-token inputs (`trialspace_mine.py`; one GPU or several with
+`--devices cuda:0,cuda:1,...`, whose vectors equal a one-GPU run's, or vLLM >= 0.32
+embedding servers with `--embedding-backend openai`), and fit with
 `finetune_embedder.py --prompt-profile trialspace` (the patient and cohort
 prompts are saved under the inference names `patient_summary` and
 `this_space`): CoSENT over every labeled pair plus MNRL over positives with
@@ -349,7 +367,7 @@ Models are saved to `trialspace_round{1,2}/` under
 `--models-dir`. Dense stages run with `--embedding-python` (an environment
 with EmbeddingGemma 2 support).
 
-**Match labels** (`trialspace_training.py label --task match`; 2026-11-04, user
+**Match labels** (`trialspace_label.py --task match`; 2026-11-04, user
 instruction). One teacher request per pair answers all five match labels,
 `reasonableness`, `cancer_type`, `burden`, `treatment_history` and `biomarker`,
 each yes/no with an `evidence_status` and a `reason`, using the inference
@@ -366,7 +384,7 @@ specificity questions only after a yes, one question per request, prompts in
 `colbert_experiments/prompts/`) is gone; its label directories do not match the
 current contract.
 
-**Boilerplate labels** (`label-boilerplate-N`: `trialspace_training.py label
+**Boilerplate labels** (`label-boilerplate-N`: `trialspace_label.py
 --task boilerplate --skip-labeled <earlier rounds' boilerplate_teacher>`; user,
 2026-11-04, per round since 2026-11-05). Every unique combination of patient
 boilerplate section and cohort boilerplate criteria among the round's candidate
@@ -378,7 +396,7 @@ fail any boilerplate criterion) on the patient's boilerplate section and the
 cohort's boilerplate criteria. Pairs whose cohort has no boilerplate are
 skipped. Answers go to `labels.jsonl` as `excluded`, with their reasoning.
 
-**Per-criterion labels** (`label-criteria-N`: `trialspace_training.py label
+**Per-criterion labels** (`label-criteria-N`: `trialspace_label.py
 --task criteria --criteria-pair-fraction 0.01 --skip-labeled <earlier rounds'
 criteria_teacher>`; user, 2026-11-05). A seeded hash of each candidate pair
 selects `--criteria-pair-fraction` of the round's pairs (the same pairs in every
@@ -432,7 +450,7 @@ modification notice, `calibration.json` (temperature 1.0) and
 architecture, causal d1-3B reader only); the inference package serves it with
 Transformers.
 
-**Mining.** EmbeddingGemma 2 (`trialspace_comparison.py dense-mine`) produces
+**Mining.** EmbeddingGemma 2 (`trialspace_mine.py`, `trialspace/mining.py`) produces
 this candidate set by default, with no flags needed:
 
 - Each patient searches only the cohorts of 500 randomly sampled trials
@@ -486,15 +504,15 @@ receipts were removed on 2026-11-05). Decision-model settings:
 
 ### Labeling and retrieval storage
 
-- **Labeling** (`trialspace_training.py label --task match|boilerplate|criteria`,
-  `label_workspace.py`) runs on local SSD by default
+- **Labeling** (`trialspace_label.py --task match|boilerplate|criteria`; the
+  labeler and its local workspace are `matchminer_ai.labeling`) runs on local SSD by default
   (`/tmp/mmai-labels/<hash>`, or `MMAI_LABEL_SCRATCH_DIR`; 16 GiB reserve;
   `MMAI_LOCAL_LABEL_STORAGE=0` disables). Concurrency per server starts at 96 and
   can reach 768. Status is mirrored to the output directory every 10 seconds. On
   completion, `scores.jsonl` (match labels only), `labels.jsonl`, the response
   database (prompts, answers and reasoning) and manifests are published with
   `storage_complete.json`; failed runs keep their scratch for resume.
-- **Retrieval** (`trialspace_comparison.py dense-mine`, `retrieval_workspace.py`)
+- **Retrieval** (`trialspace_mine.py`, `retrieval_workspace.py`)
   stages work in `/tmp/mmai-retrieval` (`--retrieval-scratch-dir`; network
   filesystems are rejected), publishes candidates, rankings, encodings and
   `complete.json` to `--output`, then removes the scratch. Unchanged dense
@@ -534,9 +552,15 @@ modules, and `retrieval_publication.py`, `scripts/trialspace_comparison_workflow
 `embeddinggemma_round_two.py`, `dense_training_preparation.py`,
 `adopted_pipeline.py` and the package's `export_completed_scores.py` and
 `import_score_journal.py` were deleted. `train_from_summaries.py` has no
-`--trialspace-retriever`; `trialspace_training.py` has only `prepare` and
-`label`; `trialspace_comparison.py` has only `dense-mine`,
-`project-dense-labels` and `evaluate-dense`. The prompt profile
+`--trialspace-retriever`. On 2026-11-06 (user instruction) `trialspace_training.py`
+(`prepare`, `label`) and `trialspace_comparison.py` (`dense-mine`,
+`project-dense-labels`, `evaluate-dense`) became the stage scripts
+`trialspace_prepare.py`, `trialspace_label.py`, `trialspace_mine.py`,
+`trialspace_project.py` and `trialspace_evaluate.py`, and the teacher labeler
+(`trialspace/labeling.py` and its journal, publication, reuse and export modules,
+`label_workspace.py`) and request pool (`remote_vllm_pool.py`,
+`adaptive_controller.py`) moved to the inference package
+(`matchminer_ai.labeling`, `matchminer_ai.llm.teacher_pool`). The prompt profile
 `colbert_matching` is now `trialspace` (same strings). The run logs are in
 `docs/history/`: `COMPARISON_GB300_20261026.md`,
 `HANDOFF_GB300_TRAINING_20261026.md`, `GB300_MEMORY_RESULTS_20261026.md` / `.json`
@@ -554,9 +578,9 @@ and `scripts/benchmark_embeddinggemma_batches.py`.
 | `0a_*`, `0b_*`, `0c_*`, `ctgov_metadata.py`, `trial_cohort_format.py`, `trial_space_format.py`, `repair_single_cohort_criteria.py` | Trial parsing, cohort extraction, sampling | Current |
 | `generate_synthetic_data.py`, `synthetic_event_prompts.py`, `synthetic_note_prompts.py`, `prepare_synthetic_training.py`, `synthetic_pool.py` | Synthetic patients and notes | Current |
 | `summarize_patients.py`, `summary_pool.py`, `summary_workspace.py` | Serial summarization | Current |
-| `train_from_summaries.py`, `trialspace_training.py`, `trialspace/`, `trialspace_comparison.py`, `finetune_embedder.py`, `trialspace_embedding_losses.py`, `trialspace_prompt_profiles.py`, `retrieval_workspace.py`, `label_workspace.py`, `retrieval_cache_import.py`, `training_workspace.py` | TrialSpace corpus, mining, match, boilerplate and per-criterion labeling, fitting | Current |
+| `train_from_summaries.py`, `trialspace_prepare.py`, `trialspace_mine.py`, `trialspace_label.py`, `trialspace_project.py`, `trialspace_evaluate.py`, `trialspace/` (incl. `stage.py` receipts), `finetune_embedder.py`, `trialspace_embedding_losses.py`, `trialspace_prompt_profiles.py`, `retrieval_workspace.py`, `retrieval_cache_import.py`, `training_workspace.py` | TrialSpace stage scripts: corpus, mining, match, boilerplate and per-criterion labeling (labeler in `matchminer_ai.labeling`), fitting | Current |
 | `train_decision_model.py` | The decision model (d1-2B) on all seven question families | Current |
-| `remote_vllm_pool.py`, `adaptive_controller.py`, `vllm_reasoning_utils.py` | Server pool, adaptive concurrency, reasoning parsers | Current |
+| `vllm_reasoning_utils.py` | Reasoning parsers and sampling flags (the teacher pool is `matchminer_ai.llm.teacher_pool`) | Current |
 | `synthetic_protocols/` | Synthetic protocol corpus and its cohort extraction | Current |
 | `scripts/` | GCP fleet (`gcp_note_fleet.py`, `gcp_note_worker.py`, `bootstrap_gcp.sh`), remote TrialSpace jobs, `teacher_proxy.py`, `post_notes_workflow.py`, `label_to_trialspace.py`, `check_patient_summaries.py`, `download_ctgov_protocols.py`, `cohort_dashboard.py` (cohort review: as extracted, merged, or key and boilerplate criteria separated), `register_event_validation_upgrade.py` (a one-off generation resume upgrade) | Mixed; see each docstring |
 | `docs/history/` | October 2026 retriever comparison logs (ColBERT removed 2026-11-04) | Historical |
