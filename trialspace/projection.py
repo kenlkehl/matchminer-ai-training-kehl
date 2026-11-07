@@ -10,7 +10,7 @@ from matchminer_ai.labeling.publication import ready_scores
 from matchminer_ai.matching.match_labels import MAX_SCORE
 
 from trial_cohort_format import file_stamp
-from .data import digest, load_corpus, read_jsonl, write_jsonl
+from .data import digest, load_corpus, read_jsonl, write_json, write_jsonl
 from .mining import completed, finish, freeze
 
 VERSION = 'trialspace-projection-v3'
