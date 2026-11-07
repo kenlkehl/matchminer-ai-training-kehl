@@ -45,3 +45,16 @@ def test_prepare_wrangles_every_family_with_its_polarity(tmp_path, monkeypatch):
     question = preview['criterion']['questions'][1]
     assert question['answer'] == 'no' and question['instructions'].endswith('[2] Exclusion criterion: Dialysis.')
     assert 'Other relevant history:\nDialysis.' in preview['criterion']['state']
+
+
+def test_the_loss_is_the_yes_no_readout_inference_reads():
+    import torch
+    import train_decision_model as t
+    readout = [[3, 7], [5, 1, 9]]  # yes forms, no forms (prompt.readout_ids)
+    logits, targets = torch.randn(4, 12), torch.tensor([0, 1, 1, 0])
+    best = torch.stack([logits[:, [3, 7]].amax(1), logits[:, [5, 1, 9]].amax(1)], 1)  # each option's best form
+    expected = -best.log_softmax(1)[torch.arange(4), targets].mean()
+    torch.testing.assert_close(t.readout_loss(logits, targets, readout), expected)
+    other = logits.clone()
+    other[:, [0, 2, 4, 6, 8, 10, 11]] += 30  # probability on any other token costs nothing
+    torch.testing.assert_close(t.readout_loss(other, targets, readout), expected)

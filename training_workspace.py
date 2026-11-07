@@ -83,8 +83,10 @@ class TrainingWorkspace:
         fcntl.flock(self.public_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.owns_lock = True
         inputs = [Path(p).resolve() for p in expand_inputs(self.original.input_parquet)]
+        # Encoder chunk sizes only trade memory for speed, so a resumed run may lower them.
         settings = {k: str(v) if isinstance(v, Path) else v for k,v in vars(self.original).items()
-                    if k not in {'training_scratch_dir', 'training_min_free_gb', 'local_training_storage'}}
+                    if k not in {'training_scratch_dir', 'training_min_free_gb', 'local_training_storage',
+                                 'loss_mini_batch_size', 'encoder_mini_batch_size', 'encoder_token_budget'}}
         model_path = Path(self.original.base_model)
         self.signature = dict(settings=settings, inputs={str(p): file_stamp(p) for p in inputs},
                               local_base_model=tree_manifest(model_path) if model_path.is_dir() else None)

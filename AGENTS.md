@@ -97,8 +97,17 @@ pair, boilerplate labels per new unique boilerplate combination (`label-boilerpl
 `--criteria-pair-fraction` (default 0.01) of the pairs (`label-criteria-N`,
 `criterion_check.labels.user.txt`). d1-2B records `d1_attention: "set"` (the state read both ways
 with its questions on full-attention layers), so training never appends the answer: **the loss is
-the cross-entropy of the yes/no token at each answer slot only, never on prompt tokens**; questions
+the cross-entropy of the yes/no answer at each answer slot only, never on prompt tokens**; questions
 are packed after their state by the checkpoint's own serving code (16 per sequence, 10,000 tokens).
+Since November 7 (user instruction, after the n=5000 smoke fits) that cross-entropy is over the
+answer as inference reads it, the best `yes` form against the best `no` form (`readout_loss`), not
+the bare lowercase token over the whole vocabulary (base d1-2B answers `Yes`/`No`: 4.7 nats there,
+0.5 on the readout); attention runs in the autocast dtype on d1's flash kernels
+(`attend_in_autocast_dtype`: fp32 queries fell back to a masked path whose score blocks ran out of
+memory); TrialSpace's gradient-cache chunk defaults to 8 texts (32 and 16 ran out of memory on
+96 GB GPUs; chunks count texts so every DDP rank runs the same number of them); the chunk sizes are not
+part of a fit's identity, so a run that ran out of memory resumes with smaller chunks; and distributed
+stages run with `PYTORCH_ALLOC_CONF=expandable_segments:True`.
 The states and question texts live in the inference package (`matching/decision_model.py`); the
 reasonableness, boilerplate and per-criterion questions open "Is this patient potentially eligible
 ... If potentially eligible, answer yes; if clearly ineligible, answer no." vLLM 0.33 cannot serve

@@ -231,14 +231,20 @@ def stage_identity(args):
         if stage.read_receipt(base):
             return stage.receipt_id(base)
         return stage.digest({str(p.relative_to(base)): file_stamp(p) for p in sorted(base.rglob('*')) if p.is_file()})
-    return dict(version='trialspace-fit-v1', inputs=[located(p) for p in expand_inputs(args.input_parquet)],
+    return dict(version='trialspace-fit-v2', inputs=[located(p) for p in expand_inputs(args.input_parquet)],
                 base_model=model(args.base_model),
                 revision=args.model_revision, max_tokens=args.max_tokens, model_dtype=args.model_dtype,
                 prompts=model_prompts(args.prompt_profile), batch_size=args.batch_size,
                 world_size=int(os.environ.get('WORLD_SIZE', '1')), gradient_checkpointing=args.gradient_checkpointing,
-                loss_mini_batch_size=args.loss_mini_batch_size, encoder_mini_batch_size=args.encoder_mini_batch_size,
-                encoder_token_budget=args.encoder_token_budget, mask_known_positives=args.mask_known_positives,
+                encoder_chunks=encoder_chunks(args), mask_known_positives=args.mask_known_positives,
                 epochs=args.epochs, max_steps=args.max_steps)
+
+
+def encoder_chunks(args):
+    """How the encoder is chunked for the full-batch losses. The chunk sizes only trade memory for speed (both ways
+    give the unchunked loss and gradients), so they stay out of the identities: a run that ran out of memory resumes
+    from its checkpoint with smaller chunks."""
+    return 'gradient_cache' if args.loss_mini_batch_size else 'retained' if args.encoder_mini_batch_size else None
 
 
 def main():
@@ -289,8 +295,7 @@ def train(args):
         prompts=model_prompts(args.prompt_profile), loss=['MultipleNegativesRankingLoss', 'CoSENTLoss'],
         positive_score_minimum=1, normalization=f'score / {MAX_SCORE} * 2 - 1',
         batch_size=args.batch_size, gradient_checkpointing=args.gradient_checkpointing,
-        loss_mini_batch_size=args.loss_mini_batch_size,
-        encoder_mini_batch_size=args.encoder_mini_batch_size, encoder_token_budget=args.encoder_token_budget,
+        encoder_chunks=encoder_chunks(args),
         sort_encoder_chunks_by_length=bool(args.loss_mini_batch_size or args.encoder_mini_batch_size),
         negative_mask='known_positive_pairs' if args.mask_known_positives else None, epochs=args.epochs, learning_rate=2e-5, warmup_ratio=.01,
         multi_dataset_batch_sampler='proportional', seed=42, training_pool='all_synthetic_training', diagnostics_held_out=False)

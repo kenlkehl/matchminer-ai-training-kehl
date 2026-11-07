@@ -104,9 +104,11 @@ def parser():
     p.add_argument('--trialspace-epochs', type=float, default=1, help='Complete passes over the labeled pairs per fit')
     p.add_argument('--trialspace-batch-size', type=int, default=96, help='EmbeddingGemma 2 pairs per GPU (one rank per --gpus entry); each rank ranks its own pairs, '
                         'and an optimizer step covers this times the GPU count')
-    p.add_argument('--trialspace-loss-mini-batch-size', type=int, default=32,
-                   help='EmbeddingGemma 2 gradient-cache encoder chunk; the loss still spans each rank\'s full batch '
-                        '(48 peaked at 212 GiB on the GB300 with a 2,500-token cap; the cap is now 4,096 on key text)')
+    p.add_argument('--trialspace-loss-mini-batch-size', type=int, default=8,
+                   help='EmbeddingGemma 2 gradient-cache encoder chunk in texts; the loss still spans each rank\'s full '
+                        'batch. 32 and 16 ran out of memory on 96 GB GPUs at the 4,096-token cap and 8 fit (2026-11-07); '
+                        'the GB300 takes 32. Every rank must run the same number of chunks, so chunks count texts, '
+                        'not tokens (token-packed chunks deadlocked DDP)')
     p.add_argument('--trialspace-save-steps', type=int, default=200)
     p.add_argument('--trialspace-save-total-limit', type=int, default=2)
     p.add_argument('--trialspace-stop-at', help='Pause student training at an ISO timestamp with timezone offset')
@@ -539,6 +541,9 @@ def main():
                 env = dict(os.environ)
                 if "torch.distributed.run" in stage.command:
                     env["CUDA_VISIBLE_DEVICES"] = args.gpus
+                    # Variable-length batches fragment the caching allocator: the decision model's last step once
+                    # failed with 4.2 GiB reserved but unusable.
+                    env.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
                 subprocess.run(stage.command, cwd=ROOT, env=env, check=True, stdout=log, stderr=subprocess.STDOUT)
             if not check(stage):
                 raise RuntimeError(f"{stage.name} finished without a complete stage receipt")

@@ -356,7 +356,8 @@ embedding servers with `--embedding-backend openai`), and fit with
 `finetune_embedder.py --prompt-profile trialspace` (the patient and cohort
 prompts are saved under the inference names `patient_summary` and
 `this_space`): CoSENT over every labeled pair plus MNRL over positives with
-known positives masked, 96 pairs per GPU (gradient-cache chunks of 32), BF16,
+known positives masked, 96 pairs per GPU (gradient-cache chunks of 8 texts,
+`--trialspace-loss-mini-batch-size`; 32 on the GB300), BF16,
 learning rate 2e-5 with 1% linear warmup and decay over 1 epoch
 (`--trialspace-epochs`), 4,096-token training cap (key texts only). Round 2
 starts from the round-1 model. The fit runs one rank per GPU in `--gpus`
@@ -439,7 +440,9 @@ the state by the checkpoint's own serving code, at most 16 per sequence and
 10,000 tokens (`--decision-max-length`). d1-2B reads its prompt with `set`
 attention (the state both ways with its questions on full-attention layers), so
 the answer is never appended to the input: **the loss is the cross-entropy of the
-`yes`/`no` token at each question's answer slot only**, never on prompt tokens.
+answer at each question's answer slot only**, never on prompt tokens, read as
+inference reads it: the best `yes` form against the best `no` form. Attention
+runs in the autocast dtype on d1's flash kernels, as at inference.
 Defaults: 1 epoch, 8 states per GPU × 4 accumulation steps, learning rate 1e-5
 with cosine decay and 3% warmup, BF16, gradient checkpointing, the vision tower
 frozen, every synthetic pair (no holdout). The output (`decision_model/` under

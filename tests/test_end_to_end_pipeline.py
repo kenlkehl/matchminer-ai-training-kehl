@@ -194,7 +194,7 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
         assert '--mask-known-positives' in command
         assert float(command[command.index('--epochs') + 1]) == 1
         assert [command[command.index(flag) + 1] for flag in ('--batch-size', '--loss-mini-batch-size', '--prompt-profile')] == \
-            ['96', '32', 'trialspace']
+            ['96', '8', 'trialspace']
     assert fits[0][fits[0].index('--base-model') + 1] == 'google/embeddinggemma-2'
     assert fits[1][fits[1].index('--base-model') + 1].endswith('trialspace_round1')
 

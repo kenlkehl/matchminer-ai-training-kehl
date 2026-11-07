@@ -22,9 +22,11 @@ counted. ``--preview N`` also writes N fully rendered prompts with their answers
 shuffled (seeded per epoch) and packed after the state exactly as the model serves them (its own
 ``SlotReader._sequences``: at most its trained set size, 16, per sequence, and at most --max-length
 tokens). d1-2B reads a state with ``set`` attention (both ways, with its questions, on its
-full-attention layers), so the answer is never appended to the input: the loss is the cross-entropy
-of the ``yes``/``no`` token at each question's answer slot and nothing else. The vision tower and
-projector are frozen. Writes the model, its own code, tokenizer, LICENSE and a modification notice,
+full-attention layers), so the answer is never appended to the input: the loss is, at each
+question's answer slot and nothing else, the cross-entropy of the answer as the model reads it at
+inference (its best ``yes`` form against its best ``no`` form; ``readout_loss``). Attention runs in
+the autocast dtype on d1's flash kernels, as at inference (``attend_in_autocast_dtype``). The vision
+tower and projector are frozen. Writes the model, its own code, tokenizer, LICENSE and a modification notice,
 ``calibration.json`` (temperature 1.0: the base temperature was fitted to the base model) and
 ``decision_contract.json`` to --output-model. Run under torchrun for several GPUs.
 """
@@ -194,6 +196,48 @@ def d1_module(model, name):
     return importlib.import_module(type(model).__module__.rsplit('.', 1)[0] + '.' + name)
 
 
+ANSWERS = ('yes', 'no')  # option order of d1's noul readout
+
+
+def readout_loss(logits, targets, readout):
+    """Mean cross-entropy of each answer slot's answer as d1 reads it at inference: over the two options alone, each
+    scored by its best form's logit (``prompt.readout``: ``yes``/``Yes`` against ``no``/``No``/``NO``), at temperature 1
+    (what ``save`` records). ``logits`` [slots, vocabulary]; ``targets`` the option index (0 yes, 1 no); ``readout``
+    ``prompt.readout_ids``' two groups. Probability on other tokens costs nothing: a vocabulary-wide loss on the bare
+    lowercase token started at 4.7 nats where this readout read 0.5 (base d1-2B, 2026-11-07), so its first steps only
+    respelled Yes/No."""
+    import torch
+    import torch.nn.functional as F
+    logits = logits.float()
+    options = torch.stack([logits[:, torch.as_tensor(ids, device=logits.device)].amax(-1) for ids in readout], dim=-1)
+    return F.cross_entropy(options, targets)
+
+
+def attend_in_autocast_dtype(model):
+    """Train d1's attention on the flash kernels it serves with.
+
+    Training keeps fp32 master weights under bf16 autocast, and each attention layer's q/k RMSNorm multiplies by its
+    fp32 weight, so the queries and keys reach d1's ``Sees.attend`` in fp32. That takes its flash varlen kernels only
+    in half precision; in fp32 it falls back to masked attention over 4,096-query blocks, holding a [states, heads,
+    4096, length] fp32 score block: 11.1 GiB for 8 states at the 5,673-token maximum, which ran out of memory on a
+    96 GB GPU (2026-11-07). Casting q, k and v to the autocast dtype first is what autocast does for attention.
+    """
+    import torch
+    sees = d1_module(model, 'attention').Sees
+    attend = sees.attend
+    if getattr(attend, 'autocast_dtype', False):
+        return
+
+    def cast(self, q, k, v, scale, window=None):
+        if q.is_cuda and q.dtype == torch.float32 and torch.is_autocast_enabled('cuda'):
+            dtype = torch.get_autocast_dtype('cuda')
+            q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
+        return attend(self, q, k, v, scale, window)
+
+    cast.autocast_dtype = True
+    sees.attend = cast
+
+
 def packer_for(model, tokenizer, attention):
     """The checkpoint's own request packing (``SlotReader._sequences``) without its inference engine."""
     runner, prompt = d1_module(model, 'runner'), d1_module(model, 'prompt')
@@ -215,8 +259,7 @@ class Collator:
         self.packer, self.prompt, self.max_length, self.seed = packer, prompt, max_length, seed
         patients, cohorts = load_corpus(corpus)
         self.patients, self.cohorts = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
-        yes, no = prompt.readout_ids(packer.tokenizer, prompt.Noul(''))
-        self.answer_ids = {'yes': yes[0], 'no': no[0]}  # the canonical lowercase tokens
+        self.readout = prompt.readout_ids(packer.tokenizer, prompt.Noul(''))  # [yes forms, no forms]
         self.pad = packer.tokenizer.pad_token_id or 0
 
     def sequences(self, state, names, questions, set_size):
@@ -243,7 +286,7 @@ class Collator:
                 for k, slots in enumerate(ends):
                     slot_rows.append(r)
                     slot_positions.append(slots[-1])  # a noul question has one slot, its last token
-                    targets.append(self.answer_ids[answers[names[first + k]]])
+                    targets.append(ANSWERS.index(answers[names[first + k]]))  # 0 yes, 1 no
         width = max(map(len, ids))
         batch = dict(input_ids=torch.tensor([s + [self.pad] * (width - len(s)) for s in ids]),
                      attention_mask=torch.tensor([[1] * len(s) + [0] * (width - len(s)) for s in ids]),
@@ -260,7 +303,6 @@ def train(args):
     import types
 
     import torch
-    import torch.nn.functional as F
     from datasets import Dataset
     from transformers import AutoModel, AutoTokenizer, Trainer, TrainingArguments
     from transformers.trainer_utils import get_last_checkpoint
@@ -286,6 +328,7 @@ def train(args):
         if part is not None:
             part.requires_grad_(False)
     model.config.use_cache = False
+    attend_in_autocast_dtype(model)
     slots = d1_module(model, 'slots')
 
     def slot_forward(self, input_ids, attention_mask, slot_rows, slot_positions, state_len=None, question=None, **_):
@@ -306,7 +349,7 @@ def train(args):
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             targets = inputs.pop('targets')
             logits = model(**inputs)
-            loss = F.cross_entropy(logits.float(), targets)  # the answer slots only
+            loss = readout_loss(logits, targets, collator.readout)  # the answer slots only
             return (loss, logits) if return_outputs else loss
 
     output = Path(args.output_model).expanduser().resolve()
@@ -356,7 +399,8 @@ def save(trainer, model, tokenizer, output, args, prepared, examples, attention)
                     label_sources=prepared['label_sources'], states=prepared['states'], questions=prepared['questions'],
                     trained_examples=examples, epochs=args.epochs, learning_rate=args.learning_rate,
                     batch_size_per_device=args.batch_size, gradient_accumulation_steps=args.gradient_accumulation_steps,
-                    seed=args.seed, loss='cross-entropy of the yes/no token at each answer slot only',
+                    seed=args.seed, loss=('cross-entropy of the yes/no readout (the best yes form against the best no form, '
+                                          'as inference reads it) at each answer slot only'),
                     holdout='none (all synthetic pairs train)', polarity=prepared['polarity'])
     contract['fingerprint'] = digest(contract)
     (output / 'decision_contract.json').write_text(json.dumps(contract, indent=2) + '\n')
@@ -417,7 +461,7 @@ def stage_identity(args):
                        for family in ('match', 'boilerplate', 'criteria')},
                     base_model=args.base_model, base_revision=args.base_revision, max_length=args.max_length,
                     seed=args.seed)
-    return dict(version='decision-model-v1', data=receipt_id(args.data_dir), base_model=args.base_model,
+    return dict(version='decision-model-v2', data=receipt_id(args.data_dir), base_model=args.base_model,
                 base_revision=args.base_revision, attention=args.attention, max_length=args.max_length,
                 epochs=args.epochs, max_steps=args.max_steps, max_examples=args.max_examples, batch_size=args.batch_size,
                 gradient_accumulation_steps=args.gradient_accumulation_steps, learning_rate=args.learning_rate,
