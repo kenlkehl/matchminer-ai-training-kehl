@@ -238,7 +238,7 @@ def train(args):
         raise ValueError('Choose gradient caching or retained encoder chunks, not both')
     input_files = expand_inputs(args.input_parquet)
     from trialspace.data import write_json
-    from trialspace.regression import MAX_SCORE
+    from matchminer_ai.matching.match_labels import MAX_SCORE
     from trial_cohort_format import file_stamp
     identity = dict(inputs={str(Path(p).resolve()): file_stamp(p) for p in input_files},
         base_model=args.base_model, revision=args.model_revision, max_tokens=args.max_tokens,

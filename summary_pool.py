@@ -10,8 +10,8 @@ import resource
 import shutil
 import uuid
 
-from remote_vllm_pool import (CompletionSampling, OutputValidationError, RequestSession,
-                              build_registry_from_args, make_completion_work_fn)
+from matchminer_ai.llm.teacher_pool import (CompletionSampling, OutputValidationError, RequestSession,
+                                            build_registry_from_args, make_completion_work_fn)
 from matchminer_ai.patients.postprocess import normalize_patient_summary
 from matchminer_ai.patients.summary_quality import check_patient_summary, summary_retry_codes
 

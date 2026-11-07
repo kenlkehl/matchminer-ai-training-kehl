@@ -1254,7 +1254,7 @@ def summarize(args, *, remote_mode, tokenizer_model, reasoning_parser):
 
         if remote_mode:
             # Server discovery / health / failover is handled inside the
-            # remote_vllm_pool via DynamicServerRegistry. No clients here.
+            # matchminer_ai.llm.teacher_pool via DynamicServerRegistry. No clients here.
             n_servers = 0
             print("Remote-pool mode: using DynamicServerRegistry "
                   "(servers managed by gcp_vllm_orchestrator).")

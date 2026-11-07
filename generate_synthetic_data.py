@@ -32,7 +32,8 @@ import pyarrow.parquet as pq
 from trial_cohort_format import training_rows, patient_generation_criteria, read_clinical_csv, file_stamp
 import synthetic_event_prompts as prompts
 
-from remote_vllm_pool import (
+import matchminer_ai
+from matchminer_ai.llm.teacher_pool import (
     CompletionSampling, OutputValidationError, RequestSession,
     add_remote_cli_args, build_registry_from_args, make_completion_work_fn,
 )
@@ -40,6 +41,8 @@ from vllm_reasoning_utils import resolve_parser_name, resolve_sampling_defaults,
 from vllm_reasoning_utils import load_tokenizer as load_generation_tokenizer
 
 HERE = Path(__file__).resolve().parent
+# The teacher pool moved to the inference package on 2026-11-06; it stays part of this stage's identity.
+POOL_SOURCES = ('llm/teacher_pool.py', 'llm/scheduler_control.py', 'llm/teacher_runtime.py')
 EVENT_TYPES = {'demographics', 'diagnosis', 'systemic', 'surgery', 'radiation',
                'adverse_event', 'clinical_note', 'imaging_report', 'pathology_report', 'ngs_report'}
 REPORT_TYPES = {'clinical_note', 'imaging_report', 'pathology_report', 'ngs_report'}
@@ -440,10 +443,11 @@ class Generator:
 
     def manifest(self):
         sources = ['generate_synthetic_data.py', 'synthetic_note_prompts.py',
-                   'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py',
-                   'trial_cohort_format.py', 'adaptive_controller.py']
+                   'synthetic_event_prompts.py', 'vllm_reasoning_utils.py', 'trial_cohort_format.py']
         value = dict(version='synthetic-cohort-seeds-patient-events-notes-v5', input_stamp=file_stamp(self.args.input_csv),
-                     source_sha256={name: sha_file(HERE / name) for name in sources},
+                     source_sha256={**{name: sha_file(HERE / name) for name in sources},
+                                    **{'matchminer_ai/' + name: sha_file(Path(matchminer_ai.__file__).parent / name)
+                                       for name in POOL_SOURCES}},
                      sampling=asdict(self.sampling), tokenizer=self.args.tokenizer_model or self.args.model,
                      chat_template_kwargs=resolve_chat_template_kwargs(self.args.tokenizer_model or self.args.model),
                      transport='completions',

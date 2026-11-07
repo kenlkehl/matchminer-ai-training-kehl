@@ -8,43 +8,12 @@ tags (``cohort_criteria_items``), which the per-criterion teacher and the decisi
 the patient's complete summary (``text``, ``Other relevant history:``, ``boilerplate``).
 """
 from pathlib import Path
-import hashlib
-import json
 
 import pandas as pd
+# The corpus reader and JSON helpers are the inference labeler's (matchminer_ai.labeling, 2026-11-06).
+from matchminer_ai.labeling.corpus import full_summary, load_corpus, split_name, text, validate_corpus  # noqa: F401
+from matchminer_ai.labeling.files import digest, read_jsonl, write_json, write_jsonl  # noqa: F401
 from trial_cohort_format import read_clinical_csv
-
-
-def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-
-
-def write_json(path, value, *, compact=False, create_parents=True):
-    path = Path(path)
-    if create_parents:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    options = dict(separators=(',', ':')) if compact else dict(indent=2)
-    temporary.write_text(json.dumps(value, ensure_ascii=False, **options) + '\n')
-    temporary.replace(path)
-
-
-def read_jsonl(path):
-    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
-
-
-def write_jsonl(path, rows):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    with temporary.open('w') as stream:
-        for row in rows:
-            stream.write(json.dumps(row, ensure_ascii=False) + '\n')
-    temporary.replace(path)
-
-
-def text(value):
-    return value if isinstance(value, str) and value.strip() else ''
 
 
 def patient_sections(row):
@@ -71,13 +40,6 @@ def read_table(path):
     if path.suffix == '.jsonl':
         return pd.DataFrame(read_jsonl(path))
     return read_clinical_csv(path)
-
-
-def split_name(value):
-    value = 'val' if value == 'validation' else value
-    if value not in ('train', 'val', 'test'):
-        raise ValueError('Every input needs an explicit train/val/test split; no random pair splits')
-    return value
 
 
 def selected_splits(value):
@@ -131,37 +93,3 @@ def prepare(patients_path, cohorts_path, output, *, merge_source_splits=False):
         patient_sha256=digest(patient_rows), cohort_sha256=digest(cohort_rows),
         source_patients=str(Path(patients_path).resolve()), source_cohorts=str(Path(cohorts_path).resolve()),
         split_policy='all_synthetic_training' if merge_source_splits else 'preserve_source_splits'))
-
-
-def validate_corpus(patients, cohorts):
-    trial_splits = {}
-    for records in (patients, cohorts):
-        if len({r['id'] for r in records}) != len(records):
-            raise ValueError('Duplicate entity IDs')
-        for row in records:
-            split_name(row['split'])
-            if not text(row['text']):
-                raise ValueError('Empty entity text')
-    for row in cohorts:
-        if trial_splits.setdefault(row['trial_id'], row['split']) != row['split']:
-            raise ValueError('Sibling cohorts must remain in the same split')
-    for row in patients:
-        if row.get('source_trial_id') in trial_splits and trial_splits[row['source_trial_id']] != row['split']:
-            raise ValueError('Synthetic patient and source trial cross splits')
-
-
-def load_corpus(directory):
-    directory = Path(directory)
-    patients, cohorts = read_jsonl(directory / 'patients.jsonl'), read_jsonl(directory / 'cohorts.jsonl')
-    for cohort in cohorts:  # corpora prepared before 2026-11-05 called the ctgov version 'registry'
-        if cohort.get('source') == 'registry':
-            cohort['source'] = 'ctgov'
-    validate_corpus(patients, cohorts)
-    return patients, cohorts
-
-
-def full_summary(patient):
-    """A corpus patient's complete summary: the key section, then ``Other relevant history:`` and the
-    boilerplate section, as the inference package joins them."""
-    from matchminer_ai.patients.postprocess import normalize_patient_summary
-    return normalize_patient_summary(patient['text'], patient.get('boilerplate') or None)

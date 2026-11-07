@@ -20,10 +20,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from trialspace.__main__ import parser as shared_parser
-from trialspace.contracts import DIRECTIONS
+from matchminer_ai.embedding.trialspace_contract import DIRECTIONS
+from matchminer_ai.labeling import add_label_cli_args, score_contract
 from trialspace.data import digest, load_corpus, prepare, read_jsonl, write_json, write_jsonl
-from trialspace.regression import score_contract
 from trial_cohort_format import file_stamp
 
 VERSION = 'trialspace-corpus-v3'
@@ -109,9 +108,20 @@ def export_candidates(corpus, candidates, cohort_output, patient_output):
         temporary.replace(path)
 
 
+def shared_parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    commands = p.add_subparsers(dest='command', required=True)
+    prepare = commands.add_parser('prepare', help='Adapt summaries and the cohort table; key and boilerplate texts')
+    prepare.add_argument('--patients', required=True)
+    prepare.add_argument('--cohorts', required=True)
+    prepare.add_argument('--output', required=True)
+    # The labeler and its flags are the inference package's (matchminer_ai.labeling, moved there 2026-11-06).
+    add_label_cli_args(commands.add_parser('label', help='Label candidate pairs: match, boilerplate or per-criterion'))
+    return p
+
+
 def parser():
     p = shared_parser()
-    p.description = __doc__
     sub = next(action for action in p._actions if hasattr(action, 'choices') and isinstance(action.choices, dict))
     sub.choices['prepare'].add_argument('--merge-source-splits', action=argparse.BooleanOptionalAction, default=True,
         help='Pool all synthetic patients/cohorts for retrieval and fitting; retain source_split provenance')
@@ -236,7 +246,7 @@ def unique_boilerplate_pairs(corpus, candidate_files, output, skip=()):
 
 
 def write_reuse_plan(args):
-    """Record the earlier round to import from (trialspace.full_pool_reuse verifies it)."""
+    """Record the earlier round to import from (matchminer_ai.labeling.full_pool_reuse verifies it)."""
     if not (args.reuse_labels and args.reuse_candidates):
         raise ValueError('--reuse-labels and --reuse-candidates go together')
     plan = dict(sources=[dict(labels=str(args.reuse_labels), candidates=str(args.reuse_candidates),
@@ -256,7 +266,7 @@ def main():
     elif args.command == 'label':
         from synthetic_pool import require_full_corpus
         require_full_corpus(args.corpus)
-        from trialspace.labeling import label
+        from matchminer_ai.labeling import label
         args.scheduler_metrics_file = args.scheduler_metrics_file or str(Path(args.output) / 'concurrency_status.json')
         if args.reuse_labels or args.reuse_candidates:
             write_reuse_plan(args)

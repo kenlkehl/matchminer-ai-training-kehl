@@ -245,6 +245,8 @@ def build_plan(args):
                  '--request_timeout', str(args.generation_request_timeout), '--api-key-env', args.api_key_env,
                  *model, *(['--server_urls_file', str(registry)] if registry else [])]
     inference_sources = args.inference_repo / 'src/matchminer_ai'
+    # The adaptive teacher pool (training's remote_vllm_pool.py before 2026-11-06).
+    pool_sources = [inference_sources / 'llm' / name for name in ('teacher_pool.py', 'scheduler_control.py', 'teacher_runtime.py')]
     package = sorted(p for p in inference_sources.rglob('*') if p.suffix in ('.py', '.txt', '.yaml'))
     pool = ['--server-urls-file', str(registry)] if registry else []
     batch, extracted = args.protocol_dir, args.protocol_cohort_dir
@@ -326,9 +328,9 @@ def build_plan(args):
               '--initial-concurrent-per-server', str(args.generation_initial_concurrency_per_server),
               '--pending-requests', str(args.generation_pending_requests), *model, *cache, *remote],
               [args.sampled_spaces], generated,
-              source('generate_synthetic_data.py', 'synthetic_note_prompts.py',
-                     'synthetic_event_prompts.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py', 'trial_cohort_format.py',
-                     'adaptive_controller.py')),
+              [*source('generate_synthetic_data.py', 'synthetic_note_prompts.py',
+                       'synthetic_event_prompts.py', 'vllm_reasoning_utils.py', 'trial_cohort_format.py'),
+               *pool_sources]),
         Stage('prepare-notes', [py, str(ROOT / 'prepare_synthetic_training.py'), 'notes',
               '--input', str(args.raw_synthetic_notes), '--sampled-spaces', str(args.sampled_spaces),
               '--output', str(args.synthetic_notes), '--patients', str(patient_map),
@@ -349,7 +351,8 @@ def build_plan(args):
               *(['--summary-scratch-dir', str(args.summary_scratch_dir)] if args.summary_scratch_dir else []),
               *model, *(['--download_dir', str(args.download_dir)] if args.download_dir else []), *remote],
               [args.synthetic_notes], [raw_summaries, d / 'patient_serial_summaries.parquet'],
-              [*source('summarize_patients.py', 'summary_pool.py', 'summary_workspace.py', 'retrieval_workspace.py', 'remote_vllm_pool.py', 'vllm_reasoning_utils.py'),
+              [*source('summarize_patients.py', 'summary_pool.py', 'summary_workspace.py', 'retrieval_workspace.py', 'vllm_reasoning_utils.py'),
+               *pool_sources,
                inference_sources / 'patients/postprocess.py', inference_sources / 'patients/prompt_builder.py',
                inference_sources / 'patients/summary_quality.py',
                inference_sources / 'prompts/patient.serial.user.primer.txt',

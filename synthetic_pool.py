@@ -7,16 +7,14 @@ evaluation and explicitly experimental modules are separate from this policy.
 POLICY = 'all_synthetic_training'
 SOURCE_SPLITS = ('train', 'val', 'test')
 
+# Pooled-record checks shared with the inference labeler's earlier-round reuse.
+from matchminer_ai.labeling.corpus import pooled_records, require_full_pool  # noqa: E402,F401
+
 
 def require_all_sources(splits):
     normalized = {'val' if value == 'validation' else value for value in splits}
     if normalized != set(SOURCE_SPLITS):
         raise ValueError('Production uses all synthetic data; source-split holdouts/subsets are disabled')
-
-
-def pooled_records(rows):
-    return [dict(row, source_split=row.get('source_split', row.get('split', 'train')), split='train')
-            for row in rows]
 
 
 def pooled_frame(frame):
@@ -25,13 +23,6 @@ def pooled_frame(frame):
         frame['source_split'] = frame['split'] if 'split' in frame else 'train'
     frame['split'] = 'train'
     return frame
-
-
-def require_full_pool(patients, cohorts):
-    if any(row.get('split') != 'train' for row in [*patients, *cohorts]):
-        raise ValueError('Production retrieval/labeling/fitting requires one full synthetic pool. '
-                         'Reprepare with --merge-source-splits and rerun both retrieval directions; '
-                         'historical assignments belong only in source_split.')
 
 
 def require_full_corpus(path):

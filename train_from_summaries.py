@@ -30,7 +30,7 @@ import urllib.request
 from trial_cohort_format import file_stamp
 from trialspace.data import digest, write_json as atomic_json
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
-from trialspace.label_concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
+from matchminer_ai.labeling.concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_TEACHER = 'nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4'
@@ -501,12 +501,11 @@ def main():
     identity = {"args": training_identity_arguments(args),
                 "training_commit": git_revision(ROOT), "inference_commit": git_revision(args.inference_repo),
                 "inputs": input_records(files, manifest_path, args.skip_input_validation)}
-    from trialspace.regression import score_contract
+    from matchminer_ai.labeling import score_contract
     identity['trialspace_contract'] = score_contract()
     source_paths = [ROOT / 'train_from_summaries.py', ROOT / 'trialspace_training.py',
-                    ROOT / 'retrieval_workspace.py', ROOT / 'label_workspace.py', ROOT / 'synthetic_pool.py', ROOT / 'retrieval_cache_import.py',
+                    ROOT / 'retrieval_workspace.py', ROOT / 'synthetic_pool.py', ROOT / 'retrieval_cache_import.py',
                     ROOT / 'trial_cohort_format.py',
-                    ROOT / 'remote_vllm_pool.py', ROOT / 'adaptive_controller.py',
                     ROOT / 'train_decision_model.py',
                     *sorted((ROOT / 'trialspace').glob('*.py')),
                     args.inference_repo / 'src/matchminer_ai/llm/traces.py',
@@ -514,6 +513,9 @@ def main():
                     args.inference_repo / 'src/matchminer_ai/llm/remote_inference.py',
                     args.inference_repo / 'src/matchminer_ai/llm/endpoint_pool.py',
                     args.inference_repo / 'src/matchminer_ai/llm/dispatch.py',
+                    *(args.inference_repo / 'src/matchminer_ai/llm' / name
+                      for name in ('teacher_pool.py', 'scheduler_control.py', 'teacher_runtime.py')),
+                    *sorted((args.inference_repo / 'src/matchminer_ai/labeling').glob('*.py')),
                     *sorted((args.inference_repo / 'src/matchminer_ai/embedding').glob('*.py')),
                     args.inference_repo / 'src/matchminer_ai/matching/match_labels.py',
                     args.inference_repo / 'src/matchminer_ai/matching/decision_model.py',

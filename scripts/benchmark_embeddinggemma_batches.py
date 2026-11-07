@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from trialspace.regression import MAX_SCORE
+from matchminer_ai.matching.match_labels import MAX_SCORE
 from finetune_embedder import load_text_model
 from trialspace_embedding_losses import KnownPositiveRankingLoss, CachedEmbeddingLoss, RetainedEmbeddingLoss
 from trialspace_prompt_profiles import model_prompts

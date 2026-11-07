@@ -17,12 +17,13 @@ import pandas as pd
 import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from trialspace.contracts import DIRECTIONS, contract_hash
+from matchminer_ai.embedding.trialspace_contract import DIRECTIONS
+from matchminer_ai.labeling import contract_hash, score_contract
+from matchminer_ai.labeling.publication import ready_scores
+from matchminer_ai.matching.match_labels import MAX_SCORE
 from trialspace.data import digest, load_corpus, read_jsonl, write_json, write_jsonl
-from trialspace.regression import MAX_SCORE, score_contract
 from trialspace.retrieval import (TRIAL_VERSION_POLICY, TrialSampler, has_trial_versions, merge_candidates,
                                            query_cohorts, top_indices)
-from trialspace.score_publication import ready_scores
 from finetune_embedder import load_text_model
 from trial_cohort_format import file_stamp
 from retrieval_workspace import add_retrieval_storage_args, run_retrieval

@@ -13,6 +13,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from trial_cohort_format import file_stamp
+# Shared with the inference labeler's local workspace (matchminer_ai.labeling.workspace).
+from matchminer_ai.labeling.files import atomic_json, copy_verified, require_free_space, require_local_disk  # noqa: F401
 
 INTERNAL = {'retrieval_status.json', 'retrieval_storage.json'}
 
@@ -27,42 +29,6 @@ def add_retrieval_storage_args(parser):
                         help='Local disk reserve; insufficient space fails without discarding checkpoints')
 
 
-def atomic_json(path, value):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + '.tmp')
-    with temporary.open('w') as stream:
-        json.dump(value, stream, indent=2)
-        stream.write('\n')
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.replace(path)
-
-
-def require_free_space(path, required=0, reserve_gb=16):
-    if reserve_gb < 0:
-        raise ValueError('Retrieval disk reserve must be nonnegative')
-    free = shutil.disk_usage(path).free
-    if free < required + int(reserve_gb * 1024 ** 3):
-        raise OSError(f'Insufficient local retrieval space at {path}: {free} bytes free; '
-                      f'need {required} bytes plus {reserve_gb} GiB reserve')
-
-
-def require_local_disk(path):
-    """Do not silently put the hot working set back on a network mount."""
-    path = Path(path).resolve()
-    matches = []
-    for line in Path('/proc/mounts').read_text().splitlines():
-        fields = line.split()
-        mount = Path(fields[1].replace('\\040', ' '))
-        if path.is_relative_to(mount):
-            matches.append((len(mount.parts), fields[2]))
-    filesystem = max(matches)[1] if matches else ''
-    if filesystem in {'nfs', 'nfs4', 'cifs', 'smb3', '9p', 'ceph', 'fuse.sshfs', 'fuse.glusterfs'}:
-        raise ValueError(f'Retrieval scratch must be local disk, not {filesystem}: {path}')
-    return filesystem
-
-
 def files(root):
     root = Path(root)
     result = []
@@ -72,33 +38,6 @@ def files(root):
         if path.is_file() and path.name not in INTERNAL and not path.name.endswith(('.tmp', '.lock')):
             result.append(path)
     return result
-
-
-def copy_verified(source, target, expected=None):
-    """Copy sequentially and fsync; check byte sizes before atomic rename.
-
-    ``expected`` is the source's recorded file_stamp. The copy keeps the
-    source's modification time, so it has the same stamp as its source and
-    stamp-based completion records stay valid after publication.
-    """
-    source, target = Path(source), Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(target.name + '.tmp')
-    before = source.stat()
-    if expected is not None and file_stamp(source) != expected:
-        raise ValueError(f'Retrieval copy source changed: {source} -> {target}')
-    with source.open('rb') as incoming, temporary.open('wb') as outgoing:
-        while block := incoming.read(8 * 1024 ** 2):
-            outgoing.write(block)
-        outgoing.flush()
-        os.fsync(outgoing.fileno())
-    after = source.stat()
-    if ((before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
-            or temporary.stat().st_size != before.st_size):
-        raise ValueError(f'Retrieval copy verification failed: {source} -> {target}')
-    os.utime(temporary, ns=(before.st_atime_ns, before.st_mtime_ns))
-    temporary.replace(target)
-    return dict(bytes=before.st_size, stamp=file_stamp(target))
 
 
 class Workspace:

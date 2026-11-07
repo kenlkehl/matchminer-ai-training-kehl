@@ -11,7 +11,7 @@ import pytest
 
 import generate_synthetic_data as generation
 import synthetic_event_prompts as prompts
-from remote_vllm_pool import OutputValidationError
+from matchminer_ai.llm.teacher_pool import OutputValidationError
 
 
 SPACE = ('Age range allowed: 18+. Sex allowed: Any. Cancer primary site allowed: Lung. '

@@ -10,7 +10,7 @@ This program is invoked by train_all_gcp.sh around each vLLM step. It:
     server per (gpus_per_server) GPU group;
   - Writes the canonical list of healthy server URLs to a JSON file
     that the modified inference scripts re-read via
-    remote_vllm_pool.DynamicServerRegistry;
+    matchminer_ai.llm.teacher_pool.DynamicServerRegistry;
   - Maintains health by re-launching dead vLLM processes and re-starting
     stopped/preempted instances on a periodic loop;
   - On SIGTERM/SIGINT, kills the SSH-launched vLLM processes and the
