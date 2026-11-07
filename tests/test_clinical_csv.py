@@ -14,7 +14,7 @@ from make_top_matches import load_retrieval_tables
 from prepare_synthetic_training import load_spaces
 from tests.test_synthetic_generation import Tokenizer, args_for
 from trial_cohort_format import NAMED_SPLIT_REPRESENTATION, read_clinical_csv
-from trialspace_training import prepare_corpus
+from trialspace.corpus import prepare_corpus
 
 
 def inputs(tmp_path, literal):
@@ -96,7 +96,7 @@ def test_csv_text_survives_sampling_generation_and_both_retrieval_paths(tmp_path
 def test_direct_production_prepare_cli_preserves_literal_none(tmp_path):
     cohorts, patients, expected = inputs(tmp_path, 'None')
     output = tmp_path / 'corpus'
-    process = subprocess.run([sys.executable, 'trialspace_training.py', 'prepare',
+    process = subprocess.run([sys.executable, 'trialspace_prepare.py',
         '--patients', str(patients), '--cohorts', str(cohorts), '--output', str(output)],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
     assert process.returncode == 0, process.stderr

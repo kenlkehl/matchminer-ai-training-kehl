@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import os
 from pathlib import Path
 import random
 import shutil
@@ -78,7 +79,7 @@ def section_tokens(tokenizer, texts):
 def prepare(args):
     from transformers import AutoTokenizer
     from matchminer_ai.matching import decision_model as d
-    from trialspace_training import criteria_digest
+    from trialspace.candidates import criteria_digest
 
     patients, cohorts = load_corpus(args.corpus)
     pmap, cmap = {p['id']: p for p in patients}, {c['id']: c for c in cohorts}
@@ -372,7 +373,7 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = p.add_subparsers(dest='command', required=True)
     a = sub.add_parser('prepare', help='Teacher labels -> examples.jsonl (one row per state)')
-    a.add_argument('--corpus', required=True, help='trialspace_training.py prepare output')
+    a.add_argument('--corpus', required=True, help='The TrialSpace corpus (trialspace_prepare.py output)')
     a.add_argument('--match-labels', nargs='*', default=[], help='Rounds\' match label directories (scores.jsonl)')
     a.add_argument('--boilerplate-labels', nargs='*', default=[], help='Rounds\' boilerplate label directories')
     a.add_argument('--criteria-labels', nargs='*', default=[], help='Rounds\' per-criterion label directories')
@@ -401,9 +402,46 @@ def parser():
     b.add_argument('--save-steps', type=int, default=1000)
     b.add_argument('--loader-workers', type=int, default=4)
     b.add_argument('--seed', type=int, default=42)
+    from trialspace.stage import add_check_arg
+    add_check_arg(a)
+    add_check_arg(b)
     return p
 
 
+def stage_identity(args):
+    """The prepare or train stage's identity: its inputs by their stage receipts, and the settings."""
+    from trialspace.stage import receipt_id
+    if args.command == 'prepare':
+        return dict(version='decision-data-v1', corpus=receipt_id(args.corpus),
+                    **{f'{family}_labels': [receipt_id(d) for d in getattr(args, f'{family}_labels')]
+                       for family in ('match', 'boilerplate', 'criteria')},
+                    base_model=args.base_model, base_revision=args.base_revision, max_length=args.max_length,
+                    seed=args.seed)
+    return dict(version='decision-model-v1', data=receipt_id(args.data_dir), base_model=args.base_model,
+                base_revision=args.base_revision, attention=args.attention, max_length=args.max_length,
+                epochs=args.epochs, max_steps=args.max_steps, max_examples=args.max_examples, batch_size=args.batch_size,
+                gradient_accumulation_steps=args.gradient_accumulation_steps, learning_rate=args.learning_rate,
+                warmup=args.warmup, seed=args.seed, world_size=int(os.environ.get('WORLD_SIZE', '1')))
+
+
+def main():
+    from trialspace import stage
+    args = parser().parse_args()
+    output = Path(args.output_dir if args.command == 'prepare' else args.output_model)
+    kind = 'decision-data' if args.command == 'prepare' else 'decision-model'
+    identity = stage_identity(args)
+    if args.check:
+        stage.exit_check(output, kind, identity)
+    if stage.require_new_or_same(output, kind, identity):
+        print(f'[skip] {kind} already complete', flush=True)
+        return
+    (prepare if args.command == 'prepare' else train)(args)
+    if int(os.environ.get('RANK', '0')) == 0:
+        files = ([n for n in ('examples.jsonl', 'preview.jsonl', 'prepared.json') if (output / n).exists()]
+                 if args.command == 'prepare' else
+                 [str(p.relative_to(output)) for p in sorted(output.rglob('*')) if p.is_file() and p.name != stage.NAME])
+        stage.write_receipt(output, kind, identity, files)
+
+
 if __name__ == '__main__':
-    arguments = parser().parse_args()
-    (prepare if arguments.command == 'prepare' else train)(arguments)
+    main()

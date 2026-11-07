@@ -149,7 +149,7 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
         'prepare-decision-data', 'train-decision-model']
     mines = commands(plan, 'mine-')
     for command in mines:
-        assert command[1:3] == ['trialspace_comparison.py', 'dense-mine']
+        assert command[1] == 'trialspace_mine.py' and command[command.index('--devices') + 1] == 'cuda:0'
         assert [command[command.index(flag) + 1] for flag in
                 ('--max-tokens', '--patient-k', '--cohort-k', '--lexical-k', '--random-k', '--patient-trial-sample')] == \
             ['8192', '20', '40', '5', '5', '500']
@@ -197,6 +197,25 @@ def test_shell_training_defaults_use_embeddinggemma_and_three_label_rounds(tmp_p
             ['96', '32', 'trialspace']
     assert fits[0][fits[0].index('--base-model') + 1] == 'google/embeddinggemma-2'
     assert fits[1][fits[1].index('--base-model') + 1].endswith('trialspace_round1')
+
+
+def test_the_runner_runs_a_stage_range_checking_each_stage_by_its_receipt(tmp_path, monkeypatch, capsys):
+    root = tmp_path / 'data/no_phi'
+    def plan(*stage_range):
+        monkeypatch.setattr(sys, 'argv', ['train_from_summaries.py', '--data-dir', str(root), '--run-dir',
+                                          str(root / 'run'), '--gpus', '0,1', '--dry-run', *stage_range])
+        training.main()
+        return json.loads(capsys.readouterr().out)
+    chosen = plan('--start-at', 'mine-1', '--stop-after', 'label-trialspace-1')
+    assert [row['name'] for row in chosen] == ['mine-1', 'label-trialspace-1']
+    assert all(row['check'] == [*row['command'], '--check'] for row in chosen)
+    # A distributed stage is checked without its launcher, at the world size it runs at.
+    fit = plan('--start-at', 'train-trialspace-1', '--stop-after', 'train-trialspace-1')[0]
+    script = fit['command'].index('finetune_embedder.py')
+    assert fit['check'] == [fit['command'][0], *fit['command'][script:], '--check']
+    assert training.Stage('x', fit['command'], []).check()[1] == {'WORLD_SIZE': '2'}
+    with pytest.raises(ValueError):
+        plan('--stop-after', 'no-such-stage')
 
 
 def test_training_only_retains_original_default_identity(tmp_path):

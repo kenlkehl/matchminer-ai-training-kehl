@@ -7,7 +7,7 @@ polls --status on shared storage. Steps (each skipped when its output exists):
    line, working directory, GPU UUID and /v1/models answer (never its
    environment), and stop it.
 2. Fit the round's student (finetune_embedder.py), then mine the next round
-   with it (trialspace_comparison.py dense-mine).
+   with it (trialspace_mine.py).
 3. Restart the teacher with the same command, directory and environment and
    wait until /health and /v1/models answer as before. This also runs when a
    step fails, so a failed fit never leaves the GB300 without its teacher.

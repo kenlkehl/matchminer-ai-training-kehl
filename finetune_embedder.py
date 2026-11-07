@@ -71,6 +71,8 @@ def parse_args():
     parser.add_argument('--local-only', action='store_true', help='Never dispatch this training job to GCP')
     from training_workspace import add_training_storage_args
     add_training_storage_args(parser)
+    from trialspace.stage import add_check_arg
+    add_check_arg(parser)
     return parser.parse_args()
 
 
@@ -111,38 +113,36 @@ def load_and_concat(parquet_files):
     return concat_df
 
 
-def load_text_model(base_model, device, *, prompt_profile='sentence_similarity',
-                    max_tokens=MAX_TOKENS, revision=None, cache_dir=None, model_dtype='float32'):
-    """Keep Google's mean pooling/normalization, loading only the text encoder."""
-    from sentence_transformers import SentenceTransformer
+def require_embeddinggemma2(base_model, *, revision=None, cache_dir=None):
     from transformers import AutoConfig
 
-    if not 1 <= max_tokens <= 8192:
-        raise ValueError('EmbeddingGemma 2 requires a token limit between 1 and 8192')
-    if model_dtype not in ('float32', 'bfloat16'):
-        raise ValueError('EmbeddingGemma 2 model dtype must be float32 or bfloat16')
     config = AutoConfig.from_pretrained(base_model, revision=revision, cache_dir=cache_dir)
     if config.model_type != "embedding_gemma2":
         raise ValueError(
             "TrialSpace now requires google/embeddinggemma-2 or a checkpoint "
             "fine-tuned from it. Use fresh model/checkpoint directories for this run."
         )
-    model = SentenceTransformer(
-        base_model,
-        device=device,
-        revision=revision,
-        cache_folder=cache_dir,
-        config_kwargs={"vision_config": None, "audio_config": None},
-        # The trainer uses BF16 autocast independently of parameter precision.
-        # BF16 parameters reproduce v22's native loading for the memory-limited
-        # larger-encoder-batch configuration. FP16 is unsupported.
-        model_kwargs={"dtype": getattr(torch, model_dtype)},
-    )
-    model.max_seq_length = max_tokens
-    model.prompts.update(model_prompts(prompt_profile))
-    model.default_prompt_name = "SentenceSimilarity"
-    model.set_pooling_include_prompt(True)
-    return model
+
+
+def load_text_model(base_model, device, *, prompt_profile='sentence_similarity',
+                    max_tokens=MAX_TOKENS, revision=None, cache_dir=None, model_dtype='float32'):
+    """Keep Google's mean pooling/normalization, loading only the text encoder.
+
+    The loader is the inference package's (the same one mining encodes with). The trainer uses BF16 autocast
+    independently of parameter precision; BF16 parameters reproduce v22's native loading for the
+    memory-limited larger-encoder-batch configuration. FP16 is unsupported.
+    """
+    from matchminer_ai.embedding.encoder import EncoderSettings, load_sentence_transformer
+
+    if not 1 <= max_tokens <= 8192:
+        raise ValueError('EmbeddingGemma 2 requires a token limit between 1 and 8192')
+    if model_dtype not in ('float32', 'bfloat16'):
+        raise ValueError('EmbeddingGemma 2 model dtype must be float32 or bfloat16')
+    require_embeddinggemma2(base_model, revision=revision, cache_dir=cache_dir)
+    return load_sentence_transformer(EncoderSettings(
+        base_model, revision=revision, cache_dir=cache_dir, max_seq_length=max_tokens, dtype=model_dtype,
+        prompts=model_prompts(prompt_profile), default_prompt_name='SentenceSimilarity',
+        include_prompt_in_pooling=True, text_only=True), device)
 
 
 def validate_resume_checkpoint(checkpoint, *, prompt_profile='sentence_similarity'):
@@ -210,14 +210,57 @@ def per_loss_logging(losses_map):
     return PerLossLogger()
 
 
+def stage_identity(args):
+    """The fit stage's identity: its projected pairs and base model by their receipts, and the settings."""
+    from pathlib import Path
+    from trialspace import stage
+
+    from trial_cohort_format import file_stamp
+
+    def located(path):  # the stage directory holding an input file and its name there, or (standalone) its stamp
+        path = Path(path).resolve()
+        for parent in path.parents:
+            if (parent / stage.NAME).exists():
+                return dict(stage=stage.receipt_id(parent), name=str(path.relative_to(parent)))
+        return dict(file=path.name, stamp=file_stamp(path))
+
+    def model(path):
+        base = Path(path)
+        if not base.is_dir():
+            return path
+        if stage.read_receipt(base):
+            return stage.receipt_id(base)
+        return stage.digest({str(p.relative_to(base)): file_stamp(p) for p in sorted(base.rglob('*')) if p.is_file()})
+    return dict(version='trialspace-fit-v1', inputs=[located(p) for p in expand_inputs(args.input_parquet)],
+                base_model=model(args.base_model),
+                revision=args.model_revision, max_tokens=args.max_tokens, model_dtype=args.model_dtype,
+                prompts=model_prompts(args.prompt_profile), batch_size=args.batch_size,
+                world_size=int(os.environ.get('WORLD_SIZE', '1')), gradient_checkpointing=args.gradient_checkpointing,
+                loss_mini_batch_size=args.loss_mini_batch_size, encoder_mini_batch_size=args.encoder_mini_batch_size,
+                encoder_token_budget=args.encoder_token_budget, mask_known_positives=args.mask_known_positives,
+                epochs=args.epochs, max_steps=args.max_steps)
+
+
 def main():
     args = parse_args()
     from pathlib import Path
-    from scripts.remote_trialspace import maybe_run_remote
-    if not args.local_only and maybe_run_remote(args, Path(__file__).resolve().parent):
+    from trialspace import stage
+    identity = stage_identity(args)
+    if args.check:
+        stage.exit_check(args.output_model, 'fit', identity)
+    if stage.require_new_or_same(args.output_model, 'fit', identity):
+        print('[skip] model already fitted', flush=True)
         return
-    from training_workspace import run_training
-    return run_training(args, train)
+    from scripts.remote_trialspace import maybe_run_remote
+    if args.local_only or not maybe_run_remote(args, Path(__file__).resolve().parent):
+        from training_workspace import run_training
+        run_training(args, train)
+    if int(os.environ.get('RANK', '0')) == 0:
+        model = Path(args.output_model)
+        files = [str(p.relative_to(model)) for p in sorted(model.rglob('*')) if p.is_file() and p.name != stage.NAME]
+        stage.write_receipt(model, 'fit', identity, files,
+                            upstream={f'input{i}': item['stage'] for i, item in enumerate(identity['inputs'])
+                                      if 'stage' in item})
 
 
 def train(args):

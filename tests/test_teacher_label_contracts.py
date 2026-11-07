@@ -16,7 +16,7 @@ def corpus():
 
 def test_boilerplate_labels_cover_each_unique_boilerplate_combination_of_every_round_once(tmp_path):
     from trialspace.data import read_jsonl, write_jsonl
-    from trialspace_training import unique_boilerplate_pairs
+    from trialspace.candidates import unique_boilerplate_pairs
     patients, cohorts, _ = corpus()
     cohorts.append(dict(id='c3', trial_id='T1', text='Key: other arm.', boilerplate='No dialysis.', split='train'))
     write_jsonl(tmp_path / 'corpus' / 'patients.jsonl', patients)
@@ -39,7 +39,7 @@ ITEMS = [dict(number=1, heading='Inclusion criteria:', text='Age >= 18.', criter
 
 def test_criteria_labels_are_one_request_per_tagged_line_of_sampled_pairs(tmp_path):
     from trialspace.data import read_jsonl, write_jsonl
-    from trialspace_training import criteria_line_candidates
+    from trialspace.candidates import criteria_line_candidates
     patients, cohorts, _ = corpus()
     for cohort in cohorts:
         cohort['items'] = ITEMS

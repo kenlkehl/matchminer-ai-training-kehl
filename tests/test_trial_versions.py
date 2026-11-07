@@ -7,7 +7,7 @@ import pytest
 
 from trialspace.retrieval import TrialSampler, query_cohorts
 from trial_cohort_format import cohort_version, validate_cohort_rows
-from trialspace_comparison import rank_dense
+from trialspace.mining import rank_dense
 
 
 def corpus(trials=40, versions=('protocol', 'ctgov')):

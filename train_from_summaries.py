@@ -27,8 +27,7 @@ import sys
 import time
 import urllib.request
 
-from trial_cohort_format import file_stamp
-from trialspace.data import digest, write_json as atomic_json
+from trialspace.data import write_json as atomic_json
 from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
 from matchminer_ai.labeling.concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
@@ -42,13 +41,6 @@ EMBEDDINGGEMMA2_REVISION = '914f7f89142e33e77833254d9c9b90c3cef7303b'
 TRIALSPACE_OPERATIONAL_OPTIONS = {
     'trialspace_save_steps', 'trialspace_save_total_limit', 'trialspace_stop_at', 'trialspace_pause_file',
 }
-
-
-def training_identity_arguments(args):
-    return {key: str(value) for key, value in vars(args).items()
-            if key not in {'dry_run', 'skip_input_validation', *TRIALSPACE_OPERATIONAL_OPTIONS}
-            and not (key in ('trial_spaces', 'patient_summaries',
-                             'teacher_servers_file', 'teacher_concurrency_file') and value is None)}
 
 
 def training_identity_command(command):
@@ -70,6 +62,16 @@ class Stage:
     command: list[str]
     outputs: list[Path]
     teacher: bool = False
+
+    def check(self):
+        """The stage script's ``--check`` (exit 0 complete, 10 not yet, 20 changed) and its environment.
+
+        A distributed stage is checked without its launcher, with the world size it will run at."""
+        if 'torch.distributed.run' not in self.command:
+            return [*self.command, '--check'], {}
+        script = next(i for i, part in enumerate(self.command) if part.endswith('.py'))
+        ranks = next(part.split('=', 1)[1] for part in self.command if part.startswith('--nproc_per_node='))
+        return [self.command[0], *self.command[script:], '--check'], {'WORLD_SIZE': ranks}
 
 
 def parser():
@@ -133,6 +135,9 @@ def parser():
     p.add_argument('--criteria-seed', type=int, default=42)
     p.add_argument('--trialspace-cache-dir', type=Path, help='Local Hugging Face model cache')
     p.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
+    p.add_argument('--mining-devices', default='cuda:0',
+                   help='Comma-separated mining encoders and scorers, one worker each (e.g. cuda:0,cuda:1); '
+                        'a mine-N directory made elsewhere (trialspace_mine.py) is adopted by its receipt')
     p.add_argument("--vllm", default=str(Path(sys.executable).parent / "vllm"))
     p.add_argument("--teacher-max-context", type=int, default=250000)
     p.add_argument('--teacher-max-num-seqs', type=int, choices=range(1, 1025),
@@ -146,8 +151,6 @@ def parser():
                    metavar='1..1024', default=DEFAULT_INITIAL,
                    help='Starting target before automatic queue/cache/throughput adjustment')
     p.add_argument("--teacher-startup-timeout", type=int, default=1800)
-    p.add_argument("--skip-input-validation", action="store_true",
-                   help="Reuse source records from this run's existing manifest without reading or rehashing input files.")
     p.add_argument("--dry-run", action="store_true")
     return p
 
@@ -185,7 +188,7 @@ def stages(args):
     teacher_model = args.teacher_served_model or args.teacher_model
     launch = [py, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={gpu_count}"]
     corpus = run / 'trialspace_corpus'
-    result = [Stage('prepare-trialspace', [py, 'trialspace_training.py', 'prepare',
+    result = [Stage('prepare-trialspace', [py, 'trialspace_prepare.py',
         '--patients', str(inputs['patient_summaries']), '--cohorts', str(inputs['trial_spaces']),
         '--output', str(corpus),
         '--merge-source-splits'], [corpus / 'prepared.json'])]
@@ -204,7 +207,7 @@ def stages(args):
         round_dir = run / f'trialspace_round{iteration}'
         mining = round_dir / 'mining'
         candidates = [mining / f'{direction}.parquet' for direction in ('patient_to_cohort', 'cohort_to_patient')]
-        mine = [dense_py, 'trialspace_comparison.py', 'dense-mine', '--corpus', str(corpus),
+        mine = [dense_py, 'trialspace_mine.py', '--corpus', str(corpus), '--devices', args.mining_devices,
             '--output', str(mining), '--model', str(embedding), '--max-tokens', str(args.trialspace_context),
             '--patient-k', str(args.trialspace_top_k_patient_to_cohort or args.trialspace_top_k),
             '--cohort-k', str(args.trialspace_top_k_cohort_to_patient or args.trialspace_top_k),
@@ -220,7 +223,7 @@ def stages(args):
         directory = round_dir / 'teacher'
         teacher_dirs.append(directory)
         scores = directory / 'scores.jsonl'
-        label = [py, 'trialspace_training.py', 'label', '--task', 'match', '--corpus', str(corpus),
+        label = [py, 'trialspace_label.py', '--task', 'match', '--corpus', str(corpus),
             '--candidates', str(mining / 'candidates.jsonl'), '--output', str(directory), *teacher_args(args, servers)]
         if iteration > 1:  # Pairs judged in the previous round are imported, not judged again.
             previous = run / f'trialspace_round{iteration - 1}'
@@ -236,7 +239,7 @@ def stages(args):
                 ('criteria', criteria_dirs, ['--criteria-pair-fraction', str(args.criteria_pair_fraction),
                                              '--criteria-seed', str(args.criteria_seed)])):
             out = round_dir / f'{task}_teacher'
-            command = [py, 'trialspace_training.py', 'label', '--task', task, '--corpus', str(corpus),
+            command = [py, 'trialspace_label.py', '--task', task, '--corpus', str(corpus),
                        '--candidates', str(mining / 'candidates.jsonl'), '--output', str(out), *extra,
                        *(['--skip-labeled', *map(str, dirs)] if dirs else []), *teacher_args(args, servers)]
             result.append(Stage(f'label-{task}-{iteration}', command,
@@ -247,8 +250,8 @@ def stages(args):
         previous_embedding = embedding
         embedding = models / f"trialspace_round{iteration}"
         pairs = round_dir / 'pairs'
-        result.append(Stage(f'project-trialspace-{iteration}', [dense_py, 'trialspace_comparison.py',
-            'project-dense-labels', '--corpus', str(corpus), '--embeddinggemma', str(mining),
+        result.append(Stage(f'project-trialspace-{iteration}', [dense_py, 'trialspace_project.py',
+            '--corpus', str(corpus), '--mining', str(mining),
             '--labels', str(directory), '--output', str(pairs)],
             [pairs / 'embeddinggemma2' / 'complete.json', pairs / 'embeddinggemma2' / 'pairs.parquet']))
         command = dense_launch + ['finetune_embedder.py', '-i', str(pairs / 'embeddinggemma2' / 'pairs.parquet'),
@@ -379,11 +382,6 @@ def teacher_pool(args):
             handle.close()
 
 
-def source_record(path):
-    path = Path(path).expanduser().resolve()
-    return {"path": str(path), "stamp": file_stamp(path)}
-
-
 def server_urls(url=None, file=None):
     """Teacher endpoint URLs from one URL or a server registry file."""
     if file:
@@ -458,24 +456,22 @@ def external_teacher_pool(args):
         atomic_json(registry, {"ready": False, "servers": []})
 
 
-def git_revision(directory):
-    return subprocess.check_output(["git", "-C", str(directory), "rev-parse", "HEAD"], text=True).strip()
+def in_no_phi(path):
+    """Synthetic training data stays in an authorized data/no_phi tree (this checkout's or a snapshot's)."""
+    path = Path(path).resolve()
+    return any(parent.name == 'no_phi' and parent.parent.name == 'data' for parent in (path, *path.parents))
 
 
-def input_records(files, manifest_path, skip_validation=False):
-    if not skip_validation:
-        return [source_record(path) for path in files]
-    if not manifest_path.is_file():
-        raise ValueError("--skip-input-validation requires an existing run manifest")
-    records = json.loads(manifest_path.read_text())["inputs"]
-    if [record["path"] for record in records] != list(map(str, files)):
-        raise ValueError("Existing source records refer to different input paths")
-    print("[inputs] Reusing recorded input identities; input validation skipped", flush=True)
-    return records
+def run_parser():
+    """parser() plus the stage range; run_pipeline.py extends parser() and has its own --start-at/--stop-after."""
+    p = parser()
+    p.add_argument('--start-at', help='First stage to run; every earlier stage must already be complete')
+    p.add_argument('--stop-after', help='Last stage to run (e.g. label-trialspace-1)')
+    return p
 
 
 def main():
-    args = parser().parse_args()
+    args = run_parser().parse_args()
     for key in ("data_dir", "run_dir", "models_dir", "inference_repo"):
         setattr(args, key, getattr(args, key).expanduser().resolve())
     for key in ("trial_spaces", "patient_summaries", "teacher_servers_file", "teacher_concurrency_file",
@@ -485,72 +481,48 @@ def main():
     if args.teacher_servers_file and args.teacher_url:
         raise ValueError('Use either --teacher-servers-file or --teacher-url')
     plan = stages(args)
+    names = [stage.name for stage in plan]
+    for option in ('start_at', 'stop_after'):
+        if getattr(args, option) and getattr(args, option) not in names:
+            raise ValueError(f'--{option.replace("_", "-")} must be one of: ' + ', '.join(names))
+    first = names.index(args.start_at) if args.start_at else 0
+    last = names.index(args.stop_after) if args.stop_after else len(names) - 1
     if args.dry_run:
-        print(json.dumps([vars(stage) for stage in plan], default=str, indent=2))
+        print(json.dumps([dict(vars(stage), check=stage.check()[0]) for stage in plan[first:last + 1]],
+                         default=str, indent=2))
         return
-    if not args.data_dir.is_relative_to(ROOT.parent / "data/no_phi"):
-        raise ValueError("The integrated runner requires the authorized data/no_phi directory")
+    if not in_no_phi(args.data_dir) or not all(in_no_phi(path) for path in input_paths(args).values()):
+        raise ValueError("The integrated runner requires inputs in an authorized data/no_phi directory")
     args.run_dir.mkdir(parents=True, exist_ok=True)
     (args.run_dir / "logs").mkdir(exist_ok=True)
     lock = (args.run_dir / "pipeline.lock").open("w")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    files = list(input_paths(args).values())
-    if any(not path.is_relative_to(ROOT.parent / "data/no_phi") for path in files):
-        raise ValueError("The integrated runner requires inputs in the authorized data/no_phi directory")
-    manifest_path = args.run_dir / "pipeline_manifest.json"
-    identity = {"args": training_identity_arguments(args),
-                "training_commit": git_revision(ROOT), "inference_commit": git_revision(args.inference_repo),
-                "inputs": input_records(files, manifest_path, args.skip_input_validation)}
-    from matchminer_ai.labeling import score_contract
-    identity['trialspace_contract'] = score_contract()
-    source_paths = [ROOT / 'train_from_summaries.py', ROOT / 'trialspace_training.py',
-                    ROOT / 'retrieval_workspace.py', ROOT / 'synthetic_pool.py', ROOT / 'retrieval_cache_import.py',
-                    ROOT / 'trial_cohort_format.py',
-                    ROOT / 'train_decision_model.py',
-                    *sorted((ROOT / 'trialspace').glob('*.py')),
-                    args.inference_repo / 'src/matchminer_ai/llm/traces.py',
-                    args.inference_repo / 'src/matchminer_ai/llm/async_processing.py',
-                    args.inference_repo / 'src/matchminer_ai/llm/remote_inference.py',
-                    args.inference_repo / 'src/matchminer_ai/llm/endpoint_pool.py',
-                    args.inference_repo / 'src/matchminer_ai/llm/dispatch.py',
-                    *(args.inference_repo / 'src/matchminer_ai/llm' / name
-                      for name in ('teacher_pool.py', 'scheduler_control.py', 'teacher_runtime.py')),
-                    *sorted((args.inference_repo / 'src/matchminer_ai/labeling').glob('*.py')),
-                    *sorted((args.inference_repo / 'src/matchminer_ai/embedding').glob('*.py')),
-                    args.inference_repo / 'src/matchminer_ai/matching/match_labels.py',
-                    args.inference_repo / 'src/matchminer_ai/matching/decision_model.py',
-                    args.inference_repo / 'src/matchminer_ai/trials/cohort_boilerplate.py',
-                    *(args.inference_repo / 'src/matchminer_ai/prompts' / name for name in (
-                        'match_quality.labels.system.txt', 'llm_exclusion_criteria.user.txt',
-                        'criterion_check.labels.user.txt', 'decision.match.state.txt',
-                        'decision.match.reasonableness.txt', 'decision.boilerplate.state.txt',
-                        'decision.boilerplate.question.txt', 'decision.criterion.state.txt',
-                        'decision.criterion.question.txt'))]
-    identity['production_sources'] = [source_record(path) for path in source_paths]
-    if manifest_path.exists() and json.loads(manifest_path.read_text()) != identity:
-        raise ValueError("Pipeline inputs/code/settings changed; use a fresh run directory")
-    atomic_json(manifest_path, identity)
-    atomic_json(args.run_dir / 'trialspace_runtime_controls.json',
-                {key: str(getattr(args, key)) for key in TRIALSPACE_OPERATIONAL_OPTIONS})
     atomic_json(args.run_dir / 'reasoning_archives.json', dict(
         policy='Preserve returned reasoning and complete responses; answer-only targets remain separate.',
-        pooled_teacher_traces=str(args.run_dir / 'llm_traces'),
         match_label_traces=[str(args.run_dir / f'trialspace_round{i}/teacher/responses') for i in (1, 2, 3)],
         boilerplate_label_traces=[str(args.run_dir / f'trialspace_round{i}/boilerplate_teacher/responses') for i in (1, 2, 3)],
         criteria_label_traces=[str(args.run_dir / f'trialspace_round{i}/criteria_teacher/responses') for i in (1, 2, 3)]))
-    fingerprint = digest(identity)
     os.environ["PYTHONPATH"] = str(args.inference_repo / "src") + os.pathsep + str(ROOT)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ.setdefault("OMP_NUM_THREADS", "8")
     os.environ["PYTHONUNBUFFERED"] = "1"
-    # Distributed mining and fitting use ranks within the selected visible GPUs.
-    pool = None
+
+    def check(stage):
+        command, extra = stage.check()
+        result = subprocess.run(command, cwd=ROOT, env={**os.environ, **extra}, capture_output=True, text=True)
+        if result.returncode not in (0, 10):
+            raise ValueError(f'{stage.name}: {(result.stdout + result.stderr).strip()[-2000:]}')
+        return result.returncode == 0
+
+    # Each stage script owns its completion: its output directory's stage receipt. A stage done elsewhere
+    # (for example mine-N on a cloud VM, copied back) is complete here when its receipt matches.
+    for stage in plan[:first]:
+        if not check(stage):
+            raise ValueError(f'--start-at {args.start_at}: the earlier stage {stage.name} is not complete')
+    pool, stage = None, None
     try:
-        for stage in plan:
-            stamp = args.run_dir / "completed" / (stage.name + ".json")
-            if stamp.exists():
-                if json.loads(stamp.read_text())["fingerprint"] != fingerprint or not all(p.exists() for p in stage.outputs):
-                    raise ValueError(f"Invalid completion marker for {stage.name}")
+        for stage in plan[first:last + 1]:
+            if check(stage):
                 print(f"[skip] {stage.name}", flush=True)
                 continue
             if pool and not stage.teacher:
@@ -565,18 +537,16 @@ def main():
             # Each command emits progress but no clinical rows to its own log.
             with (args.run_dir / "logs" / (stage.name + ".log")).open("a") as log:
                 env = dict(os.environ)
-                env['MMAI_LLM_TRACE_DIR'] = str(args.run_dir / 'llm_traces' / stage.name)
-                env['MMAI_LLM_TRACE_STAGE'] = stage.name
                 if "torch.distributed.run" in stage.command:
                     env["CUDA_VISIBLE_DEVICES"] = args.gpus
                 subprocess.run(stage.command, cwd=ROOT, env=env, check=True, stdout=log, stderr=subprocess.STDOUT)
-            if not all(path.exists() for path in stage.outputs):
-                raise RuntimeError(f"Missing outputs from {stage.name}")
-            atomic_json(stamp, {"fingerprint": fingerprint, "outputs": list(map(str, stage.outputs))})
+            if not check(stage):
+                raise RuntimeError(f"{stage.name} finished without a complete stage receipt")
             print(f"[done] {stage.name}", flush=True)
-        atomic_json(args.run_dir / "status.json", {"status": "complete"})
+        atomic_json(args.run_dir / "status.json", {"status": "complete" if last == len(plan) - 1 else "stopped",
+                                                   "last_stage": plan[last].name})
     except BaseException:
-        atomic_json(args.run_dir / "status.json", {"stage": stage.name, "status": "failed"})
+        atomic_json(args.run_dir / "status.json", {"stage": stage.name if stage else None, "status": "failed"})
         raise
     finally:
         if pool:

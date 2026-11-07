@@ -17,7 +17,7 @@ ITEMS = [dict(number=1, heading='Inclusion criteria:', text='Age >= 18.', criter
 def test_prepare_wrangles_every_family_with_its_polarity(tmp_path, monkeypatch):
     import transformers
     import train_decision_model as t
-    from trialspace_training import criteria_digest
+    from trialspace.candidates import criteria_digest
     monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', lambda *a, **k: Tokenizer())
     write_jsonl(tmp_path / 'corpus/patients.jsonl', [dict(id='p1', text='Lung cancer.', boilerplate='Dialysis.', split='train')])
     write_jsonl(tmp_path / 'corpus/cohorts.jsonl', [dict(id='c1', trial_id='T1', text='NSCLC.', boilerplate='No dialysis.',

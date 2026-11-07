@@ -19,7 +19,9 @@ def stage_full_pool_encodings(source, destination, old_corpus, new_corpus, *, ki
     for name, old_rows, new_rows in zip(('patients','cohorts'),old,new):
         if digest(old_rows) != manifest[name] or pooled_records(old_rows) != new_rows:
             raise ValueError('Encoding reuse requires identical entity order, text and provenance: '+name)
-    fields = ['model','revision','prompts','max_tokens','dimension']
+    # Mining v3 manifests name their encoder; earlier ones the model, revision, prompts and length.
+    fields = (['encoder', 'dimension'] if 'encoder' in manifest
+              else ['model', 'revision', 'prompts', 'max_tokens', 'dimension'])
     expected = {name:manifest[name] for name in fields}
     expected.update(patients=digest(new[0]),cohorts=digest(new[1]))
     complete = json.loads((source/'complete.json').read_text())
