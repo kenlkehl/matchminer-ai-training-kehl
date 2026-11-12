@@ -339,13 +339,22 @@ def train(args):
     collator = Collator(packer_for(model, tokenizer, attention), d1_module(model, 'prompt'), prepared['corpus'],
                         max_length=args.max_length, seed=args.seed)
     epochs = max(1, int(round(args.epochs)))
+    lengths = [r['tokens'] for _ in range(epochs) for r in rows]
     dataset = Dataset.from_dict(dict(
         example=[json.dumps(r) for _ in range(epochs) for r in rows],
-        length=[r['tokens'] for _ in range(epochs) for r in rows],
+        length=lengths,
         index=[i for _ in range(epochs) for i in range(len(rows))],
         epoch=[e for e in range(epochs) for _ in rows]))
 
     class SlotTrainer(Trainer):
+        def _get_train_sampler(self, train_dataset=None):
+            # Trainer's own length-grouped order, from a plain list. With datasets >= 4, dataset['length'] is a lazy
+            # Column; the sampler's per-index lookups (~60 us each over ~17M examples) held every rank at step 0
+            # for ~18 minutes (2026-11-12).
+            from transformers.trainer_pt_utils import LengthGroupedSampler
+            return LengthGroupedSampler(self.args.train_batch_size * self.args.gradient_accumulation_steps,
+                                        lengths=lengths)
+
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             targets = inputs.pop('targets')
             logits = model(**inputs)
