@@ -211,8 +211,6 @@ Inspect a plan, then remove `--dry-run` to execute:
   --run-dir ../data/no_phi/new_training_run \
   --models-dir ../models/new_training_run \
   --server-urls-file ../data/no_phi/live_pool/servers.json \
-  --generation-model gemma4-31b \
-  --generation-tokenizer RedHatAI/Gemma-4-31B-IT-FP8-Dynamic \
   --dry-run
 ```
 
@@ -226,13 +224,19 @@ directory prevents concurrent runs, and logs go to `<pipeline-dir>/logs/`.
 `generation.lock` is held.
 
 The default LLM for data production and labeling is
-`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` (`train_from_summaries.DEFAULT_TEACHER`), overridden
+`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` (`train_from_summaries.DEFAULT_TEACHER`; also
+`ctgov_llm.py`'s `--model` for 0b and 0d, and the real-data evaluations' `GOLD_LLM`), overridden
 with `--generation-model` / `--generation-tokenizer` (upstream) and
 `--teacher-model` / `--teacher-served-model` (training; an endpoint's model root
 must match the teacher model or be an approved quantization of it, listed in
-`EQUIVALENT_TEACHER_ROOTS` in `trialspace/labeling.py`: the Gemma 4 31B
-builds, and Nemotron 3.5 Super VL NVFP4 and FP8, whose tokenizers and chat
-templates are identical).
+`EQUIVALENT_TEACHER_ROOTS` in the inference package's `matchminer_ai.labeling.runner`: the
+Gemma 4 31B builds, and Nemotron 3.5 Super VL NVFP4 and FP8, whose tokenizers and chat
+templates are identical). Scripts that start their own vLLM servers for Nemotron (the
+teacher pool of `train_from_summaries.py`, `summarize_patients.py` in local mode, and the GCP
+note workers by default) add `--trust-remote-code` and its hybrid-Mamba flags
+(`vllm_reasoning_utils.NEMOTRON_SERVE_FLAGS`) with the `nemotron_v3` reasoning parser. The
+NVFP4 build needs native FP4 (Blackwell); on H100s, override with the FP8 build,
+`RedHatAI/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-FP8`.
 
 ## Data stages
 

@@ -262,6 +262,7 @@ def main():
         gpu_memory_utilization=args.gpu_mem_util,
         max_num_seqs=args.max_num_seqs,
         max_model_len=args.max_model_len,
+        trust_remote_code=True,  # Nemotron 3.5 Super (the pipelines' GOLD_LLM) ships its config as code
     )
 
     # Check for resume point within this shard's row range

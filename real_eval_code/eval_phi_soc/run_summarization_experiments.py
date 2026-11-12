@@ -17,9 +17,14 @@ Usage:
     python run_summarization_experiments.py \
       --gpu_ids 0,1 --gpus_per_server 1 --download_dir /data1/ken/models --dry_run
 
-    # Run full grid on 4 GPUs (4 models run simultaneously)
+    # Run the default model (Nemotron 3.5 Super) over every chunk size on 4 GPUs
     python run_summarization_experiments.py \
       --gpu_ids 0,1,2,3 --gpus_per_server 1 --download_dir /data1/ken/models
+
+    # Compare models (4 run simultaneously on 4 GPUs)
+    python run_summarization_experiments.py \
+      --gpu_ids 0,1,2,3 --gpus_per_server 1 --download_dir /data1/ken/models \
+      --models nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4,google/gemma-4-31b-it,Qwen/Qwen3.6-27B,openai/gpt-oss-120b
 
     # Run a single model/chunk_size for testing
     python run_summarization_experiments.py \
@@ -76,6 +81,17 @@ DATA_DIR = REPO_ROOT.parent / "data/phi/soc"
 # Qwen instruct (non-thinking) mode for reasoning tasks.
 # gpt-oss defaults.
 MODEL_CONFIGS = {
+    # The default (2026-11-12): Nemotron 3.5 Super, with NVIDIA's text sampling and neutral filters.
+    "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4": {
+        "max_model_len": 260_000,
+        "reasoning_parser": "nemotron_v3",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": -1,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repetition_penalty": 1.0,
+    },
     "google/gemma-4-31b-it": {
         "max_model_len": 260_000,
         "reasoning_parser": "gemma4",
@@ -156,7 +172,7 @@ PROMPT_OVERHEAD_TOKENS = 10_000
 _QWEN_DEFAULTS = MODEL_CONFIGS["Qwen/Qwen3.5-9B"]
 _GPT_DEFAULTS = MODEL_CONFIGS["openai/gpt-oss-20b"]
 
-DEFAULT_MODELS = list(MODEL_CONFIGS.keys())
+DEFAULT_MODELS = ["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"]  # --models selects others from MODEL_CONFIGS
 DEFAULT_CHUNK_SIZES = [2000, 10000, 25000, 50000]
 
 
@@ -164,6 +180,8 @@ def get_model_config(model: str) -> dict:
     """Get full config dict for a model, with fallback heuristics."""
     if model in MODEL_CONFIGS:
         return MODEL_CONFIGS[model]
+    if "nemotron-3.5-super-vl" in model.lower():  # other builds, e.g. the FP8 one
+        return MODEL_CONFIGS["nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"]
     if "qwen" in model.lower():
         return _QWEN_DEFAULTS
     return _GPT_DEFAULTS

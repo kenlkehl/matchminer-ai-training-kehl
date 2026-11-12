@@ -50,7 +50,7 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[2]  # matchminer-ai-training
 SCRIPTS_DIR = Path(__file__).resolve().parent  # eval_phi_enrollments
 DATA_DIR = REPO_ROOT.parent / "data/phi/enrollments"
-GOLD_LLM = "RedHatAI/Gemma-4-31B-it-FP8-Dynamic" #"nvidia/Gemma-4-31B-IT-NVFP4"
+GOLD_LLM = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"  # earlier: "RedHatAI/Gemma-4-31B-it-FP8-Dynamic"
 BASELINE_EMBEDDING_MODEL = "nvidia/llama-embed-nemotron-8b"   #"Qwen/Qwen3-Embedding-0.6B"
 ONCOREASONING_MODEL = "../../../models/onco_reasoning_qwen3_5_2b_checkpoint_7-12-26"
 

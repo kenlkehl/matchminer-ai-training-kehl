@@ -34,7 +34,7 @@ Examples:
         --embeddings trial_space_embeddings.parquet \
         --trial-checker ../../../models/trialchecker \
         --boilerplate-checker ../../../models/boilerplatechecker \
-        --summarization-model RedHatAI/gemma-4-31B-it-FP8-Dynamic \
+        --summarization-model nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 \
         --batch-size 64 --checker-batch-size 64 \
         --summarization-additional-vllm-args "--kv-cache-dtype fp8" \
         --gpu 3
@@ -122,7 +122,7 @@ def parse_args():
         help="Path to ../../summarize_patients.py",
     )
     parser.add_argument(
-        "--summarization-model", type=str, default="google/gemma-4-31b-it",
+        "--summarization-model", type=str, default="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4",
         help="Model passed to summarize_patients.py",
     )
     parser.add_argument(

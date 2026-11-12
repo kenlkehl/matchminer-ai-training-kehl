@@ -28,7 +28,7 @@ import time
 import urllib.request
 
 from trialspace.data import write_json as atomic_json
-from vllm_reasoning_utils import resolve_parser_name, resolve_tool_call_parser
+from vllm_reasoning_utils import NEMOTRON_SERVE_FLAGS, resolve_parser_name, resolve_tool_call_parser
 from matchminer_ai.labeling.concurrency import DEFAULT_CEILING, DEFAULT_INITIAL, DEFAULT_AUTO_WORKERS_MAX
 
 ROOT = Path(__file__).resolve().parent
@@ -287,12 +287,6 @@ def stages(args):
         '--learning-rate', str(args.decision_learning_rate)],
         [decision_model / 'decision_contract.json', decision_model / 'model.safetensors']))
     return result
-
-
-# Hybrid Mamba serving flags shared by the labeling fleet and the camus Nemotron servers.
-NEMOTRON_SERVE_FLAGS = ["--trust-remote-code", "--async-scheduling", "--mamba-backend", "flashinfer",
-    "--mamba-ssm-cache-dtype", "float16", "--enable-mamba-cache-stochastic-rounding",
-    "--mamba-cache-philox-rounds", "5", "--chat-template-content-format", "string", "--mamba-cache-mode", "align"]
 
 
 def teacher_command(args, index):

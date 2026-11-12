@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent
 def add_llm_arguments(p):
     """The model, endpoint and limit options of both steps."""
     p.add_argument('--inference-repo', type=Path, default=ROOT.parent / 'matchminer-ai-inference-kehl')
-    p.add_argument('--model', default='nvidia/Gemma-4-31B-IT-NVFP4')
+    p.add_argument('--model', default='nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4')
     p.add_argument('--tokenizer-model', help='Underlying model family when --model is a served alias')
     endpoints = p.add_mutually_exclusive_group(required=True)
     endpoints.add_argument('--server_urls', '--server-urls', nargs='+')

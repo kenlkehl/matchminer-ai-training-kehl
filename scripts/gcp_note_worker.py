@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VM-local per-GPU vLLM workers (Gemma by default) and an expiring controller lease."""
+"""VM-local per-GPU vLLM workers (Nemotron 3.5 Super by default) and an expiring controller lease."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import argparse
@@ -10,8 +10,13 @@ import time
 import urllib.request
 
 ROOT = Path('/opt/mmai-gemma-note-fleet')
-# Model-specific server flags; a fleet config may replace them with `vllm_args`.
-GEMMA_ARGS = ['--quantization', 'modelopt', '--gpu-memory-utilization', '0.90', '--reasoning-parser', 'gemma4']
+# Model-specific server flags; a fleet config may replace them with `vllm_args`. The default serves Nemotron 3.5
+# Super as vllm_reasoning_utils.NEMOTRON_SERVE_FLAGS do (copied: this file runs alone on the VM). Gemma 4 NVFP4 used
+# ['--quantization', 'modelopt', '--gpu-memory-utilization', '0.90', '--reasoning-parser', 'gemma4'].
+NEMOTRON_ARGS = ['--gpu-memory-utilization', '0.90', '--reasoning-parser', 'nemotron_v3', '--trust-remote-code',
+    '--async-scheduling', '--mamba-backend', 'flashinfer', '--mamba-ssm-cache-dtype', 'float16',
+    '--enable-mamba-cache-stochastic-rounding', '--mamba-cache-philox-rounds', '5',
+    '--chat-template-content-format', 'string', '--mamba-cache-mode', 'align']
 HUBS = ['/home/kenneth_kehl/.cache/huggingface/hub', '/root/.cache/huggingface/hub']
 
 
@@ -52,7 +57,7 @@ def ready(gpu, config):
 
 def smoke(gpu, config):
     body = dict(model=config['served_model'], messages=[dict(role='user', content='What is 7 + 5? Return only the number.')],
-        **config.get('smoke_sampling', dict(temperature=1.0, top_p=.95, top_k=64)), max_tokens=2048,
+        **config.get('smoke_sampling', dict(temperature=1.0, top_p=.95, top_k=-1)), max_tokens=2048,
         chat_template_kwargs={'enable_thinking': True})
     response = request(gpu, '/v1/chat/completions', body)
     choice = response['choices'][0]
@@ -89,7 +94,7 @@ def launch(gpu, config, hub):
         '--tensor-parallel-size', '1', '--language-model-only',
         '--max-model-len', str(config['context']), '--max-num-seqs', str(config['max_num_seqs']),
         '--max-num-batched-tokens', '8192', '--enable-prefix-caching',
-        *config.get('vllm_args', GEMMA_ARGS), '--no-enable-log-requests']
+        *config.get('vllm_args', NEMOTRON_ARGS), '--no-enable-log-requests']
     save(ROOT / f'command-{gpu}.json', command)
     run(command)
 

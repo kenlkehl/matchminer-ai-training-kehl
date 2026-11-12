@@ -3,7 +3,7 @@
 One place that maps model names to vLLM reasoning-parser names, adds the
 standard CLI flag, and parses a raw generated string via the appropriate
 parser. Every vLLM-touching script in this repo goes through this module so
-swapping models (e.g. Gemma-4 -> Qwen3.6-27B) is a one-flag change.
+swapping models (e.g. the default Nemotron 3.5 Super -> Gemma 4) is a one-flag change.
 """
 
 from __future__ import annotations
@@ -16,6 +16,13 @@ from typing import Optional, Tuple
 from matchminer_ai.llm.teacher_runtime import (  # noqa: F401  (re-exported)
     MODEL_TO_PARSER, load_tokenizer, resolve_chat_template_kwargs, resolve_parser_name, resolve_sampling_defaults,
 )
+
+
+# Hybrid Mamba serving flags of Nemotron 3.5 Super (the default model), shared by the labeling fleet,
+# the camus servers and the scripts that start their own vLLM servers for it.
+NEMOTRON_SERVE_FLAGS = ["--trust-remote-code", "--async-scheduling", "--mamba-backend", "flashinfer",
+    "--mamba-ssm-cache-dtype", "float16", "--enable-mamba-cache-stochastic-rounding",
+    "--mamba-cache-philox-rounds", "5", "--chat-template-content-format", "string", "--mamba-cache-mode", "align"]
 
 
 def resolve_tool_call_parser(model: str, explicit: Optional[str] = None) -> Optional[str]:
@@ -56,8 +63,8 @@ def parse_reasoning_output(
     the class-based ``extract_reasoning`` skips. ``openai_gptoss`` goes
     through vLLM's harmony helper (its ``extract_reasoning`` raises
     NotImplementedError). ``beam`` uses the shared native-channel splitter,
-    without depending on the installed vLLM build. Everything else uses the standard
-    :class:`ReasoningParser` class API.
+    without depending on the installed vLLM build. Everything else, including the default
+    model's ``nemotron_v3``, uses the standard :class:`ReasoningParser` class API.
     """
     from matchminer_ai.llm.reasoning import parse_reasoning_output as parse
 
@@ -77,6 +84,6 @@ def add_reasoning_cli_args(ap: argparse.ArgumentParser) -> None:
         default="auto",
         help=(
             "vLLM reasoning parser name (default: auto = infer from --model). "
-            "Examples: gemma4, qwen3, openai_gptoss, deepseek_r1, beam."
+            "Examples: nemotron_v3, gemma4, qwen3, openai_gptoss, deepseek_r1, beam."
         ),
     )

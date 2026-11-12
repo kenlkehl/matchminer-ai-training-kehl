@@ -75,7 +75,7 @@ python summarize_patients.py \
   --additional_vllm_args "--quantization nvfp4 --kv-cache-dtype fp8"
 """
 
-from vllm_reasoning_utils import resolve_chat_template_kwargs
+from vllm_reasoning_utils import NEMOTRON_SERVE_FLAGS, resolve_chat_template_kwargs
 
 import argparse
 import asyncio
@@ -529,6 +529,8 @@ def start_vllm_server(
         "--port", str(port),
         "--reasoning-parser", reasoning_parser,
     ]
+    if "nemotron" in model.lower():  # remote-code config and hybrid Mamba cache, as production serves it
+        cmd += ["--language-model-only", *NEMOTRON_SERVE_FLAGS]
     if enforce_eager:
         cmd.append("--enforce-eager")
     if additional_vllm_args:
