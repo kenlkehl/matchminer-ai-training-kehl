@@ -52,10 +52,13 @@ every input path (defaults below).
 | `mmai_real_eval/soc.py` | SOC cohort |
 | `mmai_real_eval/trials.py` | OnCore protocol map, DFCI trial dates, ctgov listings, holdout/training flags, trial sampling |
 | `mmai_real_eval/notes.py` | Report counts before the index date; note-level dataset builder |
+| `mmai_real_eval/trial_masking.py` | Leakage regexes, per-event trial-identifier masking, residual checks |
 | `mmai_real_eval/io_utils.py` | Dates, protocol keys, file stamps, private writes, pseudo_mrn, counts |
-| `build_note_level_dataset.py` | CLI: v22's note-level dataset (not run by default) |
+| `build_note_level_dataset.py` | CLI: v22's note-level dataset with the trial masked (not run by default) |
+| `measure_note_leakage.py` | CLI: how often pre-index notes name the patient's own trial, by cutoff |
 | `sample_soc_trials.py` | CLI: v22's SOC trial-corpus sample (non-PHI) |
 | `tests/test_denominators.py` | Rule tests on fabricated tables |
+| `tests/test_trial_masking.py` | Masking tests on fabricated text and tables |
 
 ## What v22 did
 
@@ -333,14 +336,74 @@ with listing text. No patient data.
 - `has_prior_reports` / `n_prior_reports` in the denominators still use index + `--days-buffer` (v22's rule), as
   information only.
 
+**Trial-identifier masking (trial cohort, default; `mmai_real_eval/trial_masking.py`).** User, 2026-11-14: cut at
+`note_anchor_dt` − 14 days and mask the trial. `measure_note_leakage.py` measured that, at that cutoff, kept notes
+still contain:
+- the start's own protocol number for 13.1% of trial starts (4,640 notes);
+- an investigational code from its trial's title for 3.9%;
+- its NCT ID for 0.2%.
+
+A blanket NN-NNN mask would hit 27% of kept notes (lab ranges, doses and so on), so masking is per index event. Each
+kept note is masked for the event it is kept for, against the identifiers of **all of that event's own trials** (every
+denominator row sharing its `pseudo_mrn`), and nothing else:
+- **Protocol numbers** → `[TRIAL PROTOCOL]`. Every form the leakage regex `PROTOCOL` recognizes: `17-123`, any dash
+  character (`17–123`, `17—123`, ...) and one optional space each side (`17 - 123`). The replaced span includes up to
+  three prefixes from "DFCI", "DFHCC", "protocol" (any case) and "#" (e.g. `DFCI protocol #17-123`).
+- **NCT IDs** → `[NCT ID]`, as `NCT` recognizes them: any case, optional space after NCT, leading zero optional.
+- **Investigational codes from the trial's ctgov title(s)** (`title_codes()`, from `--ctgov-csv`) → `[STUDY DRUG CODE]`.
+  Matching ignores case and allows a hyphen, another dash character or one space between letters and digits.
+- **Not masked:**
+  - other NN-NNN numbers, including other protocols the patient was on;
+  - spellings the leakage regexes do not recognize: no dash (`DFCI 17123`), a suffix (`17-123-01`), a preceding
+    `/` or `.`, or other separators.
+- **Output columns.** Each note gets `n_masked_protocol`, `n_masked_nct` and `n_masked_code`.
+- **When masking is on.** Masking needs `protocol_number` and `nct_id` in the denominator CSV, so it is on for the
+  trial cohort and off for SOC, which has neither. `--no-mask` turns it off.
+- **Residual check.** After a masked build, the script re-runs the leakage checks on the written text (`residual_flags`).
+  - The own protocol number, NCT ID and title code checks must find 0 notes, otherwise the script exits 1. The title
+    code check runs both case-sensitively, as in the measurement, and ignoring case.
+  - It also counts the unrecognized spellings above, for information.
+- `PROTOCOL`, `NCT`, `CODE` and `title_codes()` live in `trial_masking.py`, and `measure_note_leakage.py` imports them
+  from there.
+
 **`build_note_level_dataset.py`** writes `pseudo_mrn, dfci_mrn, trial_start_dt, note_cutoff_dt, date,
-note_type, RPT_ID, text`. It differs from v22 in four ways:
+note_type, RPT_ID, text`, plus the three `n_masked_*` columns when masking. It differs from v22 in four ways:
 - one copy of the notes per index event, where v22 repeated them per enrollment row;
 - no trial or plan columns copied onto every note (join on `pseudo_mrn` instead);
 - only the report columns all sources share;
-- rows not globally sorted.
+- rows not globally sorted (they are in source, then file order).
 
-It refuses output paths outside `data/phi/` or `/data1/`, and was not run on 2026-11-14.
+`--workers` (default 16) reads one report row group per spawned process; 1 streams in a single process. Every run
+writes `<output stem>.summary.json` beside the parquet (mode 600, counts only): parameters, input stamps, rows, index
+events, events without notes, rows by source, and, when masking, replacements by kind with notes and events
+affected, the spellings of masked protocol numbers, replacements per title code and the residual check. It refuses
+output paths outside `data/phi/` or `/data1/`.
+
+**Run of 2026-11-14** (research-plan trial cohort, `--anchor note_anchor --days-offset -14`, masked):
+`enrollments_note_level_dataset_minus14_masked.parquet` and its `.summary.json` in the run directory below.
+- **Rows.** 1,011,642 rows (imaging 498,804, clinical 315,552, path 197,286), the kept-note count the leakage
+  measurement predicted.
+- **Events.** 21,803 index events. 1,985 (9.1%) have no note before the cutoff.
+- **Replacements** (all in the kept notes):
+
+  | Identifier | Replacements | Notes | Events |
+  | --- | ---: | ---: | ---: |
+  | Protocol number | 7,243 | 4,640 | 2,866 |
+  | NCT ID | 71 | 62 | 51 |
+  | Title code | 2,378 | 1,445 | 858 |
+
+  The protocol and NCT note and event counts equal the measured leakage. Title codes cover a few more notes (858
+  events against 851 measured) because matching ignores case. 3,260 events had at least one replacement.
+- **Residual check.** 0 own protocol numbers, NCT IDs or title codes survive.
+- **Unrecognized spellings, left unmasked** (notes / events):
+  - no dash after a prefix: 126 / 42;
+  - a dash or slash suffix: 44 / 33;
+  - a preceding `/`, `.` or dash: 18 / 12;
+  - other separators: 21 / 20;
+  - a title code with another separator: 1 / 1.
+- **Antigen codes.** Title codes include antigen names. `CD123` accounts for 62 code replacements and `CD137` for 1,
+  so those antigens are masked in their own trial's patients' notes too.
+- **Runtime.** 2.5 minutes with 24 workers.
 
 ## Run of 2026-11-14 (research-plan trial cohort, default)
 
