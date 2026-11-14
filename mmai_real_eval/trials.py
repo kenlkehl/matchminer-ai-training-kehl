@@ -59,9 +59,9 @@ def load_oncore_treatment_protocols(oncore_status_csv, dfci_trials_csv=None) -> 
     treatment.loc[with_nct.index, "first_protocol_for_nct"] = ~with_nct.nct_id.duplicated(keep="first")
     counts["status_file_treatment_protocols_with_nct"] = int(len(with_nct))
     treatment = treatment.rename(columns={"protocol_no": "protocol_number", "status": "oncore_status",
-                                          "phase": "oncore_phase"})
+                                          "phase": "oncore_phase", "protocol_type": "oncore_protocol_type"})
     keep = ["protocol_number", "protocol_nbr", "nct_id", "nct_source", "oncore_status", "oncore_phase",
-            "first_protocol_for_nct"]
+            "oncore_protocol_type", "first_protocol_for_nct"]
     out = treatment[keep]
 
     if dfci_trials_csv is not None:
@@ -76,7 +76,8 @@ def load_oncore_treatment_protocols(oncore_status_csv, dfci_trials_csv=None) -> 
         counts["status_file_treatment_protocols_nct_from_summary"] = int(fill.sum())
         extra = summary[~summary.protocol_nbr.isin(status.protocol_nbr)].rename(
             columns={"protocol_no": "protocol_number", "status": "oncore_status"})
-        extra = extra.assign(oncore_phase=pd.NA, nct_source="dfci_trials_summary",
+        # Summary-only protocols carry no OnCore protocol type (the research-plan cohort excludes them).
+        extra = extra.assign(oncore_phase=pd.NA, oncore_protocol_type=pd.NA, nct_source="dfci_trials_summary",
                              first_protocol_for_nct=pd.Series(pd.NA, index=extra.index, dtype="boolean"))
         counts["summary_only_protocols_with_nct_any_type"] = int(len(extra))
         out = pd.concat([out, extra[keep]], ignore_index=True)

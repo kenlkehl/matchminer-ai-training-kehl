@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mmai_real_eval import enrollments as enr  # noqa: E402
+from mmai_real_eval import research_plans as rpl  # noqa: E402
 from mmai_real_eval import soc  # noqa: E402
 from mmai_real_eval import trials as tr  # noqa: E402
 from mmai_real_eval.io_utils import ctgov_date_bounds, protocol_number_to_int, write_csv_private  # noqa: E402
@@ -98,6 +99,49 @@ def test_pull_enrollments_rules(tmp_path):
     assert [a["rows"] for a in attrition][:5] == [11, 10, 9, 9, 8]
     reg_only, _, _, _ = enr.pull_enrollments(_pe_csv(tmp_path), oncore, None, "2016-01-01", "2025-12-31", "reg_dt")
     assert reg_only.set_index("patient_study_seq").loc["2", "trial_start_dt"] == pd.Timestamp("2021-01-05")
+
+
+def _tp_csv(tmp_path):
+    rows = []
+
+    def add(mrn, category, nbr, start, plan_id, name="Fictional research regimen"):
+        rows.append(dict(DFCI_MRN=str(mrn), TREATMENT_PLAN_CATEGORY=category, RESEARCH_CHEMO_PLAN=name,
+                         RESEARCH_CHEMO_PLAN_NBR=nbr, TPLAN_START_DT=start, FIRST_CYCLE_DT=start,
+                         TPLAN_GOAL="PALLIATIVE", EPIC_TPLAN_ID=str(plan_id)))
+    research = "ONCOLOGY RESEARCH CHEMO PLAN"
+    add(1, research, "17001", "2020-03-20 00:00:00", 101)   # start; registered 2020-03-01 (same protocol)
+    add(1, research, "17001", "2020-09-01 00:00:00", 102)   # re-plan of the same start
+    add(9, research, "17002", "2024-02-20 00:00:00", 103)   # masked registration 2024-02-01 nearby
+    add(11, research, "05003", "2023-05-01 00:00:00", 104)  # no registration at all
+    add(4, research, "17001", "2015-12-01 00:00:00", 105)   # first start before the window
+    add(4, research, "17001", "2016-02-01 00:00:00", 106)   # ...so this later plan is not a start
+    add(12, research, "18005", "2019-01-01 00:00:00", 107)  # not a 'Treatment' protocol
+    add(13, research, "18004", "2019-01-01 00:00:00", 108)  # Treatment protocol without an NCT ID
+    add(14, research, None, "2019-01-01 00:00:00", 109)     # no protocol number
+    add(15, "ONCOLOGY STANDARD CHEMO PLAN", None, "2019-01-01 00:00:00", 110)
+    add(16, research, "17001", "2026-01-02 00:00:00", 111)  # after the window
+    path = tmp_path / "tp.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def test_pull_trial_starts_from_research_plans(tmp_path):
+    oncore, _ = tr.load_oncore_treatment_protocols(_oncore_csv(tmp_path))
+    assert set(oncore.oncore_protocol_type) == {"Treatment"}
+    starts, first, attrition, diag = rpl.pull_trial_starts(
+        _tp_csv(tmp_path), oncore, {"NCT00000001", "NCT00000003"}, "2016-01-01", "2025-12-31", _pe_csv(tmp_path))
+    assert sorted(starts.dfci_mrn) == [1, 9, 11]
+    by = starts.set_index("dfci_mrn")
+    assert by.loc[1, "trial_start_dt"] == pd.Timestamp("2020-03-20") and by.loc[1, "n_research_plans_on_protocol"] == 2
+    assert by.loc[1, "enrollment_table_match"] == "same_protocol" and by.loc[1, "registration_dt"] == pd.Timestamp("2020-03-01")
+    assert by.loc[1, "days_registration_to_index"] == 19 and bool(by.loc[1, "index_in_dfci_accrual_window"])
+    assert by.loc[9, "enrollment_table_match"] == "masked_registration_nearby"
+    assert by.loc[11, "enrollment_table_match"] == "none" and pd.isna(by.loc[11, "registration_dt"])
+    assert by.loc[1, "index_date_rule"] == rpl.INDEX_DATE_RULE
+    assert set(first.dfci_mrn) == {1, 4, 9, 11, 16}  # first starts of any date, Treatment + NCT + listing
+    assert first.set_index("dfci_mrn").loc[4, "trial_start_dt"] == pd.Timestamp("2015-12-01")
+    assert [a["rows"] for a in attrition][:5] == [11, 10, 9, 9, 7]
+    assert diag["enrollment_table_match"] == {"same_protocol": 1, "masked_registration_nearby": 1, "none": 1}
 
 
 def test_trial_table_and_window_flags(tmp_path):

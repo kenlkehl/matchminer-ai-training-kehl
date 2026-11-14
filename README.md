@@ -3,8 +3,12 @@
 Real-patient **denominator pulls** for the MatchMiner-AI retrospective evaluations, ported
 from v22 to the 2026 pan-DFCI data (`/data1/ken/pan_dfci_2026`). Two cohorts:
 
-- **Enrollments**: real patients registered to, and starting treatment on, a DFCI
+- **Enrollments** (trial cohort): real patients starting research treatment on a DFCI
   therapeutic trial that has a ClinicalTrials.gov ("ctgov") listing.
+  - **Default since 2026-11-14:** each patient's first research chemo plan on an OnCore "Treatment" protocol
+    (`--trial-source research_plans`).
+  - The original registration pull from `PROTOCOL_ENROLLMENT` (`--trial-source enrollment_table`) remains for
+    cross-checks. See "Trial cohort from research chemo plans".
 - **SOC**: real patients starting a standard-of-care oncology chemotherapy plan.
 
 This repository holds **code only**. Every output is real-patient data (PHI): write it only
@@ -129,7 +133,38 @@ sampled with seed 42.
 stays 2016-01-01. v22 did not end "through 2024": SOC ended 2024-01-01, and enrollments had
 no bound but the 2024 data ended 2024-03-07 (16 enrollments in 2024).
 
-### Enrollment definition changes
+### Trial cohort from research chemo plans (default since 2026-11-14)
+
+User, 2026-11-14: "refactor to use the research chemo plans as the protocol number source, with index date as you
+note, and filter for 'Treatment' protocols." (`mmai_real_eval/research_plans.py`)
+
+- **Why.** `PROTOCOL_ENROLLMENT` replaces the protocol of every registration on a protocol still active at extraction
+  (August 2026) with `STUDY_NBR` `0000`. That hides 22% of 2016-2025 therapeutic registrations and 71% of 2025's.
+  `TREATMENT_PLAN` research chemo plans keep `RESEARCH_CHEMO_PLAN_NBR`, currently open protocols included: only 56
+  of 44,665 research plans have no number.
+  - Checked on unmasked registrations: the same patient's research plan starting 14 days before to 90 days after
+    registration named the true protocol 99% of the time. 79% of registrations had such a plan.
+  - 98% of research-plan starts map to an NCT ID in every year 2016-2025.
+- **Definition.**
+  - One index event per (patient, protocol): the patient's first `ONCOLOGY RESEARCH CHEMO PLAN` on that protocol, on
+    any date. It counts when that first start falls in `--start-date`..`--end-date`, so re-plans are not new starts.
+  - The index date is that plan's `TPLAN_START_DT`, the start of research treatment. That is typically days to weeks
+    after registration, and the same kind of event as the SOC cohort's standard-chemo plan start.
+  - The protocol must be an OnCore `protocol_type` "Treatment" protocol with an NCT ID. Protocols known only from the
+    DFCI summary have no type and are excluded.
+  - By default the NCT ID needs a local ctgov listing with a brief summary, as in v22.
+- **Missed by construction:** trials without a research chemo plan, such as oral-only, radiation or surgical
+  protocols.
+- **Cross-check columns.**
+  - `enrollment_table_match`:
+    - `same_protocol`: an unmasked registration on the protocol exists; `registration_dt` is its earliest date.
+    - `masked_registration_nearby`: a masked registration 90 days before to 14 days after the index date.
+    - `none`: neither.
+  - `days_registration_to_index`.
+  - DFCI accrual dates (`dfci_accrual_open_dt` / `dfci_accrual_close_dt`) come from the enrollment table, for
+    protocols it names.
+
+### Enrollment definition changes (`--trial-source enrollment_table`)
 
 - **Index date (forced change).** v22 used the OnCore consent date from `forken.json`;
   pan_dfci_2026 has none. The default `--index-date-rule earliest` uses the earliest of
@@ -229,7 +264,15 @@ v22's summaries. They are kept and flagged, not dropped.
 
 All under `--output-dir`. CSV dates are `YYYY-MM-DD`.
 
-**`processed_trial_enrollments.csv`**: one row per qualifying registration.
+**`processed_trial_enrollments.csv`**, `--trial-source research_plans` (default): one row per trial start.
+`pseudo_mrn`, `dfci_mrn`, `protocol_number`, `nct_id`, `trial_start_dt` (first research plan start),
+`index_date_rule` (`first_research_plan_start`), `first_cycle_dt`, `epic_tplan_id`, `research_plan` (plan name),
+`tplan_goal`, `n_research_plans_on_protocol`, `split`, `oncore_status`, `oncore_phase`, `nct_source`,
+`enrollment_table_match`, `registration_dt`, `days_registration_to_index`, `dfci_accrual_open_dt`,
+`dfci_accrual_close_dt`, `index_in_dfci_accrual_window`, `index_in_v22_style_window` (window built from research
+plan starts), `index_in_ctgov_window`, `n_prior_reports`, `has_prior_reports`.
+
+**`processed_trial_enrollments.csv`**, `--trial-source enrollment_table`: one row per qualifying registration.
 `pseudo_mrn`, `dfci_mrn`, `protocol_number` (OnCore, `17-123`), `nct_id`,
 `trial_start_dt` (index date), `index_date_rule`, `reg_dt`, `protocol_on_dt`,
 `treatment_start_dt`, `patient_study_seq` (OnCore row key), `split` (information only),
@@ -282,7 +325,24 @@ note_type, RPT_ID, text`. It differs from v22 in four ways:
 
 It refuses output paths outside `data/phi/` or `/data1/`, and was not run on 2026-11-14.
 
-## Run of 2026-11-14
+## Run of 2026-11-14 (research-plan trial cohort, default)
+
+Output: `/ksg/kehl_mm_data/mmai/v23/data/phi/real_eval_denominators_20261114/`. The earlier registration-based outputs
+are kept in its `enrollment_table_v1/` subfolder. SOC is unchanged (15,989 rows, 7,680 patients).
+
+| First research plan year | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | All |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Trial starts (= index events) | 2,247 | 2,457 | 2,653 | 2,508 | 1,790 | 2,023 | 1,876 | 2,146 | 2,055 | 2,048 | 21,803 |
+| Patients | 2,127 | 2,311 | 2,463 | 2,341 | 1,686 | 1,910 | 1,771 | 2,029 | 1,972 | 1,976 | 17,730 |
+
+- 2,086 trials: 35 in the v23 training sample, 988 meeting the 2025-2026 DFCI holdout rule.
+- `enrollment_table_match`: same protocol 17,830; masked registration nearby 3,822; none 151. So 99.3% of starts have
+  a matching registration.
+- Registration to first research plan: median 14 days (10th-90th percentile 2-36).
+- Index inside the DFCI accrual window: 17,740 yes, 118 no, 3,945 unknown (protocol masked in the enrollment table).
+- 21,788 index events have a report before index + 5 days.
+
+### Earlier run of 2026-11-14 (`--trial-source enrollment_table`)
 
 Output: `/ksg/kehl_mm_data/mmai/v23/data/phi/real_eval_denominators_20261114/`.
 Index events = unique (patient, index date).

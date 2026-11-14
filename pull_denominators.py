@@ -4,8 +4,13 @@
 Ports v22 real_eval_code/eval_phi_enrollments/prepare_data.py and
 eval_phi_soc/prepare_data.py (cohort steps only) to pan_dfci_2026. See README.md.
 
+The trial cohort comes from research chemo plans by default (--trial-source research_plans, since 2026-11-14:
+first research plan per patient and OnCore 'Treatment' protocol, index date = that plan's start). The registration
+pull from PROTOCOL_ENROLLMENT (--trial-source enrollment_table) remains for cross-checks; it cannot identify the 22%
+of registrations whose protocol was still active at extraction.
+
 Writes, under --output-dir (mode 700; files mode 600):
-  processed_trial_enrollments.csv   one row per qualifying trial registration
+  processed_trial_enrollments.csv   one row per qualifying trial start (research plans) or registration
   enrolled_trials.csv               one row per NCT ID among them (dates, flags, listing text)
   processed_soc_treatments.csv      one row per qualifying standard-of-care plan
   denominator_summary.json          parameters, input file stamps, attrition and counts
@@ -25,6 +30,7 @@ from pathlib import Path
 import pandas as pd
 
 from mmai_real_eval import enrollments as enr
+from mmai_real_eval import research_plans as rpl
 from mmai_real_eval import soc
 from mmai_real_eval import trials as tr
 from mmai_real_eval.io_utils import (cohort_counts, ensure_private_dir, file_stamp, utc_now,
@@ -43,6 +49,13 @@ ENROLLMENT_COLUMNS = [
     "index_in_v22_style_window", "index_in_ctgov_window", "nct_source", "first_protocol_for_nct",
     "n_prior_reports", "has_prior_reports",
 ]
+RESEARCH_PLAN_COLUMNS = [
+    "pseudo_mrn", "dfci_mrn", "protocol_number", "nct_id", "trial_start_dt", "index_date_rule",
+    "first_cycle_dt", "epic_tplan_id", "research_plan", "tplan_goal", "n_research_plans_on_protocol", "split",
+    "oncore_status", "oncore_phase", "nct_source", "enrollment_table_match", "registration_dt",
+    "days_registration_to_index", "dfci_accrual_open_dt", "dfci_accrual_close_dt", "index_in_dfci_accrual_window",
+    "index_in_v22_style_window", "index_in_ctgov_window", "n_prior_reports", "has_prior_reports",
+]
 TRIAL_COLUMNS = [
     "nct_id", "protocol_numbers", "oncore_status", "oncore_phase", "n_rows", "n_index_events", "n_patients",
     "first_dfci_treatment_start", "last_dfci_treatment_start", "dfci_accrual_open_dt", "dfci_accrual_close_dt",
@@ -60,8 +73,11 @@ def parse_args(argv=None):
     p.add_argument("--start-date", default="2016-01-01", help="First index date (inclusive); v22: 2016-01-01")
     p.add_argument("--end-date", default="2025-12-31",
                    help="Last index date (inclusive). v22: SOC 2024-01-01, enrollments unbounded (data ended 2024-03)")
+    p.add_argument("--trial-source", default="research_plans", choices=["research_plans", "enrollment_table"],
+                   help="Trial cohort source: first research chemo plan per patient-protocol (default) or "
+                        "PROTOCOL_ENROLLMENT registrations (masked active protocols excluded)")
     p.add_argument("--index-date-rule", default="earliest", choices=sorted(enr.INDEX_DATE_RULES),
-                   help="Enrollment index date (consent proxy); see README")
+                   help="Enrollment-table index date (consent proxy); --trial-source enrollment_table only")
     p.add_argument("--no-summary-nct-fill", action="store_true",
                    help="Map protocols to NCT IDs with the OnCore status file only (v22-like)")
     p.add_argument("--no-require-ctgov-listing", dest="require_ctgov_listing", action="store_false",
@@ -122,6 +138,8 @@ def main(argv=None) -> int:
 
     inputs = {"split_csv": args.split_csv}
     if "enrollments" in cohorts:
+        if args.trial_source == "research_plans":
+            inputs["treatment_plan_csv"] = args.treatment_plan_csv
         inputs.update(protocol_enrollment_csv=args.protocol_enrollment_csv, oncore_status_csv=args.oncore_status_csv,
                       dfci_trials_csv=args.dfci_trials_csv, ctgov_csv=args.ctgov_csv,
                       training_sample_csv=args.training_sample_csv)
@@ -145,8 +163,13 @@ def main(argv=None) -> int:
             args.oncore_status_csv, None if args.no_summary_nct_fill else args.dfci_trials_csv)
         listings_all = tr.load_ctgov_listings(args.ctgov_csv, set(oncore.nct_id))
         ctgov_ids = set(listings_all.nct_id) if args.require_ctgov_listing else None
-        enrollments, qualifying, attrition, diagnostics = enr.pull_enrollments(
-            args.protocol_enrollment_csv, oncore, ctgov_ids, args.start_date, args.end_date, args.index_date_rule)
+        if args.trial_source == "research_plans":
+            enrollments, qualifying, attrition, diagnostics = rpl.pull_trial_starts(
+                args.treatment_plan_csv, oncore, ctgov_ids, args.start_date, args.end_date,
+                args.protocol_enrollment_csv)
+        else:
+            enrollments, qualifying, attrition, diagnostics = enr.pull_enrollments(
+                args.protocol_enrollment_csv, oncore, ctgov_ids, args.start_date, args.end_date, args.index_date_rule)
         trials = enr.trial_table(enrollments, qualifying, tr.load_dfci_trial_dates(args.dfci_trials_csv),
                                  listings_all, tr.load_training_nct_ids(args.training_sample_csv),
                                  tr.dfci_holdout_nct_ids(args.dfci_trials_csv), args.start_date, args.end_date)
@@ -154,6 +177,7 @@ def main(argv=None) -> int:
         enrollments = enrollments.merge(split, on="dfci_mrn", how="left", validate="many_to_one")
         results["enrollments"] = enrollments
         summary["enrollments"] = {
+            "trial_source": args.trial_source,
             "oncore_reference": oncore_counts,
             "oncore_treatment_ncts_with_local_ctgov_listing": int(listings_all.nct_id.nunique()),
             "attrition": attrition,
@@ -172,9 +196,12 @@ def main(argv=None) -> int:
         }
         print("Enrollment attrition:")
         show_attrition(attrition)
-        print(f"  Masked active-protocol registrations with an index date in the window (excluded): "
-              f"{diagnostics['masked_active_protocol_rows_in_window']} rows, by year "
-              f"{diagnostics['masked_active_protocol_rows_in_window_by_year']}")
+        if args.trial_source == "enrollment_table":
+            print(f"  Masked active-protocol registrations with an index date in the window (excluded): "
+                  f"{diagnostics['masked_active_protocol_rows_in_window']} rows, by year "
+                  f"{diagnostics['masked_active_protocol_rows_in_window_by_year']}")
+        else:
+            print(f"  Cross-check against PROTOCOL_ENROLLMENT: {diagnostics['enrollment_table_match']}")
         results["trials"] = trials
 
     if "soc" in cohorts:
@@ -208,7 +235,8 @@ def main(argv=None) -> int:
 
     outputs = {}
     if "enrollments" in results:
-        frame = results["enrollments"].sort_values(["pseudo_mrn", "protocol_number"])[ENROLLMENT_COLUMNS]
+        columns = RESEARCH_PLAN_COLUMNS if args.trial_source == "research_plans" else ENROLLMENT_COLUMNS
+        frame = results["enrollments"].sort_values(["pseudo_mrn", "protocol_number"])[columns]
         outputs["processed_trial_enrollments"] = write_csv_private(frame, out_dir / "processed_trial_enrollments.csv")
         outputs["enrolled_trials"] = write_csv_private(
             results["trials"].sort_values("nct_id")[TRIAL_COLUMNS], out_dir / "enrolled_trials.csv")
