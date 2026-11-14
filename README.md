@@ -30,8 +30,9 @@ OUT=../data/phi/real_eval_denominators_$(date +%Y%m%d)
 $PY pull_denominators.py --output-dir $OUT     # ~3 min, CPU; prints counts only
 $PY sample_soc_trials.py --output-file $OUT/soc_trial_sample.csv   # no patient data
 
-# Optional, large: copy report text before each index date (v22's note_level_dataset)
-$PY build_note_level_dataset.py --denominator-csv $OUT/processed_trial_enrollments.csv \
+# Large: copy report text for summarization. The cutoff is explicit (see "Note cutoff").
+$PY build_note_level_dataset.py --anchor note_anchor --days-offset -N \
+    --denominator-csv $OUT/processed_trial_enrollments.csv \
     --output-parquet $OUT/enrollments_note_level_dataset.parquet
 ```
 
@@ -316,7 +317,23 @@ with listing text. No patient data.
 - That pool differs from v22's (v23 trials were first posted 2020 or later and passed an LLM
   screen when the training run built them; no LLM runs here).
 
-**`build_note_level_dataset.py`** writes `pseudo_mrn, dfci_mrn, trial_start_dt, date,
+### Note cutoff (2026-11-14)
+
+- **v22:** notes were included through **5 days after** the index date, never before it. Both cohorts kept reports
+  with `date < trial_start_dt + 5 days`: the OnCore consent date for enrollments, the plan start for SOC. That already
+  admits the consent-visit note, which names the trial.
+- **Here:** `build_note_level_dataset.py` takes an explicit `--days-offset` (no default; negative = before the anchor)
+  and an `--anchor`:
+  - `index`: `trial_start_dt`, v22's anchor.
+  - `note_anchor`: `note_anchor_dt`, written by the research-plan trial pull and the default when present. It is the
+    earliest of the registration on the same protocol, the nearest masked registration, and the index.
+  - The research-plan index (first research plan start) is a median 14 days after registration. Notes from that
+    stretch, and from screening before registration, name the trial, so for that cohort cut before the anchor
+    (negative offset).
+- `has_prior_reports` / `n_prior_reports` in the denominators still use index + `--days-buffer` (v22's rule), as
+  information only.
+
+**`build_note_level_dataset.py`** writes `pseudo_mrn, dfci_mrn, trial_start_dt, note_cutoff_dt, date,
 note_type, RPT_ID, text`. It differs from v22 in four ways:
 - one copy of the notes per index event, where v22 repeated them per enrollment row;
 - no trial or plan columns copied onto every note (join on `pseudo_mrn` instead);

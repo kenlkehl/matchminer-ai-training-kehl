@@ -53,7 +53,8 @@ RESEARCH_PLAN_COLUMNS = [
     "pseudo_mrn", "dfci_mrn", "protocol_number", "nct_id", "trial_start_dt", "index_date_rule",
     "first_cycle_dt", "epic_tplan_id", "research_plan", "tplan_goal", "n_research_plans_on_protocol", "split",
     "oncore_status", "oncore_phase", "nct_source", "enrollment_table_match", "registration_dt",
-    "days_registration_to_index", "dfci_accrual_open_dt", "dfci_accrual_close_dt", "index_in_dfci_accrual_window",
+    "days_registration_to_index", "masked_registration_dt", "note_anchor_dt", "dfci_accrual_open_dt",
+    "dfci_accrual_close_dt", "index_in_dfci_accrual_window",
     "index_in_v22_style_window", "index_in_ctgov_window", "n_prior_reports", "has_prior_reports",
 ]
 TRIAL_COLUMNS = [

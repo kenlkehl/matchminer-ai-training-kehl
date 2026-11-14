@@ -124,8 +124,10 @@ def pull_trial_starts(
         near = first[first.registration_dt.isna()][["dfci_mrn", "protocol_nbr", "trial_start_dt"]].merge(
             masked_dates, on="dfci_mrn")
         lag = (near.trial_start_dt - near.registration_dt).dt.days
-        near = near[(lag >= -MASKED_AFTER_DAYS) & (lag <= MASKED_BEFORE_DAYS)].drop_duplicates(["dfci_mrn", "protocol_nbr"])
-        first = first.merge(near[["dfci_mrn", "protocol_nbr"]].assign(_masked_near=True),
+        near = near[(lag >= -MASKED_AFTER_DAYS) & (lag <= MASKED_BEFORE_DAYS)].assign(_gap=lag.abs())
+        near = near.sort_values("_gap").drop_duplicates(["dfci_mrn", "protocol_nbr"])  # nearest masked registration
+        first = first.merge(near[["dfci_mrn", "protocol_nbr", "registration_dt"]]
+                            .rename(columns={"registration_dt": "masked_registration_dt"}).assign(_masked_near=True),
                             on=["dfci_mrn", "protocol_nbr"], how="left")
         first["enrollment_table_match"] = "none"
         first.loc[first._masked_near.eq(True), "enrollment_table_match"] = "masked_registration_nearby"
@@ -133,11 +135,15 @@ def pull_trial_starts(
         first = first.drop(columns="_masked_near")
         first["days_registration_to_index"] = (first.trial_start_dt - first.registration_dt).dt.days
     else:
-        for col in ("registration_dt", "dfci_accrual_open_dt", "dfci_accrual_close_dt"):
+        for col in ("registration_dt", "masked_registration_dt", "dfci_accrual_open_dt", "dfci_accrual_close_dt"):
             first[col] = pd.NaT
         first["enrollment_table_match"] = pd.NA
         first["days_registration_to_index"] = pd.NA
 
+    # Notes for summarization stop before the patient's trial registration, not before the research plan start:
+    # registration and screening notes name the trial. The anchor is the earliest of the registration on the same
+    # protocol, the nearest masked registration, and the index date (build_note_level_dataset.py, --anchor note_anchor).
+    first["note_anchor_dt"] = first[["registration_dt", "masked_registration_dt", "trial_start_dt"]].min(axis=1)
     lo, hi = pd.Timestamp(start_date), pd.Timestamp(end_date)
     starts = first[(first.trial_start_dt >= lo) & (first.trial_start_dt <= hi)].copy()
     _step(attrition, f"first research plan start within {start_date}..{end_date} (inclusive)", starts)

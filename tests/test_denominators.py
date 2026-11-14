@@ -137,6 +137,10 @@ def test_pull_trial_starts_from_research_plans(tmp_path):
     assert by.loc[1, "days_registration_to_index"] == 19 and bool(by.loc[1, "index_in_dfci_accrual_window"])
     assert by.loc[9, "enrollment_table_match"] == "masked_registration_nearby"
     assert by.loc[11, "enrollment_table_match"] == "none" and pd.isna(by.loc[11, "registration_dt"])
+    # Notes stop before the earliest known registration: same protocol, nearest masked one, else the index.
+    assert by.loc[1, "note_anchor_dt"] == pd.Timestamp("2020-03-01")
+    assert by.loc[9, "masked_registration_dt"] == pd.Timestamp("2024-02-01") == by.loc[9, "note_anchor_dt"]
+    assert by.loc[11, "note_anchor_dt"] == pd.Timestamp("2023-05-01")
     assert by.loc[1, "index_date_rule"] == rpl.INDEX_DATE_RULE
     assert set(first.dfci_mrn) == {1, 4, 9, 11, 16}  # first starts of any date, Treatment + NCT + listing
     assert first.set_index("dfci_mrn").loc[4, "trial_start_dt"] == pd.Timestamp("2015-12-01")
@@ -254,11 +258,18 @@ def test_build_note_level_dataset(tmp_path):
         reports[reports.note_type.eq(kind)].to_parquet(tmp_path / f"{name}.parquet", index=False)
     events = pd.DataFrame(dict(pseudo_mrn=[1, 2], dfci_mrn=[1, 2], trial_start_dt=pd.to_datetime(["2020-03-01", "2020-01-01"])))
     out = tmp_path / "notes.parquet"
-    stats = build_note_level_dataset(events, tmp_path, out, days_buffer=5, batch_rows=2)
+    stats = build_note_level_dataset(events, tmp_path, out, days_offset=5, batch_rows=2)  # v22's cutoff
     got = pd.read_parquet(out).sort_values("RPT_ID")
     assert got.RPT_ID.tolist() == ["a", "b", "d"]
-    assert stats["rows"] == 3
+    assert stats["rows"] == 3 and (got.note_cutoff_dt == got.trial_start_dt + pd.Timedelta(days=5)).all()
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    # Research-plan cohort: cut 7 days before the registration anchor, not after the plan start.
+    anchored = events.assign(note_anchor_dt=pd.to_datetime(["2020-03-01", "2020-01-01"]))
+    anchored = pd.concat([anchored, anchored.iloc[[0]].assign(note_anchor_dt=pd.Timestamp("2019-12-05"))])  # same event, earlier anchor
+    build_note_level_dataset(anchored, tmp_path, out, days_offset=-1, batch_rows=2, anchor_col="note_anchor_dt")
+    assert sorted(pd.read_parquet(out).RPT_ID) == ["a", "d"]  # 2019-12-01 < 2019-12-04; 1950 < 2019-12-31
+    with pytest.raises(ValueError, match="explicit integer"):
+        build_note_level_dataset(events, tmp_path, out, days_offset=None)
 
 
 def test_sample_trials_reproduces_v22_draw():

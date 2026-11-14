@@ -68,24 +68,32 @@ def count_prior_reports(events: pd.DataFrame, report_dates: pd.DataFrame, days_b
     return np.searchsorted(keys, base + cutoff, side="left") - np.searchsorted(keys, base, side="left")
 
 
-def build_note_level_dataset(events: pd.DataFrame, derived_data_dir, output_parquet, days_buffer: int = 5,
-                             sources=DEFAULT_SOURCES, batch_rows: int = 200_000) -> dict:
-    """Write v22's note-level dataset: one row per (index event, report before its cutoff).
+def build_note_level_dataset(events: pd.DataFrame, derived_data_dir, output_parquet, days_offset: int,
+                             sources=DEFAULT_SOURCES, batch_rows: int = 200_000, anchor_col: str = "trial_start_dt") -> dict:
+    """Write the note-level dataset: one row per (index event, report dated before its cutoff).
 
-    ``events`` needs pseudo_mrn, dfci_mrn and trial_start_dt (one row per pseudo_mrn is
-    enough). Differences from v22, which looped over every enrollment row: each index event
+    The cutoff is ``anchor + days_offset`` days, exclusive (``date < cutoff``). v22 used the index date as anchor and
+    +5 days (its enrollment index was the OnCore consent date, its SOC index the plan start). For the research-plan
+    trial cohort the anchor should be ``note_anchor_dt``, the earliest known registration, because registration and
+    screening notes name the trial. ``events`` needs pseudo_mrn, dfci_mrn, trial_start_dt and ``anchor_col``. An
+    event with several rows (several protocols starting the same day) takes its earliest anchor. Differences from v22, which looped over every enrollment row: each index event
     gets one copy of its reports (v22 repeated them for each row sharing a pseudo_mrn), trial
     or plan details are not copied onto every note (join on pseudo_mrn instead), only the
     columns shared by all report files are kept, and rows are not globally sorted (the
     summarizer sorts by patient and date). Streams each file once.
     """
+    if type(days_offset) is not int:
+        raise ValueError("days_offset must be an explicit integer (negative = before the anchor)")
+    anchors = events.groupby("pseudo_mrn")[anchor_col].min()
     events = events[["pseudo_mrn", "dfci_mrn", "trial_start_dt"]].drop_duplicates("pseudo_mrn").copy()
-    events["cutoff"] = events.trial_start_dt + pd.Timedelta(days=days_buffer)
+    events["cutoff"] = events.pseudo_mrn.map(anchors) + pd.Timedelta(days=days_offset)
+    if events.cutoff.isna().any():
+        raise ValueError(f"{int(events.cutoff.isna().sum())} index events have no {anchor_col}")
     wanted = set(events.dfci_mrn.astype("int64"))
     keep = ["dfci_mrn", "date", "note_type", "RPT_ID", "text"]
     schema = pa.schema([("pseudo_mrn", pa.int64()), ("dfci_mrn", pa.int64()), ("trial_start_dt", pa.timestamp("ns")),
-                        ("date", pa.timestamp("ns")), ("note_type", pa.string()), ("RPT_ID", pa.string()),
-                        ("text", pa.string())])
+                        ("note_cutoff_dt", pa.timestamp("ns")), ("date", pa.timestamp("ns")),
+                        ("note_type", pa.string()), ("RPT_ID", pa.string()), ("text", pa.string())])
     output_parquet = Path(output_parquet)
     tmp = output_parquet.with_name(output_parquet.name + ".tmp")
     written, per_source = 0, {}
@@ -102,11 +110,13 @@ def build_note_level_dataset(events: pd.DataFrame, derived_data_dir, output_parq
                 merged = merged[merged.date < merged.cutoff]
                 if merged.empty:
                     continue
-                out = merged[["pseudo_mrn", "dfci_mrn", "trial_start_dt", "date", "note_type", "RPT_ID", "text"]]
+                out = merged.rename(columns={"cutoff": "note_cutoff_dt"})[
+                    ["pseudo_mrn", "dfci_mrn", "trial_start_dt", "note_cutoff_dt", "date", "note_type", "RPT_ID", "text"]]
                 writer.write_table(pa.Table.from_pandas(out, schema=schema, preserve_index=False))
                 n_source += len(out)
             per_source[source] = int(n_source)
             written += n_source
     tmp.chmod(0o600)
     tmp.replace(output_parquet)
-    return {"rows": int(written), "rows_by_source": per_source, "index_events": int(len(events))}
+    return {"rows": int(written), "rows_by_source": per_source, "index_events": int(len(events)),
+            "anchor": anchor_col, "days_offset": days_offset}
