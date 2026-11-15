@@ -26,7 +26,9 @@ full-attention layers), so the answer is never appended to the input: the loss i
 question's answer slot and nothing else, the cross-entropy of the answer as the model reads it at
 inference (its best ``yes`` form against its best ``no`` form; ``readout_loss``). Attention runs in
 the autocast dtype on d1's flash kernels, as at inference (``attend_in_autocast_dtype``). The vision
-tower and projector are frozen. Writes the model, its own code, tokenizer, LICENSE and a modification notice,
+tower and projector are frozen. A micro-batch whose packed sequences exceed --max-micro-batch-tokens padded
+tokens is run in pieces, its loss weighted to the same mean (``split_micro_batch``). Writes the model, its own code,
+tokenizer, LICENSE and a modification notice,
 ``calibration.json`` (temperature 1.0: the base temperature was fitted to the base model) and
 ``decision_contract.json`` to --output-model. Run under torchrun for several GPUs.
 """
@@ -213,6 +215,52 @@ def readout_loss(logits, targets, readout):
     return F.cross_entropy(options, targets)
 
 
+def split_micro_batch(inputs, budget):
+    """A collated micro-batch as pieces of at most ``budget`` padded tokens (sequences x width), each with its own
+    sequences, answer slots and targets; the batch itself when it fits.
+
+    A state packs into one sequence per 16 questions, so 8 criterion states (about 34 questions each) can make a
+    micro-batch several times the size of 8 match states. One ran rank 0 out of memory at step 25,119 of the
+    2026-11-14 run, every time it was resumed (2026-11-15; the other ranks then reported NVLink peer-access errors).
+    Pieces take the longest sequences first, so each pads little, and keep their sequences in batch order.
+    """
+    import torch
+    mask = inputs['attention_mask']
+    n, width = mask.shape
+    if n * width <= budget:
+        return [inputs]
+    unknown = set(inputs) - {'input_ids', 'attention_mask', 'slot_rows', 'slot_positions', 'targets', 'state_len',
+                             'question'}
+    if unknown:
+        raise ValueError(f'cannot split a micro-batch with {sorted(unknown)}')
+    lengths = mask.sum(1).tolist()
+    groups, current = [], []
+    for r in sorted(range(n), key=lambda r: -lengths[r]):
+        if current and (len(current) + 1) * lengths[current[0]] > budget:
+            groups.append(current)
+            current = []
+        current.append(r)
+    groups.append(current)
+    slot_rows = inputs['slot_rows']
+    pieces = []
+    for rows in groups:
+        rows = sorted(rows)
+        w = max(lengths[r] for r in rows)
+        index = torch.tensor(rows, device=mask.device)
+        remap = torch.full((n,), -1, dtype=slot_rows.dtype, device=slot_rows.device)
+        remap[index.to(slot_rows.device)] = torch.arange(len(rows), dtype=slot_rows.dtype, device=slot_rows.device)
+        keep = remap[slot_rows] >= 0
+        piece = dict(input_ids=inputs['input_ids'][index, :w], attention_mask=mask[index, :w],
+                     slot_rows=remap[slot_rows[keep]], slot_positions=inputs['slot_positions'][keep],
+                     targets=inputs['targets'][keep])
+        if 'state_len' in inputs:
+            piece['state_len'] = inputs['state_len'][index]
+        if 'question' in inputs:
+            piece['question'] = inputs['question'][index, :w]
+        pieces.append(piece)
+    return pieces
+
+
 def attend_in_autocast_dtype(model):
     """Train d1's attention on the flash kernels it serves with.
 
@@ -345,8 +393,11 @@ def train(args):
         length=lengths,
         index=[i for _ in range(epochs) for i in range(len(rows))],
         epoch=[e for e in range(epochs) for _ in rows]))
+    budget = args.max_micro_batch_tokens or args.batch_size * args.max_length
 
     class SlotTrainer(Trainer):
+        piece_weight = 1.0
+
         def _get_train_sampler(self, train_dataset=None):
             # Trainer's own length-grouped order, from a plain list. With datasets >= 4, dataset['length'] is a lazy
             # Column; the sampler's per-index lookups (~60 us each over ~17M examples) held every rank at step 0
@@ -358,8 +409,28 @@ def train(args):
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             targets = inputs.pop('targets')
             logits = model(**inputs)
-            loss = readout_loss(logits, targets, collator.readout)  # the answer slots only
+            loss = readout_loss(logits, targets, collator.readout) * self.piece_weight  # the answer slots only
             return (loss, logits) if return_outputs else loss
+
+        def training_step(self, model, inputs, num_items_in_batch=None):
+            """An oversized micro-batch in pieces (``split_micro_batch``), each piece's slot mean weighted by its
+            share of the slots, so the gradient and the logged loss are the whole micro-batch's mean. Only the last
+            piece may start DDP's gradient all-reduce, so every rank all-reduces once whether or not it split."""
+            import contextlib
+            pieces = split_micro_batch(inputs, budget)
+            if len(pieces) == 1:
+                return super().training_step(model, inputs, num_items_in_batch)
+            slots = sum(int(p['targets'].numel()) for p in pieces)
+            total = 0
+            try:
+                for i, piece in enumerate(pieces):
+                    self.piece_weight = piece['targets'].numel() / slots
+                    last = i == len(pieces) - 1
+                    with contextlib.nullcontext() if last or not hasattr(model, 'no_sync') else model.no_sync():
+                        total = total + super().training_step(model, piece, num_items_in_batch)
+            finally:
+                self.piece_weight = 1.0
+            return total
 
     output = Path(args.output_model).expanduser().resolve()
     work = Path(args.work_dir or output.with_name(output.name + '_training')).expanduser().resolve()
@@ -453,6 +524,9 @@ def parser():
     b.add_argument('--warmup', type=float, default=0.03, help='A float below 1 is a fraction of the steps')
     b.add_argument('--logging-steps', type=int, default=25)
     b.add_argument('--save-steps', type=int, default=1000)
+    b.add_argument('--max-micro-batch-tokens', type=int,
+                   help='Run a micro-batch with more padded tokens than this in pieces (same loss); default '
+                        '--batch-size x --max-length. A memory setting, not part of the fit\'s identity')
     b.add_argument('--loader-workers', type=int, default=4)
     b.add_argument('--seed', type=int, default=42)
     from trialspace.stage import add_check_arg
