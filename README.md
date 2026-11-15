@@ -519,3 +519,19 @@ noted):
   `enrolled_trials.csv` is the input for v23's cohort extraction instead.
 - `pull_soc_treatments.py`, `pull_trials.py` (SOC only): duplicates of the ported
   `prepare_data.py` / `prepare_trials.py` logic.
+
+## Summarization of the retrospective cohorts (queued 2026-11-14)
+
+User, 2026-11-14: "queue summarization of these retrospective enrollment and soc cohort patients behind the ongoing OA
+patient summarization work". The script is `summarize_retro_cohorts.py`.
+- **Settings:** the same summarizer and settings as the OA run: the inference package's default preset, Nemotron on
+  the GB300 only, fixed per-process concurrency from `servers.json`, and per-batch round checkpoints in a private
+  local `--work` directory.
+- **Unit:** one index event (`pseudo_mrn`, the summaries' `patient_id`). Its notes come from the note-level datasets:
+  trial notes cut at registration -14 days and masked; SOC notes cut at plan start -14 days.
+- **Plan:** 70 batches of up to 500 events.
+  - enrollments: 19,818 events with notes;
+  - SOC: 14,808 events with notes.
+- **Queue:** `--launch-after-oa <OA resume json>` waits for every OA shard and worker to exit, then starts the shards
+  and records them in `<out>/launch.json`.
+- **Outputs:** in `data/phi/real_eval_denominators_20261114/summaries/<cohort>/{summaries,qc,metadata}/`, mode 600.
