@@ -33,6 +33,23 @@ def test_own_protocol_masked_in_every_recognized_form(written):
     assert (text, n_protocol, n_nct, n_code) == ("Discussed [TRIAL PROTOCOL] today.", 1, 0, 0)
 
 
+@pytest.mark.parametrize("written,expected", [
+    ("DFCI 17123", "[TRIAL PROTOCOL]"), ("protocol #17123", "[TRIAL PROTOCOL]"), ("#17123", "[TRIAL PROTOCOL]"),
+    ("17-123-01", "[TRIAL PROTOCOL]"), ("protocol 17-123/A", "[TRIAL PROTOCOL]"), ("DFCI 17-123-2", "[TRIAL PROTOCOL]"),
+    ("DFCI/17-123", "DFCI/[TRIAL PROTOCOL]"), ("DFHCC-17-123", "DFHCC-[TRIAL PROTOCOL]"),
+])
+def test_own_protocol_masked_in_loose_spellings(written, expected):
+    """2026-11-14 rerun: the event's own number without a dash after a prefix, with a suffix, or after a letter."""
+    text, n_protocol, _, _ = mask_trial_identifiers(f"Discussed {written} today.", IDS)
+    assert (text, n_protocol) == (f"Discussed {expected} today.", 1)
+
+
+@pytest.mark.parametrize("written", ["DFCI 17124", "17-124-01", "DFCI/17-124", "#17124"])
+def test_loose_spellings_of_other_protocols_not_masked(written):
+    text = f"Discussed {written} today."
+    assert mask_trial_identifiers(text, IDS) == (text, 0, 0, 0)
+
+
 @pytest.mark.parametrize("written", [
     "17-124",            # a different protocol
     "18-123", "05-123",  # other NN-NNN numbers
@@ -62,6 +79,7 @@ def test_title_codes_and_code_matching():
     title = "A Phase 1/2 Study of ABC-1234 With or Without XYZ 98765 in Fictional Tumors During COVID 2019 (STAR-12)"
     assert title_codes(title) == ["ABC1234", "XYZ98765"]  # COVID excluded; STAR-12 has too few digits
     assert title_codes(None) == []
+    assert title_codes("CD123-Directed ABC-1234 for CD137+ Disease") == ["ABC1234"]  # CD antigens are not drug codes
     for written in ["ABC-1234", "ABC1234", "abc 1234", "Abc–1234", "xyz98765", "XYZ-98765"]:
         assert mask_trial_identifiers(f"Started {written} on C1D1.", IDS) == ("Started [STUDY DRUG CODE] on C1D1.", 0, 0, 1)
     for written in ["ABC-12345", "XABC1234", "ABC-123", "DEF-1234", "ABC1234X", "XYZ987650"]:
@@ -87,11 +105,14 @@ def test_residual_flags_reuse_the_leakage_checks():
     # The leakage regex is case-sensitive for codes; the mask (and own_code_any_case) is not.
     lower = residual_flags("started abc 1234", IDS)
     assert not lower["own_code"] and lower["own_code_any_case"]
-    # Spellings the leakage regexes do not recognize are reported, not masked.
-    assert residual_flags("DFCI 17123", IDS)["protocol_dashless_after_prefix"]
-    assert residual_flags("protocol 17-123-01", IDS)["protocol_followed_by_dash_or_slash"]
-    assert residual_flags("DFCI/17-123", IDS)["protocol_after_dot_dash_or_slash"]
-    assert residual_flags("17 123", IDS)["protocol_other_separator"]
+    # Spellings the leakage regexes do not recognize are detected; three are masked since the 2026-11-14 rerun.
+    for written, flag in (("DFCI 17123", "protocol_dashless_after_prefix"),
+                          ("protocol 17-123-01", "protocol_followed_by_dash_or_slash"),
+                          ("DFCI/17-123", "protocol_after_dot_dash_or_slash")):
+        assert residual_flags(written, IDS)[flag]
+        assert not residual_flags(mask_trial_identifiers(written, IDS)[0], IDS)[flag]
+    # Bare "17 123" is too ambiguous to mask: reported only.
+    assert residual_flags(mask_trial_identifiers("17 123", IDS)[0], IDS)["protocol_other_separator"]
     assert residual_flags("trial 01234567", IDS)["nct_digits_without_prefix"]
     assert residual_flags("ABC / 1234", IDS)["code_other_separator"]
 

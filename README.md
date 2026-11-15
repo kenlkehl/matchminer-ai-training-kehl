@@ -352,10 +352,17 @@ denominator row sharing its `pseudo_mrn`), and nothing else:
 - **NCT IDs** → `[NCT ID]`, as `NCT` recognizes them: any case, optional space after NCT, leading zero optional.
 - **Investigational codes from the trial's ctgov title(s)** (`title_codes()`, from `--ctgov-csv`) → `[STUDY DRUG CODE]`.
   Matching ignores case and allows a hyphen, another dash character or one space between letters and digits.
+- **Own protocol numbers in looser spellings** (since the 2026-11-14 rerun; `LOOSE_PROTOCOL_MASKS`) →
+  `[TRIAL PROTOCOL]`:
+  - no dash after a prefix (`DFCI 17123`, `protocol #17123`, `#17123`);
+  - a suffix (`17-123-01`, `protocol 17-123/A`; the suffix is masked too);
+  - after a letter and a slash, dot or dash (`DFCI/17-123`).
 - **Not masked:**
   - other NN-NNN numbers, including other protocols the patient was on;
-  - spellings the leakage regexes do not recognize: no dash (`DFCI 17123`), a suffix (`17-123-01`), a preceding
-    `/` or `.`, or other separators.
+  - a bare own number without a prefix (`17123`), a space-separated `17 123`, or numeric contexts such as `4.17-123`:
+    too ambiguous;
+  - CD-number antigens (`CD123`, `CD137`), which `title_codes()` no longer treats as drug codes. Masking them erased
+    flow-cytometry results.
 - **Output columns.** Each note gets `n_masked_protocol`, `n_masked_nct` and `n_masked_code`.
 - **When masking is on.** Masking needs `protocol_number` and `nct_id` in the denominator CSV, so it is on for the
   trial cohort and off for SOC, which has neither. `--no-mask` turns it off.
@@ -379,7 +386,25 @@ events, events without notes, rows by source, and, when masking, replacements by
 affected, the spellings of masked protocol numbers, replacements per title code and the residual check. It refuses
 output paths outside `data/phi/` or `/data1/`.
 
-**Run of 2026-11-14** (research-plan trial cohort, `--anchor note_anchor --days-offset -14`, masked):
+**Rerun of 2026-11-14 (current file)**, after masking the looser own-protocol spellings and no longer masking CD
+antigens (user: "do both and rerun"). Same rows and events as the first run below.
+
+| Identifier | Replacements | Notes | Events |
+| --- | ---: | ---: | ---: |
+| Protocol number | 7,421 | 4,757 | 2,895 |
+| NCT ID | 71 | 62 | 51 |
+| Title code | 2,312 | 1,414 | 853 |
+
+- **Residual own identifiers (notes / events):**
+  - recognized forms (protocol, NCT, title code): 0;
+  - no dash after a prefix: 0 / 0 (was 126 / 42);
+  - suffix: 22 / 18 (was 44 / 33);
+  - after a separator: 9 / 8 (was 18 / 12);
+  - bare space-separated: 21 / 20 (unmasked by design);
+  - title code with another separator: 1 / 1.
+- 6,989 events have title codes (670 distinct).
+
+**First run of 2026-11-14** (research-plan trial cohort, `--anchor note_anchor --days-offset -14`, masked; superseded):
 `enrollments_note_level_dataset_minus14_masked.parquet` and its `.summary.json` in the run directory below.
 - **Rows.** 1,011,642 rows (imaging 498,804, clinical 315,552, path 197,286), the kept-note count the leakage
   measurement predicted.

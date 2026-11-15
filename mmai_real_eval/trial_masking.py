@@ -10,8 +10,15 @@ ALL its own trials (every denominator row sharing its pseudo_mrn), and nothing e
   space on each side), with an optional "DFCI", "DFHCC", "protocol" or "#" prefix -> ``[TRIAL PROTOCOL]``.
 - NCT IDs in every form ``NCT`` recognizes (any case, optional space after NCT, leading zero optional) ->
   ``[NCT ID]``.
+- Since the 2026-11-14 rerun (user: "do both and rerun"), also the event's own protocol number in three spellings the
+  leakage regex does not recognize, again only for the event's own numbers (``LOOSE_PROTOCOL_MASKS``):
+  - no dash after a prefix ("DFCI 17123", "protocol #17123", "#17123");
+  - a suffix ("17-123-01", "protocol 17-123/A"; the suffix is masked too);
+  - after a letter and a slash, dot or dash ("DFCI/17-123", "DFHCC-17-123").
+  Bare "17 123" and numeric contexts such as "4.17-123" stay unmasked: too ambiguous.
 - Investigational codes from the trial's ctgov title (``title_codes``), any case, with an optional hyphen, other
-  dash character or space between letters and digits -> ``[STUDY DRUG CODE]``.
+  dash character or space between letters and digits -> ``[STUDY DRUG CODE]``. CD-number antigens (CD123, CD137) are
+  not codes: masking them erased flow-cytometry results (2026-11-14).
 
 ``PROTOCOL``, ``NCT``, ``CODE`` and ``title_codes`` are the definitions ``measure_note_leakage.py`` measures with
 (moved here unchanged so both use one copy). ``residual_flags`` re-runs that measurement on masked text. Nothing in
@@ -46,7 +53,16 @@ _PREFIX = r"(?P<prefix>(?:\b(?:DFCI|DFHCC|protocol)\s?[/:]?\s?|#:?\s?){0,3})"
 PROTOCOL_MASK = re.compile(_PREFIX + PROTOCOL.pattern, re.I)
 _CODE_KEY = re.compile(r"([A-Z]{2,6})(\d{3,7}[A-Z]?)")
 
-# Own identifiers in forms the leakage regexes do not recognize (reported after masking, never masked).
+# Masked since the 2026-11-14 rerun, for the event's own protocol numbers only (groups 1-2 are the digits).
+LOOSE_PROTOCOL_MASKS = {
+    "dashless_after_prefix": re.compile(r"(?:\b(?:DFCI|DFHCC|protocol)\s?[#:]?|#)\s?(\d{2})(\d{3})(?!\d)", re.I),
+    "suffixed": re.compile(r"(?:(?:\b(?:DFCI|DFHCC|protocol)\s?[/:]?\s?|#:?\s?){0,3})(?<![\d.\-/])(\d{2})\s?[" + DASHES
+                           + r"]\s?(\d{3})(?:[\-/][A-Za-z0-9]{1,6})+(?![\dA-Za-z])", re.I),
+    "after_letter_and_separator": re.compile(r"(?<=[A-Za-z][.\-/])(\d{2})\s?[" + DASHES + r"]\s?(\d{3})(?![\d\-/])"),
+}
+
+# Own identifiers in forms the leakage regexes do not recognize (reported after masking). Since the 2026-11-14 rerun
+# the first three are masked by LOOSE_PROTOCOL_MASKS where unambiguous; the rest are reported only.
 _LOOSE_PROTOCOL = {
     "protocol_dashless_after_prefix": re.compile(r"(?:\b(?:DFCI|DFHCC|protocol)\s?[#:]?|#)\s?(\d{2})(\d{3})(?!\d)", re.I),
     "protocol_followed_by_dash_or_slash": re.compile(r"(?<![\d.\-/])(\d{2})\s?[-‐‑‒–—]\s?(\d{3})(?=[\-/])"),
@@ -60,7 +76,8 @@ def title_codes(title: str) -> list[str]:
     """Investigational codes in a ctgov title, as letters+digits keys (ABC-1234 -> ABC1234)."""
     if not isinstance(title, str):
         return []
-    return sorted({(a + b).upper() for a, b in CODE.findall(title) if a.upper() not in {"NCT", "COVID", "SARS", "HIV"}})
+    return sorted({(a + b).upper() for a, b in CODE.findall(title)
+                   if a.upper() not in {"NCT", "COVID", "SARS", "HIV", "CD"}})  # CD123 etc. are antigens, not drugs
 
 
 def protocol_key(protocol_number) -> int | None:
@@ -157,6 +174,15 @@ def mask_trial_identifiers(text: str, ids: TrialIdentifiers, forms: Counter | No
                 forms[_protocol_form(m)] += 1
             return PROTOCOL_TOKEN
         text = PROTOCOL_MASK.sub(protocol, text)
+        for name, pattern in LOOSE_PROTOCOL_MASKS.items():
+            def loose(m, name=name):
+                if int(m[1] + m[2]) not in ids.protocol_keys:
+                    return m[0]
+                n[0] += 1
+                if forms is not None:
+                    forms[f"loose={name}"] += 1
+                return PROTOCOL_TOKEN
+            text = pattern.sub(loose, text)
     if ids.nct_keys and _NCT_HINT.search(text):
         def nct(m):
             if _nct_match_key(m[0]) not in ids.nct_keys:
