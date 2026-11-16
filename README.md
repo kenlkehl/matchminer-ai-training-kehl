@@ -590,6 +590,7 @@ and `scripts/benchmark_embeddinggemma_batches.py`.
 | `vllm_reasoning_utils.py` | Reasoning parsers and sampling flags (the teacher pool is `matchminer_ai.llm.teacher_pool`) | Current |
 | `synthetic_protocols/` | Synthetic protocol corpus and its cohort extraction | Current |
 | `scripts/` | GCP fleet (`gcp_note_fleet.py`, `gcp_note_worker.py`, `bootstrap_gcp.sh`), remote TrialSpace jobs, `teacher_proxy.py`, `post_notes_workflow.py`, `label_to_trialspace.py`, `check_patient_summaries.py`, `download_ctgov_protocols.py`, `cohort_dashboard.py` (cohort review: as extracted, merged, or key and boilerplate criteria separated), `register_event_validation_upgrade.py` (a one-off generation resume upgrade) | Mixed; see each docstring |
+| `docs/RUN_REPORT_N5000_20261104.md` | End-to-end report of the n=5000 production run: trial selection, synthetic data, labels, TrialSpace and the decision model, with counts and sources | Current |
 | `docs/history/` | October 2026 retriever comparison logs (ColBERT removed 2026-11-04) | Historical |
 | `claude_oracle/` | Claude Code plugin with judge skills for evaluations | Current |
 | `real_eval_code/` | Retrospective evaluations on real (PHI) data. Their trial line items come from cohorts: `eval_cohort_lineitems.py` runs `0d_extract_ctgov_cohorts.py` and writes each cohort's key criteria as `this_space` and its boilerplate criteria as `trial_boilerplate_text` (the legacy pre-cohort trial-space extractor and `trial_prompts/` were removed 2026-11-06) | Current |
