@@ -28,8 +28,20 @@ versions; a trial accepted in only one version uses it. Patients are generated
 from protocol cohorts only. Do not revert to single-version retrieval without
 the user's instruction.
 
-Removed components (user instruction, November 5): OncoReasoning distillation (`oncoreasoning_training/`,
-its pipeline stages and the peft/trl/bitsandbytes/liger dependencies), the training GoodOption catalog stages and
+OncoReasoning restored (user instruction, 2026-11-16: "bring back the old oncoreasoning model and set it up to train
+on all the tasks (patient summarization, trial cohort ETL, labeling) in a text generation way, so train it on the
+teacher outputs including reasoning", starting from the fine-tuned reasoning `LiquidAI/LFM3-1.7B`, revision
+`1da06bec`, LFM Open License v1.0): `oncoreasoning_training/` is a new multi-task distillation, not the November 5
+code. `build_data.py` (stage `oncoreasoning-data`) samples the teacher's stored requests, reasoning and accepted
+answers for nine tasks (serial summaries; cohort screen, names, criteria, merge and per-line boilerplate/type tags of
+both trial versions; match, boilerplate and per-criterion labels, question 7 from the relabeled 7a7eb230 contract
+only), rebuilds each request with the frozen inference snapshot that sent it (checked against the stored hashes) and
+renders it in LFM3's own thinking format; `train.py` (stage `oncoreasoning-model`) is a full fine-tune with
+transformers' Trainer on packed rows, loss on the completion (reasoning + answer) only. No LoRA/peft/TRL/bitsandbytes/
+liger. See `oncoreasoning_training/README.md`.
+
+Removed components (user instruction, November 5): the November 5 OncoReasoning distillation (its pipeline stages
+and the peft/trl/bitsandbytes/liger dependencies; superseded by the 2026-11-16 restoration above), the training GoodOption catalog stages and
 scripts (`train_good_option_checker.py`, `train_good_option_cosplit.py`; GoodOption stays in the inference
 package, scored with LLMs), `14_check_boilerplate.py` and the real-time evaluations' optional LLM-boilerplate
 stage that ran it (question-6 labels come from `trialspace_label.py --task boilerplate`), and the scoped
