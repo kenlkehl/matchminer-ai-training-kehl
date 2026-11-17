@@ -535,3 +535,47 @@ patient summarization work". The script is `summarize_retro_cohorts.py`.
 - **Queue:** `--launch-after-oa <OA resume json>` waits for every OA shard and worker to exit, then starts the shards
   and records them in `<out>/launch.json`.
 - **Outputs:** in `data/phi/real_eval_denominators_20261114/summaries/<cohort>/{summaries,qc,metadata}/`, mode 600.
+
+## Validation-split SOC run (2026-11-16)
+
+User, 2026-11-16: "add to the code a run for patients in the validation set for soc ... and send those patients to gb300
+for summarization also. i want to run some evals without committing to eval on my held out test set yet", and "i want
+this to supersede the OA patient summarization run until this val set run is done".
+
+- **Cohort:** the same SOC definition and inputs as the evaluation cohort, on `split == 'validation'`. Validation and
+  test patients are disjoint (the split is per patient). This is a development set: tune and check evaluations here,
+  and keep the test split for the final evaluation.
+- **Pull:** in its own folder, with its own pseudo_mrn numbering starting from 1. Never join its summaries to the
+  test-split CSV:
+
+  ```bash
+  RUN=../data/phi/real_eval_denominators_20261114
+  $PY pull_denominators.py --cohorts soc --soc-split-filter validation --output-dir $RUN/soc_validation
+  ```
+
+  `pull_denominators.py` refuses an `--output-dir` that already holds a SOC pull for another split. 15,813 plans,
+  15,398 index events, 7,623 patients (2016-2025), the same as the validation row of the test pull's
+  `before_split_filter_by_split`.
+- **Notes:** the test cohort's cutoff, plan start -14 days, unmasked. 705,783 reports for the 14,546 events that
+  have any (852 have none):
+
+  ```bash
+  $PY build_note_level_dataset.py --anchor index --days-offset -14 \
+      --denominator-csv $RUN/soc_validation/processed_soc_treatments.csv \
+      --output-parquet $RUN/soc_validation/soc_validation_note_level_dataset_minus14.parquet
+  ```
+
+- **Summaries:** cohort `soc_validation` of `summarize_retro_cohorts.py`. It uses the test run's settings, servers.json
+  (GB300 only, 64 per process) and output folder (`summaries/soc_validation/`, batches `soc_validation-NNNN`), so
+  30 batches.
+  - **Launch:** `--launch` starts the shards once the note dataset's `.summary.json` exists. Logs go to
+    `summaries/run.soc_validation.shard<i>.log`, and the record to `summaries/launch_soc_validation.json`:
+
+    ```bash
+    $PY summarize_retro_cohorts.py --cohorts soc_validation --launch --launch-record launch_soc_validation.json --shards 8
+    ```
+
+  - **Shards that do no work:** of 8 shards, those that find every batch locked by another shard exit at once (6
+    stayed). Each shard works on up to 5 batches.
+  - **OA waits:** while any shard runs, OA stays paused. `data/phi/real_time/resume_oa_after_retro.py`, which the
+    extraction-then-OA chain runs, waits for every `summarize_retro_cohorts.py --cohorts` process.

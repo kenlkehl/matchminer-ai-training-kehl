@@ -231,6 +231,8 @@ def test_pull_soc_rules(tmp_path):
     assert all_splits["validation"]["rows"] == 1
     everyone, _, _ = soc.pull_soc(path, split, "2016-01-01", "2025-12-31", None)
     assert sorted(everyone.dfci_mrn) == [1, 1, 2, 6]
+    validation, _, _ = soc.pull_soc(path, split, "2016-01-01", "2025-12-31", "validation")
+    assert list(validation.dfci_mrn) == [6] and list(validation.pseudo_mrn) == [1]
 
 
 def _reports():

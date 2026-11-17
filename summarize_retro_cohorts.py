@@ -18,6 +18,12 @@ note-level datasets built by build_note_level_dataset.py (docs/ANCHOR_DATES.md):
 - SOC: cut before plan start - 14 days.
 Events without notes have nothing to summarize.
 
+Cohorts: ``enrollments`` and ``soc`` are the evaluation cohorts (SOC = the test split, as in v22). ``soc_validation``
+(user, 2026-11-16: "add to the code a run for patients in the validation set for soc ... i want to run some evals
+without committing to eval on my held out test set yet") is the same SOC definition on the validation split, pulled into
+its own folder (<run>/soc_validation/, pull_denominators.py --cohorts soc --soc-split-filter validation) with its own
+pseudo_mrn numbering; never join its summaries to the test-split CSV.
+
 Outputs (PHI, under --out): <cohort>/summaries/<batch>.parquet, <cohort>/qc/<batch>.csv and
 <cohort>/metadata/<batch>.json. Round checkpoints live in --work (a private local directory) and are removed per finished
 batch.
@@ -25,7 +31,11 @@ batch.
 - Finished batches are skipped on rerun, and an interrupted batch continues from its checkpoints.
 
 ``--launch-after-oa RESUME_JSON``: wait until every OA shard listed there, and every orphaned OA worker, has exited,
-then start --shards processes of this script (recorded in <out>/launch.json) and exit.
+then start --shards processes of this script (recorded in <out>/<--launch-record>, default launch.json) and exit.
+``--launch``: start them now, once every cohort's note dataset is complete (its .summary.json exists; at most
+--notes-wait-hours). Shard logs are <out>/run.shard<i>.log for the default cohorts and
+run.<cohorts>.shard<i>.log otherwise. While any shard runs, the OA resume waiter (data/phi/real_time/
+resume_oa_after_retro.py) keeps OA from starting, since it waits for every summarize_retro_cohorts.py process.
 
 Prints counts and batch names only, never clinical text or identifiers. Research summaries for evaluation, not
 clinical documentation.
@@ -56,13 +66,15 @@ RUN = Path("/ksg/kehl_mm_data/mmai/v23/data/phi/real_eval_denominators_20261114"
 NOTES = {
     "enrollments": RUN / "enrollments_note_level_dataset_minus14_masked.parquet",
     "soc": RUN / "soc_note_level_dataset_minus14.parquet",
+    "soc_validation": RUN / "soc_validation" / "soc_validation_note_level_dataset_minus14.parquet",
 }
+DEFAULT_COHORTS = "enrollments,soc"
 logger = logging.getLogger("summarize_retro")
 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--cohorts", default="enrollments,soc")
+    p.add_argument("--cohorts", default=DEFAULT_COHORTS, help=", ".join(NOTES))
     p.add_argument("--out", type=Path, default=RUN / "summaries")
     p.add_argument("--work", type=Path, default=Path("/tmp/mmai-retro-phi/summaries"),
                    help="private local directory for round checkpoints (mode 700)")
@@ -78,6 +90,10 @@ def parse_args(argv=None):
     p.add_argument("--max-retries", type=int, default=20)
     p.add_argument("--dry-run", action="store_true", help="load notes and print the batch plan; no requests")
     p.add_argument("--launch-after-oa", type=Path, help="OA resume_*.json listing the running OA shard PIDs")
+    p.add_argument("--launch", action="store_true", help="start --shards processes now and exit")
+    p.add_argument("--launch-record", default="launch.json", help="launch record file name under --out")
+    p.add_argument("--notes-wait-hours", type=float, default=6,
+                   help="launch: wait this long for each cohort's note dataset (its .summary.json, written last)")
     p.add_argument("--poll-seconds", type=int, default=300)
     return p.parse_args(argv)
 
@@ -98,22 +114,40 @@ def oa_running(resume_json: Path) -> int:
     return max(alive, others)
 
 
-def launch_after_oa(args) -> int:
+def launch(args) -> int:
+    """Start --shards processes (after OA has finished, with --launch-after-oa) and record them."""
     args.out.mkdir(parents=True, exist_ok=True)
     os.chmod(args.out, 0o700)
-    status = args.out / "launch.json"
-    record = dict(queued_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), waits_for=str(args.launch_after_oa),
-                  launcher_pid=os.getpid(), state="waiting for OA summarization to finish")
-    status.write_text(json.dumps(record, indent=2) + "\n")
-    while (n := oa_running(args.launch_after_oa)):
-        time.sleep(args.poll_seconds)
-    oa_out = args.launch_after_oa.parent
-    record.update(oa_finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                  oa_summary_batches=len(list((oa_out / "summaries").glob("*.parquet"))))
+    status = args.out / args.launch_record
+    record = dict(queued_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), cohorts=args.cohorts,
+                  launcher_pid=os.getpid())
+    if args.launch_after_oa:
+        record.update(waits_for=str(args.launch_after_oa), state="waiting for OA summarization to finish")
+        status.write_text(json.dumps(record, indent=2) + "\n")
+        while oa_running(args.launch_after_oa):
+            time.sleep(args.poll_seconds)
+        oa_out = args.launch_after_oa.parent
+        record.update(oa_finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                      oa_summary_batches=len(list((oa_out / "summaries").glob("*.parquet"))))
+    cohorts = [c.strip() for c in args.cohorts.split(",") if c.strip()]
+    pending = [c for c in cohorts if not NOTES[c].with_suffix(".summary.json").exists()]
+    if pending:
+        record.update(state=f"waiting for the note datasets of {', '.join(pending)}")
+        status.write_text(json.dumps(record, indent=2) + "\n")
+        deadline = time.time() + args.notes_wait_hours * 3600
+        while any(not NOTES[c].with_suffix(".summary.json").exists() for c in cohorts):
+            if time.time() > deadline:
+                record.update(state="not started: the note datasets were not ready in time",
+                              gave_up_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+                status.write_text(json.dumps(record, indent=2) + "\n")
+                return 1
+            time.sleep(min(args.poll_seconds, 60))
+        record.update(notes_ready_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
     script = Path(__file__).resolve()
+    tag = "" if args.cohorts == DEFAULT_COHORTS else args.cohorts.replace(",", "+") + "."
     children = []
     for i in range(args.shards):
-        log = open(args.out / f"run.shard{i}.log", "a")
+        log = open(args.out / f"run.{tag}shard{i}.log", "a")
         command = [sys.executable, str(script), "--cohorts", args.cohorts, "--out", str(args.out), "--work", str(args.work),
                    "--server-url", args.server_url, "--model", args.model, "--concurrency", str(args.concurrency),
                    "--batch-size", str(args.batch_size), "--parallel-batches", str(args.parallel_batches),
@@ -211,8 +245,8 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     os.umask(0o077)
-    if args.launch_after_oa:
-        return launch_after_oa(args)
+    if args.launch_after_oa or args.launch:
+        return launch(args)
     cohorts = [c.strip() for c in args.cohorts.split(",") if c.strip()]
     args.out.mkdir(parents=True, exist_ok=True)
     args.work.mkdir(parents=True, exist_ok=True)

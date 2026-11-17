@@ -21,6 +21,7 @@ Prints counts only. Needs no GPU, LLM or network.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import subprocess
@@ -134,6 +135,12 @@ def main(argv=None) -> int:
     cohorts = {c.strip() for c in args.cohorts.split(",") if c.strip()}
     if not cohorts <= {"enrollments", "soc"}:
         raise SystemExit(f"Unknown cohort in --cohorts: {sorted(cohorts - {'enrollments', 'soc'})}")
+    previous = Path(args.output_dir) / "denominator_summary.json"
+    if "soc" in cohorts and previous.exists():
+        earlier = json.loads(previous.read_text()).get("parameters", {}).get("soc_split_filter")
+        if earlier != args.soc_split_filter:
+            raise SystemExit(f"{args.output_dir} holds a SOC pull for split {earlier!r}, not {args.soc_split_filter!r}; "
+                             "use a separate --output-dir per split (e.g. <run>/soc_validation)")
     out_dir = ensure_private_dir(args.output_dir)
     sources = [s.strip() for s in args.report_sources.split(",") if s.strip()]
 
