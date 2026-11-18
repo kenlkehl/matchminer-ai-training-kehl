@@ -1,0 +1,48 @@
+# This repository holds code only. Every pull writes real-patient (PHI) outputs, which
+# must never be committed. Keep outputs under ../data/phi/ (see README.md).
+
+# Data and output files of any kind
+*.csv
+*.tsv
+*.txt
+!requirements.txt
+*.parquet
+*.feather
+*.arrow
+*.pkl
+*.pickle
+*.json
+*.jsonl
+*.xlsx
+*.xls
+*.duckdb
+*.db
+*.sqlite
+*.h5
+*.zip
+*.gz
+*.bz2
+*.xz
+*.tar
+*.log
+*.pdf
+*.png
+*.jpg
+*.docx
+
+# Notebooks (their outputs can contain PHI)
+*.ipynb
+.ipynb_checkpoints/
+
+# Local data/output directories, in case someone points a run here
+data/
+outputs/
+output/
+phi/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
