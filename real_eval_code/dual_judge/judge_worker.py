@@ -33,17 +33,18 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from judging import (COMPONENTS, Journal, check_enums, component_module, log, mask, parse_answer, private,  # noqa: E402
-                     read_jsonl)
+from judging import (COMPONENTS, PRICES, Journal, check_enums, component_module, log, mask, parse_answer,  # noqa: E402
+                     private, read_jsonl, usage_cost)
 
 FINAL = ('ok', 'refusal', 'max_tokens', 'invalid')
 DEFAULTS = dict(
-    vertex=dict(model='claude-opus-5-5', usd_in=4.0, usd_out=20.0, concurrency=8, min_interval=0.0),
-    # GPT-6.1 Sol prices are an assumption until set with --usd-in/--usd-out; Azure deployments are named by the user
-    azure=dict(model=None, usd_in=5.0, usd_out=30.0, concurrency=3, min_interval=2.0),
+    vertex=dict(model='claude-opus-5-5', concurrency=8, min_interval=0.0, **PRICES['vertex']),
+    azure=dict(model=None, concurrency=3, min_interval=2.0, **PRICES['azure']),  # Azure deployments are named by the user
 )
-EXPECTED_OUTPUT = dict(extraction=12000, summary=16000, decision=3000)  # tokens incl. reasoning, for --dry-run
-CHARS_PER_TOKEN = 3.5
+# --dry-run estimates, from the Opus smoke run (2026-11-18): output tokens per request with some margin for a judge
+# that reasons longer, and characters per input token (clinical notes and criteria tokenize densely: ~2.0)
+EXPECTED_OUTPUT = dict(extraction=5000, summary=10000, decision=1000)
+CHARS_PER_TOKEN = 2.0
 
 
 class Refused(Exception):
@@ -150,7 +151,7 @@ class AzureJudge:
         usage = raw.get('usage') or {}
         meta = dict(served_model=raw.get('model'), provider_id=raw.get('id'), stop_reason=raw.get('status'),
                     usage=dict(input_tokens=usage.get('input_tokens', 0), output_tokens=usage.get('output_tokens', 0),
-                               cache_read_tokens=(usage.get('input_tokens_details') or {}).get('cached_tokens', 0),
+                               cached_input_tokens=(usage.get('input_tokens_details') or {}).get('cached_tokens', 0),  # inside input_tokens
                                reasoning_tokens=(usage.get('output_tokens_details') or {}).get('reasoning_tokens', 0)))
         text, refused = [], False
         for item in raw.get('output', []):
@@ -174,7 +175,7 @@ class AzureJudge:
 # --- the run -------------------------------------------------------------------------------------------------------
 
 def cost(usage, args):
-    return (usage.get('input_tokens', 0) * args.usd_in + usage.get('output_tokens', 0) * args.usd_out) / 1e6
+    return usage_cost(usage, dict(usd_in=args.usd_in, usd_out=args.usd_out))
 
 
 def done_ids(rows, retry_failed):
@@ -210,7 +211,7 @@ def judge_one(judge, request, module, journal, args, spend):
             journal.append(row)
             return row
         row.update(meta, text=text, seconds=round(time.time() - started, 1),
-                   cost_usd=round(cost(meta['usage'], args), 4))
+                   prices=dict(usd_in=args.usd_in, usd_out=args.usd_out), cost_usd=round(cost(meta['usage'], args), 4))
         spend(row['cost_usd'])
         if status != 'ok':
             row.update(final=True, status=status, answer=None)
@@ -264,7 +265,7 @@ def main(argv=None):
         requests = read_jsonl(args.run_dir / 'requests' / f'{component}.jsonl')
         journal_path = args.run_dir / 'responses' / args.judge / f'{component}.jsonl'
         rows = read_jsonl(journal_path)
-        spent += sum(row.get('cost_usd', 0) for row in rows)
+        spent += sum(usage_cost(row.get('usage'), row.get('prices') or PRICES[args.judge]) for row in rows)
         done = done_ids(rows, args.retry_failed)
         todo = [r for r in requests if r['request_id'] not in done][:args.limit]
         finished = sum(r['request_id'] in done for r in requests)

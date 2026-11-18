@@ -27,8 +27,9 @@ FROZEN = dict(
 VERSION = 'dual-judge-build-v1'
 
 
-def code_digest():
-    files = sorted([*HERE.glob('rubric_*.py'), HERE / 'judging.py', *(HERE / 'prompts').glob('*.txt')])
+def code_digest(name):
+    """The component's own code: its rubric, its judge prompt and the shared request builder."""
+    files = [HERE / f'rubric_{name}.py', HERE / 'prompts' / f'judge.{name}.txt', HERE / 'judging.py']
     return sha256({f.name: f.read_text() for f in files})
 
 
@@ -63,6 +64,9 @@ def main(argv=None):
     p.add_argument('--match-pairs', type=int, default=16)
     p.add_argument('--boilerplate-pairs', type=int, default=12)
     p.add_argument('--criteria-lines', type=int, default=24)
+    p.add_argument('--rebuild', nargs='+', default=[], choices=COMPONENTS,
+                   help='rebuild these components: their items and requests move to superseded/<time>/, and answers to '
+                        'requests that did not change still count (answers are matched by request id)')
     args = p.parse_args(argv)
     private()
     private_dir(args.run_dir)
@@ -75,13 +79,24 @@ def main(argv=None):
                                              criteria=args.criteria_lines)))
     for name in args.components:
         identity = dict(version=VERSION, seed=args.seed, fidelity_dir=settings['fidelity_dir'],
-                        denominators=settings['denominators'], size=settings['sizes'][name], code=code_digest())
+                        denominators=settings['denominators'], size=settings['sizes'][name], code=code_digest(name))
         previous = manifest['components'].get(name)
         if previous and previous['identity'] == identity and (args.run_dir / 'requests' / f'{name}.jsonl').exists():
             log(f'[skip] {name} already built')
             continue
+        if previous and name not in args.rebuild:
+            raise SystemExit(f'{name} was built under other settings or code; pass --rebuild {name} or use a new run '
+                             'directory')
+        old_ids = set()
         if previous:
-            raise SystemExit(f'{name} was built under other settings or code; use a new run directory')
+            archive = private_dir(args.run_dir / 'superseded' / time.strftime('%Y%m%dT%H%M%S') / name)
+            for folder in ('items', 'requests'):
+                path = args.run_dir / folder / f'{name}.jsonl'
+                if path.exists():
+                    if folder == 'requests':
+                        old_ids = {r['request_id'] for r in map(__import__('json').loads, path.open())}
+                    path.replace(archive / f'{folder}.jsonl')
+            write_json(archive / 'build.json', previous)
         started = time.time()
         items, requests, design = build_component(name, args)
         write_jsonl(args.run_dir / 'items' / f'{name}.jsonl', items)
@@ -92,8 +107,9 @@ def main(argv=None):
             max_request_chars=max((len(r['system']) + len(r['user']) for r in requests), default=0),
             built_at=time.strftime('%Y-%m-%dT%H:%M:%S%z'), seconds=round(time.time() - started))
         write_json(manifest_path, manifest)
-        log(f'{name}: {len(items)} items, {len(requests)} requests, {chars / 1e6:.2f}M characters '
-            f'(largest {manifest["components"][name]["max_request_chars"] / 1e6:.2f}M)')
+        kept = sum(r['request_id'] in old_ids for r in requests)
+        log(f'{name}: {len(items)} items, {len(requests)} requests ({kept} unchanged from the previous build), '
+            f'{chars / 1e6:.2f}M characters (largest {manifest["components"][name]["max_request_chars"] / 1e6:.2f}M)')
     for judge in ('vertex', 'azure'):
         judge_worker.main(['--run-dir', str(args.run_dir), '--judge', judge, '--dry-run',
                            '--components', *[c for c in COMPONENTS if (args.run_dir / 'requests' / f'{c}.jsonl').exists()]])

@@ -150,9 +150,10 @@ def unit_target(item, key):
 
 # --- building (camus: notes, summaries and the inference package) ----------------------------------------------------
 
-STRATA = (  # (name, share of the sample, estimated tokens of the raw notes: chars / 4)
-    ('under_20k', 0.25, 0, 20_000), ('30k_80k', 0.375, 30_000, 80_000), ('150k_300k', 0.25, 150_000, 300_000),
-    ('over_400k', 0.125, 400_000, None))
+STRATA = (  # (name, share of the sample, note volume in tokens, estimated as characters / 4); contiguous, so every
+    # query event with a summary is in exactly one stratum
+    ('under_20k', 0.25, 0, 20_000), ('20k_80k', 0.375, 20_000, 80_000), ('80k_300k', 0.25, 80_000, 300_000),
+    ('300k_plus', 0.125, 300_000, None))
 
 
 def notes_text(frame):
@@ -199,7 +200,8 @@ def build(fidelity_dir, denominators, n, seed):
     counts = [int(share * n) for _, share, _, _ in STRATA]
     for i in range(n - sum(counts)):
         counts[i % len(counts)] += 1
-    items, design = [], dict(strata={}, sampled={})
+    items, design = [], dict(strata={}, sampled={}, query_events=len(queries),
+                             with_summary=sum(str(e) in summaries.index for e in chars.index))
     for (name, _, low, high), count in zip(STRATA, counts):
         tokens = chars / 4
         pool = sorted(int(e) for e in tokens[(tokens >= low) & ((tokens < high) if high else True)].index

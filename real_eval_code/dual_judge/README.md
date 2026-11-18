@@ -113,11 +113,21 @@ and the item's queued units on the right.
 
 ## Smoke run, 2026-11-18 (validation SOC)
 
-The sample had 10 trials, 8 index events (stratified by note volume, up to about 880k characters of notes) and
-52 teacher requests (16 match, 12 boilerplate, 24 criteria lines, stratified by teacher answer × decision P).
+**What it samples from:**
+- **Extraction:** 10 of the 500 trials in the ctgov trial sample.
+- **Summaries:** 8 of the 500 query index events, in four contiguous note-volume strata (197 / 182 / 108 / 13
+  events).
+- **Decision questions:** 52 teacher requests:
+  - 16 match pairs (80 question answers) of 34,595;
+  - 12 boilerplate combinations of 33,135;
+  - 24 criteria lines of 10,132.
 
-Opus on Vertex, run from camus:
-- 70 of 70 answers were valid on the first attempt, in about 3 minutes.
-- Cost $7.89: extraction $0.83, summaries $5.48, decision questions $1.56.
+  Each family is stratified by teacher answer × decision P. Criteria lines carry two-stage weights.
 
-The Azure judge has not run yet: it needs the machine where `az` is logged in.
+**Opus on Vertex, run from camus.** All answers were valid on the first attempt. The current items cost $8.01:
+- extraction $1.40 ($0.14 per trial);
+- summaries $4.94 ($0.62 per event; cost grows with note volume, about $0.07 plus $2.2 per million characters);
+- decision questions $1.67 ($0.032 per request).
+
+A further $5.41 went to summary items that the stratum fix replaced. The Azure judge has not run yet: it needs the
+machine where `az` is logged in.

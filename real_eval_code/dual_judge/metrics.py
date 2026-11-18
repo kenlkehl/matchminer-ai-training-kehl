@@ -16,9 +16,9 @@ import statistics
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from judging import (COMPONENTS, JUDGES, cohen_kappa, gold, latest_decisions, log, private, read_jsonl,  # noqa: E402
-                     write_json)
-from compare import final_answers  # noqa: E402
+from judging import (COMPONENTS, JUDGES, PRICES, cohen_kappa, gold, latest_decisions, log, private,  # noqa: E402
+                     read_jsonl, usage_cost, write_json)
+from compare import current_requests, final_answers  # noqa: E402
 
 DRAWS = 1000
 
@@ -101,17 +101,22 @@ def scored(rows, function):
 def judge_costs(run_dir, component):
     out = {}
     for judge in JUDGES:
-        rows = read_jsonl(Path(run_dir) / 'responses' / judge / f'{component}.jsonl')
+        current = current_requests(run_dir, component)
+        every = read_jsonl(Path(run_dir) / 'responses' / judge / f'{component}.jsonl')
+        rows = [row for row in every if row['request_id'] in current]
+        superseded = sum(usage_cost(row.get('usage'), row.get('prices') or PRICES[judge])
+                         for row in every if row['request_id'] not in current)
         finals = final_answers(run_dir, judge, component)
         if not rows:
-            out[judge] = dict(ran=False)
+            out[judge] = dict(ran=False, superseded_cost_usd=round(superseded, 2))
             continue
         statuses = defaultdict(int)
         for row in finals.values():
             statuses[row['status']] += 1
         seconds = [row['seconds'] for row in rows if row.get('seconds') is not None and row['status'] != 'error']
-        cost = sum(row.get('cost_usd') or 0 for row in rows)
+        cost = sum(usage_cost(row.get('usage'), row.get('prices') or PRICES[judge]) for row in rows)
         out[judge] = dict(ran=True, final=dict(statuses), attempts=len(rows), cost_usd=round(cost, 2),
+                          superseded_cost_usd=round(superseded, 2),
                           cost_per_item_usd=round(cost / max(1, len(finals)), 3),
                           median_seconds=statistics.median(seconds) if seconds else None,
                           retried=sum(row['attempt'] == 2 for row in rows),
@@ -278,14 +283,15 @@ def report(result):
              'items. Small samples give wide intervals.', '']
     for component, entry in result['components'].items():
         lines += [f'## {component} ({entry["items"]} items)', '', '### Judges', '',
-                  '| Judge | Final statuses | Retried | Cost | Cost/item | Median s/request | Input tokens | Output tokens |',
-                  '|---|---|---|---|---|---|---|---|']
+                  '| Judge | Final statuses | Retried | Cost | Cost/item | Median s/request | Input tokens | Output tokens | '
+                  'Spent on superseded requests |', '|---|---|---|---|---|---|---|---|---|']
         for judge, j in entry['judges'].items():
             if not j['ran']:
-                lines.append(f'| {judge} | not run | | | | | | |')
+                lines.append(f'| {judge} | not run | | | | | | | ${j["superseded_cost_usd"]} |')
                 continue
             lines.append(f'| {judge} | {j["final"]} | {j["retried"]} | ${j["cost_usd"]} | ${j["cost_per_item_usd"]} | '
-                         f'{fmt(j["median_seconds"], 1)} | {j["input_tokens"]:,} | {j["output_tokens"]:,} |')
+                         f'{fmt(j["median_seconds"], 1)} | {j["input_tokens"]:,} | {j["output_tokens"]:,} | '
+                         f'${j["superseded_cost_usd"]} |')
         lines += ['', '### Agreement and adjudication', '',
                   '| Unit | Units | Agreed | Disputed | Single | Awaiting | Agreement | Kappa | Queued | Adjudicated | '
                   'Pending | ' + ' | '.join(f'{j} accuracy (adjudicated)' for j in JUDGES) + ' | Audit both wrong |',

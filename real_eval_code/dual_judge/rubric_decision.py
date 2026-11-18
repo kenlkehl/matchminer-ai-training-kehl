@@ -119,7 +119,7 @@ def _scan(path, wanted=None):
             row = json.loads(line)
             out.append(dict({k: row.get(k) for k in ('patient_id', 'cohort_id', 'trial_id', 'number', 'criterion_type',
                                                        'labels', 'excluded', 'criterion', 'contract', 'prompt_sha256')},
-                            offset=offset))
+                            first_stratum=row.get('stratum'), offset=offset))
             offset += len(line)
     return out
 
@@ -127,7 +127,15 @@ def _scan(path, wanted=None):
 def build(fidelity_dir, counts, seed):
     """Seeded items per task, stratified by teacher answer x decision model P(yes) >= 0.5 (the reasonableness answer
     for match pairs), so the sample holds teacher-model disagreements in both directions. Returns (items, None,
-    design)."""
+    design).
+
+    Weights are inverse inclusion probabilities. Match pairs (unique pairs in any merged top-20 list) and boilerplate
+    combinations (unique, labeled once) are sampled once: weight = cell size / sampled. Criteria lines were sampled
+    twice: the fidelity evaluation labeled every line of a sample of top-20 pairs per workflow and ranker
+    (lists_*/criteria_sample.json: pairs of pairs_available list slots), then this sample draws lines from them, so
+    a line's weight is (pairs_available / pairs of its first-stage stratum) x (cell size / sampled). Criteria
+    estimates then describe the lines of top-20 list slots, averaged over the six workflow x ranker lists."""
+    import json
     import random
     from pathlib import Path
     import pandas as pd
@@ -144,6 +152,11 @@ def build(fidelity_dir, counts, seed):
                for r in decide['match'].itertuples()}
     p_boilerplate = {(str(r.patient_id), r.cohort_id): float(r.p_boilerplate) for r in decide['boilerplate'].itertuples()}
     p_criterion = {(str(r.patient_id), r.cohort_id, int(r.number)): float(r.p_yes) for r in decide['criteria'].itertuples()}
+    first_stage = {}
+    for part in ('ab', 'c'):
+        sample = json.loads((root / f'lists_{part}' / 'criteria_sample.json').read_text())
+        for name, entry in sample['strata'].items():
+            first_stage[(part, name)] = entry['pairs_available'] / entry['pairs']
     rng = random.Random(f'{seed}:decision')
     items, design = [], dict(strata={}, sampled={}, contracts=contracts)
     for task in TASKS:
@@ -171,7 +184,9 @@ def build(fidelity_dir, counts, seed):
                 if p is None:
                     continue
                 stratum = f'teacher_{first[0]}/model_{"yes" if first[1] >= 0.5 else "no"}'
-                pool.append(dict(row, part=part, path=str(path), teacher=teacher, decision_p_yes=p, stratum=stratum))
+                expand = first_stage[(part, row['first_stratum'])] if task == 'criteria' else 1.0
+                pool.append(dict(row, part=part, path=str(path), teacher=teacher, decision_p_yes=p, stratum=stratum,
+                                 first_stage_weight=expand))
         strata = {}
         for row in pool:
             strata.setdefault(row['stratum'], []).append(row)
@@ -195,7 +210,8 @@ def build(fidelity_dir, counts, seed):
                 item_id=f'{task}-{sum(i["task"] == task for i in items) + 1:03d}', task=task,
                 patient_id=str(row['patient_id']), cohort_id=row['cohort_id'], trial_id=row['trial_id'],
                 number=row.get('number'), criterion_type=row.get('criterion_type'), stratum=name,
-                weight=len(strata[name]) / take[name], messages=stored['messages'],
+                first_stratum=row.get('first_stratum'), first_stage_weight=row['first_stage_weight'],
+                weight=row['first_stage_weight'] * len(strata[name]) / take[name], messages=stored['messages'],
                 schema=dict(match=MATCH_LABELS_JSON_SCHEMA, criteria=CRITERION_LABEL_JSON_SCHEMA).get(task),
                 teacher=row['teacher'],
                 teacher_detail=stored.get('labels') or stored.get('criterion') or dict(excluded=stored.get('excluded')),

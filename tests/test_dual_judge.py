@@ -120,6 +120,11 @@ def _decision_item(item_id, task, teacher, p):
                 messages=[{'role': 'user', 'content': 'synthetic task'}])
 
 
+def _requests(run_dir, items, ids):
+    judging.write_jsonl(run_dir / 'requests' / 'decision.jsonl',
+                        [dict(request_id=rid, item_id=item['item_id']) for rid, item in zip(ids, items)])
+
+
 def _answer(row_id, judge, item_id, answer, status='ok'):
     return dict(request_id=row_id, item_id=item_id, component='decision', judge=judge, attempt=1, final=True,
                 status=status, answer=answer)
@@ -130,6 +135,7 @@ def test_units_agreement_adjudication_and_gold(tmp_path):
              _decision_item('b-2', 'boilerplate', {'boilerplate': 'yes'}, {'boilerplate': 0.6}),
              _decision_item('b-3', 'boilerplate', {'boilerplate': 'no'}, {'boilerplate': 0.2})]
     judging.write_jsonl(tmp_path / 'items' / 'decision.jsonl', items)
+    _requests(tmp_path, items, ['1', '2', '3'])
     no, yes = {'reason': 'r', 'excluded': True}, {'reason': 'r', 'excluded': False}
     judging.write_jsonl(tmp_path / 'responses' / 'vertex' / 'decision.jsonl',
                         [_answer('1', 'vertex', 'b-1', yes), _answer('2', 'vertex', 'b-2', yes),
@@ -161,8 +167,9 @@ def test_units_agreement_adjudication_and_gold(tmp_path):
 
 
 def test_awaiting_units_are_not_queued_until_the_other_judge_runs(tmp_path):
-    judging.write_jsonl(tmp_path / 'items' / 'decision.jsonl',
-                        [_decision_item('b-1', 'boilerplate', {'boilerplate': 'yes'}, {'boilerplate': 0.9})])
+    items = [_decision_item('b-1', 'boilerplate', {'boilerplate': 'yes'}, {'boilerplate': 0.9})]
+    judging.write_jsonl(tmp_path / 'items' / 'decision.jsonl', items)
+    _requests(tmp_path, items, ['1'])
     judging.write_jsonl(tmp_path / 'responses' / 'vertex' / 'decision.jsonl',
                         [_answer('1', 'vertex', 'b-1', {'reason': 'r', 'excluded': False})])
     units, _ = dj_compare.compare(tmp_path, audit_fraction=1.0)
@@ -176,3 +183,20 @@ def test_collapsed_kinds_compare_major_versus_not_major_and_kappa():
     assert judging.unit_status({'vertex': 'no_major', 'azure': 'no_major'}) == 'agreed'
     assert judging.cohen_kappa([('a', 'a'), ('b', 'b')]) == 1.0
     assert judging.cohen_kappa([('a', 'a'), ('a', 'a')]) is None
+
+
+def test_answers_to_superseded_requests_are_not_used(tmp_path):
+    """A rebuilt component can reuse item ids for new items; only answers to the current requests count."""
+    items = [_decision_item('b-1', 'boilerplate', {'boilerplate': 'yes'}, {'boilerplate': 0.9})]
+    judging.write_jsonl(tmp_path / 'items' / 'decision.jsonl', items)
+    _requests(tmp_path, items, ['new'])
+    for judge in judging.JUDGES:
+        judging.write_jsonl(tmp_path / 'responses' / judge / 'decision.jsonl',
+                            [_answer('old', judge, 'b-1', {'reason': 'r', 'excluded': True})])
+    units, _ = dj_compare.compare(tmp_path, audit_fraction=0.0)
+    assert units == []  # no current answers, so no units yet
+
+
+def test_usage_cost_bills_anthropic_cache_tokens():
+    usage = dict(input_tokens=1_000_000, cache_write_tokens=1_000_000, cache_read_tokens=1_000_000, output_tokens=0)
+    assert judging.usage_cost(usage, dict(usd_in=4.0, usd_out=20.0)) == pytest.approx(4.0 * (1 + 1.25 + 0.1))

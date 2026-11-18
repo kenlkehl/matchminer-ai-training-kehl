@@ -27,11 +27,17 @@ from judging import (COMPONENTS, JUDGES, component_module, compared, log, privat
 NOT_AUDITED = {('omission', 'none'), ('missing', 'none')}
 
 
+def current_requests(run_dir, component):
+    """{request_id: item_id} of the component's current requests (a rebuilt component supersedes earlier ones)."""
+    return {r['request_id']: r['item_id'] for r in read_jsonl(Path(run_dir) / 'requests' / f'{component}.jsonl')}
+
+
 def final_answers(run_dir, judge, component):
-    """{item_id: latest final row} of one judge's journal (rows that are not final are retried transport errors)."""
-    latest = {}
+    """{item_id: latest final row} of one judge's journal, for the items' current requests only (rows that are not
+    final are retried transport errors; answers to superseded requests are kept in the journal but not used)."""
+    current, latest = current_requests(run_dir, component), {}
     for row in read_jsonl(Path(run_dir) / 'responses' / judge / f'{component}.jsonl'):
-        if row.get('final'):
+        if row.get('final') and current.get(row['request_id']) == row['item_id']:
             latest[row['item_id']] = row
     return latest
 

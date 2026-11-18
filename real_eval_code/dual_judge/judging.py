@@ -99,6 +99,20 @@ def sha256(value):
     return hashlib.sha256(data).hexdigest()
 
 
+# Prices per million tokens (Claude Opus 5.5 list price; GPT-6.1 Sol is a placeholder until set with --usd-in and
+# --usd-out). Anthropic reports cache writes and reads apart from input_tokens and bills them at 1.25x and 0.1x the
+# input price; OpenAI counts cached tokens inside input_tokens, so they are billed here at the full price.
+PRICES = dict(vertex=dict(usd_in=4.0, usd_out=20.0), azure=dict(usd_in=5.0, usd_out=30.0))
+
+
+def usage_cost(usage, prices):
+    """US dollars of one response's usage at ``prices`` ({usd_in, usd_out})."""
+    usage = usage or {}
+    tokens_in = (usage.get('input_tokens', 0) + 1.25 * usage.get('cache_write_tokens', 0)
+                 + 0.1 * usage.get('cache_read_tokens', 0))
+    return (tokens_in * prices['usd_in'] + usage.get('output_tokens', 0) * prices['usd_out']) / 1e6
+
+
 def prompt_text(name):
     return (HERE / 'prompts' / name).read_text()
 
@@ -276,6 +290,6 @@ def component_module(name):
 
 
 __all__ = ['COMPONENTS', 'HERE', 'JUDGES', 'Journal', 'check_enums', 'cohen_kappa', 'component_module', 'compared',
-           'gold', 'latest_decisions', 'log', 'make_request', 'mask', 'parse_answer', 'private', 'private_dir',
-           'prompt_text', 'quote_found', 'read_jsonl', 'sha256', 'strict_schema', 'unit_status', 'write_json',
+           'gold', 'latest_decisions', 'log', 'make_request', 'mask', 'parse_answer', 'PRICES', 'private', 'private_dir',
+           'prompt_text', 'quote_found', 'read_jsonl', 'sha256', 'strict_schema', 'unit_status', 'usage_cost', 'write_json',
            'write_jsonl']
