@@ -66,6 +66,12 @@
   .refs .who { font-weight:600; }
   .ans-yes { color:var(--good); font-weight:700; } .ans-no { color:var(--bad); font-weight:700; }
   .muted { color:var(--mute); }
+  table.verdicts { border-collapse:collapse; margin:6px 0 2px; font-size:.93rem; }
+  table.verdicts th, table.verdicts td { border:1px solid var(--line); padding:3px 9px; text-align:left; }
+  table.verdicts th { color:var(--mute); font-weight:600; background:var(--soft); }
+  table.verdicts td.hidden, .strip .hidden { color:var(--mute); font-style:italic; }
+  .strip { font-size:.9rem; margin:0 0 6px; display:flex; flex-wrap:wrap; gap:4px 14px; }
+  .strip .who { color:var(--mute); }
   .help { font-size:.86rem; color:var(--mute); }
   .lines { font-size:.9rem; margin:4px 0 10px; }
 </style>
@@ -217,6 +223,40 @@ function decisionDetailEl(detail, q) {
   return box;
 }
 
+function verdictSpan(value, extra) {
+  const span = el('span', value === 'yes' ? 'ans-yes' : value === 'no' ? 'ans-no' : 'hidden',
+                  value === null || value === undefined ? 'no answer' : value);
+  const box = el('span'); box.appendChild(span); if (extra) box.append(extra); return box;
+}
+
+function verdicts(u) {
+  // The five answers side by side: both judges, the teacher, the decision model and the user's decision.
+  const ref = u.reference;
+  const p = ref && ref.model.p_yes !== null && ref.model.p_yes !== undefined ? ` (P=${Number(ref.model.p_yes).toFixed(2)})` : '';
+  return [
+    ['Judge 1', u.judges[0] ? verdictSpan(u.judges[0].compared) : null],
+    ['Judge 2', u.judges[1] ? verdictSpan(u.judges[1].compared) : null],
+    ['Teacher (Nemotron)', ref ? verdictSpan(ref.teacher.answer) : null],
+    ['Decision model', ref ? verdictSpan(ref.model.answer, p) : null],
+    ['You', u.decision ? verdictSpan(u.decision.value) : el('span', 'hidden', 'not decided')],
+  ];
+}
+
+function hiddenCell() { return el('span', 'hidden', 'hidden until you decide'); }
+
+function verdictTable(units) {
+  const t = el('table', 'verdicts');
+  const head = el('tr'); head.appendChild(el('th', null, 'Question'));
+  for (const [who] of verdicts(units[0])) head.appendChild(el('th', null, who));
+  t.appendChild(head);
+  for (const u of units) {
+    const row = el('tr'); row.appendChild(el('td', null, u.label));
+    for (const [, cell] of verdicts(u)) { const td = el('td'); td.appendChild(cell || hiddenCell()); row.appendChild(td); }
+    t.appendChild(row);
+  }
+  return t;
+}
+
 function referenceEl(ref, q) {
   const box = el('div', 'refs');
   const t = el('div'); t.appendChild(el('span', 'who', 'Teacher (Nemotron 3.5 Super, the training label): '));
@@ -285,6 +325,11 @@ function renderReview() {
     head.appendChild(lines);
   } else {
     head.appendChild(el('div', 'muted', 'The source pane shows the task exactly as the teacher and both judges received it.'));
+    if (current.units.length) {
+      head.appendChild(verdictTable(current.units));
+      head.appendChild(el('div', 'help', 'yes/no in the decision model\u2019s polarity; each card below says what yes and no mean. ' +
+        'Teacher and model answers stay hidden until you decide a question, unless "show teacher and model before deciding" is ticked.'));
+    }
   }
   box.appendChild(head);
   const units = visibleUnits();
@@ -301,6 +346,11 @@ function unitCard(u, i) {
   card.appendChild(t);
   const q = u.question;
   if (q) {
+    const strip = el('div', 'strip');
+    for (const [who, cell] of verdicts(u)) {
+      const w = el('span'); w.appendChild(el('span', 'who', who + ': ')); w.appendChild(cell || hiddenCell()); strip.appendChild(w);
+    }
+    card.appendChild(strip);
     const qb = el('div', 'question');
     qb.appendChild(el('div', null, 'Question: ' + q.text));
     qb.appendChild(el('div', 'meaning', `yes = ${q.answers.yes}; no = ${q.answers.no}`));
