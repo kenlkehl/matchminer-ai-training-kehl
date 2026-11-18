@@ -7,7 +7,7 @@ It reads the run directory's items and ``compare/units.jsonl`` (rerun compare.py
 reloads it when it changes) and appends every decision to ``adjudications.jsonl`` (the latest decision per unit
 wins; "skip" withdraws one). Judges appear as Judge 1 and Judge 2 in an order fixed per item and revealed only
 after a decision, and for decision questions the teacher's answer and the decision model's P(yes) are shown only
-after a decision too. The data are PHI: the server binds to 127.0.0.1, refuses other hosts and Host headers, and
+after a decision too, unless the user ticks "show teacher and model before deciding". The data are PHI: the server binds to 127.0.0.1, refuses other hosts and Host headers, and
 logs nothing about requests.
 """
 import argparse
@@ -78,7 +78,7 @@ class Store:
                                       decided=sum(r['decided'] for r in rows))
             return dict(components=out, compared_at=self.units_mtime)
 
-    def unit_view(self, unit, item, decisions, order):
+    def unit_view(self, unit, item, decisions, order, show_reference=False):
         module = self.modules[unit['component']]
         kind = module.KINDS[unit['kind']]
         collapse = kind.get('collapse') or {}
@@ -87,25 +87,23 @@ class Store:
                   for n, j in enumerate(order, 1)]
         row = dict(unit_id=unit['unit_id'], key=unit['key'], kind=unit['kind'], label=kind['label'], choices=choices,
                    target=module.unit_target(item, unit['key']), status=unit['status'], queued=unit['queued'],
-                   queue_reason=unit['queue_reason'], judges=judges, decision=None)
+                   queue_reason=unit['queue_reason'], judges=judges, decision=None,
+                   question=module.question(item, unit['key']) if hasattr(module, 'question') else None)
         decision = decisions.get(unit['unit_id'])
+        if hasattr(module, 'reveal') and (decision is not None or show_reference):
+            row['reference'] = module.reveal(item, unit['key'])
         if decision is not None:
             row['decision'] = dict(value=decision['value'], note=decision.get('note', ''), at=decision['at'],
                                    stale=decision.get('seen') != unit['compared'])
             row['reveal'] = dict(judges={n: JUDGE_NAMES[j] for n, j in enumerate(order, 1)})
-            if hasattr(module, 'reveal'):
-                reveal = module.reveal(item)
-                family = unit['kind']
-                row['reveal'].update(teacher=reveal['teacher'].get(family),
-                                     decision_p_yes=reveal['decision_p_yes'].get(family))
         return row
 
-    def item(self, component, item_id):
+    def item(self, component, item_id, show_reference=False):
         with self.lock:
             self.reload()
             item = self.items[component][item_id]
             decisions, order = self.decisions(), self.order(component, item_id)
-            units = [self.unit_view(self.units[i], item, decisions, order)
+            units = [self.unit_view(self.units[i], item, decisions, order, show_reference)
                      for i in self.by_item.get((component, item_id), [])]
             return dict(component=component, item_id=item_id, view=self.modules[component].view(item), units=units)
 
@@ -127,7 +125,7 @@ class Store:
             self.journal.append(dict(unit_id=unit['unit_id'], choice=choice, value=value, picked_judge=picked,
                                      note=str(body.get('note', ''))[:4000], seen=unit['compared'],
                                      at=time.strftime('%Y-%m-%dT%H:%M:%S%z'), user=os.environ.get('USER', '')))
-        return self.item(unit['component'], unit['item_id'])
+        return self.item(unit['component'], unit['item_id'], bool(body.get('show_reference')))
 
 
 def make_handler(store, port):
@@ -165,7 +163,8 @@ def make_handler(store, port):
                 if url.path == '/api/state':
                     return self.send(HTTPStatus.OK, store.state())
                 if url.path == '/api/item':
-                    return self.send(HTTPStatus.OK, store.item(query['component'], query['item_id']))
+                    return self.send(HTTPStatus.OK, store.item(query['component'], query['item_id'],
+                                                               query.get('reference') == '1'))
                 return self.send(HTTPStatus.NOT_FOUND, dict(error='not found'))
             except KeyError:
                 return self.send(HTTPStatus.NOT_FOUND, dict(error='unknown item'))

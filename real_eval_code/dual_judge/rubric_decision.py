@@ -95,9 +95,77 @@ def unit_target(item, key):
     return f'Match question: {key.replace("_", " ")}'
 
 
-def reveal(item):
-    """The teacher's answers and the decision model's P(yes), shown only after the user has decided."""
-    return dict(teacher=item['teacher'], decision_p_yes=item['decision_p_yes'])
+# What each question asks and what its answers mean, in the decision model's polarity (the teacher prompts'
+# definitions: match_quality.labels.system.txt, llm_exclusion_criteria.user.txt, criterion_check.labels.user.txt).
+SPECIFIC = ('yes = the cohort specifically requires this and the patient is documented to meet it; no = the cohort has '
+            'no specific requirement (not applicable), the patient does not meet it (contradicted), or the record does '
+            'not say (insufficient information)')
+QUESTIONS = {
+    'reasonableness': ('Is the patient potentially eligible for this cohort (its key criteria)?',
+                       dict(yes='potentially eligible', no='clearly ineligible')),
+    'cancer_type': ('Does the cohort specifically require a cancer type or histology that the patient is documented to '
+                    'have?', dict(yes='specific requirement, documented as met', no='not a specific requirement, not met, '
+                                  'or not documented (see the status)')),
+    'burden': ('Does the cohort specifically require a stage or disease burden that the patient is documented to meet?',
+               dict(yes='specific requirement, documented as met', no='not a specific requirement, not met, or not '
+                    'documented (see the status)')),
+    'treatment_history': ('Does the cohort specifically require prior treatment that the patient is documented to have '
+                          'had?', dict(yes='specific requirement, documented as met', no='not a specific requirement, '
+                                       'not met, or not documented (see the status)')),
+    'biomarker': ('Does the cohort specifically require a biomarker status that the patient is documented to have?',
+                  dict(yes='specific requirement, documented as met', no='not a specific requirement, not met, or not '
+                       'documented (see the status)')),
+    'boilerplate': ('Is the patient potentially eligible with respect to the boilerplate criteria (not clearly '
+                    'excluded)?', dict(yes='not clearly excluded', no='clearly excluded')),
+    'criterion': ('Does the patient NOT clearly fail this criteria line?',
+                  dict(yes='does not clearly fail the line', no='clearly fails it (an inclusion line clearly not met, '
+                       'or an exclusion line clearly met)')),
+}
+STATUS = {
+    'evidence_status': dict(
+        supported='the record documents what the answer says',
+        contradicted='the record conflicts with the cohort\'s requirement',
+        insufficient_information='the record does not say enough to decide',
+        not_applicable='the cohort has no specific requirement of this kind'),
+    'criterion_status': dict(
+        met='the record documents that the line is true of the patient (for an exclusion line: the excluding '
+            'condition applies)',
+        not_met='the record documents that the line is not true of the patient',
+        insufficient_information='the record does not say enough to decide',
+        not_applicable='the line does not bind this patient (an alternative another line satisfies, or a requirement '
+                       'for other patients)'),
+}
+
+
+def question(item, key):
+    """The question, what yes and no mean, and the glossary of the status field the answers carry."""
+    family = 'criterion' if item['task'] == 'criteria' else 'boilerplate' if item['task'] == 'boilerplate' else key
+    text, answers = QUESTIONS[family]
+    if item['task'] == 'criteria':
+        text = f'Line [{item["number"]}] ({item["criterion_type"]}): {text}'
+    field = dict(match='evidence_status', criteria='criterion_status').get(item['task'])
+    note = ('The teacher answered the inverse question, "Is this patient clearly excluded?" (Yes!/No!), shown here '
+            'inverted.' if item['task'] == 'boilerplate' else
+            'The status explains the answer; it is not a second verdict.' if field else '')
+    return dict(text=text, answers=answers, status_field=field, statuses=STATUS.get(field, {}), note=note)
+
+
+def reveal(item, key):
+    """The teacher's and the decision model's answers to one question, shown after the user decides (or on request)."""
+    family = 'criterion' if item['task'] == 'criteria' else 'boilerplate' if item['task'] == 'boilerplate' else key
+    detail = item.get('teacher_detail') or {}
+    if item['task'] == 'match':
+        detail = detail.get(key) or {}
+    teacher = dict(answer=item['teacher'][family])
+    if item['task'] == 'match':
+        teacher.update(status=detail.get('evidence_status'), reason=detail.get('reason'))
+    elif item['task'] == 'criteria':
+        teacher.update(status=detail.get('criterion_status'), reason=detail.get('reason'))
+    else:
+        teacher.update(raw='Yes! (clearly excluded)' if detail.get('excluded') else 'No! (not clearly excluded)')
+    p = item['decision_p_yes'].get(family)
+    model = dict(p_yes=p, answer=None if p is None else ('yes' if p >= 0.5 else 'no'), threshold=0.5)
+    return dict(teacher=teacher, model=model)
 
 
 # --- building (camus: the fidelity evaluation's labels and decision scores) -----------------------------------------

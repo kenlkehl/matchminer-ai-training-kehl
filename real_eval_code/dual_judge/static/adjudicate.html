@@ -44,6 +44,12 @@
   .choices input { flex:1; min-width:160px; }
   .reveal { margin-top:6px; font-size:12.5px; color:#333; background:#f6f6f6; padding:4px 8px; border-radius:4px; }
   .stale { color:var(--warn); }
+  .question { font-size:13px; margin:0 0 6px; padding:4px 8px; background:#f3f7fc; border-radius:4px; }
+  .question .meaning { color:#333; }
+  .refs { margin-top:6px; font-size:12.5px; border:1px solid var(--line); border-radius:4px; }
+  .refs > div { padding:4px 8px; } .refs > div + div { border-top:1px solid var(--line); }
+  .refs .who { font-weight:600; }
+  .ans-yes { color:var(--good); font-weight:700; } .ans-no { color:var(--bad); font-weight:700; }
   .muted { color:var(--mute); }
   .help { font-size:12px; color:var(--mute); }
   .lines { font-size:12.5px; margin:4px 0 10px; }
@@ -57,6 +63,7 @@
   <button class="tab" id="prev" title="Previous item with open units ([)">&#8592;</button>
   <button class="tab" id="next" title="Next item with open units (])">&#8594;</button>
   <label class="help"><input type="checkbox" id="showAll"> show agreed units</label>
+  <label class="help" title="Decision questions: show the Nemotron teacher's and the decision model's answers before you decide (unblinds you)"><input type="checkbox" id="showRef"> show teacher and model before deciding</label>
   <span class="help">keys: j/k move &middot; 1/2 take judge 1/2 &middot; a,b,c&hellip; pick a choice &middot; n note &middot; s skip &middot; [ ] item</span>
 </header>
 <main>
@@ -116,7 +123,8 @@ function step(dir) {
 
 async function openItem(itemId) {
   if (!itemId) { $('#review').textContent = 'No items.'; return; }
-  current = await api(`/api/item?component=${encodeURIComponent(component)}&item_id=${encodeURIComponent(itemId)}`);
+  current = await api(`/api/item?component=${encodeURIComponent(component)}&item_id=${encodeURIComponent(itemId)}` +
+                      ($('#showRef').checked ? '&reference=1' : ''));
   $('#itemSel').value = itemId; focus = 0;
   renderSource(current.view.source); renderReview();
 }
@@ -165,6 +173,46 @@ function quoteEl(text, grounded, date) {
                (date ? date + ': ' : '') + '“' + text + '”' + (grounded === false ? '  (not found in source)' : ''));
   q.onclick = () => { if (!highlight(text, date)) q.title = 'not found'; };
   return q;
+}
+
+function answerEl(value, q) {
+  const span = el('span');
+  if (value === null || value === undefined) { span.append('—'); return span; }
+  span.appendChild(el('span', value === 'yes' ? 'ans-yes' : value === 'no' ? 'ans-no' : 'v', value));
+  if (q && q.answers && q.answers[value]) span.append(` — ${q.answers[value]}`);
+  return span;
+}
+
+function statusEl(field, value, q) {
+  const d = el('div');
+  d.appendChild(el('span', 'k', (field || 'status').replace(/_/g, ' ') + ': '));
+  d.appendChild(el('b', null, String(value).replace(/_/g, ' ')));
+  if (q && q.statuses && q.statuses[value]) d.append(` — ${q.statuses[value]}`);
+  return d;
+}
+
+function decisionDetailEl(detail, q) {
+  const box = el('div');
+  if (!detail) { box.appendChild(el('div', 'muted', 'no answer (refused, truncated, invalid or not run)')); return box; }
+  if (q.status_field && detail[q.status_field] !== undefined) box.appendChild(statusEl(q.status_field, detail[q.status_field], q));
+  if (detail.reason) { const r = el('div'); r.appendChild(el('span', 'k', 'reason: ')); r.append(detail.reason); box.appendChild(r); }
+  return box;
+}
+
+function referenceEl(ref, q) {
+  const box = el('div', 'refs');
+  const t = el('div'); t.appendChild(el('span', 'who', 'Teacher (Nemotron 3.5 Super, the training label): '));
+  t.appendChild(answerEl(ref.teacher.answer, q));
+  if (ref.teacher.raw) t.append(`  (it answered "${ref.teacher.raw}" to "Is this patient clearly excluded?")`);
+  if (ref.teacher.status) t.appendChild(statusEl(q.status_field, ref.teacher.status, q));
+  if (ref.teacher.reason) { const r = el('div'); r.appendChild(el('span', 'k', 'reason: ')); r.append(ref.teacher.reason); t.appendChild(r); }
+  box.appendChild(t);
+  const m = el('div'); m.appendChild(el('span', 'who', 'Decision model (fine-tuned d1-2B): '));
+  if (ref.model.p_yes === null || ref.model.p_yes === undefined) m.append('no score');
+  else { m.append(`P(yes) = ${Number(ref.model.p_yes).toFixed(3)} \u2192 `); m.appendChild(answerEl(ref.model.answer, q));
+         m.append(`  (yes when P(yes) \u2265 ${ref.model.threshold})`); }
+  box.appendChild(m);
+  return box;
 }
 
 function detailEl(detail) {
@@ -233,15 +281,27 @@ function unitCard(u, i) {
   t.appendChild(el('span', 'badge ' + (u.queue_reason || u.status), u.queue_reason || u.status));
   t.appendChild(el('span', 'badge', u.label));
   card.appendChild(t);
+  const q = u.question;
+  if (q) {
+    const qb = el('div', 'question');
+    qb.appendChild(el('div', null, 'Question: ' + q.text));
+    qb.appendChild(el('div', 'meaning', `yes = ${q.answers.yes}; no = ${q.answers.no}`));
+    if (q.note) qb.appendChild(el('div', 'muted', q.note));
+    card.appendChild(qb);
+  }
   const js = el('div', 'judges');
   for (const j of u.judges) {
     const d = el('div', 'judge');
     const top = el('div'); top.appendChild(el('span', 'k', `Judge ${j.slot}: `));
-    top.appendChild(el('span', 'v', j.compared === null ? '—' : j.compared));
-    if (j.value !== null && j.value !== j.compared) top.appendChild(el('span', 'k', ` (${j.value})`));
-    d.appendChild(top); d.appendChild(detailEl(j.detail)); js.appendChild(d);
+    if (q) top.appendChild(answerEl(j.compared, q));
+    else {
+      top.appendChild(el('span', 'v', j.compared === null ? '—' : j.compared));
+      if (j.value !== null && j.value !== j.compared) top.appendChild(el('span', 'k', ` (${j.value})`));
+    }
+    d.appendChild(top); d.appendChild(q ? decisionDetailEl(j.detail, q) : detailEl(j.detail)); js.appendChild(d);
   }
   card.appendChild(js);
+  if (u.reference) card.appendChild(referenceEl(u.reference, q || {}));
   const ch = el('div', 'choices');
   u.choices.forEach((c, n) => {
     const b = el('button', u.decision && u.decision.value === c ? 'picked' : '', `${String.fromCharCode(97 + n)}) ${c}`);
@@ -253,9 +313,7 @@ function unitCard(u, i) {
   card.appendChild(ch);
   if (u.decision) {
     const r = el('div', 'reveal');
-    r.append(`Decided ${u.decision.value} at ${u.decision.at}. Judge 1 = ${u.reveal.judges[1]}; Judge 2 = ${u.reveal.judges[2]}.`);
-    if (u.reveal.teacher !== undefined) r.append(`  Teacher (Nemotron): ${u.reveal.teacher}; decision model P(yes) = ${
-      u.reveal.decision_p_yes === undefined || u.reveal.decision_p_yes === null ? 'n/a' : Number(u.reveal.decision_p_yes).toFixed(3)}.`);
+    r.append(`You decided: ${u.decision.value} (${u.decision.at}). Judge 1 = ${u.reveal.judges[1]}; Judge 2 = ${u.reveal.judges[2]}.`);
     if (u.decision.stale) r.appendChild(el('div', 'stale', 'The judges’ answers changed after this decision; check it again.'));
     card.appendChild(r);
   }
@@ -273,7 +331,7 @@ function markFocus() {
 async function decide(u, value, choice) {
   const card = document.querySelector(`#review .card[data-unit="${CSS.escape(u.unit_id)}"]`);
   const note = card ? card.querySelector('input').value : '';
-  current = await api('/api/decide', {unit_id: u.unit_id, value, choice, note});
+  current = await api('/api/decide', {unit_id: u.unit_id, value, choice, note, show_reference: $('#showRef').checked});
   const keep = focus; renderReview();
   const cards = [...document.querySelectorAll('#review .card[data-unit]')];
   const next = cards.findIndex((c, k) => k > keep && !c.classList.contains('done'));
@@ -305,6 +363,7 @@ $('#itemSel').onchange = (e) => openItem(e.target.value);
 $('#prev').onclick = () => step(-1);
 $('#next').onclick = () => step(1);
 $('#showAll').onchange = () => { focus = 0; renderReview(); };
+$('#showRef').onchange = () => { if (current) openItem(current.item_id); };
 $('#dateIdx').onchange = (e) => { const b = blocks[Number(e.target.value)]; if (b) b.div.scrollIntoView(); };
 loadState().then(() => openItem(firstOpen())).catch(err => { $('#review').textContent = 'Error: ' + err.message; });
 </script>
