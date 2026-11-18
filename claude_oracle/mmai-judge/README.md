@@ -1,5 +1,7 @@
 # mmai-judge
 
+> **Superseded for evaluation (2026-11-18):** `real_eval_code/dual_judge/` judges the current pipeline (cohort extraction, the current summary sections, the decision model's question families) with two frontier judges and manual adjudication. The skills below target the pre-November prompts and removed scripts and are kept for reference.
+
 Claude Code plugin providing Opus-4.7-as-judge evaluation skills for the
 MatchMiner-AI training pipeline, plus the rubric-replicating trialcheck oracle.
 

@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MatchMiner-AI judge adjudication</title>
+<style>
+  :root { --bg:#f7f7f5; --pane:#fff; --line:#ddd; --ink:#222; --mute:#777; --good:#2e7d32; --bad:#c62828;
+          --warn:#b26a00; --accent:#1f5fa8; --mark:#ffe58a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; color:var(--ink); background:var(--bg); height:100vh;
+         display:flex; flex-direction:column; }
+  header { display:flex; gap:12px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line);
+           background:var(--pane); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0 8px 0 0; }
+  .tab { border:1px solid var(--line); background:#fff; padding:4px 10px; border-radius:4px; cursor:pointer; }
+  .tab.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  select, input[type=text] { font:inherit; padding:3px 6px; }
+  main { flex:1; display:flex; min-height:0; }
+  #source { flex:1 1 50%; display:flex; flex-direction:column; border-right:1px solid var(--line); min-width:0; }
+  #source .bar { display:flex; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); background:var(--pane); }
+  #sourceText { flex:1; overflow:auto; padding:8px 12px; background:var(--pane); }
+  .note h4 { margin:10px 0 2px; font-size:12px; color:var(--accent); position:sticky; top:-8px; background:var(--pane); }
+  pre { white-space:pre-wrap; word-wrap:break-word; margin:0; font:12.5px/1.45 ui-monospace, monospace; }
+  mark { background:var(--mark); }
+  #review { flex:1 1 50%; overflow:auto; padding:10px 14px; }
+  .card { background:var(--pane); border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:0 0 10px; }
+  .card.focus { outline:2px solid var(--accent); }
+  .card.done { opacity:.75; }
+  .target { font-weight:600; margin-bottom:6px; white-space:pre-wrap; }
+  .badge { font-size:11px; padding:1px 6px; border-radius:8px; margin-left:6px; background:#eee; color:#333; }
+  .badge.disputed { background:#fde2e1; color:var(--bad); } .badge.single { background:#fff1d6; color:var(--warn); }
+  .badge.audit { background:#e3eefb; color:var(--accent); } .badge.agreed { background:#e5f3e6; color:var(--good); }
+  .judges { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:6px 0; }
+  .judge { border:1px solid var(--line); border-radius:4px; padding:6px 8px; font-size:13px; }
+  .judge .v { font-weight:700; }
+  .judge .k { color:var(--mute); }
+  .quote { display:block; margin:3px 0; padding:2px 6px; border-left:3px solid var(--accent); cursor:pointer;
+           background:#f3f7fc; font-size:12.5px; }
+  .quote.ungrounded { border-left-color:var(--bad); background:#fdf0f0; }
+  .choices { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:6px; }
+  .choices button { font:inherit; padding:3px 10px; border:1px solid var(--line); background:#fff; border-radius:4px;
+                    cursor:pointer; }
+  .choices button.picked { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .choices input { flex:1; min-width:160px; }
+  .reveal { margin-top:6px; font-size:12.5px; color:#333; background:#f6f6f6; padding:4px 8px; border-radius:4px; }
+  .stale { color:var(--warn); }
+  .muted { color:var(--mute); }
+  .help { font-size:12px; color:var(--mute); }
+  .lines { font-size:12.5px; margin:4px 0 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Judge adjudication</h1>
+  <span id="tabs"></span>
+  <select id="itemSel" title="Item"></select>
+  <button class="tab" id="prev" title="Previous item with open units ([)">&#8592;</button>
+  <button class="tab" id="next" title="Next item with open units (])">&#8594;</button>
+  <label class="help"><input type="checkbox" id="showAll"> show agreed units</label>
+  <span class="help">keys: j/k move &middot; 1/2 take judge 1/2 &middot; a,b,c&hellip; pick a choice &middot; n note &middot; s skip &middot; [ ] item</span>
+</header>
+<main>
+  <section id="source">
+    <div class="bar">
+      <input type="text" id="find" placeholder="Search the source (Enter)" style="flex:1">
+      <select id="dateIdx" title="Jump to note"></select>
+    </div>
+    <div id="sourceText"></div>
+  </section>
+  <section id="review"></section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = String(text); return e; };
+let state = null, component = 'summary', current = null, focus = 0, blocks = [];
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'},
+                                      body:JSON.stringify(body)} : {});
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || r.status);
+  return data;
+}
+
+async function loadState() {
+  state = await api('/api/state');
+  const tabs = $('#tabs'); tabs.textContent = '';
+  for (const [name, c] of Object.entries(state.components)) {
+    const b = el('button', 'tab' + (name === component ? ' on' : ''), `${name} ${c.decided}/${c.queued}`);
+    b.onclick = () => { component = name; loadState().then(() => openItem(firstOpen())); };
+    tabs.appendChild(b);
+  }
+  const sel = $('#itemSel'); sel.textContent = '';
+  for (const it of state.components[component].items) {
+    const o = el('option', null, `${it.title} [${it.stratum || ''}] ${it.decided}/${it.queued}`);
+    o.value = it.item_id; sel.appendChild(o);
+  }
+  if (current && current.component === component) sel.value = current.item_id;
+}
+
+function firstOpen() {
+  const items = state.components[component].items;
+  const open = items.find(i => i.decided < i.queued);
+  return (open || items[0] || {}).item_id;
+}
+
+function step(dir) {
+  const items = state.components[component].items;
+  let i = items.findIndex(x => x.item_id === (current && current.item_id));
+  for (let n = 0; n < items.length; n++) {
+    i = (i + dir + items.length) % items.length;
+    if (items[i].decided < items[i].queued) return openItem(items[i].item_id);
+  }
+}
+
+async function openItem(itemId) {
+  if (!itemId) { $('#review').textContent = 'No items.'; return; }
+  current = await api(`/api/item?component=${encodeURIComponent(component)}&item_id=${encodeURIComponent(itemId)}`);
+  $('#itemSel').value = itemId; focus = 0;
+  renderSource(current.view.source); renderReview();
+}
+
+function renderSource(src) {
+  const box = $('#sourceText'); box.textContent = ''; blocks = [];
+  const idx = $('#dateIdx'); idx.textContent = '';
+  if (src.kind === 'notes') {
+    const parts = src.text.split(/=== Clinical Note dated (.+?) ===\n?/);
+    if (parts[0].trim()) parts.unshift('');  // text before the first header
+    for (let i = 1; i < parts.length; i += 2) {
+      const div = el('div', 'note'); div.appendChild(el('h4', null, parts[i]));
+      const pre = el('pre', null, parts[i + 1] || ''); div.appendChild(pre); box.appendChild(div);
+      blocks.push({pre, text: parts[i + 1] || '', date: parts[i], div});
+      const o = el('option', null, parts[i]); o.value = blocks.length - 1; idx.appendChild(o);
+    }
+    idx.style.display = '';
+  } else {
+    const pre = el('pre', null, src.text); box.appendChild(pre);
+    blocks.push({pre, text: src.text, date: null, div: pre}); idx.style.display = 'none';
+  }
+}
+
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function highlight(quote, date) {
+  for (const b of blocks) { if (b.marked) { b.pre.textContent = b.text; b.marked = false; } }
+  const piece = String(quote).split(/\.\.\.|…/).map(s => s.trim()).filter(Boolean)[0];
+  if (!piece) return false;
+  const re = new RegExp(piece.split(/\s+/).map(escapeRe).join('\\s+'), 'i');
+  const order = [...blocks].sort((a, b) => (b.date === date) - (a.date === date));
+  for (const b of order) {
+    const m = re.exec(b.text);
+    if (!m) continue;
+    b.pre.textContent = '';
+    b.pre.append(b.text.slice(0, m.index));
+    const mk = el('mark', null, m[0]); b.pre.appendChild(mk);
+    b.pre.append(b.text.slice(m.index + m[0].length)); b.marked = true;
+    mk.scrollIntoView({block:'center'}); return true;
+  }
+  return false;
+}
+
+function quoteEl(text, grounded, date) {
+  const q = el('span', 'quote' + (grounded === false ? ' ungrounded' : ''),
+               (date ? date + ': ' : '') + '“' + text + '”' + (grounded === false ? '  (not found in source)' : ''));
+  q.onclick = () => { if (!highlight(text, date)) q.title = 'not found'; };
+  return q;
+}
+
+function detailEl(detail) {
+  const box = el('div');
+  if (!detail) { box.appendChild(el('div', 'muted', 'no answer (refused, truncated, invalid or not run)')); return box; }
+  const skip = new Set(['line', 'n', 'cohort']);
+  for (const [k, v] of Object.entries(detail)) {
+    if (skip.has(k) || v === '' || v === null || (Array.isArray(v) && !v.length)) continue;
+    if (k === 'evidence') { for (const e of v) box.appendChild(quoteEl(e.quote, e.grounded, e.date)); continue; }
+    if (k === 'missing' || k === 'omissions') {
+      for (const m of v) {
+        const d = el('div'); d.appendChild(el('span', 'k', `${m.severity}${m.section ? ' · ' + m.section : ''}: `));
+        if (m.description) d.append(m.description);
+        box.appendChild(d);
+        if (m.listing_text) box.appendChild(quoteEl(m.listing_text, m.grounded));
+        for (const e of (m.evidence || [])) box.appendChild(quoteEl(e.quote, e.grounded, e.date));
+      }
+      continue;
+    }
+    const d = el('div'); d.appendChild(el('span', 'k', k.replace(/_/g, ' ') + ': '));
+    d.append(Array.isArray(v) ? v.join('; ') : String(v)); box.appendChild(d);
+  }
+  return box;
+}
+
+function visibleUnits() {
+  const all = $('#showAll').checked;
+  return current.units.filter(u => all || u.queued || u.decision);
+}
+
+function renderReview() {
+  const box = $('#review'); box.textContent = '';
+  const v = current.view;
+  const head = el('div', 'card');
+  head.appendChild(el('div', 'target', `${v.title}`));
+  if (v.kind === 'extraction') {
+    head.appendChild(el('div', 'muted', `screen: ${v.screen}; cohort names: ${(v.cohort_names || []).join(' | ') || 'none'}`));
+    for (const c of v.cohorts) {
+      head.appendChild(el('div', null, `Cohort ${c.number}: ${c.name}` +
+        ((c.merged_from_names || []).length > 1 ? `  (merged from ${c.merged_from_names.join(' | ')})` : '')));
+      const lines = el('div', 'lines');
+      for (const it of c.items) lines.appendChild(el('div', null,
+        `[${it.number}] (${it.criterion_type}; ${it.boilerplate ? 'boilerplate' : 'key'}) ${it.text}`));
+      head.appendChild(lines);
+    }
+  } else if (v.kind === 'summary') {
+    const lines = el('div', 'lines'); let section = null;
+    for (const s of v.statements) {
+      if (s.section !== section) { section = s.section; lines.appendChild(el('div', 'muted', `(${section})`)); }
+      lines.appendChild(el('div', null, `[${s.n}] ${s.text}`));
+    }
+    head.appendChild(lines);
+  } else {
+    head.appendChild(el('div', 'muted', 'The source pane shows the task exactly as the teacher and both judges received it.'));
+  }
+  box.appendChild(head);
+  const units = visibleUnits();
+  if (!units.length) box.appendChild(el('div', 'card muted', 'Nothing queued in this item (tick "show agreed units" to review them anyway).'));
+  units.forEach((u, i) => box.appendChild(unitCard(u, i)));
+}
+
+function unitCard(u, i) {
+  const card = el('div', 'card' + (i === focus ? ' focus' : '') + (u.decision ? ' done' : ''));
+  card.dataset.unit = u.unit_id;
+  const t = el('div', 'target', u.target);
+  t.appendChild(el('span', 'badge ' + (u.queue_reason || u.status), u.queue_reason || u.status));
+  t.appendChild(el('span', 'badge', u.label));
+  card.appendChild(t);
+  const js = el('div', 'judges');
+  for (const j of u.judges) {
+    const d = el('div', 'judge');
+    const top = el('div'); top.appendChild(el('span', 'k', `Judge ${j.slot}: `));
+    top.appendChild(el('span', 'v', j.compared === null ? '—' : j.compared));
+    if (j.value !== null && j.value !== j.compared) top.appendChild(el('span', 'k', ` (${j.value})`));
+    d.appendChild(top); d.appendChild(detailEl(j.detail)); js.appendChild(d);
+  }
+  card.appendChild(js);
+  const ch = el('div', 'choices');
+  u.choices.forEach((c, n) => {
+    const b = el('button', u.decision && u.decision.value === c ? 'picked' : '', `${String.fromCharCode(97 + n)}) ${c}`);
+    b.onclick = () => decide(u, c, 'other'); ch.appendChild(b);
+  });
+  const note = el('input'); note.type = 'text'; note.placeholder = 'note (optional)';
+  note.value = u.decision ? u.decision.note : ''; ch.appendChild(note);
+  const skip = el('button', null, 's) skip'); skip.onclick = () => decide(u, null, 'skip'); ch.appendChild(skip);
+  card.appendChild(ch);
+  if (u.decision) {
+    const r = el('div', 'reveal');
+    r.append(`Decided ${u.decision.value} at ${u.decision.at}. Judge 1 = ${u.reveal.judges[1]}; Judge 2 = ${u.reveal.judges[2]}.`);
+    if (u.reveal.teacher !== undefined) r.append(`  Teacher (Nemotron): ${u.reveal.teacher}; decision model P(yes) = ${
+      u.reveal.decision_p_yes === undefined || u.reveal.decision_p_yes === null ? 'n/a' : Number(u.reveal.decision_p_yes).toFixed(3)}.`);
+    if (u.decision.stale) r.appendChild(el('div', 'stale', 'The judges’ answers changed after this decision; check it again.'));
+    card.appendChild(r);
+  }
+  card.onclick = () => { const k = [...document.querySelectorAll('#review .card[data-unit]')].indexOf(card);
+                         if (k >= 0) { focus = k; markFocus(); } };
+  return card;
+}
+
+function markFocus() {
+  const cards = [...document.querySelectorAll('#review .card[data-unit]')];
+  cards.forEach((c, k) => c.classList.toggle('focus', k === focus));
+  if (cards[focus]) cards[focus].scrollIntoView({block:'nearest'});
+}
+
+async function decide(u, value, choice) {
+  const card = document.querySelector(`#review .card[data-unit="${CSS.escape(u.unit_id)}"]`);
+  const note = card ? card.querySelector('input').value : '';
+  current = await api('/api/decide', {unit_id: u.unit_id, value, choice, note});
+  const keep = focus; renderReview();
+  const cards = [...document.querySelectorAll('#review .card[data-unit]')];
+  const next = cards.findIndex((c, k) => k > keep && !c.classList.contains('done'));
+  focus = next >= 0 ? next : keep; markFocus();
+  loadState();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
+    if (e.key === 'Escape') e.target.blur();
+    if (e.key === 'Enter' && e.target.id === 'find') { highlight(e.target.value); }
+    return;
+  }
+  const units = current ? visibleUnits() : [];
+  const u = units[focus];
+  if (e.key === 'j') { focus = Math.min(focus + 1, units.length - 1); markFocus(); }
+  else if (e.key === 'k') { focus = Math.max(focus - 1, 0); markFocus(); }
+  else if (e.key === ']') step(1);
+  else if (e.key === '[') step(-1);
+  else if (!u) return;
+  else if (e.key === '1' || e.key === '2') {
+    const j = u.judges[Number(e.key) - 1];
+    if (j && j.compared !== null) decide(u, j.compared, 'judge' + e.key);
+  } else if (e.key === 's') decide(u, null, 'skip');
+  else if (e.key === 'n') { e.preventDefault(); document.querySelectorAll('#review .card[data-unit]')[focus].querySelector('input').focus(); }
+  else if (/^[a-h]$/.test(e.key)) { const c = u.choices[e.key.charCodeAt(0) - 97]; if (c) decide(u, c, 'other'); }
+});
+$('#itemSel').onchange = (e) => openItem(e.target.value);
+$('#prev').onclick = () => step(-1);
+$('#next').onclick = () => step(1);
+$('#showAll').onchange = () => { focus = 0; renderReview(); };
+$('#dateIdx').onchange = (e) => { const b = blocks[Number(e.target.value)]; if (b) b.div.scrollIntoView(); };
+loadState().then(() => openItem(firstOpen())).catch(err => { $('#review').textContent = 'Error: ' + err.message; });
+</script>
+</body>
+</html>
