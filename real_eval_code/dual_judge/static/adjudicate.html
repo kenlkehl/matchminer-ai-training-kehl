@@ -3,56 +3,71 @@
 <head>
 <meta charset="utf-8">
 <title>MatchMiner-AI judge adjudication</title>
+<script>
+  // Theme and text size before the first paint: dark unless the user chose light; size remembered too.
+  document.documentElement.dataset.theme = localStorage.getItem('adj-theme') || 'dark';
+  document.documentElement.style.setProperty('--scale', localStorage.getItem('adj-scale') || '1');
+</script>
 <style>
-  :root { --bg:#f7f7f5; --pane:#fff; --line:#ddd; --ink:#222; --mute:#777; --good:#2e7d32; --bad:#c62828;
-          --warn:#b26a00; --accent:#1f5fa8; --mark:#ffe58a; }
+  /* Light and dark themes (dark by default; the header toggle and text size are remembered in this browser). */
+  :root { --scale:1; color-scheme:light;
+          --bg:#f7f7f5; --pane:#fff; --line:#ddd; --ink:#222; --mute:#6b6b6b; --good:#2e7d32; --bad:#c62828;
+          --warn:#a35f00; --accent:#1f5fa8; --on-accent:#fff; --mark:#ffe58a; --mark-ink:#222; --button:#fff;
+          --soft:#f3f7fc; --soft-bad:#fdf0f0; --chip:#eee; --chip-ink:#333; --tint-bad:#fde2e1; --tint-warn:#fff1d6;
+          --tint-accent:#e3eefb; --tint-good:#e5f3e6; }
+  :root[data-theme=dark] { color-scheme:dark;
+          --bg:#121417; --pane:#1c1f24; --line:#3a3f47; --ink:#e8e8e8; --mute:#a3a9b0; --good:#8fd19e; --bad:#f4a19a;
+          --warn:#f6d47a; --accent:#8ab4f8; --on-accent:#10131a; --mark:#7a6300; --mark-ink:#fff; --button:#262a31;
+          --soft:#232a35; --soft-bad:#3a2626; --chip:#2c3038; --chip-ink:#d6d6d6; --tint-bad:#4a2b2b; --tint-warn:#4a3d1f;
+          --tint-accent:#243650; --tint-good:#23402b; }
+  html { font-size:calc(14px * var(--scale)); }
   * { box-sizing: border-box; }
-  body { margin:0; font:14px/1.45 system-ui, sans-serif; color:var(--ink); background:var(--bg); height:100vh;
+  body { margin:0; font:1rem/1.5 system-ui, sans-serif; color:var(--ink); background:var(--bg); height:100vh;
          display:flex; flex-direction:column; }
   header { display:flex; gap:12px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line);
            background:var(--pane); flex-wrap:wrap; }
-  header h1 { font-size:15px; margin:0 8px 0 0; }
-  .tab { border:1px solid var(--line); background:#fff; padding:4px 10px; border-radius:4px; cursor:pointer; }
-  .tab.on { background:var(--accent); color:#fff; border-color:var(--accent); }
-  select, input[type=text] { font:inherit; padding:3px 6px; }
+  header h1 { font-size:1.07rem; margin:0 8px 0 0; }
+  button, select, input[type=text] { font:inherit; color:var(--ink); background:var(--button);
+                                     border:1px solid var(--line); border-radius:4px; }
+  select, input[type=text] { padding:3px 6px; }
+  .tab { padding:4px 10px; cursor:pointer; }
+  .tab.on { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
   main { flex:1; display:flex; min-height:0; }
   #source { flex:1 1 50%; display:flex; flex-direction:column; border-right:1px solid var(--line); min-width:0; }
   #source .bar { display:flex; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); background:var(--pane); }
   #sourceText { flex:1; overflow:auto; padding:8px 12px; background:var(--pane); }
-  .note h4 { margin:10px 0 2px; font-size:12px; color:var(--accent); position:sticky; top:-8px; background:var(--pane); }
-  pre { white-space:pre-wrap; word-wrap:break-word; margin:0; font:12.5px/1.45 ui-monospace, monospace; }
-  mark { background:var(--mark); }
+  .note h4 { margin:10px 0 2px; font-size:.86rem; color:var(--accent); position:sticky; top:-8px; background:var(--pane); }
+  pre { white-space:pre-wrap; word-wrap:break-word; margin:0; font:.93rem/1.5 ui-monospace, monospace; }
+  mark { background:var(--mark); color:var(--mark-ink); }
   #review { flex:1 1 50%; overflow:auto; padding:10px 14px; }
   .card { background:var(--pane); border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:0 0 10px; }
   .card.focus { outline:2px solid var(--accent); }
-  .card.done { opacity:.75; }
+  .card.done { opacity:.8; }
   .target { font-weight:600; margin-bottom:6px; white-space:pre-wrap; }
-  .badge { font-size:11px; padding:1px 6px; border-radius:8px; margin-left:6px; background:#eee; color:#333; }
-  .badge.disputed { background:#fde2e1; color:var(--bad); } .badge.single { background:#fff1d6; color:var(--warn); }
-  .badge.audit { background:#e3eefb; color:var(--accent); } .badge.agreed { background:#e5f3e6; color:var(--good); }
+  .badge { font-size:.79rem; padding:1px 6px; border-radius:8px; margin-left:6px; background:var(--chip); color:var(--chip-ink); }
+  .badge.disputed { background:var(--tint-bad); color:var(--bad); } .badge.single { background:var(--tint-warn); color:var(--warn); }
+  .badge.audit { background:var(--tint-accent); color:var(--accent); } .badge.agreed { background:var(--tint-good); color:var(--good); }
   .judges { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:6px 0; }
-  .judge { border:1px solid var(--line); border-radius:4px; padding:6px 8px; font-size:13px; }
+  .judge { border:1px solid var(--line); border-radius:4px; padding:6px 8px; font-size:.93rem; }
   .judge .v { font-weight:700; }
-  .judge .k { color:var(--mute); }
+  .k { color:var(--mute); }
   .quote { display:block; margin:3px 0; padding:2px 6px; border-left:3px solid var(--accent); cursor:pointer;
-           background:#f3f7fc; font-size:12.5px; }
-  .quote.ungrounded { border-left-color:var(--bad); background:#fdf0f0; }
+           background:var(--soft); font-size:.9rem; }
+  .quote.ungrounded { border-left-color:var(--bad); background:var(--soft-bad); }
   .choices { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:6px; }
-  .choices button { font:inherit; padding:3px 10px; border:1px solid var(--line); background:#fff; border-radius:4px;
-                    cursor:pointer; }
-  .choices button.picked { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .choices button { padding:3px 10px; cursor:pointer; }
+  .choices button.picked { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
   .choices input { flex:1; min-width:160px; }
-  .reveal { margin-top:6px; font-size:12.5px; color:#333; background:#f6f6f6; padding:4px 8px; border-radius:4px; }
+  .reveal { margin-top:6px; font-size:.9rem; background:var(--soft); padding:4px 8px; border-radius:4px; }
   .stale { color:var(--warn); }
-  .question { font-size:13px; margin:0 0 6px; padding:4px 8px; background:#f3f7fc; border-radius:4px; }
-  .question .meaning { color:#333; }
-  .refs { margin-top:6px; font-size:12.5px; border:1px solid var(--line); border-radius:4px; }
+  .question { font-size:.93rem; margin:0 0 6px; padding:4px 8px; background:var(--soft); border-radius:4px; }
+  .refs { margin-top:6px; font-size:.9rem; border:1px solid var(--line); border-radius:4px; }
   .refs > div { padding:4px 8px; } .refs > div + div { border-top:1px solid var(--line); }
   .refs .who { font-weight:600; }
   .ans-yes { color:var(--good); font-weight:700; } .ans-no { color:var(--bad); font-weight:700; }
   .muted { color:var(--mute); }
-  .help { font-size:12px; color:var(--mute); }
-  .lines { font-size:12.5px; margin:4px 0 10px; }
+  .help { font-size:.86rem; color:var(--mute); }
+  .lines { font-size:.9rem; margin:4px 0 10px; }
 </style>
 </head>
 <body>
@@ -64,6 +79,9 @@
   <button class="tab" id="next" title="Next item with open units (])">&#8594;</button>
   <label class="help"><input type="checkbox" id="showAll"> show agreed units</label>
   <label class="help" title="Decision questions: show the Nemotron teacher's and the decision model's answers before you decide (unblinds you)"><input type="checkbox" id="showRef"> show teacher and model before deciding</label>
+  <button class="tab" id="theme" title="Switch between dark and light">&#9789; dark</button>
+  <button class="tab" id="smaller" title="Smaller text">A&minus;</button>
+  <button class="tab" id="larger" title="Larger text">A+</button>
   <span class="help">keys: j/k move &middot; 1/2 take judge 1/2 &middot; a,b,c&hellip; pick a choice &middot; n note &middot; s skip &middot; [ ] item</span>
 </header>
 <main>
@@ -364,6 +382,21 @@ $('#prev').onclick = () => step(-1);
 $('#next').onclick = () => step(1);
 $('#showAll').onchange = () => { focus = 0; renderReview(); };
 $('#showRef').onchange = () => { if (current) openItem(current.item_id); };
+function showTheme() {
+  $('#theme').innerHTML = document.documentElement.dataset.theme === 'dark' ? '&#9728; light' : '&#9789; dark';
+}
+$('#theme').onclick = () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next; localStorage.setItem('adj-theme', next); showTheme();
+};
+function scaleBy(step) {
+  const now = parseFloat(localStorage.getItem('adj-scale') || '1');
+  const next = Math.min(1.8, Math.max(0.8, Math.round((now + step) * 10) / 10));
+  document.documentElement.style.setProperty('--scale', String(next)); localStorage.setItem('adj-scale', String(next));
+}
+$('#smaller').onclick = () => scaleBy(-0.1);
+$('#larger').onclick = () => scaleBy(0.1);
+showTheme();
 $('#dateIdx').onchange = (e) => { const b = blocks[Number(e.target.value)]; if (b) b.div.scrollIntoView(); };
 loadState().then(() => openItem(firstOpen())).catch(err => { $('#review').textContent = 'Error: ' + err.message; });
 </script>
