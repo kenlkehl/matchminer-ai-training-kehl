@@ -30,7 +30,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import RANKERS, TOP, WORKFLOWS, log, private, read_jsonl, run_stage, stage, write_json  # noqa: E402
 
-VERSION = 'retro-fidelity-metrics-v1'
+VERSION = 'retro-fidelity-metrics-v2'  # v2: a full section per workflow (user, 2026-11-18)
 LABELS = ('reasonableness', 'cancer_type', 'burden', 'treatment_history', 'biomarker')
 EPS = 1e-6
 
@@ -271,37 +271,55 @@ def report(result, design):
            f"Generated {time.strftime('%Y-%m-%d %H:%M %Z')} by `real_eval_code/retro_fidelity/metrics.py`. Counts and metrics "
            'only. This directory holds PHI; do not copy it elsewhere.', '', '## Design', '']
     out += [f'- {line}' for line in design]
-    out += ['', f'## Retrieval: P@{r["top"]} against the teacher\'s reasonableness answer', '',
-            '| Workflow | Ranker | Queries | P@20 [95% CI] | Mean 0-6 score [95% CI] | Queries < 20 | Unlabeled pairs |',
-            '| --- | --- | --- | --- | --- | --- | --- |']
-    for key, m in r['table'].items():
-        workflow, ranker = key.split('/')
-        p, s = m['precision_at_top'], m['mean_score']
-        out.append(f"| {workflow} | {names[ranker]} | {m['queries']} | {p['mean']:.3f} [{p['low']:.3f}, {p['high']:.3f}] | "
-                   f"{s['mean']:.2f} [{s['low']:.2f}, {s['high']:.2f}] | {m['queries_with_fewer_than_top']} | "
-                   f"{m['unlabeled_pairs']} |")
-    out += ['', 'Paired differences (bootstrap over the same queries):', '', '| Difference | Mean [95% CI] |', '| --- | --- |']
-    for key, m in r['paired_differences'].items():
-        if m['mean'] is not None:
-            out.append(f"| {key} | {m['mean']:+.3f} [{m['low']:+.3f}, {m['high']:+.3f}] |")
-    out += ['', '## Decision model against the teacher (merged top 20)', '',
-            'Pooled over both workflows, one row per unique pair (boilerplate: per unique combination of the two '
-            'boilerplate texts; per-criterion: per sampled line); 95% CIs from bootstrapping patients (persons). '
-            'Yes means potentially eligible / not clearly failing; for match questions 2-5, yes means the cohort '
+    titles = {'patient_centric': 'Trials for a patient (patient-centric)',
+              'trial_centric': 'Patients for a trial (trial-centric)'}
+    note = ('Yes means potentially eligible / not clearly failing; for match questions 2-5, yes means the cohort '
             'specifically requires that dimension and the patient documentedly satisfies it. AUPRC (no) scores '
-            '1 - P(yes) against the no class; its chance baseline is the no prevalence shown.', '']
-    out += table_rows(result['decision']['pooled'])
+            '1 - P(yes) against the no class; its chance baseline is the no prevalence shown.')
+
+    def reliability_tables(tables):
+        lines = []
+        for name, m in tables.items():
+            if not m.get('n'):
+                continue
+            lines += [f'**{name}**', '', '| bin | n | P(yes) range | mean P(yes) | observed yes |',
+                      '| --- | --- | --- | --- | --- |']
+            for i, b in enumerate(m['reliability'], 1):
+                lines.append(f"| {i} | {b['n']:,} | {b['p_min']:.3f}-{b['p_max']:.3f} | {b['mean_predicted']:.3f} | "
+                             f"{b['observed']:.3f} |")
+            lines.append('')
+        return lines
+
     for workflow in WORKFLOWS:
-        out += ['', f'By workflow: {workflow} (clustered by query)', '']
+        out += ['', f'## {titles[workflow]}', '', f'### Retrieval: P@{r["top"]} against the teacher\'s reasonableness answer',
+                '', '| Ranker | Queries | P@20 [95% CI] | Mean 0-6 score [95% CI] | Queries < 20 | Unlabeled pairs |',
+                '| --- | --- | --- | --- | --- | --- |']
+        for key, m in r['table'].items():
+            w, ranker = key.split('/')
+            if w != workflow:
+                continue
+            p, s = m['precision_at_top'], m['mean_score']
+            out.append(f"| {names[ranker]} | {m['queries']} | {p['mean']:.3f} [{p['low']:.3f}, {p['high']:.3f}] | "
+                       f"{s['mean']:.2f} [{s['low']:.2f}, {s['high']:.2f}] | {m['queries_with_fewer_than_top']} | "
+                       f"{m['unlabeled_pairs']} |")
+        out += ['', 'Paired differences (bootstrap over the same queries):', '', '| Difference | Mean [95% CI] |',
+                '| --- | --- |']
+        for key, m in r['paired_differences'].items():
+            if key.startswith(workflow + '/') and m['mean'] is not None:
+                out.append(f"| {key.split('/', 1)[1]} | {m['mean']:+.3f} [{m['low']:+.3f}, {m['high']:+.3f}] |")
+        out += ['', '### Decision model against the teacher (this workflow\'s merged top 20)', '',
+                f'One row per unique pair of this workflow (boilerplate: per unique combination of the two boilerplate '
+                f'texts; per-criterion: per sampled line of this workflow\'s strata); 95% CIs from bootstrapping its '
+                f'queries. {note}', '']
         out += table_rows(result['decision'][workflow])
+        out += ['', '#### Reliability tables (equal-mass bins of P(yes))', '']
+        out += reliability_tables(result['decision'][workflow])
+    out += ['## Both workflows pooled', '',
+            'Decision model over the union of both workflows\' merged top 20, one row per unique pair; 95% CIs from '
+            f'bootstrapping patients (persons). {note}', '']
+    out += table_rows(result['decision']['pooled'])
     out += ['', '### Reliability tables (equal-mass bins of P(yes), pooled)', '']
-    for name, m in result['decision']['pooled'].items():
-        if not m.get('n'):
-            continue
-        out += [f'**{name}**', '', '| bin | n | P(yes) range | mean P(yes) | observed yes |', '| --- | --- | --- | --- | --- |']
-        for i, b in enumerate(m['reliability'], 1):
-            out.append(f"| {i} | {b['n']:,} | {b['p_min']:.3f}-{b['p_max']:.3f} | {b['mean_predicted']:.3f} | {b['observed']:.3f} |")
-        out.append('')
+    out += reliability_tables(result['decision']['pooled'])
     out += ['## Caveats', '',
             '- The gold standard is one teacher model\'s judgments (Nemotron 3.5 Super), not clinician review; '
             'P@20 measures agreement with the teacher, not true eligibility.',
@@ -417,10 +435,13 @@ def main(argv=None):
                                                         w_bp.p_boilerplate.to_numpy(), w_bp.query_id.to_numpy(),
                                                         draws=args.draws, seed=args.seed, bins=args.bins)
             w_crit = crit[crit.stratum.str.startswith(workflow + '/')]
-            tables['criterion (all lines)'] = clustered_bootstrap(
-                w_crit.yes.to_numpy(), w_crit.p_yes.to_numpy(),
-                [query_of.get((a, b), a) for a, b in zip(w_crit.patient_id, w_crit.cohort_id)],
-                draws=args.draws, seed=args.seed, bins=args.bins)
+            for name, subset in (('criterion (all lines)', w_crit),
+                                 ('criterion (inclusion lines)', w_crit[w_crit.criterion_type == 'inclusion']),
+                                 ('criterion (exclusion lines)', w_crit[w_crit.criterion_type == 'exclusion'])):
+                tables[name] = clustered_bootstrap(
+                    subset.yes.to_numpy(), subset.p_yes.to_numpy(),
+                    [query_of.get((a, b), a) for a, b in zip(subset.patient_id, subset.cohort_id)],
+                    draws=args.draws, seed=args.seed, bins=args.bins)
             result['decision'][workflow] = tables
         counts = dict(union_pairs=int(len(pairs)), union_pairs_with_match_labels=int(len(labeled)),
                       boilerplate_combinations_scored=int(bp.combination.nunique()),
