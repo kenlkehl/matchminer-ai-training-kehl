@@ -15,7 +15,7 @@ This folder holds **code only**. Every output is real-patient data (PHI): write 
 under `v23/data/phi/` (mode 700 directories, mode 600 files; the scripts set both). Never
 commit, print or paste row-level output. The pulls need no GPU, no LLM and no network.
 
-Until 2026-11-18 this was its own repository, `matchminer-ai-real-eval` (never pushed). At the user's request it was
+Until 2026-11-18 this was its own repository, `matchminer-ai-real-eval` (DFCI GitLab `kk71/matchminer-ai-real-eval`, last at eb991ce). At the user's request it was
 merged here with its history (the training repo's merge commit "Merge matchminer-ai-real-eval into
 real_eval_code/retro_cohorts"), beside `../retro_fidelity/`, the distillation-fidelity evaluation that reads its
 denominators and summaries. It is a research tool: the denominators feed retrospective evaluations of a
