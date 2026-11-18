@@ -1,4 +1,4 @@
-# matchminer-ai-real-eval
+# Retrospective real-patient cohorts (`real_eval_code/retro_cohorts`)
 
 Real-patient **denominator pulls** for the MatchMiner-AI retrospective evaluations, ported
 from v22 to the 2026 pan-DFCI data (`/data1/ken/pan_dfci_2026`). Two cohorts:
@@ -11,22 +11,24 @@ from v22 to the 2026 pan-DFCI data (`/data1/ken/pan_dfci_2026`). Two cohorts:
     cross-checks. See "Trial cohort from research chemo plans".
 - **SOC**: real patients starting a standard-of-care oncology chemotherapy plan.
 
-This repository holds **code only**. Every output is real-patient data (PHI): write it only
-under `../data/phi/` (mode 700 directories, mode 600 files; the scripts set both). Never
+This folder holds **code only**. Every output is real-patient data (PHI): write it only
+under `v23/data/phi/` (mode 700 directories, mode 600 files; the scripts set both). Never
 commit, print or paste row-level output. The pulls need no GPU, no LLM and no network.
 
-It is deliberately separate from `matchminer-ai-training-kehl`. It is a research tool: the
-denominators feed retrospective evaluations of a human-in-the-loop ranking aid, not
-eligibility decisions.
+Until 2026-11-18 this was its own repository, `matchminer-ai-real-eval` (never pushed). At the user's request it was
+merged here with its history (the training repo's merge commit "Merge matchminer-ai-real-eval into
+real_eval_code/retro_cohorts"), beside `../retro_fidelity/`, the distillation-fidelity evaluation that reads its
+denominators and summaries. It is a research tool: the denominators feed retrospective evaluations of a
+human-in-the-loop ranking aid, not eligibility decisions.
 
 ## Quick start
 
 ```bash
-cd /ksg/kehl_mm_data/mmai/v23/matchminer-ai-real-eval
+cd /ksg/kehl_mm_data/mmai/v23/matchminer-ai-training-kehl/real_eval_code/retro_cohorts
 PY=/data1/ken/envs/gptoss3/bin/python          # pandas >= 2.2, pyarrow
-$PY -m pytest -q tests/                        # fabricated data only
+(cd ../.. && $PY -m pytest -q tests/test_retro_cohorts_*.py)   # fabricated data only
 
-OUT=../data/phi/real_eval_denominators_$(date +%Y%m%d)
+OUT=/ksg/kehl_mm_data/mmai/v23/data/phi/real_eval_denominators_$(date +%Y%m%d)
 $PY pull_denominators.py --output-dir $OUT     # ~3 min, CPU; prints counts only
 $PY sample_soc_trials.py --output-file $OUT/soc_trial_sample.csv   # no patient data
 
@@ -57,8 +59,8 @@ every input path (defaults below).
 | `build_note_level_dataset.py` | CLI: v22's note-level dataset with the trial masked (not run by default) |
 | `measure_note_leakage.py` | CLI: how often pre-index notes name the patient's own trial, by cutoff |
 | `sample_soc_trials.py` | CLI: v22's SOC trial-corpus sample (non-PHI) |
-| `tests/test_denominators.py` | Rule tests on fabricated tables |
-| `tests/test_trial_masking.py` | Masking tests on fabricated text and tables |
+| `../../tests/test_retro_cohorts_denominators.py` | Rule tests on fabricated tables |
+| `../../tests/test_retro_cohorts_trial_masking.py` | Masking tests on fabricated text and tables |
 
 ## What v22 did
 
@@ -549,7 +551,7 @@ this to supersede the OA patient summarization run until this val set run is don
   test-split CSV:
 
   ```bash
-  RUN=../data/phi/real_eval_denominators_20261114
+  RUN=/ksg/kehl_mm_data/mmai/v23/data/phi/real_eval_denominators_20261114
   $PY pull_denominators.py --cohorts soc --soc-split-filter validation --output-dir $RUN/soc_validation
   ```
 

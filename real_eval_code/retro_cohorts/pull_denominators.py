@@ -39,7 +39,7 @@ from mmai_real_eval.io_utils import (cohort_counts, ensure_private_dir, file_sta
 from mmai_real_eval.notes import DEFAULT_SOURCES, REPORT_FILES, count_prior_reports, load_report_dates
 
 REPO = Path(__file__).resolve().parent
-V23 = REPO.parent
+V23 = REPO.parents[2]  # v23/matchminer-ai-training-kehl/real_eval_code/retro_cohorts
 NO_PHI = V23 / "data" / "no_phi"
 PAN = Path("/data1/ken/pan_dfci_2026")
 

@@ -88,7 +88,7 @@ def main(argv=None) -> int:
     p.add_argument("--denominator-csv", type=Path, required=True)
     p.add_argument("--derived-data-dir", type=Path, default=Path("/data1/ken/pan_dfci_2026/derived_data"))
     p.add_argument("--ctgov-csv", type=Path,
-                   default=Path(__file__).resolve().parent.parent / "data/no_phi/ctgov_trials.csv")
+                   default=Path(__file__).resolve().parents[3] / "data/no_phi/ctgov_trials.csv")
     p.add_argument("--sources", default="clinical,imaging,path")
     p.add_argument("--workers", type=int, default=32)
     args = p.parse_args(argv)

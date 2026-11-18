@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'real_eval_code' / 'retro_cohorts'))
 
 from mmai_real_eval import enrollments as enr  # noqa: E402
 from mmai_real_eval import research_plans as rpl  # noqa: E402

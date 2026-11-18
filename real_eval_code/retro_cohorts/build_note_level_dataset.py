@@ -61,7 +61,7 @@ def main(argv=None) -> int:
     p.add_argument("--no-mask", action="store_true",
                    help="Do not mask the event's own trial identifiers (masking is on whenever the CSV has "
                         "protocol_number and nct_id, i.e. the trial cohort)")
-    p.add_argument("--ctgov-csv", type=Path, default=REPO.parent / "data/no_phi/ctgov_trials.csv",
+    p.add_argument("--ctgov-csv", type=Path, default=REPO.parents[2] / "data/no_phi/ctgov_trials.csv",
                    help="nct_id,title: the trial titles investigational codes are taken from (masking only)")
     p.add_argument("--workers", type=int, default=16,
                    help="Processes, one report row group each; 1 streams in this process")

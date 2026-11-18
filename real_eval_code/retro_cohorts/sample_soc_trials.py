@@ -28,7 +28,7 @@ import pandas as pd
 from mmai_real_eval.io_utils import file_stamp, utc_now, write_csv_private, write_json_private
 from mmai_real_eval.trials import load_ctgov_listings, load_training_nct_ids, sample_trials
 
-NO_PHI = Path(__file__).resolve().parent.parent / "data" / "no_phi"
+NO_PHI = Path(__file__).resolve().parents[3] / "data" / "no_phi"  # v23/data/no_phi
 RUN = NO_PHI / "training_run_screened_sample5000_20261104"
 
 
