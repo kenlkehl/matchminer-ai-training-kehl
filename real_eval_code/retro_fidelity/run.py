@@ -61,9 +61,11 @@ def running_elsewhere(job):
 def plan(args):
     py, root = args.python, Path(args.root)
     e = lambda *parts: str(root.joinpath(*parts))  # noqa: E731
-    jobs = [Job('extraction', [py, str(CODE / 'cohorts.py'), '--trials', args.trials, '--servers',
-                               e('servers', 'extraction_servers.json'), '--output', e('extraction'), '--holders',
-                               e('oa_pause', 'holders.json')], kind='gb300', output=e('extraction')),
+    extraction = [py, str(CODE / 'cohorts.py'), '--trials', args.trials, '--servers', e('servers', 'extraction_servers.json'),
+                  '--output', e('extraction'), '--holders', e('oa_pause', 'holders.json')]
+    if args.extraction_source:
+        extraction += ['--source', args.extraction_source]
+    jobs = [Job('extraction', extraction, kind='gb300', output=e('extraction')),
             Job('patients', [py, str(CODE / 'prepare.py'), 'patients', '--summaries', args.summaries, '--denominator',
                              args.denominator, '--output', e('patients')], output=e('patients')),
             Job('cohort_table', [py, str(CODE / 'prepare.py'), 'cohorts', '--extraction', e('extraction'), '--output',
@@ -174,6 +176,7 @@ def main(argv=None):
     p.add_argument('--summaries', required=True)
     p.add_argument('--denominator', required=True)
     p.add_argument('--python', default=sys.executable)
+    p.add_argument('--extraction-source', help='Code snapshot for cohorts.py --source (revised cohort prompts)')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--patient-queries', type=int, default=500)
     p.add_argument('--cohort-queries', type=int, default=200)
