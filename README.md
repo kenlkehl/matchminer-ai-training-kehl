@@ -1,3 +1,5 @@
+> **Moved, 2026-11-20.** This code now lives in `matchminer-ai-inference-kehl`: its current path (the pipeline stages, TrialSpace, the decision model, OncoReasoning and the current evaluations) is `matchminer_ai.training` and `matchminer_ai.evaluation`, imported from 2635091. The legacy evaluations, the GCP fleet scripts and one-off scripts stay here. Institution-specific values come from a site config outside the repositories (`MMAI_SITE_CONFIG`). This repository is kept read-only for its history; make changes there.
+
 # matchminer-ai-training
 
 Data production and model training for MatchMiner-AI. This repository turns
